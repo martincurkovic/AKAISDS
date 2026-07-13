@@ -1,0 +1,192 @@
+from PySide6.QtWidgets import (
+    QCheckBox,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QListWidget,
+    QListWidgetItem,
+    QProgressBar,
+    QPushButton,
+    QStatusBar,
+    QVBoxLayout,
+    QWidget,
+)
+from PySide6.QtCore import Qt
+
+
+class TransferDashboard(QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+
+        # top level layout (vertical architecture)
+        # everything will stack cleanly top to bottom
+        master_layout = QVBoxLayout(self)
+        master_layout.setContentsMargins(15, 15, 15, 15)
+        master_layout.setSpacing(12)
+
+        # TWIN PANELS BABYYYY (horizontal layout nesting)
+        panel_layout = QHBoxLayout()
+        panel_layout.setSpacing(15)
+
+        # LEFT COLUMN - Files queue list thingy
+        left_containter = QWidget()
+        left_vbox = QVBoxLayout(left_containter)
+        left_vbox.setContentsMargins(0, 0, 0, 0)
+
+        lbl_local = QLabel("<b>File Transfer Queue</b>")
+        self.list_local = QListWidget()
+        self.list_local.setDragDropMode(QListWidget.DragDropMode.InternalMove)
+        self.list_local.setSelectionMode(QListWidget.SelectionMode.SingleSelection)
+
+        left_vbox.addWidget(lbl_local)
+        left_vbox.addWidget(self.list_local)
+
+        # populate left list using custom row customisation
+        local_files = [
+            "Sample 01.wav",
+            "Sample 02.wav",
+            "Sample 03.wav",
+            "Sample 04.wav",
+            "Sample 05.wav",
+        ]
+        for file_name in local_files:
+            self.create_local_row(file_name)
+
+        # RIGHT COLUMN - files on the akai already
+        right_container = QWidget()
+        right_vbox = QVBoxLayout(right_container)
+        right_vbox.setContentsMargins(0, 0, 0, 0)
+
+        lbl_hardware = QLabel("<b>Currently Loaded Samples</b>")
+        self.list_hardware = QListWidget()
+        self.list_hardware.setSelectionMode(QListWidget.SelectionMode.NoSelection)
+
+        right_vbox.addWidget(lbl_hardware)
+        right_vbox.addWidget(self.list_hardware)
+
+        # NEST BOTH CONNTAINERS SIDE BY SIDE INTO HORIZONTAL LAYOUT
+        panel_layout.addWidget(left_containter)
+        panel_layout.addWidget(right_container)
+
+        # populate right list using checkbox row customisation
+        hardware_files = ["SAMPLE01", "SAMPLE02", "SAMPLE03 -L", "SAMPLE03 -R"]
+        for file_name in hardware_files:
+            self.create_hardware_row(file_name)
+
+        # ACtION CONTROL BAR (Horizontal layout)
+        action_layout = QHBoxLayout()
+        self.btn_send = QPushButton("Send Samples")
+        self.btn_recieve = QPushButton("Recieve Samples")
+
+        # Add stretch spacer to push both control columns cleanly to the bottom of the window
+        action_layout.addStretch()
+        action_layout.addWidget(self.btn_recieve)
+        action_layout.addWidget(self.btn_send)
+
+        # PROGRESS BAR BABYYYY
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setRange(0, 100)
+        self.progress_bar.setValue(35)
+
+        # STATUS FEEDBACK BAR
+        self.status_bar = QStatusBar()
+        self.status_bar.showMessage("Sending Sample 2 of 4")
+
+        # FINAL ASSEMBLY
+        master_layout.addLayout(
+            panel_layout, stretch=1
+        )  # stretch=1 forces panels to grab all expanding screen space
+        master_layout.addLayout(action_layout)
+        master_layout.addWidget(self.progress_bar)
+        master_layout.addWidget(self.status_bar)
+
+    # ROW BUILDER METHODS
+    def create_local_row(self, filename):
+        # build an editable, drag-swappable row with action buttons pinned to right side
+
+        # create blank structural placeholder item inside real list
+        item = QListWidgetItem(self.list_local)
+
+        # create custom layout container canvas for the row
+        row_widget = QWidget()
+        row_layout = QHBoxLayout(row_widget)
+        row_layout.setContentsMargins(5, 2, 5, 2)
+
+        # hamburger icon draggy thingy
+        lbl_handle = QLabel("☰")
+        lbl_handle.setFixedSize(24, 24)
+        lbl_handle.setStyleSheet("color: #777777; font-size: 16px;")
+        lbl_handle.setCursor(Qt.CursorShape.OpenHandCursor)
+
+        # left component - use qline edit instead of qlabel to allow renaming
+        edit_field = QLineEdit(filename)
+        edit_field.setReadOnly(True)
+        edit_field.setStyleSheet(
+            "background: transparent; border: none; font-size: 13px; color: black;"
+        )
+
+        # interactive logic for editing file names
+        def enable_editing(event):
+            edit_field.setReadOnly(False)
+            edit_field.setFocus()
+            edit_field.setStyleSheet(
+                "background: #2a2a35; border: 1px solid #3f3f4e; font-size: 13px; color: white;"
+            )
+
+        def disable_editing():
+            edit_field.setReadOnly(True)
+            edit_field.clearFocus()
+            edit_field.setStyleSheet(
+                "background: transparent; border: none; font-size: 13px; color: black;"
+            )
+
+        edit_field.mouseDoubleClickEvent = enable_editing
+        edit_field.returnPressed.connect(disable_editing)
+        edit_field.editingFinished.connect(disable_editing)
+
+        # right components - small control buttons
+        btn_edit = QPushButton("Edit")
+        btn_del = QPushButton("Delete")
+
+        # make buttons compact so they dont look fucken massive hey
+        btn_edit.setFixedHeight(24)
+        btn_del.setFixedHeight(24)
+
+        # assemble row layout horizontaly
+        row_layout.addWidget(lbl_handle)
+        row_layout.addWidget(
+            edit_field, stretch=1
+        )  # stretch=1 forces file name to take maximum room
+        row_layout.addWidget(btn_edit)
+        row_layout.addWidget(btn_del)
+
+        # inject custom canvas widget directly into list row framework
+        item.setSizeHint(row_widget.sizeHint())
+        self.list_local.setItemWidget(item, row_widget)
+
+    def create_hardware_row(self, filename):
+        # build read only, fized row with leading checkbox and trailing action buttons
+        item = QListWidgetItem(self.list_hardware)
+
+        row_widget = QWidget()
+        row_layout = QHBoxLayout(row_widget)
+        row_layout.setContentsMargins(5, 2, 5, 2)
+
+        # left component - checkbox with name acting as its linked text
+        checkbox = QCheckBox(filename)
+        checkbox.setStyleSheet("font-size: 13px;")
+
+        # right components - action buttons
+        btn_edit = QPushButton("Edit")
+        btn_del = QPushButton("Delete")
+        btn_edit.setFixedHeight(24)
+        btn_del.setFixedHeight(24)
+
+        # assemble row layout horizontally
+        row_layout.addWidget(checkbox, stretch=1)
+        row_layout.addWidget(btn_edit)
+        row_layout.addWidget(btn_del)
+
+        # inject canvas widget into list row framework
+        item.setSizeHint(row_widget.sizeHint())
+        self.list_hardware.setItemWidget(item, row_widget)
