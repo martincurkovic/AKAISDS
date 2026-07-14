@@ -84,20 +84,25 @@ class TransferDashboard(QWidget):
         action_layout.addWidget(self.btn_send)
 
         # PROGRESS BAR BABYYYY
-        self.progress_bar = QProgressBar()
-        self.progress_bar.setRange(0, 100)
-        self.progress_bar.setValue(35)
+        self.progress_bar_current_smpl = QProgressBar()
+        self.progress_bar_current_smpl.setRange(0, 100)
+        self.progress_bar_current_smpl.setValue(35)
+
+        self.progress_bar_overall = QProgressBar()
+        self.progress_bar_overall.setRange(0, 100)
+        self.progress_bar_overall.setValue(95)
 
         # STATUS FEEDBACK BAR
         self.status_bar = QStatusBar()
-        self.status_bar.showMessage("Sending Sample 2 of 4")
+        self.status_bar.showMessage("Sending Sample 5 of 5")
 
         # FINAL ASSEMBLY
         master_layout.addLayout(
             panel_layout, stretch=1
         )  # stretch=1 forces panels to grab all expanding screen space
         master_layout.addLayout(action_layout)
-        master_layout.addWidget(self.progress_bar)
+        master_layout.addWidget(self.progress_bar_current_smpl)
+        master_layout.addWidget(self.progress_bar_overall)
         master_layout.addWidget(self.status_bar)
 
     # ROW BUILDER METHODS
