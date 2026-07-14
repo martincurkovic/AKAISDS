@@ -12,11 +12,17 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 from PySide6.QtCore import Qt
+from settings_dialog import MidiSettingsDialog
 
 
 class TransferDashboard(QWidget):
-    def __init__(self, parent=None):
+    def __init__(self, midi_manager, parent=None):
         super().__init__(parent)
+
+        # single MidiManager instance is owwned by the main window
+        # and handed down here - everything MIDI related goes thru it
+        self.midi_manager = midi_manager
+        self.midi_manager.sysex_received.connect(self.on_sysex_received)
 
         # top level layout (vertical architecture)
         # everything will stack cleanly top to bottom
@@ -24,13 +30,20 @@ class TransferDashboard(QWidget):
         master_layout.setContentsMargins(15, 15, 15, 15)
         master_layout.setSpacing(12)
 
+        # TOP BAR - to finish later but holds settings button for now
+        top_bar = QHBoxLayout()
+        top_bar.addStretch()
+        self.btn_settings = QPushButton("\u2699 MIDI Settings")
+        self.btn_settings.clicked.connect(self.open_settings_dialog)
+        top_bar.addWidget(self.btn_settings)
+
         # TWIN PANELS BABYYYY (horizontal layout nesting)
         panel_layout = QHBoxLayout()
         panel_layout.setSpacing(15)
 
         # LEFT COLUMN - Files queue list thingy
-        left_containter = QWidget()
-        left_vbox = QVBoxLayout(left_containter)
+        left_container = QWidget()
+        left_vbox = QVBoxLayout(left_container)
         left_vbox.setContentsMargins(0, 0, 0, 0)
 
         lbl_local = QLabel("<b>File Transfer Queue</b>")
@@ -61,11 +74,18 @@ class TransferDashboard(QWidget):
         self.list_hardware = QListWidget()
         self.list_hardware.setSelectionMode(QListWidget.SelectionMode.NoSelection)
 
-        right_vbox.addWidget(lbl_hardware)
+        # HEADER ROW - title + refresh button share one line
+        hardware_header = QHBoxLayout()
+        hardware_header.addWidget(lbl_hardware, stretch=1)
+        self.btn_refresh = QPushButton("\u27f3 Refresh")
+        self.btn_refresh.clicked.connect(self.request_sample_list)
+        hardware_header.addWidget(self.btn_refresh)
+
+        right_vbox.addLayout(hardware_header)
         right_vbox.addWidget(self.list_hardware)
 
         # NEST BOTH CONNTAINERS SIDE BY SIDE INTO HORIZONTAL LAYOUT
-        panel_layout.addWidget(left_containter)
+        panel_layout.addWidget(left_container)
         panel_layout.addWidget(right_container)
 
         # populate right list using checkbox row customisation
@@ -97,6 +117,7 @@ class TransferDashboard(QWidget):
         self.status_bar.showMessage("Sending Sample 5 of 5")
 
         # FINAL ASSEMBLY
+        master_layout.addLayout(top_bar)
         master_layout.addLayout(
             panel_layout, stretch=1
         )  # stretch=1 forces panels to grab all expanding screen space
@@ -104,6 +125,23 @@ class TransferDashboard(QWidget):
         master_layout.addWidget(self.progress_bar_current_smpl)
         master_layout.addWidget(self.progress_bar_overall)
         master_layout.addWidget(self.status_bar)
+
+    def open_settings_dialog(self):
+        dialog = MidiSettingsDialog(self.midi_manager, self)
+        dialog.exec()
+
+    def request_sample_list(self):
+        try:
+            request = [0x47, 0x00, 0x04, 0x48]
+            self.midi_manager.send_sysex(request)
+            self.status_bar.showMessage("Sent sample list request...")
+        except RuntimeError as err:
+            self.status_bar.showMessage(str(err))
+
+    def on_sysex_received(self, data_bytes):
+        preview = " ".join(f"{b:02X}" for b in data_bytes[:16])
+        self.create_hardware_row(f"RAW: {preview}...")
+        self.status_bar.showMessage("Received SysEx response")
 
     # ROW BUILDER METHODS
     def create_local_row(self, filename):

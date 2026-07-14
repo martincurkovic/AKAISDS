@@ -1,6 +1,7 @@
 import sys
 from PySide6.QtWidgets import QApplication, QMainWindow
 from components import TransferDashboard
+from midi_manager import MidiManager
 
 
 class ApplicationWindow(QMainWindow):
@@ -9,11 +10,20 @@ class ApplicationWindow(QMainWindow):
         self.setWindowTitle("AKAI SDS")
         self.setFixedSize(750, 480)
 
+        # owns the real mido ports for the app's lifetime
+        self.midi_manager = MidiManager()
+
         # instantiate custom UI layout components
-        self.dashboard_view = TransferDashboard()
+        self.dashboard_view = TransferDashboard(self.midi_manager)
 
         # mount layout into core central display panel area
         self.setCentralWidget(self.dashboard_view)
+
+    def closeEvent(self, event):
+        # release MIDI ports cleanly so mido's backend doesn't hang around
+        self.midi_manager.close_input()
+        self.midi_manager.close_output()
+        super().closeEvent(event)
 
 
 if __name__ == "__main__":
