@@ -1,5 +1,5 @@
 from PySide6.QtCore import QObject, Signal
-import akai_sysex
+from core import akai_sysex
 
 
 class SamplerController(QObject):
@@ -19,11 +19,3 @@ class SamplerController(QObject):
     def on_sysex_received(self, data_bytes):
         count, names = akai_sysex.parse_slist_response(data_bytes)
         self.sample_list_updated.emit(names)
-
-
-if __name__ == "__main__":
-    import midi_manager as mm
-
-    manager = mm.MidiManager()
-    controller = SamplerController(manager)
-    print("Controller created OK")

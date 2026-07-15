@@ -1,8 +1,7 @@
-import sys
-from PySide6.QtWidgets import QApplication, QMainWindow
-from components import TransferDashboard
-from midi_manager import MidiManager
-from controller import SamplerController
+from PySide6.QtWidgets import QMainWindow
+from ui.dashboard import TransferDashboard
+from core.midi_manager import MidiManager
+from controller.sampler_controller import SamplerController
 
 
 class ApplicationWindow(QMainWindow):
@@ -13,7 +12,6 @@ class ApplicationWindow(QMainWindow):
 
         # owns the real mido ports for the app's lifetime
         self.midi_manager = MidiManager()
-
         self.sampler_controller = SamplerController(self.midi_manager)
 
         # instantiate custom UI layout components
@@ -25,14 +23,7 @@ class ApplicationWindow(QMainWindow):
         self.setCentralWidget(self.dashboard_view)
 
     def closeEvent(self, event):
-        # release MIDI ports cleanly so mido's backend doesn't hang around
+        # release midi ports cleanly so mido's backend doesnt hang around like a fart in a doctor's waiting room
         self.midi_manager.close_input()
         self.midi_manager.close_output()
         super().closeEvent(event)
-
-
-if __name__ == "__main__":
-    app = QApplication(sys.argv)
-    window = ApplicationWindow()
-    window.show()
-    sys.exit(app.exec())
