@@ -139,8 +139,9 @@ class TransferDashboard(QWidget):
             self.status_bar.showMessage(str(err))
 
     def on_sysex_received(self, data_bytes):
-        preview = " ".join(f"{b:02X}" for b in data_bytes[:16])
+        preview = " ".join(f"{b:02X}" for b in data_bytes)
         self.create_hardware_row(f"RAW: {preview}...")
+        print(preview)
         self.status_bar.showMessage("Received SysEx response")
 
     # ROW BUILDER METHODS
