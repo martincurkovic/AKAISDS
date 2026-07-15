@@ -14,6 +14,9 @@ class ApplicationWindow(QMainWindow):
         self.midi_manager = MidiManager()
         self.sampler_controller = SamplerController(self.midi_manager)
 
+        # TEMPORARY DEBUG WIRING - print EVERY status handshake message to console so we can debug responses from the sampler
+        self.sampler_controller.status_changed.connect(print)
+
         # instantiate custom UI layout components
         self.dashboard_view = TransferDashboard(
             self.sampler_controller, self.midi_manager

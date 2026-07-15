@@ -25,6 +25,10 @@ class TransferDashboard(QWidget):
         self.sampler_controller = sampler_controller
         self.sampler_controller.sample_list_updated.connect(self.on_sample_list_updated)
 
+        # TEMPORARY TEST WIRING!!!
+        self.sampler_controller.transfer_progress.connect(self.on_transfer_progress)
+        self.sampler_controller.transfer_finished.connect(self.on_transfer_finished)
+
         # top level layout (vertical architecture)
         # everything will stack cleanly top to bottom
         master_layout = QVBoxLayout(self)
@@ -99,6 +103,9 @@ class TransferDashboard(QWidget):
         self.btn_send = QPushButton("Send Samples")
         self.btn_recieve = QPushButton("Recieve Samples")
 
+        # TEMPORARY!!! Hijack send button to fire hardcoded test transfer
+        self.btn_send.clicked.connect(self.test_send_sample)
+
         # Add stretch spacer to push both control columns cleanly to the bottom of the window
         action_layout.addStretch()
         action_layout.addWidget(self.btn_recieve)
@@ -107,15 +114,15 @@ class TransferDashboard(QWidget):
         # PROGRESS BAR BABYYYY
         self.progress_bar_current_smpl = QProgressBar()
         self.progress_bar_current_smpl.setRange(0, 100)
-        self.progress_bar_current_smpl.setValue(35)
+        self.progress_bar_current_smpl.setValue(0)
 
         self.progress_bar_overall = QProgressBar()
         self.progress_bar_overall.setRange(0, 100)
-        self.progress_bar_overall.setValue(95)
+        self.progress_bar_overall.setValue(0)
 
         # STATUS FEEDBACK BAR
         self.status_bar = QStatusBar()
-        self.status_bar.showMessage("Sending Sample 5 of 5")
+        self.status_bar.showMessage("Ready")
 
         # FINAL ASSEMBLY
         master_layout.addLayout(top_bar)
@@ -139,6 +146,21 @@ class TransferDashboard(QWidget):
         for name in names:
             self.create_hardware_row(name)
         self.status_bar.showMessage(f"Loaded {len(names)} sample(s) from hardware")
+
+    # TEMPORARY TEST METHODS!!!!!
+    def test_send_sample(self):
+        # point this to a real wav file to test sending samples
+        test_path = "/Users/martincurkovic/Music/Sample Packs/Akai Packs/SCSI ID 5 - Default/Partition A - Stabs and Synths/Volume 002 - Zenhiser Stabs 1/Stab1_01.wav"
+        self.sampler_controller.send_sample_file(test_path, sample_number=0)
+
+    def on_transfer_progress(self, sent, total):
+        percent = int((sent / total) * 100) if total else 0
+        self.progress_bar_current_smpl.setValue(percent)
+        self.status_bar.showMessage(f"Sending packet {sent}/{total}")
+
+    def on_transfer_finished(self):
+        self.progress_bar_current_smpl.setValue(100)
+        self.status_bar.showMessage("Transfer complete")
 
     # ROW BUILDER METHODS
     def create_local_row(self, filename):

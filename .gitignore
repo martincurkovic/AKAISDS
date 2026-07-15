@@ -1,4 +1,26 @@
+# Python bytecode
+__pycache__/
+*.pyc
+*.pyo
+
+# Virtual environment
+.venv/
+venv/
+
+# Environment variables / secrets
+.env
+
+# macOS junk
+.DS_Store
+
+# PyInstaller build output
+build/
+dist/
+*.spec
+
+# Editor specific
+.zed/
+
 /__pycache__
 /.venv
-.DS_Store
 
