@@ -2,6 +2,7 @@ import sys
 from PySide6.QtWidgets import QApplication, QMainWindow
 from components import TransferDashboard
 from midi_manager import MidiManager
+from controller import SamplerController
 
 
 class ApplicationWindow(QMainWindow):
@@ -13,8 +14,12 @@ class ApplicationWindow(QMainWindow):
         # owns the real mido ports for the app's lifetime
         self.midi_manager = MidiManager()
 
+        self.sampler_controller = SamplerController(self.midi_manager)
+
         # instantiate custom UI layout components
-        self.dashboard_view = TransferDashboard(self.midi_manager)
+        self.dashboard_view = TransferDashboard(
+            self.sampler_controller, self.midi_manager
+        )
 
         # mount layout into core central display panel area
         self.setCentralWidget(self.dashboard_view)

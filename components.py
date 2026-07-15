@@ -16,13 +16,14 @@ from settings_dialog import MidiSettingsDialog
 
 
 class TransferDashboard(QWidget):
-    def __init__(self, midi_manager, parent=None):
+    def __init__(self, sampler_controller, midi_manager, parent=None):
         super().__init__(parent)
 
         # single MidiManager instance is owwned by the main window
         # and handed down here - everything MIDI related goes thru it
         self.midi_manager = midi_manager
-        self.midi_manager.sysex_received.connect(self.on_sysex_received)
+        self.sampler_controller = sampler_controller
+        self.sampler_controller.sample_list_updated.connect(self.on_sample_list_updated)
 
         # top level layout (vertical architecture)
         # everything will stack cleanly top to bottom
@@ -131,18 +132,13 @@ class TransferDashboard(QWidget):
         dialog.exec()
 
     def request_sample_list(self):
-        try:
-            request = [0x47, 0x00, 0x04, 0x48]
-            self.midi_manager.send_sysex(request)
-            self.status_bar.showMessage("Sent sample list request...")
-        except RuntimeError as err:
-            self.status_bar.showMessage(str(err))
+        self.sampler_controller.refresh_sample_list()
 
-    def on_sysex_received(self, data_bytes):
-        preview = " ".join(f"{b:02X}" for b in data_bytes)
-        self.create_hardware_row(f"RAW: {preview}...")
-        print(preview)
-        self.status_bar.showMessage("Received SysEx response")
+    def on_sample_list_updated(self, names):
+        self.list_hardware.clear()
+        for name in names:
+            self.create_hardware_row(name)
+        self.status_bar.showMessage(f"Loaded {len(names)} sample(s) from hardware")
 
     # ROW BUILDER METHODS
     def create_local_row(self, filename):
