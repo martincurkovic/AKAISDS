@@ -69,8 +69,11 @@ def sample_to_sds_bytes(sample):
     # left justify a 16 bit sample into 3 MSB first 7 bit MIDI bytes
     # used for data packets. bits are packed with the real 16 bits pushed to the top of a 21 bit container, zero padded at the bottom
     # ie left justified
+    # IMPORTANT: MIDI SDS represents sample words as UNSIGNED quantities, with silence sitting at mid-scale (0x8000 for 16 bit)
+    # not as signed two's complement
     raw16 = sample & 0xFFFF
-    val21 = (raw16 << 5) & 0x1FFFFF  # shift by (21 - 16) = 5 bits
+    unsigned16 = raw16 ^ 0x8000  # two's complement -> unsigned/offset-binary
+    val21 = (unsigned16 << 5) & 0x1FFFFF  # shift by (21 - 16) = 5 bits
     b0 = (val21 >> 14) & 0x7F
     b1 = (val21 >> 7) & 0x7F
     b2 = val21 & 0x7F
