@@ -70,6 +70,93 @@ def build_slist_request():
     return [0x47, 0x00, 0x04, 0x48]
 
 
+REVERSE_CHAR_MAP = {v: k for k, v in AKAI_CHAR_MAP.items()}
+
+
+def encode_name(name, length=12):
+    # turn plain text name into 12 char akai encoded name
+    # padded with spaces to make up to 12 char length
+    # unknown chars fall back to space instead of crashing
+    # longer file names get chopped down to 12 chars
+    name = name.upper()[:length].ljust(length)
+    return [REVERSE_CHAR_MAP.get(ch, 0x0A) for ch in name]
+
+
+def to_nibble_pairs(raw_bytes):
+    # split each raw byte into low, hi nibble midi byte pairs
+    # encoding used by SDATA/PDATA/KDATA messages
+    # NOT the same as plain char codes used by SLIST
+    # NOT teh same as MSB first bit packing used by standard SDS
+    pairs = []
+    for b in raw_bytes:
+        pairs.append(b & 0x0F)
+        pairs.append((b >> 4) & 0x0F)
+    return pairs
+
+
+def _le_word(value):
+    # 2 byte LITTLE ENDIAN word as used inside header block
+    value &= 0xFFFF
+    return [value & 0xFF, (value >> 8) & 0xFF]
+
+
+def _le_word_as_two_words(value):
+    # 4 byte field expressed as 2 little endian 16 bit words (low word first)
+    # matches how SLOCAT/SLNGTH/SSTART/SMPEND are stored
+    value &= 0xFFFFFFFF
+    return _le_word(value & 0xFFFF) + _le_word((value >> 16) & 0xFFFF)
+
+
+def build_sample_header_block(
+    name,
+    sample_length,
+    sample_rate,
+    original_pitch=60,
+    bandwidth=1,  # 1 = 20kHz
+    playback_type=2,  # 2 = no looping/one shot
+):
+    # build the raw pre-nibble-split sample header block bytes
+    block = bytearray(192)
+
+    block[0] = 0x03  # SHINDENT = S3000 style header (CHECK THIS)
+    block[1] = bandwidth & 0xFF
+    block[2] = original_pitch & 0xFF
+    block[3:15] = bytes(encode_name(name))  # SHNAME, 12 bytes
+    block[15] = 0x80  # SSRVLD = sample rate valid
+    block[16] = 0x00  # SLOOPS (internal use)
+    block[17] = 0x00  # SALOOP (internal use)
+    block[18] = 0x00  # spare i think
+    block[19] = playback_type & 0xFF  # SPTYPE
+
+    block[20:22] = bytes(_le_word(0))  # STUNO (tune offset)
+    block[22:26] = bytes(
+        _le_word_as_two_words(0)
+    )  # SLOCAT (i think the hardware fills this in...)
+    block[26:30] = bytes(_le_word_as_two_words(sample_length))  # SLNGTH
+    block[30:34] = bytes(_le_word_as_two_words(0))  # SSTART
+    block[34:38] = bytes(_le_word_as_two_words(max(sample_length - 1, 0)))  # SMPEND
+
+    # loop slots 1-8 stay zero filled (bytearray default) - no looping
+
+    block[138:140] = bytes(_le_word(sample_rate))  # SSRATE
+
+    return bytes(block)
+
+
+def build_sdata_message(
+    name, sample_length, sample_rate, sample_number=0, channel=0, **header_kwargs
+):
+    # build full SDATA sysex message - akai's own 'create or replace this sample header' command
+    header_block = build_sample_header_block(
+        name, sample_length, sample_rate, **header_kwargs
+    )
+    nibbled = to_nibble_pairs(header_block)
+    sample_num_bytes = [sample_number & 0x7F, (sample_number >> 7) & 0x7F]
+
+    payload = [0x47, channel & 0x7F, 0x0B, 0x48] + sample_num_bytes + nibbled
+    return bytes([0xF0] + payload + [0xF7])
+
+
 if __name__ == "__main__":
     # a quick sanity check against some dummy file name data_bytes
     # only runs when this file is executed directly, not on import

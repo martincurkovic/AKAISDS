@@ -58,13 +58,28 @@ class SamplerController(QObject):
         # read wav file, encode as SDS dump, send it per packet based on timer interval
         # IMPORTANT - this is deliberately naiive - no ACK/NAK handshake yet. Too complex for now
         # This just yeets packets and hopes the receiver can keep up. To fix later
-        samples, framerate = sds_encoder.read_wav_samples(filepath)
-        packets = sds_encoder.build_sds_dump(samples, framerate, sample_number, channel)
 
-        self._send_queue = packets
+        import os
+
+        samples, framerate = sds_encoder.read_wav_samples(filepath)
+        sample_name = os.path.splitext(os.path.basename(filepath))[0]
+
+        sdata_message = akai_sysex.build_sdata_message(
+            name=sample_name,
+            sample_length=len(samples),
+            sample_rate=framerate,
+            sample_number=sample_number,
+            channel=channel,
+        )
+
+        data_packets = sds_encoder.build_data_packets(samples, channel)
+
+        self._send_queue = [sdata_message] + data_packets
         self._send_index = 0
-        self.status_changed.emit(f"Sending {len(packets)} packets...")
-        self.transfer_progress.emit(0, len(packets))
+        self.status_changed.emit(
+            f"Sending SDATA header + {len(data_packets)} packets..."
+        )
+        self.transfer_progress.emit(0, len(self._send_queue))
 
         self._send_timer.start(packet_interval_ms)
 
