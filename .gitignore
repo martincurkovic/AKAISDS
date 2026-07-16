@@ -27,3 +27,4 @@ dist/
 *.py[cod]
 *$py.class
 
+/test_scripts

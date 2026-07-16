@@ -58,3 +58,12 @@ class MidiManager(QObject):
         if self.output_port is None:
             raise RuntimeError("No MIDI output port is open")
         self.output_port.send(mido.Message("sysex", data=data_bytes))
+
+    def send_control_change(self, channel, control, value):
+        if self.output_port is None:
+            raise RuntimeError("No MIDI output port is open")
+        self.output_port.send(
+            mido.Message(
+                "control_change", channel=channel, control=control, value=value
+            )
+        )

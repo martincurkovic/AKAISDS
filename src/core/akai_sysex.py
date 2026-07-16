@@ -136,6 +136,8 @@ def build_sample_header_block(
     block[30:34] = bytes(_le_word_as_two_words(0))  # SSTART
     block[34:38] = bytes(_le_word_as_two_words(max(sample_length - 1, 0)))  # SMPEND
 
+    block[38:42] = bytes(_le_word_as_two_words(sample_length))
+    block[48:50] = bytes(_le_word(9999))
     # loop slots 1-8 stay zero filled (bytearray default) - no looping
 
     block[138:140] = bytes(_le_word(sample_rate))  # SSRATE
