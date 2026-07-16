@@ -150,17 +150,21 @@ class TransferDashboard(QWidget):
     # TEMPORARY TEST METHODS!!!!!
     def test_send_sample(self):
         # point this to a real wav file to test sending samples
-        test_path = "/Users/martincurkovic/Music/Sample Packs/Akai Packs/SCSI ID 5 - Default/Partition A - Stabs and Synths/Volume 002 - Zenhiser Stabs 1/Stab1_01.wav"
-        self.sampler_controller.send_sample_file(test_path, sample_number=0)
+        test_path = "/Users/martincurkovic/Stab001.wav"
+        self.sampler_controller.send_sample_file(test_path, sample_number=4)
 
     def on_transfer_progress(self, sent, total):
         percent = int((sent / total) * 100) if total else 0
         self.progress_bar_current_smpl.setValue(percent)
         self.status_bar.showMessage(f"Sending packet {sent}/{total}")
 
-    def on_transfer_finished(self):
-        self.progress_bar_current_smpl.setValue(100)
-        self.status_bar.showMessage("Transfer complete")
+    def on_transfer_finished(self, completed):
+        if completed:
+            self.progress_bar_current_smpl.setValue(100)
+            self.status_bar.showMessage("Transfer complete")
+        else:
+            self.progress_bar_current_smpl.setValue(0)
+            self.status_bar.showMessage("Transfer cancelled")
 
     # ROW BUILDER METHODS
     def create_local_row(self, filename):

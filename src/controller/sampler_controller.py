@@ -1,12 +1,13 @@
-from PySide6.QtCore import QObject, Signal, QTimer
+from PySide6.QtCore import QObject, Signal
 from core import akai_sysex, sds_encoder
+import os
 
 
 class SamplerController(QObject):
     sample_list_updated = Signal(list)
     status_changed = Signal(str)
     transfer_progress = Signal(int, int)  # (packets sent so far, total packets)
-    transfer_finished = Signal()
+    transfer_finished = Signal(bool)
 
     def __init__(self, midi_manager):
         super().__init__()
@@ -17,8 +18,6 @@ class SamplerController(QObject):
         # via QTtimer instead of blocking the GUI thread like a slow person walking in the middle of the aisles at Kmart
         self._send_queue = []
         self._send_index = 0
-        self._send_timer = QTimer(self)
-        self._send_timer.timeout.connect(self._send_next_packet)
 
     def refresh_sample_list(self):
         request = akai_sysex.build_slist_request()
@@ -37,7 +36,7 @@ class SamplerController(QObject):
 
         handshake = sds_encoder.classify_response(data_bytes)
         if handshake is not None:
-            self._on_handshake_message(handshake, data_bytes)
+            self._on_handshake_message(handshake)
             return
 
         # anything else - log it for now rather than crash so i can figure out wtf is going on
@@ -45,21 +44,31 @@ class SamplerController(QObject):
             f"Received unrecognised SysEx: {bytes(data_bytes).hex(' ')}"
         )
 
-    def _on_handshake_message(self, kind, data_bytes):
+    def _on_handshake_message(self, kind):
         # PLACEHOLDER - just log for now, but this is where the ACK/NAK/WAIT handling needs to happen
-        packet_num = data_bytes[3] if len(data_bytes) > 3 else "?"
-        self.status_changed.emit(
-            f"Received handshake message: {kind} (packet #{packet_num})"
-        )
+        if not self._send_queue:
+            return
+        if kind == "ack":
+            # previous packet accepted - move on to next packet
+            self._send_index += 1
+            self.transfer_progress.emit(self._send_index, len(self._send_queue))
+            self._send_current_packet()
+        elif kind == "wait":
+            # Sampler still processing - do nothing and stfu
+            self.status_changed.emit("Sampler asked us to wait...")
+        elif kind == "nak":
+            # checksum failed on sampler's end - resend the same packet, DONT advance the index
+            self.status_changed.emit(
+                f"NAK received - resending packet {self._send_index}"
+            )
+            self._send_current_packet()
+        elif kind == "cancel":
+            self.status_changed.emit("Transfer cancelled by sampler")
+            self._abort_transfer(completed=False)
 
-    def send_sample_file(
-        self, filepath, sample_number=0, channel=0, packet_interval_ms=20
-    ):
-        # read wav file, encode as SDS dump, send it per packet based on timer interval
-        # IMPORTANT - this is deliberately naiive - no ACK/NAK handshake yet. Too complex for now
-        # This just yeets packets and hopes the receiver can keep up. To fix later
-
-        import os
+    def send_sample_file(self, filepath, sample_number=0, channel=0):
+        # read wav file, encode as SDS dump, send it per packet
+        # pacing is driven by sampler handshake responses
 
         samples, framerate = sds_encoder.read_wav_samples(filepath)
         sample_name = os.path.splitext(os.path.basename(filepath))[0]
@@ -81,20 +90,23 @@ class SamplerController(QObject):
         )
         self.transfer_progress.emit(0, len(self._send_queue))
 
-        self._send_timer.start(packet_interval_ms)
+        self._send_current_packet()
 
-    def _send_next_packet(self):
+    def _send_current_packet(self):
+        # send whatever packet self._send_index currently points to.
+        # called once to kick off transfer, then again every time the response tells us to advance or retry
         if self._send_index >= len(self._send_queue):
-            self._send_timer.stop()
-            self.status_changed.emit("Transfer complete")
-            self.transfer_finished.emit()
+            self._abort_transfer(completed=True)
             return
 
         packet = self._send_queue[self._send_index]
+        self.midi_manager.send_sysex(
+            list(packet[1:-1])
+        )  # strip F0/F7 wrapper since mido adds those
 
-        # packet is a full sysex message (F0 ... F7) BUUUTTTTT mido expects payload without the F0/F7 werapper
-        # strip first and last byte before sending
-        self.midi_manager.send_sysex(list(packet[1:-1]))
-
-        self._send_index += 1
-        self.transfer_progress.emit(self._send_index, len(self._send_queue))
+    def _abort_transfer(self, completed):
+        self._send_queue = []
+        self._send_index = 0
+        if completed:
+            self.status_changed.emit("Transfer complete")
+        self.transfer_finished.emit(completed)
