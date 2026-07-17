@@ -114,12 +114,30 @@ class SamplerController(QObject):
             self.status_changed.emit("Transfer cancelled by sampler")
             self._abort_transfer(completed=False)
 
-    def send_sample_file(self, filepath, sample_number=0, channel=0):
+    def send_sample_file(
+        self,
+        filepath,
+        sample_number=0,
+        channel=0,
+        effective_bits=16,
+        target_sample_rate=None,
+    ):
         # read wav file, encode as SDS dump, send it per packet
         # pacing is driven by sampler handshake responses
+        # effective bits reduces audio resolution but still sends as 16 bit audio samples. akai cant understand anything other than 16 bit dumps
+        # target_sample_rate if given and differnet from wav's own sample rate will downsample before sending. this actually reduces file size
+        # only integer ratio downsample supported for now
 
         samples, framerate = sds_encoder.read_wav_samples(filepath)
         sample_name = os.path.splitext(os.path.basename(filepath))[0]
+
+        if target_sample_rate is not None and target_sample_rate != framerate:
+            samples, framerate = sds_encoder.resample_to_target_rate(
+                samples, framerate, target_sample_rate
+            )
+
+        if effective_bits < 16:
+            samples = [sds_encoder.bitcrush_sample(s, effective_bits) for s in samples]
 
         if (
             self._priming_stage is not None
@@ -139,7 +157,7 @@ class SamplerController(QObject):
             channel=channel,
         )
 
-        data_packets = sds_encoder.build_data_packets(samples, channel)
+        data_packets = sds_encoder.build_data_packets(samples, channel, bit_depth=16)
 
         # DONT SEND SAMPLE YET! Stash for now and run the priming dance thing first
         # on_sysex_received's priming branch picks this up once both SLIST round-trips finish

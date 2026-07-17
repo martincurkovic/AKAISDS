@@ -1,7 +1,7 @@
 import struct
 import wave
 
-WORDS_PER_DATA_PACKET = 40  # fixed by SDS spec
+DATA_BYTES_PER_PACKET = 120  # fixed by SDS spec
 NO_LOOP = 0x7F  # loop type byte which translated to one-shot or no loop
 
 # SDS HANDSHAKE IDs
@@ -65,19 +65,87 @@ def read_wav_samples(path):
 # BIT PACKING HELPERS AND STUFF
 
 
-def sample_to_sds_bytes(sample):
-    # left justify a 16 bit sample into 3 MSB first 7 bit MIDI bytes
-    # used for data packets. bits are packed with the real 16 bits pushed to the top of a 21 bit container, zero padded at the bottom
-    # ie left justified
+def sample_to_sds_bytes(sample, bit_depth=16):
+    # left justify one sample into ceil(bit_depth / 7) MSB first 7 bit midi bytes
+    # used for data packets. bits are packed with real bit_depth bits pushed to the top of the smallest 7 bit multiple container, zero padded at the bottom
+    # 16 bit = 3 bytes (21 bit container)
+    # 12 bit = 2 bytes (14 bit container)
     # IMPORTANT: MIDI SDS represents sample words as UNSIGNED quantities, with silence sitting at mid-scale (0x8000 for 16 bit)
     # not as signed two's complement
-    raw16 = sample & 0xFFFF
-    unsigned16 = raw16 ^ 0x8000  # two's complement -> unsigned/offset-binary
-    val21 = (unsigned16 << 5) & 0x1FFFFF  # shift by (21 - 16) = 5 bits
-    b0 = (val21 >> 14) & 0x7F
-    b1 = (val21 >> 7) & 0x7F
-    b2 = val21 & 0x7F
-    return b0, b1, b2
+
+    bytes_per_word = (
+        bit_depth + 6
+    ) // 7  # ceiling division - how many 7 bit bytes are needed
+    container_bits = bytes_per_word * 7
+    shift = container_bits - bit_depth
+
+    mask = (1 << bit_depth) - 1
+    raw = sample & mask
+    sign_bit = 1 << (bit_depth - 1)
+    unsigned = raw ^ sign_bit  # convert two's complement to unsigned
+
+    val = (unsigned << shift) & ((1 << container_bits) - 1)
+
+    result = []
+    for i in range(bytes_per_word):
+        shift_amount = 7 * (bytes_per_word - 1 - i)  # MSB first
+        result.append((val >> shift_amount) & 0x7F)
+    return result
+
+    # raw16 = sample & 0xFFFF
+    # unsigned16 = raw16 ^ 0x8000  # two's complement -> unsigned/offset-binary
+    # val21 = (unsigned16 << 5) & 0x1FFFFF  # shift by (21 - 16) = 5 bits
+    # b0 = (val21 >> 14) & 0x7F
+    # b1 = (val21 >> 7) & 0x7F
+    # b2 = val21 & 0x7F
+    # return b0, b1, b2
+
+
+def bitcrush_sample(sample_16bit, effective_bits):
+    # reduce 16 bit sample's effective resolution to something lower for sonic purposes only
+    # still sent as a 16 bit sample, but the bottom bits are zero'd out
+    # cant send anything other than 16 bit samples to the akai, so this doesnt actually speed up the transfer :(
+    # pass if effective bits is 16 or higher
+    if effective_bits >= 16:
+        return sample_16bit
+    shift = 16 - effective_bits
+    return (sample_16bit >> shift) << shift  # zero out the low "shift" bits
+
+
+def downsample_samples(samples, decimation_factor):
+    # reduce sample rate by integer factor
+    # instead of just throwing away in-between samples (causing aliasing),
+    # this does a simple box-filter low-pass. not as clean as proper FIR filtering,
+    # but a whole lot better than just pure decimation
+    if decimation_factor <= 1:
+        return list(samples)
+
+    downsampled = []
+    for i in range(0, len(samples), decimation_factor):
+        chunk = samples[i : i + decimation_factor]
+        downsampled.append(sum(chunk) // len(chunk))
+    return downsampled
+
+
+def resample_to_target_rate(samples, source_rate, target_rate):
+    # convert 'samples' from source_rate down to target_rate
+    # only exact int ratio downsampling supported rn
+    # upsampling and non int ratios raise ValueError instead of outputting wrong data
+    # returns (new_samples, new_rate)
+    if target_rate == source_rate:
+        return list(samples), source_rate
+    if target_rate > source_rate:
+        raise ValueError(
+            f"Upsampling ({source_rate}Hz --> {target_rate}Hz) isn't supported."
+        )
+    if source_rate % target_rate != 0:
+        raise ValueError(
+            f"Only exact integer-ratio downsampling is supported right now - "
+            f"{source_rate} is not an exact multiple of {target_rate}"
+        )
+
+    decimation_factor = source_rate // target_rate
+    return downsample_samples(samples, decimation_factor), target_rate
 
 
 def to_3byte_lsb_first(value, bits=21):
@@ -143,28 +211,32 @@ def build_dump_header(samples, framerate, sample_number=0, channel=0, bit_depth=
 
 
 # DATA PACKETS
-def build_data_packets(samples, channel=0):
+def build_data_packets(samples, channel=0, bit_depth=16):
     # build list of data packet sysex messages carrying the auidio
-    # each pack holds exactly 40 sdample words. final packet is zero padded if sample count
+    # for 16 bit samples each pack holds exactly 40 sdample words. final packet is zero padded if sample count
     # is not a multiple of 40 - the header already told the receiver the tru sample length,
     # so the receiver knows when to stop giving a fck
+
+    bytes_per_word = (bit_depth + 6) // 7
+    words_per_packet = DATA_BYTES_PER_PACKET // bytes_per_word
+
     packets = []
     packet_num = 0
 
-    for i in range(0, len(samples), WORDS_PER_DATA_PACKET):
-        chunk = samples[i : i + WORDS_PER_DATA_PACKET]
+    for i in range(0, len(samples), words_per_packet):
+        chunk = samples[i : i + words_per_packet]
 
         data_bytes = []
         for s in chunk:
-            data_bytes.extend(sample_to_sds_bytes(s))
+            data_bytes.extend(sample_to_sds_bytes(s, bit_depth))
 
-        while len(data_bytes) < WORDS_PER_DATA_PACKET * 3:
+        while len(data_bytes) < words_per_packet * bytes_per_word:
             data_bytes.append(0)
 
         header = [0x7E, channel & 0x7F, 0x02, packet_num & 0x7F]
         checksum = xor_checksum(header + data_bytes)
 
-        packet = bytes([0x70] + header + data_bytes + [checksum, 0xF7])
+        packet = bytes([0xF0] + header + data_bytes + [checksum, 0xF7])
         packets.append(packet)
 
         packet_num = (packet_num + 1) % 128  # SDS packet numbers wrap- at 128
@@ -173,13 +245,15 @@ def build_data_packets(samples, channel=0):
 
 
 # TOP LEVEL ENTRY POINT
-def build_sds_dump(samples, framerate, sample_number=0, channel=0):
+def build_sds_dump(samples, framerate, sample_number=0, channel=0, bit_depth=16):
     # build full list of sysex packets for one sample:
     # dump header first then every data packet in order
     # returns list of 'bytes' objects, each a complete ready to send sysex message (F0 ... F7)
 
-    header_packet = build_dump_header(samples, framerate, sample_number, channel)
-    data_packets = build_data_packets(samples, channel)
+    header_packet = build_dump_header(
+        samples, framerate, sample_number, channel, bit_depth
+    )
+    data_packets = build_data_packets(samples, channel, bit_depth)
     return [header_packet] + data_packets
 
 

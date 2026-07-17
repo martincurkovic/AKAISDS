@@ -151,7 +151,9 @@ class TransferDashboard(QWidget):
     def test_send_sample(self):
         # point this to a real wav file to test sending samples
         test_path = "/Users/martincurkovic/Stab001.wav"
-        self.sampler_controller.send_sample_file(test_path, sample_number=4)
+        self.sampler_controller.send_sample_file(
+            test_path, sample_number=4, effective_bits=16
+        )
 
     def on_transfer_progress(self, sent, total):
         percent = int((sent / total) * 100) if total else 0
