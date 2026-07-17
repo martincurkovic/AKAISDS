@@ -1,3 +1,5 @@
+import math
+
 AKAI_CHAR_MAP = {
     0x00: "0",
     0x01: "1",
@@ -107,15 +109,42 @@ def _le_word_as_two_words(value):
     return _le_word(value & 0xFFFF) + _le_word((value >> 16) & 0xFFFF)
 
 
+# akai hardware playback engine only runs at either 10 or 20kHz bandwidth
+# (SBANDW=0 or 1 respectively)
+# non native sample rates get compensated with a tuning offset
+_NATIVE_RATES = {0: 22050, 1: 44100}
+
+
+def compute_bandwidth_and_tuning(sample_rate):
+    # pick whichever native engine speed is closer to sample rate
+    # calculate how many semitones of tuning offset required to correct for remaining gap
+    # returns (bandwidth, semitone_offset)
+    # semitone_offset may be fractional, so pass to encode_tuning_offset for wire format
+    bandwidth = min(
+        _NATIVE_RATES, key=lambda b: abs(math.log2(sample_rate / _NATIVE_RATES[b]))
+    )
+    native_rate = _NATIVE_RATES[bandwidth]
+    semitone_offset = 12 * math.log2(sample_rate / native_rate)
+    return bandwidth, semitone_offset
+
+
+def encode_tuning_offset(semitone_offset):
+    # encode possibly fractional semitone offset as 2 byte signed 8.8 fixed point value
+    # that the akai tuning offset fields use
+    raw = round(semitone_offset * 256)
+    raw &= 0xFFFF  # wrap negative values into 16 bit two's complement
+    return _le_word(raw)
+
+
 def build_sample_header_block(
     name,
     sample_length,
     sample_rate,
     original_pitch=60,
-    bandwidth=1,  # 1 = 20kHz
     playback_type=2,  # 2 = no looping/one shot
 ):
     # build the raw pre-nibble-split sample header block bytes
+    bandwidth, semitone_offset = compute_bandwidth_and_tuning(sample_rate)
     block = bytearray(192)
 
     block[0] = 0x03  # SHINDENT = S3000 style header (CHECK THIS)
@@ -128,7 +157,7 @@ def build_sample_header_block(
     block[18] = 0x00  # spare i think
     block[19] = playback_type & 0xFF  # SPTYPE
 
-    block[20:22] = bytes(_le_word(0))  # STUNO (tune offset)
+    block[20:22] = bytes(encode_tuning_offset(semitone_offset))  # STUNO (tune offset)
     block[22:26] = bytes(
         _le_word_as_two_words(0)
     )  # SLOCAT (i think the hardware fills this in...)
