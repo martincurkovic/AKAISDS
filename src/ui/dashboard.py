@@ -5,6 +5,7 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QListWidget,
     QListWidgetItem,
+    QMessageBox,
     QProgressBar,
     QPushButton,
     QStatusBar,
@@ -95,8 +96,8 @@ class TransferDashboard(QWidget):
 
         # populate right list using checkbox row customisation
         hardware_files = ["SAMPLE01", "SAMPLE02", "SAMPLE03 -L", "SAMPLE03 -R"]
-        for file_name in hardware_files:
-            self.create_hardware_row(file_name)
+        for sample_number, file_name in enumerate(hardware_files):
+            self.create_hardware_row(file_name, sample_number)
 
         # ACtION CONTROL BAR (Horizontal layout)
         action_layout = QHBoxLayout()
@@ -147,8 +148,8 @@ class TransferDashboard(QWidget):
 
     def on_sample_list_updated(self, names):
         self.list_hardware.clear()
-        for name in names:
-            self.create_hardware_row(name)
+        for sample_number, name in enumerate(names):
+            self.create_hardware_row(name, sample_number)
         self.status_bar.showMessage(f"Loaded {len(names)} sample(s) from hardware")
 
     # TEMPORARY TEST METHODS!!!!!
@@ -243,7 +244,7 @@ class TransferDashboard(QWidget):
         item.setSizeHint(row_widget.sizeHint())
         self.list_local.setItemWidget(item, row_widget)
 
-    def create_hardware_row(self, filename):
+    def create_hardware_row(self, filename, sample_number):
         # build read only, fized row with leading checkbox and trailing action buttons
         item = QListWidgetItem(self.list_hardware)
 
@@ -261,6 +262,12 @@ class TransferDashboard(QWidget):
         btn_edit.setFixedHeight(24)
         btn_del.setFixedHeight(24)
 
+        btn_del.clicked.connect(
+            lambda checked=False, name=filename, num=sample_number: (
+                self.confirm_and_delete_sample(name, num)
+            )
+        )
+
         # assemble row layout horizontally
         row_layout.addWidget(checkbox, stretch=1)
         row_layout.addWidget(btn_edit)
@@ -269,3 +276,15 @@ class TransferDashboard(QWidget):
         # inject canvas widget into list row framework
         item.setSizeHint(row_widget.sizeHint())
         self.list_hardware.setItemWidget(item, row_widget)
+
+    def confirm_and_delete_sample(self, name, sample_number):
+        reply = QMessageBox.question(
+            self,
+            "Delete Sample",
+            f"Delete '{name.strip()}' (sample {sample_number}) from the sampler? "
+            f"This cannot be undone. ",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply == QMessageBox.StandardButton.Yes:
+            self.sampler_controller.delete_sample(sample_number)

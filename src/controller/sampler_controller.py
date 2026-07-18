@@ -19,6 +19,7 @@ class SamplerController(QObject):
         self._send_queue = []
         self._send_index = 0
         self._active_channel = 0
+        self._active_sample_number = 0
 
         # PRIMING STATE - for SOME GODDAMN REASON the akai ignores a brand new SDATA header UNLESS...
         # it's preceeded by this exact dance (RSLIST, sustain pedal reset on all channels, RSLIST again)
@@ -30,6 +31,13 @@ class SamplerController(QObject):
     def refresh_sample_list(self):
         self._send_rslist_request()
         self.status_changed.emit("Requesting sample list...")
+
+    def delete_sample(self, sample_number, channel=0):
+        # delete the selected sample (DELS command in akai documentation)
+        request = akai_sysex.build_dels_request(sample_number, channel)
+        self.midi_manager.send_sysex(request)
+        self.status_changed.emit(f"Deleting sample {sample_number}...")
+        QTimer.singleShot(300, self.refresh_sample_list)
 
     def _send_rslist_request(self):
         request = akai_sysex.build_slist_request()
@@ -164,6 +172,7 @@ class SamplerController(QObject):
         # on_sysex_received's priming branch picks this up once both SLIST round-trips finish
         self._pending_transfer = [sdata_message] + data_packets
         self._active_channel = channel
+        self._active_sample_number = sample_number
 
         self.status_changed.emit("Priming sample before transfer...")
         self._priming_stage = 1
@@ -186,6 +195,12 @@ class SamplerController(QObject):
             packet_num = self._send_index & 0x7F
             self.midi_manager.send_sysex(
                 [0x7E, self._active_channel & 0x7F, sds_encoder.CANCEL, packet_num]
+            )
+
+            self.midi_manager.send_sysex(
+                akai_sysex.build_dels_request(
+                    self._active_sample_number, self._active_channel
+                )
             )
 
         self.status_changed.emit("Transfer cancelled")

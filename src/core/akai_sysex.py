@@ -84,6 +84,15 @@ def encode_name(name, length=12):
     return [REVERSE_CHAR_MAP.get(ch, 0x0A) for ch in name]
 
 
+def build_dels_request(sample_number, channel=0):
+    # build DELS (Delete Sample Header and Data) request
+    # F0, 47, cc, DELS(0x14), 48, ss, ss, F7
+    # where ss, ss is sample number, LSB first 7 bit
+    ss_lsb = sample_number & 0x7F
+    ss_msb = (sample_number >> 7) & 0x7F
+    return [0x47, channel & 0x7F, 0x14, 0x48, ss_lsb, ss_msb]
+
+
 def to_nibble_pairs(raw_bytes):
     # split each raw byte into low, hi nibble midi byte pairs
     # encoding used by SDATA/PDATA/KDATA messages
