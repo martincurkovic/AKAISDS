@@ -1,6 +1,7 @@
 from PySide6.QtWidgets import QMainWindow
 from ui.dashboard import TransferDashboard
 from core.midi_manager import MidiManager
+from core import app_config
 from controller.sampler_controller import SamplerController
 
 
@@ -24,6 +25,21 @@ class ApplicationWindow(QMainWindow):
 
         # mount layout into core central display panel area
         self.setCentralWidget(self.dashboard_view)
+
+        # reconnect to whatever MIDI ports were used last time, if still exist
+        self._restore_saved_ports()
+
+    def _restore_saved_ports(self):
+        input_name, output_name = app_config.get_saved_ports()
+
+        available_inputs = self.midi_manager.list_inputs()
+        available_outputs = self.midi_manager.list_outputs()
+
+        if input_name and input_name in available_inputs:
+            self.midi_manager.open_input(input_name)
+
+        if output_name and output_name in available_outputs:
+            self.midi_manager.open_output(output_name)
 
     def closeEvent(self, event):
         # release midi ports cleanly so mido's backend doesnt hang around like a fart in a doctor's waiting room

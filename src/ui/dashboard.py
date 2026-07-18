@@ -102,12 +102,16 @@ class TransferDashboard(QWidget):
         action_layout = QHBoxLayout()
         self.btn_send = QPushButton("Send Samples")
         self.btn_recieve = QPushButton("Recieve Samples")
+        self.btn_cancel = QPushButton("Cancel Transfer")
+        self.btn_cancel.setEnabled(False)
 
         # TEMPORARY!!! Hijack send button to fire hardcoded test transfer
         self.btn_send.clicked.connect(self.test_send_sample)
+        self.btn_cancel.clicked.connect(self.cancel_transfer)
 
         # Add stretch spacer to push both control columns cleanly to the bottom of the window
         action_layout.addStretch()
+        action_layout.addWidget(self.btn_cancel)
         action_layout.addWidget(self.btn_recieve)
         action_layout.addWidget(self.btn_send)
 
@@ -154,6 +158,11 @@ class TransferDashboard(QWidget):
         self.sampler_controller.send_sample_file(
             test_path, sample_number=4, effective_bits=16, target_sample_rate=11025
         )
+        self.btn_send.setEnabled(False)
+        self.btn_cancel.setEnabled(True)
+
+    def cancel_transfer(self):
+        self.sampler_controller.cancel_transfer()
 
     def on_transfer_progress(self, sent, total):
         percent = int((sent / total) * 100) if total else 0
@@ -161,6 +170,8 @@ class TransferDashboard(QWidget):
         self.status_bar.showMessage(f"Sending packet {sent}/{total}")
 
     def on_transfer_finished(self, completed):
+        self.btn_send.setEnabled(True)
+        self.btn_cancel.setEnabled(False)
         if completed:
             self.progress_bar_current_smpl.setValue(100)
             self.status_bar.showMessage("Transfer complete")

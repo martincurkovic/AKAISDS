@@ -1,4 +1,5 @@
 from PySide6.QtWidgets import QComboBox, QDialog, QDialogButtonBox, QFormLayout, QLabel
+from core import app_config
 
 
 class MidiSettingsDialog(QDialog):
@@ -43,6 +44,13 @@ class MidiSettingsDialog(QDialog):
                 self.combo_output.setCurrentIndex(idx)
 
     def _apply_and_close(self):
-        self.midi_manager.open_input(self.combo_input.currentData())
-        self.midi_manager.open_output(self.combo_output.currentData())
+        input_name = self.combo_input.currentData()
+        output_name = self.combo_output.currentData()
+
+        self.midi_manager.open_input(input_name)
+        self.midi_manager.open_output(output_name)
+
+        # remember these for next launch
+        app_config.save_ports(input_name, output_name)
+
         self.accept()

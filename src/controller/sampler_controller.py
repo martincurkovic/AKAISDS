@@ -18,6 +18,7 @@ class SamplerController(QObject):
         # via QTtimer instead of blocking the GUI thread like a slow person walking in the middle of the aisles at Kmart
         self._send_queue = []
         self._send_index = 0
+        self._active_channel = 0
 
         # PRIMING STATE - for SOME GODDAMN REASON the akai ignores a brand new SDATA header UNLESS...
         # it's preceeded by this exact dance (RSLIST, sustain pedal reset on all channels, RSLIST again)
@@ -162,10 +163,33 @@ class SamplerController(QObject):
         # DONT SEND SAMPLE YET! Stash for now and run the priming dance thing first
         # on_sysex_received's priming branch picks this up once both SLIST round-trips finish
         self._pending_transfer = [sdata_message] + data_packets
+        self._active_channel = channel
 
         self.status_changed.emit("Priming sample before transfer...")
         self._priming_stage = 1
         self._send_rslist_request()
+
+    def cancel_transfer(self):
+        # abort whatever is currently happening and communicate the cancel to the hardware
+        # should be safe to call at any time i think
+        in_progrss = (
+            self._priming_stage is not None
+            or bool(self._send_queue)
+            or self._pending_transfer is not None
+        )
+        if not in_progrss:
+            return
+
+        if self._send_queue:
+            # tell the sampler we're bailing out
+            # communicate using universal CANCEL handshake in SDS standard
+            packet_num = self._send_index & 0x7F
+            self.midi_manager.send_sysex(
+                [0x7E, self._active_channel & 0x7F, sds_encoder.CANCEL, packet_num]
+            )
+
+        self.status_changed.emit("Transfer cancelled")
+        self._abort_transfer(completed=False)
 
     def _begin_pending_transfer(self):
         queue = self._pending_transfer
