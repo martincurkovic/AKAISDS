@@ -84,6 +84,13 @@ def encode_name(name, length=12):
     return [REVERSE_CHAR_MAP.get(ch, 0x0A) for ch in name]
 
 
+def build_stereo_channel_name(base_name, suffix, total_length=12):
+    # build name with channel suffix (ie -L or -R) that ALWAYS = 12 chars
+    # truncate longer file names if required
+    max_base_length = total_length - len(suffix)
+    return base_name[:max_base_length] + suffix
+
+
 def build_dels_request(sample_number, channel=0):
     # build DELS (Delete Sample Header and Data) request
     # F0, 47, cc, DELS(0x14), 48, ss, ss, F7

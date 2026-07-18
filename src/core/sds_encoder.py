@@ -62,6 +62,38 @@ def read_wav_samples(path):
     return samples, framerate
 
 
+def read_wav_channels(path):
+    # read 16 bit PCM WAV and return (channels, framerate) WITHOUT downmixing stereo file
+    # channels: list with one tuple per channel - [samples] for mono, [left_samples, right_samples] for stereo
+    # framerate = samples per second (ie, 44100 or whaterver)
+
+    with wave.open(path, "rb") as wf:
+        n_channels = wf.getnchannels()
+        sampwidth = wf.getsampwidth()
+        framerate = wf.getframerate()
+        n_frames = wf.getnframes()
+        raw = wf.readframes(n_frames)
+
+    if sampwidth != 2:
+        raise ValueError(
+            f"Only 16-bit PCM WAV files are supported right now (got {sampwidth * 8}-bit"
+        )
+
+    fmt = "<" + "h" * (len(raw) // 2)
+    interleaved = struct.unpack(fmt, raw)
+
+    if n_channels == 1:
+        return [interleaved], framerate
+    elif n_channels == 2:
+        left = interleaved[0::2]
+        right = interleaved[1::2]
+        return [left, right], framerate
+    else:
+        raise ValueError(
+            f"Only mono or stereo WAV files are supported right now (got {n_channels} channels)"
+        )
+
+
 # BIT PACKING HELPERS AND STUFF
 
 

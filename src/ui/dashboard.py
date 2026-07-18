@@ -155,9 +155,13 @@ class TransferDashboard(QWidget):
     # TEMPORARY TEST METHODS!!!!!
     def test_send_sample(self):
         # point this to a real wav file to test sending samples
-        test_path = "/Users/martincurkovic/Stab001.wav"
-        self.sampler_controller.send_sample_file(
-            test_path, sample_number=4, effective_bits=16, target_sample_rate=11025
+        test_path = "/Users/martincurkovic/stereotest.wav"
+        self.sampler_controller.send_stereo_sample_file(
+            test_path,
+            sample_number_left=4,
+            sample_number_right=5,
+            effective_bits=4,
+            target_sample_rate=6300,
         )
         self.btn_send.setEnabled(False)
         self.btn_cancel.setEnabled(True)

@@ -27,6 +27,7 @@ class SamplerController(QObject):
         # also dont ask why this bs isnt documented anywhere...
         self._priming_stage = None
         self._pending_transfer = None
+        self._stereo_queue = []
 
     def refresh_sample_list(self):
         self._send_rslist_request()
@@ -140,6 +141,65 @@ class SamplerController(QObject):
         samples, framerate = sds_encoder.read_wav_samples(filepath)
         sample_name = os.path.splitext(os.path.basename(filepath))[0]
 
+        samples, framerate = self._prepare_samples(
+            samples, framerate, effective_bits, target_sample_rate
+        )
+        self._start_send(sample_name, samples, framerate, sample_number, channel)
+
+    def send_stereo_sample_file(
+        self,
+        filepath,
+        sample_number_left,
+        sample_number_right,
+        channel=0,
+        effective_bits=16,
+        target_sample_rate=None,
+    ):
+        # send stereo file as 2 separate samples with -L/-R suffixes
+        # left channel sent first, right sent once left is completed
+
+        channels, framerate = sds_encoder.read_wav_channels(filepath)
+        if len(channels) != 2:
+            self.status_changed.emit(
+                "That file isn't stereo - use send_sample_file instead"
+            )
+            return
+
+        if (
+            self._priming_stage is not None
+            or self._send_queue
+            or self._pending_transfer is not None
+            or self._stereo_queue
+        ):
+            self.status_changed.emit(
+                "A transfer is already in progress - please wait for it to finish"
+            )
+            return
+
+        base_name = os.path.splitext(os.path.basename(filepath))[0]
+        left_name = akai_sysex.build_stereo_channel_name(base_name, "-L")
+        right_name = akai_sysex.build_stereo_channel_name(base_name, "-R")
+
+        left_samples, left_rate = self._prepare_samples(
+            channels[0], framerate, effective_bits, target_sample_rate
+        )
+        right_samples, right_rate = self._prepare_samples(
+            channels[1], framerate, effective_bits, target_sample_rate
+        )
+
+        # right sample waits here until left sample finishes transfer
+        self._stereo_queue = [
+            (right_name, right_samples, right_rate, sample_number_right, channel),
+        ]
+
+        self.status_changed.emit("Sending stereo file: left channel first...")
+        self._start_send(
+            left_name, left_samples, left_rate, sample_number_left, channel
+        )
+
+    def _prepare_samples(self, samples, framerate, effective_bits, target_sample_rate):
+        # shared prep step for both mono and stero files
+        # optional downsampling, then bitcrush
         if target_sample_rate is not None and target_sample_rate != framerate:
             samples, framerate = sds_encoder.resample_to_target_rate(
                 samples, framerate, target_sample_rate
@@ -148,6 +208,10 @@ class SamplerController(QObject):
         if effective_bits < 16:
             samples = [sds_encoder.bitcrush_sample(s, effective_bits) for s in samples]
 
+        return samples, framerate
+
+    def _start_send(self, name, samples, framerate, sample_number, channel):
+        # build SDATA header + data packets for one already prepped samples and kick off priming+send flow
         if (
             self._priming_stage is not None
             or self._send_queue
@@ -159,7 +223,7 @@ class SamplerController(QObject):
             return
 
         sdata_message = akai_sysex.build_sdata_message(
-            name=sample_name,
+            name=name,
             sample_length=len(samples),
             sample_rate=framerate,
             sample_number=sample_number,
@@ -185,6 +249,7 @@ class SamplerController(QObject):
             self._priming_stage is not None
             or bool(self._send_queue)
             or self._pending_transfer is not None
+            or bool(self._stereo_queue)
         )
         if not in_progrss:
             return
@@ -202,7 +267,7 @@ class SamplerController(QObject):
                     self._active_sample_number, self._active_channel
                 )
             )
-
+        self._stereo_queue = []
         self.status_changed.emit("Transfer cancelled")
         self._abort_transfer(completed=False)
 
@@ -239,6 +304,19 @@ class SamplerController(QObject):
         self._send_index = 0
         self._priming_stage = None
         self._pending_transfer = None
+        if completed and self._stereo_queue:
+            name, samples, framerate, sample_number, channel = self._stereo_queue.pop(0)
+            self.status_changed.emit("Left channel done - sending right channel...")
+            QTimer.singleShot(
+                300,
+                lambda: self._start_send(
+                    name, samples, framerate, sample_number, channel
+                ),
+            )
+            return
+
+        self._stereo_queue = []
         if completed:
             self.status_changed.emit("Transfer complete")
+            QTimer.singleShot(300, self.refresh_sample_list)
         self.transfer_finished.emit(completed)
