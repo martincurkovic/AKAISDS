@@ -102,8 +102,16 @@ class TransferDashboard(QWidget):
         self.btn_send.clicked.connect(self.send_queued_samples)
         self.btn_cancel.clicked.connect(self.cancel_transfer)
 
+        # TEMPORARY TEST BUTTONS - for generic SDS experiment
+        self.btn_test_generic_sds = QPushButton("Test Generic SDS")
+        self.btn_test_generic_sds.clicked.connect(self.test_send_generic_sds)
+        self.btn_test_rename = QPushButton("Test Rename")
+        self.btn_test_rename.clicked.connect(self.test_rename_sample)
+
         # Add stretch spacer to push both control columns cleanly to the bottom of the window
         action_layout.addStretch()
+        action_layout.addWidget(self.btn_test_generic_sds)
+        action_layout.addWidget(self.btn_test_rename)
         action_layout.addWidget(self.btn_cancel)
         action_layout.addWidget(self.btn_recieve)
         action_layout.addWidget(self.btn_send)
@@ -188,6 +196,19 @@ class TransferDashboard(QWidget):
     def cancel_transfer(self):
         self.sampler_controller.cancel_transfer()
 
+    # TEMPORARY TEST METHODS FOR GENERIC SDS + RENAME EXPERIMENT!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+    def test_send_generic_sds(self):
+        test_path = "/Users/martincurkovic/akai test samples/Stab001 copy 2.wav"
+        self.sampler_controller.send_sample_file_generic(
+            test_path, sample_number=21, channel=0, bit_depth=12
+        )
+        self.btn_send.setEnabled(False)
+        self.btn_cancel.setEnabled(True)
+
+    def test_rename_sample(self):
+        # RUN THIS AFTER GENERIC SDS HAS COMPLETED
+        self.sampler_controller.rename_sample(21, "TEST NAME")
+
     def on_transfer_progress(self, sent, total):
         percent = int((sent / total) * 100) if total else 0
         self.progress_bar_current_smpl.setValue(percent)
@@ -202,7 +223,7 @@ class TransferDashboard(QWidget):
                 self.list_local.takeItem(i)
                 break
 
-        # one more file done out of however many were thrown in the queue
+        # one more file done out of however many were thrown in the queu
         self._queue_completed += 1
         if self._queue_total:
             percent = int((self._queue_completed / self._queue_total) * 100)

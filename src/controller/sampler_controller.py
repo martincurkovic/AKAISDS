@@ -54,6 +54,18 @@ class SamplerController(QObject):
         self.status_changed.emit(f"Deleting sample {sample_number}...")
         QTimer.singleShot(300, self.refresh_sample_list)
 
+    def rename_sample(self, sample_number, new_name, channel=0):
+        # rename existing sample WITHOUT touching its audio data
+        # so far untested
+        request = akai_sysex.build_rename_sample_request(
+            sample_number, new_name, channel
+        )
+        self.midi_manager.send_sysex(request)
+        self.status_changed.emit(
+            f"Renaming sample {sample_number} to '{new_name.strip()}'..."
+        )
+        QTimer.singleShot(300, self.refresh_sample_list)
+
     def _send_rslist_request(self):
         request = akai_sysex.build_slist_request()
         self.midi_manager.send_sysex(request)
@@ -164,6 +176,42 @@ class SamplerController(QObject):
             samples, framerate, effective_bits, target_sample_rate
         )
         self._start_send(sample_name, samples, framerate, sample_number, channel)
+
+    def send_sample_file_generic(
+        self, filepath, sample_number=0, channel=0, bit_depth=16
+    ):
+        # send sample using generic usiversal midi sds protocol (NOT THE AKAI ONE)
+        # this actually sends samples at a lower bit depth across less bytes (ie, 12 bit samples sent across 2 midi bytes, not 3 like a 16 bit sample)
+        samples, framerate = sds_encoder.read_wav_samples(filepath)
+
+        if bit_depth < 16:
+            samples = [sds_encoder.reduce_bit_depth(s, bit_depth) for s in samples]
+
+        if (
+            self._priming_stage is not None
+            or self._send_queue
+            or self._pending_transfer is not None
+            or self._stereo_queue
+            or self._file_queue
+        ):
+            self.status_changed.emit(
+                "A transfer is already in progress - please wait for it to finish"
+            )
+            return
+
+        header_packet = sds_encoder.build_dump_header(
+            samples, framerate, sample_number, channel, bit_depth
+        )
+        data_packets = sds_encoder.build_data_packets(samples, channel, bit_depth)
+
+        self._send_queue = [header_packet] + data_packets
+        self._send_index = 0
+        self._active_channel = channel
+        self._active_sample_number = sample_number
+
+        self.status_changed.emit(f"Sending generic SDS dump ({bit_depth}-bit)...")
+        self.transfer_progress.emit(0, len(self._send_queue))
+        self._send_current_packet()
 
     def send_stereo_sample_file(
         self,

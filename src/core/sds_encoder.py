@@ -144,6 +144,15 @@ def bitcrush_sample(sample_16bit, effective_bits):
     return (sample_16bit >> shift) << shift  # zero out the low "shift" bits
 
 
+def reduce_bit_depth(sample_16bit, target_bit_depth):
+    # actually reduce bit depth for REALS instead of fake bitcrushing by zero-ing out lower bits
+    # this wont work for akai sds, only generic sds (akai sds can only send 16 bit samples)
+    if target_bit_depth >= 16:
+        return sample_16bit
+    shift = 16 - target_bit_depth
+    return sample_16bit >> shift  # arithmetic shift - preserves sign, shrinks range
+
+
 def downsample_samples(samples, decimation_factor):
     # reduce sample rate by integer factor
     # instead of just throwing away in-between samples (causing aliasing),

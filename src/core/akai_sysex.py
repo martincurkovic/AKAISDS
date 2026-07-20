@@ -100,6 +100,43 @@ def build_dels_request(sample_number, channel=0):
     return [0x47, channel & 0x7F, 0x14, 0x48, ss_lsb, ss_msb]
 
 
+# offset within the 192 byte raw sample header block where SHNAME lives
+_SHNAME_OFFSET = 3
+_SHNAME_LENGTH = 12
+
+
+def build_rename_sample_request(sample_number, new_name, channel=0):
+    # rename existing sample WITHOUT touching its audio data or length
+    # uses the documented offset addressed "receive sample header bytes" commmand (function code 0x2C)
+    # writing only the header 12-byte SHNAME field (offset 3) rather than the WHOLE header
+    # this is important because sending a full SDATA header for an existing sample number risks the device
+    # mis-interpreting it as a full create/replace sample
+    # at least I THINK this will work, should probably test this hey?
+    ss_lsb = sample_number & 0x7F
+    ss_msb = (sample_number >> 7) & 0x7F
+    offset_lsb = _SHNAME_OFFSET & 0x7F
+    offset_msb = (_SHNAME_OFFSET >> 7) & 0x7F
+    length_lsb = _SHNAME_LENGTH & 0x7F
+    length_msb = (_SHNAME_LENGTH >> 7) & 0x7F
+
+    name_bytes = encode_name(new_name, length=_SHNAME_LENGTH)
+    nibbled = to_nibble_pairs(name_bytes)
+
+    return [
+        0x47,
+        channel & 0x7F,
+        0x2C,
+        0x48,
+        ss_lsb,
+        ss_msb,
+        0x00,
+        offset_lsb,
+        offset_msb,
+        length_lsb,
+        length_msb,
+    ] + nibbled
+
+
 def to_nibble_pairs(raw_bytes):
     # split each raw byte into low, hi nibble midi byte pairs
     # encoding used by SDATA/PDATA/KDATA messages
