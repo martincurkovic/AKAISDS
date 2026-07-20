@@ -30,6 +30,11 @@ class TransferDashboard(QWidget):
         self.sampler_controller.transfer_finished.connect(self.on_transfer_finished)
         self.sampler_controller.file_transferred.connect(self.on_file_transferred)
 
+        # tracks the current batch progress for the overall progress bar
+        # how many files finished vs how many were queued when send was clicked
+        self._queue_total = 0
+        self._quque_completed = 0
+
         # top level layout (vertical architecture)
         # everything will stack cleanly top to bottom
         master_layout = QVBoxLayout(self)
@@ -107,10 +112,12 @@ class TransferDashboard(QWidget):
         self.progress_bar_current_smpl = QProgressBar()
         self.progress_bar_current_smpl.setRange(0, 100)
         self.progress_bar_current_smpl.setValue(0)
+        self.progress_bar_current_smpl.setVisible(False)
 
         self.progress_bar_overall = QProgressBar()
         self.progress_bar_overall.setRange(0, 100)
         self.progress_bar_overall.setValue(0)
+        self.progress_bar_overall.setVisible(False)
 
         # STATUS FEEDBACK BAR
         self.status_bar = QStatusBar()
@@ -171,6 +178,13 @@ class TransferDashboard(QWidget):
         self.btn_send.setEnabled(False)
         self.btn_cancel.setEnabled(True)
 
+        self._queue_total = len(entries)
+        self._queue_completed = 0
+        self.progress_bar_current_smpl.setValue(0)
+        self.progress_bar_overall.setValue(0)
+        self.progress_bar_current_smpl.setVisible(True)
+        self.progress_bar_overall.setVisible(True)
+
     def cancel_transfer(self):
         self.sampler_controller.cancel_transfer()
 
@@ -188,6 +202,12 @@ class TransferDashboard(QWidget):
                 self.list_local.takeItem(i)
                 break
 
+        # one more file done out of however many were thrown in the queue
+        self._queue_completed += 1
+        if self._queue_total:
+            percent = int((self._queue_completed / self._queue_total) * 100)
+            self.progress_bar_overall.setValue(percent)
+
     def on_transfer_finished(self, completed):
         self.btn_send.setEnabled(True)
         self.btn_cancel.setEnabled(False)
@@ -197,6 +217,10 @@ class TransferDashboard(QWidget):
         else:
             self.progress_bar_current_smpl.setValue(0)
             self.status_bar.showMessage("Transfer cancelled")
+
+        # nothing happening anymore: hide both progress bars
+        self.progress_bar_current_smpl.setVisible(False)
+        self.progress_bar_overall.setVisible(False)
 
     # ROW BUILDER METHODS
     def create_local_row(self, filepath):
