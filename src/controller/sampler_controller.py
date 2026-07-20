@@ -8,6 +8,7 @@ class SamplerController(QObject):
     status_changed = Signal(str)
     transfer_progress = Signal(int, int)  # (packets sent so far, total packets)
     transfer_finished = Signal(bool)
+    file_transferred = Signal(str)
 
     def __init__(self, midi_manager):
         super().__init__()
@@ -28,6 +29,19 @@ class SamplerController(QObject):
         self._priming_stage = None
         self._pending_transfer = None
         self._stereo_queue = []
+
+        # FILE QUEUE STATE - for send_file_queue: a whole batch of local files to send in order
+        # auto-numbered starting from however many samples already exist on the hardware
+        self._file_queue = []
+        self._file_queue_total = 0
+        self._file_queue_channel = 0
+        self._file_queue_effective_bits = 16
+        self._file_queue_target_rate = None
+        self._awaiting_count_for_queue = False
+        self._next_file_sample_number = 0
+        self._current_file_path = (
+            None  # which queued file is in transit right now (if any)
+        )
 
     def refresh_sample_list(self):
         self._send_rslist_request()
@@ -55,7 +69,12 @@ class SamplerController(QObject):
                 count, names = akai_sysex.parse_slist_response(data_bytes)
                 self.sample_list_updated.emit(names)
 
-                if self._priming_stage == 1:
+                if self._awaiting_count_for_queue:
+                    self._awaiting_count_for_queue = False
+                    self._next_file_sample_number = len(names)
+                    self._send_next_queued_file()
+
+                elif self._priming_stage == 1:
                     # got first SLIST reply - reset sustain pedal on all 16 channels, then ask for SLIST again
                     # why Akai, WHYYYYY???
                     self._priming_stage = 2
@@ -242,6 +261,97 @@ class SamplerController(QObject):
         self._priming_stage = 1
         self._send_rslist_request()
 
+    def send_file_queue(
+        self, file_entries, channel=0, effective_bits=16, target_sample_rate=None
+    ):
+        # send a batch of local wav files, one after another, without overwriting anything already on the sampler
+        # file_entries = list of (filepath, name_override) tuples, in the order they should be sent
+        # starting sample number is deterimed automatically from the hardware
+        if not file_entries:
+            return
+
+        if (
+            self._priming_stage is not None
+            or self._send_queue
+            or self._pending_transfer is not None
+            or self._stereo_queue
+            or self._file_queue
+            or self._awaiting_count_for_queue
+        ):
+            self.status_changed.emit(
+                "A transfer is already in progress - please wait for it to finish"
+            )
+            return
+
+        self._file_queue = list(file_entries)
+        self._file_queue_total = len(file_entries)
+        self._file_queue_channel = channel
+        self._file_queue_effective_bits = effective_bits
+        self._file_queue_target_rate = target_sample_rate
+        self._awaiting_count_for_queue = True
+
+        self.status_changed.emit(
+            "Checking existing samples to choose a starting slot..."
+        )
+        self._send_rslist_request()
+
+    def _send_next_queued_file(self):
+        if not self._file_queue:
+            return
+
+        filepath, name_override = self._file_queue.pop(0)
+        self._current_file_path = filepath
+        current_index = self._file_queue_total - len(self._file_queue)
+
+        try:
+            channels, framerate = sds_encoder.read_wav_channels(filepath)
+        except (OSError, ValueError) as e:
+            self.status_changed.emit(f"Skipping {os.path.basename(filepath)}: {e}")
+            QTimer.singleShot(0, self._send_next_queued_file)
+            return
+
+        base_name = name_override or os.path.splitext(os.path.basename(filepath))[0]
+        channel = self._file_queue_channel
+        effective_bits = self._file_queue_effective_bits
+        target_sample_rate = self._file_queue_target_rate
+
+        if len(channels) == 2:
+            left_name = akai_sysex.build_stereo_channel_name(base_name, "-L")
+            right_name = akai_sysex.build_stereo_channel_name(base_name, "-R")
+            left_samples, left_rate = self._prepare_samples(
+                channels[0], framerate, effective_bits, target_sample_rate
+            )
+            right_samples, right_rate = self._prepare_samples(
+                channels[1], framerate, effective_bits, target_sample_rate
+            )
+
+            sample_number_left = self._next_file_sample_number
+            sample_number_right = self._next_file_sample_number + 1
+            self._next_file_sample_number += 2
+
+            # right leg awaits here, same mechanism as send_stereo_sample_file
+            self._stereo_queue = [
+                (right_name, right_samples, right_rate, sample_number_right, channel),
+            ]
+            self.status_changed.emit(
+                f"Sending file {current_index}/{self._file_queue_total}: {base_name} (stereo)..."
+            )
+            self._start_send(
+                left_name, left_samples, left_rate, sample_number_left, channel
+            )
+        else:
+            samples, out_rate = self._prepare_samples(
+                channels[0], framerate, effective_bits, target_sample_rate
+            )
+
+            sample_number = self._next_file_sample_number
+            self._next_file_sample_number += 1
+
+            self.status_changed.emit(
+                f"Sending file {current_index}/{self._file_queue_total}: {base_name}..."
+            )
+            self._start_send(base_name, samples, out_rate, sample_number, channel)
+
     def cancel_transfer(self):
         # abort whatever is currently happening and communicate the cancel to the hardware
         # should be safe to call at any time i think
@@ -250,6 +360,8 @@ class SamplerController(QObject):
             or bool(self._send_queue)
             or self._pending_transfer is not None
             or bool(self._stereo_queue)
+            or bool(self._file_queue)
+            or self._awaiting_count_for_queue
         )
         if not in_progrss:
             return
@@ -268,6 +380,9 @@ class SamplerController(QObject):
                 )
             )
         self._stereo_queue = []
+        self._file_queue = []
+        self._awaiting_count_for_queue = False
+
         self.status_changed.emit("Transfer cancelled")
         self._abort_transfer(completed=False)
 
@@ -304,6 +419,7 @@ class SamplerController(QObject):
         self._send_index = 0
         self._priming_stage = None
         self._pending_transfer = None
+
         if completed and self._stereo_queue:
             name, samples, framerate, sample_number, channel = self._stereo_queue.pop(0)
             self.status_changed.emit("Left channel done - sending right channel...")
@@ -315,7 +431,19 @@ class SamplerController(QObject):
             )
             return
 
+        # if we get here, whatever file was in flight (mono or the full stereo pair) the transfer is finished
+        # tell the UI it can remove it from the queue. only on success - cancelled/failed transfer should stay in the queue
+        if self._current_file_path is not None:
+            if completed:
+                self.file_transferred.emit(self._current_file_path)
+            self._current_file_path = None
+
+        if completed and self._file_queue:
+            QTimer.singleShot(300, self._send_next_queued_file)
+            return
+
         self._stereo_queue = []
+        self._file_queue = []
         if completed:
             self.status_changed.emit("Transfer complete")
             QTimer.singleShot(300, self.refresh_sample_list)

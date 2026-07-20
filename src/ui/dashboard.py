@@ -1,9 +1,9 @@
+import os
 from PySide6.QtWidgets import (
     QCheckBox,
     QHBoxLayout,
     QLabel,
     QLineEdit,
-    QListWidget,
     QListWidgetItem,
     QMessageBox,
     QProgressBar,
@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import Qt
 from ui.settings_dialog import MidiSettingsDialog
+from ui.drop_list_widget import DropListWidget
 
 
 class TransferDashboard(QWidget):
@@ -25,10 +26,9 @@ class TransferDashboard(QWidget):
         self.midi_manager = midi_manager
         self.sampler_controller = sampler_controller
         self.sampler_controller.sample_list_updated.connect(self.on_sample_list_updated)
-
-        # TEMPORARY TEST WIRING!!!
         self.sampler_controller.transfer_progress.connect(self.on_transfer_progress)
         self.sampler_controller.transfer_finished.connect(self.on_transfer_finished)
+        self.sampler_controller.file_transferred.connect(self.on_file_transferred)
 
         # top level layout (vertical architecture)
         # everything will stack cleanly top to bottom
@@ -52,24 +52,14 @@ class TransferDashboard(QWidget):
         left_vbox = QVBoxLayout(left_container)
         left_vbox.setContentsMargins(0, 0, 0, 0)
 
-        lbl_local = QLabel("<b>File Transfer Queue</b>")
-        self.list_local = QListWidget()
-        self.list_local.setDragDropMode(QListWidget.DragDropMode.InternalMove)
-        self.list_local.setSelectionMode(QListWidget.SelectionMode.SingleSelection)
+        lbl_local = QLabel("<b>File Transfer Queue</b> (drag WAV files here)")
+        self.list_local = DropListWidget()
+        self.list_local.setDragDropMode(DropListWidget.DragDropMode.InternalMove)
+        self.list_local.setSelectionMode(DropListWidget.SelectionMode.SingleSelection)
+        self.list_local.filesDropped.connect(self.on_files_dropped)
 
         left_vbox.addWidget(lbl_local)
         left_vbox.addWidget(self.list_local)
-
-        # populate left list using custom row customisation
-        local_files = [
-            "Sample 01.wav",
-            "Sample 02.wav",
-            "Sample 03.wav",
-            "Sample 04.wav",
-            "Sample 05.wav",
-        ]
-        for file_name in local_files:
-            self.create_local_row(file_name)
 
         # RIGHT COLUMN - files on the akai already
         right_container = QWidget()
@@ -77,8 +67,11 @@ class TransferDashboard(QWidget):
         right_vbox.setContentsMargins(0, 0, 0, 0)
 
         lbl_hardware = QLabel("<b>Currently Loaded Samples</b>")
-        self.list_hardware = QListWidget()
-        self.list_hardware.setSelectionMode(QListWidget.SelectionMode.NoSelection)
+        self.list_hardware = (
+            DropListWidget()
+        )  # not used for drop here, just re-using the same widget type
+        self.list_hardware.setSelectionMode(DropListWidget.SelectionMode.NoSelection)
+        self.list_hardware.setAcceptDrops(False)
 
         # HEADER ROW - title + refresh button share one line
         hardware_header = QHBoxLayout()
@@ -94,11 +87,6 @@ class TransferDashboard(QWidget):
         panel_layout.addWidget(left_container)
         panel_layout.addWidget(right_container)
 
-        # populate right list using checkbox row customisation
-        hardware_files = ["SAMPLE01", "SAMPLE02", "SAMPLE03 -L", "SAMPLE03 -R"]
-        for sample_number, file_name in enumerate(hardware_files):
-            self.create_hardware_row(file_name, sample_number)
-
         # ACtION CONTROL BAR (Horizontal layout)
         action_layout = QHBoxLayout()
         self.btn_send = QPushButton("Send Samples")
@@ -106,8 +94,7 @@ class TransferDashboard(QWidget):
         self.btn_cancel = QPushButton("Cancel Transfer")
         self.btn_cancel.setEnabled(False)
 
-        # TEMPORARY!!! Hijack send button to fire hardcoded test transfer
-        self.btn_send.clicked.connect(self.test_send_sample)
+        self.btn_send.clicked.connect(self.send_queued_samples)
         self.btn_cancel.clicked.connect(self.cancel_transfer)
 
         # Add stretch spacer to push both control columns cleanly to the bottom of the window
@@ -152,17 +139,35 @@ class TransferDashboard(QWidget):
             self.create_hardware_row(name, sample_number)
         self.status_bar.showMessage(f"Loaded {len(names)} sample(s) from hardware")
 
-    # TEMPORARY TEST METHODS!!!!!
-    def test_send_sample(self):
-        # point this to a real wav file to test sending samples
-        test_path = "/Users/martincurkovic/stereotest.wav"
-        self.sampler_controller.send_stereo_sample_file(
-            test_path,
-            sample_number_left=4,
-            sample_number_right=5,
-            effective_bits=4,
-            target_sample_rate=6300,
-        )
+    def on_files_dropped(self, paths):
+        added = 0
+        for path in paths:
+            if path.lower().endswith(".wav"):
+                self.create_local_row(path)
+                added += 1
+            else:
+                self.status_bar.showMessage(
+                    f"Skipped non-WAV file: {os.path.basename(path)}"
+                )
+        if added:
+            self.status_bar.showMessage(f"Added {added} file(s) to the queue")
+
+    def send_queued_samples(self):
+        entries = []
+        for i in range(self.list_local.count()):
+            item = self.list_local.item(i)
+            filepath = item.data(Qt.ItemDataRole.UserRole)
+            row_widget = self.list_local.itemWidget(item)
+            edit_field = row_widget.findChild(QLineEdit)
+            override_name = edit_field.text().strip() if edit_field else None
+            entries.append((filepath, override_name or None))
+        if not entries:
+            self.status_bar.showMessage(
+                "No files in the queue to send - drag some WAV files in first"
+            )
+            return
+
+        self.sampler_controller.send_file_queue(entries)
         self.btn_send.setEnabled(False)
         self.btn_cancel.setEnabled(True)
 
@@ -173,6 +178,15 @@ class TransferDashboard(QWidget):
         percent = int((sent / total) * 100) if total else 0
         self.progress_bar_current_smpl.setValue(percent)
         self.status_bar.showMessage(f"Sending packet {sent}/{total}")
+
+    def on_file_transferred(self, filepath):
+        # find and remove whichever row holds this exact file path
+        # ie, the row's stored data (set in create_local_row) NOT its display text since the user may have renamed it
+        for i in range(self.list_local.count()):
+            item = self.list_local.item(i)
+            if item.data((Qt.ItemDataRole.UserRole)) == filepath:
+                self.list_local.takeItem(i)
+                break
 
     def on_transfer_finished(self, completed):
         self.btn_send.setEnabled(True)
@@ -185,11 +199,12 @@ class TransferDashboard(QWidget):
             self.status_bar.showMessage("Transfer cancelled")
 
     # ROW BUILDER METHODS
-    def create_local_row(self, filename):
+    def create_local_row(self, filepath):
         # build an editable, drag-swappable row with action buttons pinned to right side
 
         # create blank structural placeholder item inside real list
         item = QListWidgetItem(self.list_local)
+        item.setData(Qt.ItemDataRole.UserRole, filepath)
 
         # create custom layout container canvas for the row
         row_widget = QWidget()
@@ -203,7 +218,8 @@ class TransferDashboard(QWidget):
         lbl_handle.setCursor(Qt.CursorShape.OpenHandCursor)
 
         # left component - use qline edit instead of qlabel to allow renaming
-        edit_field = QLineEdit(filename)
+        display_name = os.path.splitext(os.path.basename(filepath))[0]
+        edit_field = QLineEdit(display_name)
         edit_field.setReadOnly(True)
         edit_field.setStyleSheet(
             "background: transparent; border: none; font-size: 13px; color: black;"
@@ -235,6 +251,14 @@ class TransferDashboard(QWidget):
         # make buttons compact so they dont look fucken massive hey
         btn_edit.setFixedHeight(24)
         btn_del.setFixedHeight(24)
+
+        # remove this file from the queue - ie remove this row
+        # nothing has been sent to the hardware yet
+        btn_del.clicked.connect(
+            lambda checked=False, it=item: self.list_local.takeItem(
+                self.list_local.row(it)
+            )
+        )
 
         # assemble row layout horizontaly
         row_layout.addWidget(lbl_handle)
