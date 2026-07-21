@@ -15,6 +15,9 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Qt
 from ui.settings_dialog import MidiSettingsDialog
 from ui.drop_list_widget import DropListWidget
+from ui.sample_settings_dialog import SampleSettingsDialog
+
+SETTINGS_ROLE = Qt.ItemDataRole.UserRole + 1
 
 
 class TransferDashboard(QWidget):
@@ -34,6 +37,11 @@ class TransferDashboard(QWidget):
         # how many files finished vs how many were queued when send was clicked
         self._queue_total = 0
         self._quque_completed = 0
+
+        # DEFAULT transmission values for newly dropped files
+        self._global_bit_depth = 16
+        self._global_sample_rate = None
+        self._global_mono = False
 
         # top level layout (vertical architecture)
         # everything will stack cleanly top to bottom
@@ -58,12 +66,19 @@ class TransferDashboard(QWidget):
         left_vbox.setContentsMargins(0, 0, 0, 0)
 
         lbl_local = QLabel("<b>File Transfer Queue</b> (drag WAV files here)")
+
+        local_header = QHBoxLayout()
+        local_header.addWidget(lbl_local, stretch=1)
+        self.btn_global_settings = QPushButton("\u2699 Transmission Settings")
+        self.btn_global_settings.clicked.connect(self.open_global_settings_dialog)
+        local_header.addWidget(self.btn_global_settings)
+
         self.list_local = DropListWidget()
         self.list_local.setDragDropMode(DropListWidget.DragDropMode.InternalMove)
         self.list_local.setSelectionMode(DropListWidget.SelectionMode.SingleSelection)
         self.list_local.filesDropped.connect(self.on_files_dropped)
 
-        left_vbox.addWidget(lbl_local)
+        left_vbox.addLayout(local_header)
         left_vbox.addWidget(self.list_local)
 
         # RIGHT COLUMN - files on the akai already
@@ -102,13 +117,8 @@ class TransferDashboard(QWidget):
         self.btn_send.clicked.connect(self.send_queued_samples)
         self.btn_cancel.clicked.connect(self.cancel_transfer)
 
-        # TEMPORARY TEST BUTTONS - for generic SDS experiment
-        self.btn_test_generic_rename = QPushButton("Test Generic+Rename")
-        self.btn_test_generic_rename.clicked.connect(self.test_send_generic_and_rename)
-
         # Add stretch spacer to push both control columns cleanly to the bottom of the window
         action_layout.addStretch()
-        action_layout.addWidget(self.btn_test_generic_rename)
         action_layout.addWidget(self.btn_cancel)
         action_layout.addWidget(self.btn_recieve)
         action_layout.addWidget(self.btn_send)
@@ -164,6 +174,73 @@ class TransferDashboard(QWidget):
         if added:
             self.status_bar.showMessage(f"Added {added} file(s) to the queue")
 
+    def open_global_settings_dialog(self):
+        dialog = SampleSettingsDialog(
+            self,
+            title="Global Transmission Settings",
+            show_name=False,
+            bit_depth=self._global_bit_depth,
+            sample_rate=self._global_sample_rate,
+            mono=self._global_mono,
+        )
+        if dialog.exec():
+            settings = dialog.get_settings()
+            self._global_bit_depth = settings["bit_depth"]
+            self._global_sample_rate = settings["sample_rate"]
+            self._global_mono = settings["mono"]
+
+        # bulk apply to every file in the queue (per file names are left untouched)
+        # this dialog doesnt have a name field
+        applied = 0
+        for i in range(self.list_local.count()):
+            item = self.list_local.item(i)
+            item.setData(
+                SETTINGS_ROLE,
+                {
+                    "bit_depth": self._global_bit_depth,
+                    "sample_rate": self._global_sample_rate,
+                    "mono": self._global_mono,
+                },
+            )
+            applied += 1
+
+        if applied:
+            self.status_bar.showMessage(
+                f"Applied global settings to {applied} file(s) in the queue"
+            )
+        else:
+            self.status_bar.showMessage(
+                "Gloabl settings saved - will apply to files added from now on"
+            )
+
+    def open_edit_dialog(self, item, edit_field):
+        current_settings = item.data(SETTINGS_ROLE) or {
+            "bit_depth": self._global_bit_depth,
+            "sample_rate": self._global_sample_rate,
+            "mono": self._global_mono,
+        }
+
+        dialog = SampleSettingsDialog(
+            self,
+            title="Sample Settings",
+            show_name=True,
+            name=edit_field.text(),
+            bit_depth=current_settings["bit_depth"],
+            sample_rate=current_settings["sample_rate"],
+            mono=current_settings["mono"],
+        )
+        if dialog.exec():
+            settings = dialog.get_settings()
+            edit_field.setText(settings["name"])
+            item.setData(
+                SETTINGS_ROLE,
+                {
+                    "bit_depth": settings["bit_depth"],
+                    "sample_rate": settings["sample_rate"],
+                    "mono": settings["mono"],
+                },
+            )
+
     def send_queued_samples(self):
         entries = []
         for i in range(self.list_local.count()):
@@ -172,7 +249,23 @@ class TransferDashboard(QWidget):
             row_widget = self.list_local.itemWidget(item)
             edit_field = row_widget.findChild(QLineEdit)
             override_name = edit_field.text().strip() if edit_field else None
-            entries.append((filepath, override_name or None))
+
+            settings = item.data(SETTINGS_ROLE) or {
+                "bit_depth": self._global_bit_depth,
+                "sample_rate": self._global_sample_rate,
+                "mono": self._global_mono,
+            }
+
+            entries.append(
+                {
+                    "filepath": filepath,
+                    "name": override_name or None,
+                    "bit_depth": settings["bit_depth"],
+                    "sample_rate": settings["sample_rate"],
+                    "mono": settings["mono"],
+                }
+            )
+
         if not entries:
             self.status_bar.showMessage(
                 "No files in the queue to send - drag some WAV files in first"
@@ -180,6 +273,7 @@ class TransferDashboard(QWidget):
             return
 
         self.sampler_controller.send_file_queue(entries)
+
         self.btn_send.setEnabled(False)
         self.btn_cancel.setEnabled(True)
 
@@ -192,15 +286,6 @@ class TransferDashboard(QWidget):
 
     def cancel_transfer(self):
         self.sampler_controller.cancel_transfer()
-
-    # TEMPORARY TEST METHODS FOR GENERIC SDS + RENAME EXPERIMENT!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-    def test_send_generic_and_rename(self):
-        test_path = "/Users/martincurkovic/akai test samples/Stab001 copy 2.wav"
-        self.sampler_controller.send_sample_file_generic_and_rename(
-            test_path, new_name="TEST NAME", channel=0, bit_depth=12
-        )
-        self.btn_send.setEnabled(False)
-        self.btn_cancel.setEnabled(True)
 
     def on_transfer_progress(self, sent, total):
         percent = int((sent / total) * 100) if total else 0
@@ -243,6 +328,14 @@ class TransferDashboard(QWidget):
         # create blank structural placeholder item inside real list
         item = QListWidgetItem(self.list_local)
         item.setData(Qt.ItemDataRole.UserRole, filepath)
+        item.setData(
+            SETTINGS_ROLE,
+            {
+                "bit_depth": self._global_bit_depth,
+                "sample_rate": self._global_sample_rate,
+                "mono": self._global_mono,
+            },
+        )
 
         # create custom layout container canvas for the row
         row_widget = QWidget()
@@ -289,6 +382,11 @@ class TransferDashboard(QWidget):
         # make buttons compact so they dont look fucken massive hey
         btn_edit.setFixedHeight(24)
         btn_del.setFixedHeight(24)
+
+        # opens the per-file settings dialog
+        btn_edit.clicked.connect(
+            lambda checked=False, it=item, ef=edit_field: self.open_edit_dialog(it, ef)
+        )
 
         # remove this file from the queue - ie remove this row
         # nothing has been sent to the hardware yet

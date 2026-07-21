@@ -62,6 +62,15 @@ def read_wav_samples(path):
     return samples, framerate
 
 
+def read_wav_info(path):
+    # quickly read WAV's channel count and sample rate WITHOUT reading any audio data
+    # fast enough to call every time a UI dialog opens
+    # returns (n_channels, framerate)
+
+    with wave.open(path, "rb") as wf:
+        return wf.getnchannels(), wf.getframerate()
+
+
 def read_wav_channels(path):
     # read 16 bit PCM WAV and return (channels, framerate) WITHOUT downmixing stereo file
     # channels: list with one tuple per channel - [samples] for mono, [left_samples, right_samples] for stereo
@@ -153,40 +162,61 @@ def reduce_bit_depth(sample_16bit, target_bit_depth):
     return sample_16bit >> shift  # arithmetic shift - preserves sign, shrinks range
 
 
-def downsample_samples(samples, decimation_factor):
-    # reduce sample rate by integer factor
-    # instead of just throwing away in-between samples (causing aliasing),
-    # this does a simple box-filter low-pass. not as clean as proper FIR filtering,
-    # but a whole lot better than just pure decimation
-    if decimation_factor <= 1:
+def _lowpass_filter(samples, width):
+    # simple moving-average lowpass filter - basic anti-aliasing step before downsampling
+    # sized to roughly match the target sample rate
+    # not as clean as a proper FIR filter, but whatever man, it's lo-fi...
+    if width <= 1:
         return list(samples)
 
-    downsampled = []
-    for i in range(0, len(samples), decimation_factor):
-        chunk = samples[i : i + decimation_factor]
-        downsampled.append(sum(chunk) // len(chunk))
-    return downsampled
+    half = width // 2
+    n = len(samples)
+    filtered = []
+    for i in range(n):
+        start = max(0, i - half)
+        end = min(n, i + half + 1)
+        window = samples[start:end]
+        filtered.append(round(sum(window) / len(window)))
+    return filtered
 
 
 def resample_to_target_rate(samples, source_rate, target_rate):
-    # convert 'samples' from source_rate down to target_rate
-    # only exact int ratio downsampling supported rn
-    # upsampling and non int ratios raise ValueError instead of outputting wrong data
-    # returns (new_samples, new_rate)
+    # convert 'samples' from source_rate to ANY target_rate
+    # (up or down-sampling supported)
+    # also supports any ratio of downsampling, not just exact integer divisions
+    # runs a simple low pass filter to reduce aliasing, then both direction use linear interpolation
+    # to land on exactly the right number of output samples for the new rate
+    # yeah sure its not 100% accurate, but we're aiming for lo-fi and speed here
+    # not trying to spend hours waiting for resampling before anything is even sent to the sampler
     if target_rate == source_rate:
         return list(samples), source_rate
-    if target_rate > source_rate:
-        raise ValueError(
-            f"Upsampling ({source_rate}Hz --> {target_rate}Hz) isn't supported."
-        )
-    if source_rate % target_rate != 0:
-        raise ValueError(
-            f"Only exact integer-ratio downsampling is supported right now - "
-            f"{source_rate} is not an exact multiple of {target_rate}"
-        )
+    if target_rate <= 0:
+        raise ValueError(f"target_rate must be positive (got {target_rate})")
+    if not samples:
+        return [], target_rate
 
-    decimation_factor = source_rate // target_rate
-    return downsample_samples(samples, decimation_factor), target_rate
+    ratio = target_rate / source_rate
+
+    if ratio < 1:
+        filter_width = max(1, round(1 / ratio))
+        samples = _lowpass_filter(samples, filter_width)
+
+    out_length = max(1, round(len(samples) * ratio))
+    last_index = len(samples) - 1
+
+    resampled = []
+    for i in range(out_length):
+        src_pos = i / ratio
+        idx0 = int(src_pos)
+        if idx0 >= last_index:
+            resampled.append(samples[last_index])
+            continue
+        frac = src_pos - idx0
+        s0 = samples[idx0]
+        s1 = samples[idx0 + 1]
+        resampled.append(round(s0 + (s1 - s0) * frac))
+
+    return resampled, target_rate
 
 
 def to_3byte_lsb_first(value, bits=21):

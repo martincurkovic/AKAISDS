@@ -29,8 +29,6 @@ class SamplerController(QObject):
         self._file_queue = []
         self._file_queue_total = 0
         self._file_queue_channel = 0
-        self._file_queue_effective_bits = 16
-        self._file_queue_target_rate = None
         self._awaiting_count_for_queue = False
         self._next_file_sample_number = 0
         self._current_file_path = (
@@ -89,9 +87,12 @@ class SamplerController(QObject):
                     # diff against this once transfer is done
                     self._awaiting_pre_send_slist = False
                     self._pre_send_names = list(names)
-                    filepath, channel, bit_depth = self._pending_generic_params
-                    self._pending_generic_params = None
-                    self._do_send_generic(filepath, channel, bit_depth)
+                    samples, framerate, channel, bit_depth = self._pending_generic_send
+                    self._pending_generic_send = None
+                    sample_number_hint = len(names)
+                    self._send_generic_packets(
+                        samples, framerate, sample_number_hint, channel, bit_depth
+                    )
 
                 elif self._awaiting_post_send_slist_for_rename:
                     # get the "after" sample list snapshot, find the one thats changed and rename THAT
@@ -111,7 +112,7 @@ class SamplerController(QObject):
                         self.status_changed.emit(
                             "Couldn't tell which slot the new sample landed in - skipping rename"
                         )
-                    self.transfer_finished.emit(True)
+                    self._finish_unit(True)
 
                 elif self._awaiting_count_for_queue:
                     self._awaiting_count_for_queue = False
@@ -169,6 +170,13 @@ class SamplerController(QObject):
             self.status_changed.emit("Transfer cancelled by sampler")
             self._abort_transfer(completed=False)
 
+    # -----------------------------------------------------------------
+    # LEGACY / DIRECT signle shot entry points
+    # still useful for manual tests
+    # effective_bits here means bitcrush and keep 16 bit format
+    # not the new bitcrush which actually reduces bit depth for reals
+    # -----------------------------------------------------------------
+
     def send_sample_file(
         self,
         filepath,
@@ -177,12 +185,6 @@ class SamplerController(QObject):
         effective_bits=16,
         target_sample_rate=None,
     ):
-        # read wav file, encode as SDS dump, send it per packet
-        # pacing is driven by sampler handshake responses
-        # effective bits reduces audio resolution but still sends as 16 bit audio samples. akai cant understand anything other than 16 bit dumps
-        # target_sample_rate if given and differnet from wav's own sample rate will downsample before sending. this actually reduces file size
-        # only integer ratio downsample supported for now
-
         samples, framerate = sds_encoder.read_wav_samples(filepath)
         sample_name = os.path.splitext(os.path.basename(filepath))[0]
 
@@ -190,74 +192,6 @@ class SamplerController(QObject):
             samples, framerate, effective_bits, target_sample_rate
         )
         self._start_send(sample_name, samples, framerate, sample_number, channel)
-
-    def send_sample_file_generic(
-        self, filepath, sample_number=0, channel=0, bit_depth=16
-    ):
-        # send sample using generic usiversal midi sds protocol (NOT THE AKAI ONE)
-        # this actually sends samples at a lower bit depth across less bytes (ie, 12 bit samples sent across 2 midi bytes, not 3 like a 16 bit sample)
-
-        if self._send_queue or self._stereo_queue or self._file_queue:
-            self.status_changed.emit(
-                "A transfer is already in progress - please wait for it to finish"
-            )
-            return
-
-        self._do_send_generic(
-            filepath, channel, bit_depth, sample_number_hint=sample_number
-        )
-
-    def send_sample_file_generic_and_rename(
-        self, filepath, new_name, channel=0, bit_depth=16
-    ):
-        # send via generic sds then rename it correctly using the diff sample slist logic
-
-        if (
-            self._send_queue
-            or self._stereo_queue
-            or self._file_queue
-            or self._awaiting_pre_send_slist
-        ):
-            self.status_changed.emit(
-                "A transfer is already in progress - please wait for it to finish"
-            )
-            return
-
-        self._pending_generic_params = (filepath, channel, bit_depth)
-        self._rename_after_send = (new_name, channel)
-        self._awaiting_pre_send_slist = True
-
-        self.status_changed.emit("Checking current samples before sending...")
-        self._send_rslist_request()
-
-    def _do_send_generic(self, filepath, channel, bit_depth, sample_number_hint=0):
-        samples, framerate = sds_encoder.read_wav_samples(filepath)
-
-        if bit_depth < 16:
-            samples = [sds_encoder.reduce_bit_depth(s, bit_depth) for s in samples]
-
-        header_packet = sds_encoder.build_dump_header(
-            samples, framerate, sample_number_hint, channel, bit_depth
-        )
-        data_packets = sds_encoder.build_data_packets(samples, channel, bit_depth)
-
-        self._send_queue = [header_packet] + data_packets
-        self._send_index = 0
-        self._active_channel = channel
-        self._active_sample_number = sample_number_hint
-
-        self.status_changed.emit(f"Sending generic SDS dump ({bit_depth}-bit)...")
-        self.transfer_progress.emit(0, len(self._send_queue))
-        self._send_current_packet()
-
-    def _find_new_sample_slot(self, names_before, names_after):
-        # compare sample name lists before and after to find which slot index changed
-        for i in range(min(len(names_before), len(names_after))):
-            if names_before[i] != names_after[i]:
-                return i
-        if len(names_after) > len(names_before):
-            return len(names_before)
-        return None
 
     def send_stereo_sample_file(
         self,
@@ -268,9 +202,6 @@ class SamplerController(QObject):
         effective_bits=16,
         target_sample_rate=None,
     ):
-        # send stereo file as 2 separate samples with -L/-R suffixes
-        # left channel sent first, right sent once left is completed
-
         channels, framerate = sds_encoder.read_wav_channels(filepath)
         if len(channels) != 2:
             self.status_changed.emit(
@@ -295,67 +226,160 @@ class SamplerController(QObject):
             channels[1], framerate, effective_bits, target_sample_rate
         )
 
-        # right sample waits here until left sample finishes transfer
         self._stereo_queue = [
-            (right_name, right_samples, right_rate, sample_number_right, channel),
+            (right_name, right_samples, right_rate, channel, 16, sample_number_right),
         ]
-
         self.status_changed.emit("Sending stereo file: left channel first...")
         self._start_send(
             left_name, left_samples, left_rate, sample_number_left, channel
         )
 
-    def _prepare_samples(self, samples, framerate, effective_bits, target_sample_rate):
-        # shared prep step for both mono and stero files
-        # optional downsampling, then bitcrush
-        if target_sample_rate is not None and target_sample_rate != framerate:
-            samples, framerate = sds_encoder.resample_to_target_rate(
-                samples, framerate, target_sample_rate
-            )
+    def send_sample_file_generic(
+        self, filepath, sample_number=0, channel=0, bit_depth=16
+    ):
+        # send sample using generic usiversal midi sds protocol (NOT THE AKAI ONE)
+        # this actually sends samples at a lower bit depth across less bytes (ie, 12 bit samples sent across 2 midi bytes, not 3 like a 16 bit sample)
 
-        if effective_bits < 16:
-            samples = [sds_encoder.bitcrush_sample(s, effective_bits) for s in samples]
-
-        return samples, framerate
-
-    def _start_send(self, name, samples, framerate, sample_number, channel):
-        # build SDATA header + data packets for one already prepped samples and kick off priming+send flow
-        if self._send_queue:
+        if self._send_queue or self._stereo_queue or self._file_queue:
             self.status_changed.emit(
                 "A transfer is already in progress - please wait for it to finish"
             )
             return
 
-        sdata_message = akai_sysex.build_sdata_message(
-            name=name,
-            sample_length=len(samples),
-            sample_rate=framerate,
-            sample_number=sample_number,
-            channel=channel,
+        samples, framerate = sds_encoder.read_wav_samples(filepath)
+        if bit_depth < 16:
+            samples = [sds_encoder.reduce_bit_depth(s, bit_depth) for s in samples]
+        self._send_generic_packets(
+            samples, framerate, sample_number, channel, bit_depth
         )
 
-        data_packets = sds_encoder.build_data_packets(samples, channel, bit_depth=16)
+    def send_sample_file_generic_and_rename(
+        self, filepath, new_name, channel=0, bit_depth=16
+    ):
+        # send via generic sds then rename it correctly using the diff sample slist logic
 
-        self._send_queue = [sdata_message] + data_packets
+        if (
+            self._send_queue
+            or self._stereo_queue
+            or self._file_queue
+            or self._awaiting_pre_send_slist
+        ):
+            self.status_changed.emit(
+                "A transfer is already in progress - please wait for it to finish"
+            )
+            return
+
+        samples, framerate = sds_encoder.read_wav_samples(filepath)
+        if bit_depth < 16:
+            samples = [sds_encoder.reduce_bit_depth(s, bit_depth) for s in samples]
+
+        self._begin_generic_with_rename(
+            samples, framerate, channel, bit_depth, new_name
+        )
+
+    def _prepare_samples(self, samples, framerate, effective_bits, target_sample_rate):
+        # shared prep step for LEGACY entry points above
+        # optional downsampling, then bitcrush (keeping 16 bit wire format)
+        if target_sample_rate is not None and target_sample_rate != framerate:
+            samples, framerate = sds_encoder.resample_to_target_rate(
+                samples, framerate, target_sample_rate
+            )
+        if effective_bits < 16:
+            samples = [sds_encoder.bitcrush_sample(s, effective_bits) for s in samples]
+        return samples, framerate
+
+    def _find_new_sample_slot(self, names_before, names_after):
+        # compare sample name lists before and after to find which slot index changed
+        for i in range(min(len(names_before), len(names_after))):
+            if names_before[i] != names_after[i]:
+                return i
+        if len(names_after) > len(names_before):
+            return len(names_before)
+        return None
+
+    # -------------------------------------------------------------------
+    # new per-file setting prep (actualy reduces bit depth for reals)
+    # -------------------------------------------------------------------
+
+    def _prepare_samples_for_settings(
+        self, samples, framerate, bit_depth, target_sample_rate
+    ):
+        if target_sample_rate is not None and target_sample_rate != framerate:
+            try:
+                samples, framerate = sds_encoder.resample_to_target_rate(
+                    samples, framerate, target_sample_rate
+                )
+            except ValueError as e:
+                self.status_changed.emit(
+                    f"Couldn't resample to {target_sample_rate}Hz ({e}) - using original rate"
+                )
+        if bit_depth < 16:
+            samples = [sds_encoder.reduce_bit_depth(s, bit_depth) for s in samples]
+        return samples, framerate
+
+    def _start_unit(
+        self, name, samples, framerate, channel, bit_depth, sample_number=None
+    ):
+        # send one sample, choosing Akai SDATA (bit depth = 16, needs a real sample number) or generic SDS + auto-rename (bit depth != 16, real slot determined automaticaly)
+        if bit_depth == 16:
+            self._start_send(name, samples, framerate, sample_number, channel)
+        else:
+            self._begin_generic_with_rename(
+                samples, framerate, channel, bit_depth, name
+            )
+
+    def _begin_generic_with_rename(
+        self, samples, framerate, channel, bit_depth, new_name
+    ):
+        self._pending_generic_send = (samples, framerate, channel, bit_depth)
+        self._rename_after_send = (new_name, channel)
+        self._awaiting_pre_send_slist = True
+        self.status_changed.emit("Checking current samples before sengin...")
+        self._send_rslist_request()
+
+    def _send_generic_packets(
+        self, samples, framerate, sample_number_hint, channel, bit_depth
+    ):
+        header_packet = sds_encoder.build_dump_header(
+            samples, framerate, sample_number_hint, channel, bit_depth
+        )
+        data_packets = sds_encoder.build_data_packets(samples, channel, bit_depth)
+
+        self._send_queue = [header_packet] + data_packets
         self._send_index = 0
         self._active_channel = channel
-        self._active_sample_number = sample_number
+        self._active_sample_number = sample_number_hint
 
-        self.status_changed.emit(
-            f"Sending SDATA header + {len(data_packets)} data packets..."
-        )
+        self.status_changed.emit(f"Sending generic SDS dump ({bit_depth}-bit)...")
         self.transfer_progress.emit(0, len(self._send_queue))
         self._send_current_packet()
 
-    def send_file_queue(
-        self, file_entries, channel=0, effective_bits=16, target_sample_rate=None
-    ):
-        # send a batch of local wav files, one after another, without overwriting anything already on the sampler
-        # file_entries = list of (filepath, name_override) tuples, in the order they should be sent
-        # starting sample number is deterimed automatically from the hardware
+    # ---------------------------------------------------------
+    # FILE QUEUE - drag and drop batch sending, per file settings
+    # ---------------------------------------------------------
+
+    def send_file_queue(self, file_entries, channel=0):
+        # send batch of local wav files, one after another without overwriting anything already on the hardware
+        # file_entries: list of dicts, each shaped like:
+        #    {
+        #         "filepath": str,
+        #         "name": str or None,        # None = use the file's own name
+        #         "bit_depth": int,           # 16 = Akai SDATA; anything
+        #                                      # else = generic SDS (real
+        #                                      # wire size reduction)
+        #         "sample_rate": int or None, # None = keep the file's own rate
+        #         "mono": bool,                # True = send only the left
+        #                                      # channel even if the file
+        #                                      # is stereo
+        #     }
+        #
+        # Starting sample number (for bit_depth == 16 entries) is
+        # determined automatically from however many samples already
+        # exist on the hardware. Entries using bit_depth != 16 ignore
+        # that number entirely (the Akai always reallocates for generic
+        # SDS) and get renamed correctly afterward instead.
         if not file_entries:
             return
-
         if (
             self._send_queue
             or self._stereo_queue
@@ -370,8 +394,6 @@ class SamplerController(QObject):
         self._file_queue = list(file_entries)
         self._file_queue_total = len(file_entries)
         self._file_queue_channel = channel
-        self._file_queue_effective_bits = effective_bits
-        self._file_queue_target_rate = target_sample_rate
         self._awaiting_count_for_queue = True
 
         self.status_changed.emit(
@@ -382,8 +404,8 @@ class SamplerController(QObject):
     def _send_next_queued_file(self):
         if not self._file_queue:
             return
-
-        filepath, name_override = self._file_queue.pop(0)
+        entry = self._file_queue.pop(0)
+        filepath = entry["filepath"]
         self._current_file_path = filepath
         current_index = self._file_queue_total - len(self._file_queue)
 
@@ -394,47 +416,73 @@ class SamplerController(QObject):
             QTimer.singleShot(0, self._send_next_queued_file)
             return
 
-        base_name = name_override or os.path.splitext(os.path.basename(filepath))[0]
+        base_name = entry.get("name") or os.path.splitext(os.path.basename(filepath))[0]
         channel = self._file_queue_channel
-        effective_bits = self._file_queue_effective_bits
-        target_sample_rate = self._file_queue_target_rate
+        bit_depth = entry.get("bit_depth", 16)
+        target_sample_rate = entry.get("sample_rate")
+        force_mono = entry.get("mono", False)
 
-        if len(channels) == 2:
+        send_stereo = (len(channels) == 2) and not force_mono
+
+        if send_stereo:
             left_name = akai_sysex.build_stereo_channel_name(base_name, "-L")
             right_name = akai_sysex.build_stereo_channel_name(base_name, "-R")
-            left_samples, left_rate = self._prepare_samples(
-                channels[0], framerate, effective_bits, target_sample_rate
+            left_samples, left_rate = self._prepare_samples_for_settings(
+                channels[0], framerate, bit_depth, target_sample_rate
             )
-            right_samples, right_rate = self._prepare_samples(
-                channels[1], framerate, effective_bits, target_sample_rate
+            right_samples, right_rate = self._prepare_samples_for_settings(
+                channels[1], framerate, bit_depth, target_sample_rate
             )
 
-            sample_number_left = self._next_file_sample_number
-            sample_number_right = self._next_file_sample_number + 1
-            self._next_file_sample_number += 2
+            if bit_depth == 16:
+                sample_number_left = self._next_file_sample_number
+                sample_number_right = self._next_file_sample_number + 1
+                self._next_file_sample_number += 2
+            else:
+                # generic path picks its own slot regardless - these are unused
+                sample_number_left = None
+                sample_number_right = None
 
-            # right leg awaits here, same mechanism as send_stereo_sample_file
+            # right leg waits here until the left leg (audio + any
+            # rename it needs) is FULLY done - see _finish_unit
             self._stereo_queue = [
-                (right_name, right_samples, right_rate, sample_number_right, channel),
+                (
+                    right_name,
+                    right_samples,
+                    right_rate,
+                    channel,
+                    bit_depth,
+                    sample_number_right,
+                ),
             ]
             self.status_changed.emit(
                 f"Sending file {current_index}/{self._file_queue_total}: {base_name} (stereo)..."
             )
-            self._start_send(
-                left_name, left_samples, left_rate, sample_number_left, channel
+            self._start_unit(
+                left_name,
+                left_samples,
+                left_rate,
+                channel,
+                bit_depth,
+                sample_number_left,
             )
         else:
-            samples, out_rate = self._prepare_samples(
-                channels[0], framerate, effective_bits, target_sample_rate
+            samples, out_rate = self._prepare_samples_for_settings(
+                channels[0], framerate, bit_depth, target_sample_rate
             )
 
-            sample_number = self._next_file_sample_number
-            self._next_file_sample_number += 1
+            if bit_depth == 16:
+                sample_number = self._next_file_sample_number
+                self._next_file_sample_number += 1
+            else:
+                sample_number = None
 
             self.status_changed.emit(
                 f"Sending file {current_index}/{self._file_queue_total}: {base_name}..."
             )
-            self._start_send(base_name, samples, out_rate, sample_number, channel)
+            self._start_unit(
+                base_name, samples, out_rate, channel, bit_depth, sample_number
+            )
 
     def cancel_transfer(self):
         # abort whatever is currently happening and communicate the cancel to the hardware
@@ -468,7 +516,7 @@ class SamplerController(QObject):
         self._awaiting_count_for_queue = False
         self._awaiting_pre_send_slist = False
         self._awaiting_post_send_slist_for_rename = False
-        self._pending_generic_params = None
+        self._pending_generic_send = None
         self._rename_after_send = None
         self._pre_send_names = []
 
@@ -491,19 +539,30 @@ class SamplerController(QObject):
         self._send_queue = []
         self._send_index = 0
 
+        if completed and self._rename_after_send is not None:
+            self.status_changed.emit("Checking where the sample actually landed...")
+            self._awaiting_post_send_slist_for_rename = True
+            QTimer.singleShot(300, self._send_rslist_request)
+            return
+        self._finish_unit(completed)
+
+    def _finish_unit(self, completed):
+        # called once single send unit is finished - generic sds or akai sdata
+        # decided whether to continue to a stereo right channel, next queued file or declare everything done
+
         if completed and self._stereo_queue:
-            name, samples, framerate, sample_number, channel = self._stereo_queue.pop(0)
+            name, samples, framerate, channel, bit_depth, sample_number = (
+                self._stereo_queue.pop(0)
+            )
             self.status_changed.emit("Left channel done - sending right channel...")
             QTimer.singleShot(
                 300,
-                lambda: self._start_send(
-                    name, samples, framerate, sample_number, channel
+                lambda: self._start_unit(
+                    name, samples, framerate, channel, bit_depth, sample_number
                 ),
             )
             return
 
-        # if we get here, whatever file was in flight (mono or the full stereo pair) the transfer is finished
-        # tell the UI it can remove it from the queue. only on success - cancelled/failed transfer should stay in the queue
         if self._current_file_path is not None:
             if completed:
                 self.file_transferred.emit(self._current_file_path)
@@ -513,17 +572,40 @@ class SamplerController(QObject):
             QTimer.singleShot(300, self._send_next_queued_file)
             return
 
-        if completed and self._rename_after_send is not None:
-            # audio data for generic SDS and rename send just finished
-            # dont tell the UI we're done just yet, snapshot the sample list again so we can diff and rename
-            self.status_changed.emit("Checking where the sample actually landed...")
-            self._awaiting_post_send_slist_for_rename = True
-            QTimer.singleShot(300, self._send_rslist_request)
-            return
-
         self._stereo_queue = []
         self._file_queue = []
+        self._rename_after_send = None
         if completed:
             self.status_changed.emit("Transfer complete")
             QTimer.singleShot(300, self.refresh_sample_list)
         self.transfer_finished.emit(completed)
+
+    def _start_send(self, name, samples, framerate, sample_number, channel):
+        # build SDATA header + data packets for one already-prepared
+        # sample and send it directly (no priming needed - confirmed on
+        # hardware; a flaky MIDI interface was the real cause, not this)
+        if self._send_queue:
+            self.status_changed.emit(
+                "A transfer is already in progress - please wait for it to finish"
+            )
+            return
+
+        sdata_message = akai_sysex.build_sdata_message(
+            name=name,
+            sample_length=len(samples),
+            sample_rate=framerate,
+            sample_number=sample_number,
+            channel=channel,
+        )
+        data_packets = sds_encoder.build_data_packets(samples, channel, bit_depth=16)
+
+        self._send_queue = [sdata_message] + data_packets
+        self._send_index = 0
+        self._active_channel = channel
+        self._active_sample_number = sample_number
+
+        self.status_changed.emit(
+            f"Sending SDATA header + {len(data_packets)} data packets..."
+        )
+        self.transfer_progress.emit(0, len(self._send_queue))
+        self._send_current_packet()
