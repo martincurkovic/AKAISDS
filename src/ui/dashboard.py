@@ -13,9 +13,11 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QFont
 from ui.settings_dialog import MidiSettingsDialog
 from ui.drop_list_widget import DropListWidget
 from ui.sample_settings_dialog import SampleSettingsDialog
+from ui.ascii_logo import LOGO
 
 SETTINGS_ROLE = Qt.ItemDataRole.UserRole + 1
 
@@ -51,6 +53,17 @@ class TransferDashboard(QWidget):
 
         # TOP BAR - to finish later but holds settings button for now
         top_bar = QHBoxLayout()
+
+        self.lbl_logo = QLabel(LOGO)
+        logo_font = QFont("Menlo")
+        logo_font.setStyleHint(QFont.StyleHint.Monospace)
+        logo_font.setPointSize(8)
+        self.lbl_logo.setFont(logo_font)
+        self.lbl_logo.setTextFormat(Qt.TextFormat.PlainText)
+        self.lbl_logo.setWordWrap(False)
+        self.lbl_logo.setStyleSheet("background: transparent;")
+        top_bar.addWidget(self.lbl_logo)
+
         top_bar.addStretch()
         self.btn_settings = QPushButton("\u2699 MIDI Settings")
         self.btn_settings.clicked.connect(self.open_settings_dialog)
