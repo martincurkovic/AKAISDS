@@ -103,15 +103,15 @@ class TransferDashboard(QWidget):
         self.btn_cancel.clicked.connect(self.cancel_transfer)
 
         # TEMPORARY TEST BUTTONS - for generic SDS experiment
-        self.btn_test_generic_sds = QPushButton("Test Generic SDS")
-        self.btn_test_generic_sds.clicked.connect(self.test_send_generic_sds)
-        self.btn_test_rename = QPushButton("Test Rename")
-        self.btn_test_rename.clicked.connect(self.test_rename_sample)
+        self.btn_test_generic_rename = QPushButton("Test Generic+Rename")
+        self.btn_test_generic_rename.clicked.connect(self.test_send_generic_and_rename)
+        self.btn_test_no_priming = QPushButton("Test SDATA No Priming")
+        self.btn_test_no_priming.clicked.connect(self.test_send_no_priming)
 
         # Add stretch spacer to push both control columns cleanly to the bottom of the window
         action_layout.addStretch()
-        action_layout.addWidget(self.btn_test_generic_sds)
-        action_layout.addWidget(self.btn_test_rename)
+        action_layout.addWidget(self.btn_test_generic_rename)
+        action_layout.addWidget(self.btn_test_no_priming)
         action_layout.addWidget(self.btn_cancel)
         action_layout.addWidget(self.btn_recieve)
         action_layout.addWidget(self.btn_send)
@@ -197,17 +197,22 @@ class TransferDashboard(QWidget):
         self.sampler_controller.cancel_transfer()
 
     # TEMPORARY TEST METHODS FOR GENERIC SDS + RENAME EXPERIMENT!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-    def test_send_generic_sds(self):
+    def test_send_generic_and_rename(self):
         test_path = "/Users/martincurkovic/akai test samples/Stab001 copy 2.wav"
-        self.sampler_controller.send_sample_file_generic(
-            test_path, sample_number=21, channel=0, bit_depth=12
+        self.sampler_controller.send_sample_file_generic_and_rename(
+            test_path, new_name="TEST NAME", channel=0, bit_depth=12
         )
         self.btn_send.setEnabled(False)
         self.btn_cancel.setEnabled(True)
 
-    def test_rename_sample(self):
-        # RUN THIS AFTER GENERIC SDS HAS COMPLETED
-        self.sampler_controller.rename_sample(21, "TEST NAME")
+    def test_send_no_priming(self):
+        # checks whether Akai SDATA dumps actually need the pedal reset trick
+        test_path = "/Users/martincurkovic/akai test samples/Stab001 copy 2.wav"
+        self.sampler_controller.test_send_sdata_no_priming(
+            test_path, sample_number=21, channel=0
+        )
+        self.btn_send.setEnabled(False)
+        self.btn_cancel.setEnabled(True)
 
     def on_transfer_progress(self, sent, total):
         percent = int((sent / total) * 100) if total else 0

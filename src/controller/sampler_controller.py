@@ -43,6 +43,16 @@ class SamplerController(QObject):
             None  # which queued file is in transit right now (if any)
         )
 
+        # GENERIC SDS + AUTO-RENAME STATE
+        # Akai ignores our requested sample number for generic SDS and reallocates to
+        # whatever the lowest sample slot number is.
+        # Snapshot the sample list before and after, diff them, rename the slot that has changed
+        self._awaiting_pre_send_slist = False
+        self._pre_send_names = []
+        self._pending_generic_params = None
+        self._rename_after_send = None
+        self._awaiting_post_send_slist_for_rename = False
+
     def refresh_sample_list(self):
         self._send_rslist_request()
         self.status_changed.emit("Requesting sample list...")
@@ -56,7 +66,6 @@ class SamplerController(QObject):
 
     def rename_sample(self, sample_number, new_name, channel=0):
         # rename existing sample WITHOUT touching its audio data
-        # so far untested
         request = akai_sysex.build_rename_sample_request(
             sample_number, new_name, channel
         )
@@ -81,7 +90,36 @@ class SamplerController(QObject):
                 count, names = akai_sysex.parse_slist_response(data_bytes)
                 self.sample_list_updated.emit(names)
 
-                if self._awaiting_count_for_queue:
+                if self._awaiting_pre_send_slist:
+                    # get the "before" sample list snapshot, then send the generic SDS dump
+                    # diff against this once transfer is done
+                    self._awaiting_pre_send_slist = False
+                    self._pre_send_names = list(names)
+                    filepath, channel, bit_depth = self._pending_generic_params
+                    self._pending_generic_params = None
+                    self._do_send_generic(filepath, channel, bit_depth)
+
+                elif self._awaiting_post_send_slist_for_rename:
+                    # get the "after" sample list snapshot, find the one thats changed and rename THAT
+                    self._awaiting_post_send_slist_for_rename = False
+                    new_name, rename_channel = self._rename_after_send
+                    self._rename_after_send = None
+                    actual_slot = self._find_new_sample_slot(
+                        self._pre_send_names, names
+                    )
+                    self._pre_send_names = []
+                    if actual_slot is not None:
+                        self.status_changed.emit(
+                            f"Sample landed in slot {actual_slot} - renaming..."
+                        )
+                        self.rename_sample(actual_slot, new_name, rename_channel)
+                    else:
+                        self.status_changed.emit(
+                            "Couldn't tell which slot the new sample landed in - skipping rename"
+                        )
+                    self.transfer_finished.emit(True)
+
+                elif self._awaiting_count_for_queue:
                     self._awaiting_count_for_queue = False
                     self._next_file_sample_number = len(names)
                     self._send_next_queued_file()
@@ -182,10 +220,6 @@ class SamplerController(QObject):
     ):
         # send sample using generic usiversal midi sds protocol (NOT THE AKAI ONE)
         # this actually sends samples at a lower bit depth across less bytes (ie, 12 bit samples sent across 2 midi bytes, not 3 like a 16 bit sample)
-        samples, framerate = sds_encoder.read_wav_samples(filepath)
-
-        if bit_depth < 16:
-            samples = [sds_encoder.reduce_bit_depth(s, bit_depth) for s in samples]
 
         if (
             self._priming_stage is not None
@@ -199,19 +233,63 @@ class SamplerController(QObject):
             )
             return
 
+        self._do_send_generic(
+            filepath, channel, bit_depth, sample_number_hint=sample_number
+        )
+
+    def send_sample_file_generic_and_rename(
+        self, filepath, new_name, channel=0, bit_depth=16
+    ):
+        # send via generic sds then rename it correctly using the diff sample slist logic
+
+        if (
+            self._priming_stage is not None
+            or self._send_queue
+            or self._pending_transfer is not None
+            or self._stereo_queue
+            or self._file_queue
+            or self._awaiting_pre_send_slist
+        ):
+            self.status_changed.emit(
+                "A transfer is already in progress - please wait for it to finish"
+            )
+            return
+
+        self._pending_generic_params = (filepath, channel, bit_depth)
+        self._rename_after_send = (new_name, channel)
+        self._awaiting_pre_send_slist = True
+
+        self.status_changed.emit("Checking current samples before sending...")
+        self._send_rslist_request()
+
+    def _do_send_generic(self, filepath, channel, bit_depth, sample_number_hint=0):
+        samples, framerate = sds_encoder.read_wav_samples(filepath)
+
+        if bit_depth < 16:
+            samples = [sds_encoder.reduce_bit_depth(s, bit_depth) for s in samples]
+
         header_packet = sds_encoder.build_dump_header(
-            samples, framerate, sample_number, channel, bit_depth
+            samples, framerate, sample_number_hint, channel, bit_depth
         )
         data_packets = sds_encoder.build_data_packets(samples, channel, bit_depth)
 
         self._send_queue = [header_packet] + data_packets
         self._send_index = 0
         self._active_channel = channel
-        self._active_sample_number = sample_number
+        self._active_sample_number = sample_number_hint
 
         self.status_changed.emit(f"Sending generic SDS dump ({bit_depth}-bit)...")
         self.transfer_progress.emit(0, len(self._send_queue))
         self._send_current_packet()
+
+    def _find_new_sample_slot(self, names_before, names_after):
+        # compare sample name lists before and after to find which slot index changed
+        for i in range(min(len(names_before), len(names_after))):
+            if names_before[i] != names_after[i]:
+                return i
+        if len(names_after) > len(names_before):
+            return len(names_before)
+        return None
 
     def send_stereo_sample_file(
         self,
@@ -276,6 +354,40 @@ class SamplerController(QObject):
             samples = [sds_encoder.bitcrush_sample(s, effective_bits) for s in samples]
 
         return samples, framerate
+
+    def test_send_sdata_no_priming(self, filepath, sample_number=0, channel=0):
+        # temporary test to see if akai SDATA dump works without the sustain pedal priming dance bullshit
+        samples, framerate = sds_encoder.read_wav_samples(filepath)
+        sample_name = os.path.splitext(os.path.basename(filepath))[0]
+
+        if (
+            self._priming_stage is not None
+            or self._send_queue
+            or self._pending_transfer is not None
+            or self._stereo_queue
+            or self._file_queue
+        ):
+            self.status_changed.emit(
+                "A transfer is already in progress - please wait for it to finish"
+            )
+            return
+        sdata_message = akai_sysex.build_sdata_message(
+            name=sample_name,
+            sample_length=len(samples),
+            sample_rate=framerate,
+            sample_number=sample_number,
+            channel=channel,
+        )
+        data_packets = sds_encoder.build_data_packets(samples, channel, bit_depth=16)
+
+        self._send_queue = [sdata_message] + data_packets
+        self._send_index = 0
+        self._active_channel = channel
+        self._active_sample_number = sample_number
+
+        self.status_changed.emit("Sending SDATA WITHOUT priming (test)...")
+        self.transfer_progress.emit(0, len(self._send_queue))
+        self._send_current_packet()
 
     def _start_send(self, name, samples, framerate, sample_number, channel):
         # build SDATA header + data packets for one already prepped samples and kick off priming+send flow
@@ -430,6 +542,11 @@ class SamplerController(QObject):
         self._stereo_queue = []
         self._file_queue = []
         self._awaiting_count_for_queue = False
+        self._awaiting_pre_send_slist = False
+        self._awaiting_post_send_slist_for_rename = False
+        self._pending_generic_params = None
+        self._rename_after_send = None
+        self._pre_send_names = []
 
         self.status_changed.emit("Transfer cancelled")
         self._abort_transfer(completed=False)
@@ -488,6 +605,14 @@ class SamplerController(QObject):
 
         if completed and self._file_queue:
             QTimer.singleShot(300, self._send_next_queued_file)
+            return
+
+        if completed and self._rename_after_send is not None:
+            # audio data for generic SDS and rename send just finished
+            # dont tell the UI we're done just yet, snapshot the sample list again so we can diff and rename
+            self.status_changed.emit("Checking where the sample actually landed...")
+            self._awaiting_post_send_slist_for_rename = True
+            QTimer.singleShot(300, self._send_rslist_request)
             return
 
         self._stereo_queue = []
