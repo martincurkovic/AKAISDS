@@ -22,12 +22,6 @@ class SamplerController(QObject):
         self._active_channel = 0
         self._active_sample_number = 0
 
-        # PRIMING STATE - for SOME GODDAMN REASON the akai ignores a brand new SDATA header UNLESS...
-        # it's preceeded by this exact dance (RSLIST, sustain pedal reset on all channels, RSLIST again)
-        # dont ask me how long it took for me to figure this out...
-        # also dont ask why this bs isnt documented anywhere...
-        self._priming_stage = None
-        self._pending_transfer = None
         self._stereo_queue = []
 
         # FILE QUEUE STATE - for send_file_queue: a whole batch of local files to send in order
@@ -124,24 +118,6 @@ class SamplerController(QObject):
                     self._next_file_sample_number = len(names)
                     self._send_next_queued_file()
 
-                elif self._priming_stage == 1:
-                    # got first SLIST reply - reset sustain pedal on all 16 channels, then ask for SLIST again
-                    # why Akai, WHYYYYY???
-                    self._priming_stage = 2
-                    self.status_changed.emit(
-                        "Priming: resetting sustain pedal on all channels..."
-                    )
-                    for channel in range(16):
-                        self.midi_manager.send_control_change(channel, 64, 0)
-                    QTimer.singleShot(100, self._send_rslist_request)
-
-                elif self._priming_stage == 2:
-                    # got the second SLIST reply, priming is done and start the transfer for reals this time...
-                    self._priming_stage = None
-                    self.status_changed.emit(
-                        "Priming complete, settling before transfer..."
-                    )
-                    QTimer.singleShot(400, self._begin_pending_transfer)
             elif function_code == 0x16:
                 # S1000 command reply: F0, 47, cc, 16, 48, mm, F7 - mm: 0=ok, 1=error
                 result = data_bytes[4] if len(data_bytes) > 4 else None
@@ -221,13 +197,7 @@ class SamplerController(QObject):
         # send sample using generic usiversal midi sds protocol (NOT THE AKAI ONE)
         # this actually sends samples at a lower bit depth across less bytes (ie, 12 bit samples sent across 2 midi bytes, not 3 like a 16 bit sample)
 
-        if (
-            self._priming_stage is not None
-            or self._send_queue
-            or self._pending_transfer is not None
-            or self._stereo_queue
-            or self._file_queue
-        ):
+        if self._send_queue or self._stereo_queue or self._file_queue:
             self.status_changed.emit(
                 "A transfer is already in progress - please wait for it to finish"
             )
@@ -243,9 +213,7 @@ class SamplerController(QObject):
         # send via generic sds then rename it correctly using the diff sample slist logic
 
         if (
-            self._priming_stage is not None
-            or self._send_queue
-            or self._pending_transfer is not None
+            self._send_queue
             or self._stereo_queue
             or self._file_queue
             or self._awaiting_pre_send_slist
@@ -310,12 +278,7 @@ class SamplerController(QObject):
             )
             return
 
-        if (
-            self._priming_stage is not None
-            or self._send_queue
-            or self._pending_transfer is not None
-            or self._stereo_queue
-        ):
+        if self._send_queue or self._stereo_queue:
             self.status_changed.emit(
                 "A transfer is already in progress - please wait for it to finish"
             )
@@ -355,47 +318,9 @@ class SamplerController(QObject):
 
         return samples, framerate
 
-    def test_send_sdata_no_priming(self, filepath, sample_number=0, channel=0):
-        # temporary test to see if akai SDATA dump works without the sustain pedal priming dance bullshit
-        samples, framerate = sds_encoder.read_wav_samples(filepath)
-        sample_name = os.path.splitext(os.path.basename(filepath))[0]
-
-        if (
-            self._priming_stage is not None
-            or self._send_queue
-            or self._pending_transfer is not None
-            or self._stereo_queue
-            or self._file_queue
-        ):
-            self.status_changed.emit(
-                "A transfer is already in progress - please wait for it to finish"
-            )
-            return
-        sdata_message = akai_sysex.build_sdata_message(
-            name=sample_name,
-            sample_length=len(samples),
-            sample_rate=framerate,
-            sample_number=sample_number,
-            channel=channel,
-        )
-        data_packets = sds_encoder.build_data_packets(samples, channel, bit_depth=16)
-
-        self._send_queue = [sdata_message] + data_packets
-        self._send_index = 0
-        self._active_channel = channel
-        self._active_sample_number = sample_number
-
-        self.status_changed.emit("Sending SDATA WITHOUT priming (test)...")
-        self.transfer_progress.emit(0, len(self._send_queue))
-        self._send_current_packet()
-
     def _start_send(self, name, samples, framerate, sample_number, channel):
         # build SDATA header + data packets for one already prepped samples and kick off priming+send flow
-        if (
-            self._priming_stage is not None
-            or self._send_queue
-            or self._pending_transfer is not None
-        ):
+        if self._send_queue:
             self.status_changed.emit(
                 "A transfer is already in progress - please wait for it to finish"
             )
@@ -411,15 +336,16 @@ class SamplerController(QObject):
 
         data_packets = sds_encoder.build_data_packets(samples, channel, bit_depth=16)
 
-        # DONT SEND SAMPLE YET! Stash for now and run the priming dance thing first
-        # on_sysex_received's priming branch picks this up once both SLIST round-trips finish
-        self._pending_transfer = [sdata_message] + data_packets
+        self._send_queue = [sdata_message] + data_packets
+        self._send_index = 0
         self._active_channel = channel
         self._active_sample_number = sample_number
 
-        self.status_changed.emit("Priming sample before transfer...")
-        self._priming_stage = 1
-        self._send_rslist_request()
+        self.status_changed.emit(
+            f"Sending SDATA header + {len(data_packets)} data packets..."
+        )
+        self.transfer_progress.emit(0, len(self._send_queue))
+        self._send_current_packet()
 
     def send_file_queue(
         self, file_entries, channel=0, effective_bits=16, target_sample_rate=None
@@ -431,9 +357,7 @@ class SamplerController(QObject):
             return
 
         if (
-            self._priming_stage is not None
-            or self._send_queue
-            or self._pending_transfer is not None
+            self._send_queue
             or self._stereo_queue
             or self._file_queue
             or self._awaiting_count_for_queue
@@ -516,12 +440,12 @@ class SamplerController(QObject):
         # abort whatever is currently happening and communicate the cancel to the hardware
         # should be safe to call at any time i think
         in_progrss = (
-            self._priming_stage is not None
-            or bool(self._send_queue)
-            or self._pending_transfer is not None
+            bool(self._send_queue)
             or bool(self._stereo_queue)
             or bool(self._file_queue)
             or self._awaiting_count_for_queue
+            or self._awaiting_pre_send_slist
+            or self._awaiting_post_send_slist_for_rename
         )
         if not in_progrss:
             return
@@ -551,22 +475,6 @@ class SamplerController(QObject):
         self.status_changed.emit("Transfer cancelled")
         self._abort_transfer(completed=False)
 
-    def _begin_pending_transfer(self):
-        queue = self._pending_transfer
-        self._pending_transfer = None
-
-        if queue is None:
-            self.status_changed.emit("No pending transfer to start - ignoring")
-            return
-
-        self._send_queue = queue
-        self._send_index = 0
-        self.status_changed.emit(
-            f"Sending SDATA header + {len(queue) - 1} data packets..."
-        )
-        self.transfer_progress.emit(0, len(queue))
-        self._send_current_packet()
-
     def _send_current_packet(self):
         # send whatever packet self._send_index currently points to.
         # called once to kick off transfer, then again every time the response tells us to advance or retry
@@ -582,8 +490,6 @@ class SamplerController(QObject):
     def _abort_transfer(self, completed):
         self._send_queue = []
         self._send_index = 0
-        self._priming_stage = None
-        self._pending_transfer = None
 
         if completed and self._stereo_queue:
             name, samples, framerate, sample_number, channel = self._stereo_queue.pop(0)
