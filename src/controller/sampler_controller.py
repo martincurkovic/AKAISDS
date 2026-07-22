@@ -9,6 +9,9 @@ class SamplerController(QObject):
     transfer_progress = Signal(int, int)  # (packets sent so far, total packets)
     transfer_finished = Signal(bool)
     file_transferred = Signal(str)
+    receive_progress = Signal(int, int)
+    sample_received = Signal(str)
+    receive_finished = Signal(bool)
 
     def __init__(self, midi_manager):
         super().__init__()
@@ -44,6 +47,17 @@ class SamplerController(QObject):
         self._pending_generic_params = None
         self._rename_after_send = None
         self._awaiting_post_send_slist_for_rename = False
+
+        # RECEIVING STATE - basically the mirror image of sending state
+        # We need to ACK/NAK each incoming data packet ourselves (at least i think so...)
+        self._receiving = False
+        self._receive_channel = 0
+        self._receive_sample_number = None
+        self._receive_save_path = None
+        self._receive_header_info = None
+        self._receive_packets = []
+        self._receive_queue = []
+        self._receive_queue_total = 0
 
     def refresh_sample_list(self):
         self._send_rslist_request()
@@ -138,6 +152,16 @@ class SamplerController(QObject):
                     f"{bytes(data_bytes).hex(' ')}"
                 )
             return
+
+        if data_bytes[0] == 0x7E:
+            sub_id = data_bytes[2] if len(data_bytes) > 2 else None
+
+            if self._receiving and sub_id == 0x01:
+                self._on_receive_header(data_bytes)
+                return
+            if self._receiving and sub_id == 0x02:
+                self._on_receive_data_packet(data_bytes)
+                return
 
         handshake = sds_encoder.classify_response(data_bytes)
         if handshake is not None:
@@ -483,6 +507,140 @@ class SamplerController(QObject):
             self._start_unit(
                 base_name, samples, out_rate, channel, bit_depth, sample_number
             )
+
+    # ----------------------------------------------------------------------------
+    # RECEIVING - download samples from hardware and save as WAV files
+    # -----------------------------------------------------------------------------
+
+    def receive_samples(self, sample_requests, channel=0):
+        # download batch of samples from hardware, one after another, saving each as wav file
+        # sample_requests = list of (sample_number, save_path) tuples
+        if not sample_requests:
+            return
+
+        if (
+            self._send_queue
+            or self._stereo_queue
+            or self._file_queue
+            or self._receiving
+            or self._receive_queue
+        ):
+            self.status_changed.emit(
+                "A transfer is already in progress - please wait for it to finish"
+            )
+            return
+
+        self._receive_queue = list(sample_requests)
+        self._receive_queue_total = len(self._receive_queue)
+        self._receive_channel = channel
+        self._receive_next_sample()
+
+    def _receive_next_sample(self):
+        if not self._receive_queue:
+            self.status_changed.emit("All samples received")
+            self.receive_finished.emit(True)
+            return
+
+        sample_number, save_path = self._receive_queue.pop(0)
+        current_index = self._receive_queue_total - len(self._receive_queue)
+
+        self._receiving = True
+        self._receive_sample_number = sample_number
+        self._receive_save_path = save_path
+        self._receive_header_info = None
+        self._receive_packets = []
+
+        request = sds_encoder.build_dump_request(sample_number, self._receive_channel)
+        self.midi_manager.send_sysex(request)
+        self.status_changed.emit(
+            f"Requesting sample {sample_number} ({current_index}/{self._receive_queue_total})..."
+        )
+
+    def _on_receive_header(self, data_bytes):
+        info = sds_encoder.parse_dump_header(data_bytes)
+        self._receive_header_info = info
+        self._receive_packets = []
+
+        self.status_changed.emit(
+            f"Receiving sample {info['sample_number']}: {info['bit_depth']}-bit, "
+            f"{info['sample_rate']}Hz, {info['sample_length']} samples..."
+        )
+        self.receive_progress.emit(0, info["sample_length"])
+
+        # accept header so the hardware can start sending data packets
+        self.midi_manager.send_sysex(
+            [0x7E, self._receive_channel & 0x7F, sds_encoder.ACK, 0]
+        )
+
+    def _on_receive_data_packet(self, data_bytes):
+        if self._receive_header_info is None:
+            # got a data packet before ever seeing a header - ignore it instead of crashing, something's fucked it...
+            return
+
+        packet_num = data_bytes[3] if len(data_bytes) > 3 else 0
+        payload = data_bytes[4:-1]
+        received_checksum = data_bytes[-1] if len(data_bytes) > 4 else None
+
+        computed_checksum = sds_encoder.xor_checksum(list(data_bytes[:-1]))
+        if computed_checksum != received_checksum:
+            self.status_changed.emit(
+                f"Checksum error on packet {packet_num} - requesting resend"
+            )
+            self.midi_manager.send_sysex(
+                [0x7E, self._receive_channel & 0x7F, sds_encoder.NAK, packet_num]
+            )
+            return
+
+        self._receive_packets.append(bytes(payload))
+        self.midi_manager.send_sysex(
+            [0x7E, self._receive_channel & 0x7F, sds_encoder.ACK, packet_num]
+        )
+
+        info = self._receive_header_info
+        bytes_per_word = (info["bit_depth"] + 6) // 7
+        words_per_packet = sds_encoder.DATA_BYTES_PER_PACKET // bytes_per_word
+        words_received = len(self._receive_packets) * words_per_packet
+
+        self.receive_progress.emit(
+            min(words_received, info["sample_length"]), info["sample_length"]
+        )
+
+        if words_received >= info["sample_length"]:
+            self._finish_receiving()
+
+    def _finish_receiving(self):
+        info = self._receive_header_info
+        bytes_per_word = (info["bit_depth"] + 6) // 7
+
+        all_bytes = b"".join(self._receive_packets)
+        samples = []
+        for i in range(0, len(all_bytes), bytes_per_word):
+            chunk = all_bytes[i : i + bytes_per_word]
+            if len(chunk) < bytes_per_word:
+                break  # trailing zero padding on final packet
+            samples.append(sds_encoder.sds_bytes_to_sample(chunk, info["bit_depth"]))
+
+        samples = samples[
+            : info["sample_length"]
+        ]  # trim any padding words past the real length (ie, trailing zeroes)
+
+        sds_encoder.write_wav_file(
+            self._receive_save_path,
+            samples,
+            info["sample_rate"],
+            info["bit_depth"],
+        )
+
+        self.status_changed.emit(
+            f"Saved sample {info['sample_number']} to {self._receive_save_path}"
+        )
+        self.sample_received.emit(self._receive_save_path)
+
+        self._receiving = False
+        self._receive_header_info = None
+        self._receive_packets = []
+
+        QTimer.singleShot(300, self._receive_next_sample)
 
     def cancel_transfer(self):
         # abort whatever is currently happening and communicate the cancel to the hardware

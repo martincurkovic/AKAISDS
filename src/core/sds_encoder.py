@@ -133,13 +133,27 @@ def sample_to_sds_bytes(sample, bit_depth=16):
         result.append((val >> shift_amount) & 0x7F)
     return result
 
-    # raw16 = sample & 0xFFFF
-    # unsigned16 = raw16 ^ 0x8000  # two's complement -> unsigned/offset-binary
-    # val21 = (unsigned16 << 5) & 0x1FFFFF  # shift by (21 - 16) = 5 bits
-    # b0 = (val21 >> 14) & 0x7F
-    # b1 = (val21 >> 7) & 0x7F
-    # b2 = val21 & 0x7F
-    # return b0, b1, b2
+
+def sds_bytes_to_sample(byte_list, bit_depth=16):
+    # basically the exact inverse of sample_to_sds_bytes
+    # used for receiving sample dumps
+    bytes_per_word = (bit_depth + 6) // 7
+    container_bits = bytes_per_word * 7
+    shift = container_bits - bit_depth
+
+    val = 0
+    for b in byte_list:
+        val = (val << 7) | (b & 0x7F)
+
+    unsigned = (val >> shift) & ((1 << bit_depth) - 1)
+    sign_bit = 1 << (bit_depth - 1)
+    raw = (
+        unsigned ^ sign_bit
+    )  # convert unsigned/offset binary to two's complement bit pattern
+
+    if raw & sign_bit:
+        raw -= 1 << bit_depth  # sign extend into real negative list
+    return raw
 
 
 def bitcrush_sample(sample_16bit, effective_bits):
@@ -229,6 +243,48 @@ def to_3byte_lsb_first(value, bits=21):
     b1 = (value >> 7) & 0x7F
     b2 = (value >> 14) & 0x7F
     return [b0, b1, b2]
+
+
+def from_3byte_lsb_first(byte_list):
+    # inverse of to_3byte_lsb_first
+    # decode LSB first 7 bit MIDI bytes back to unsigned int
+    # required for receiving a header
+    b0, b1, b2 = byte_list
+    return (b0 & 0x7F) | ((b1 & 0x7F) << 7) | ((b2 & 0x7F) << 14)
+
+
+def build_dump_request(sample_number, channel=0):
+    # build universal SDS dump request (sub-ID 0x03)
+    # asks device to send back dump header + packets for an existing sample
+    # F0 7E cc 03 ss ss F7 as per the official MIDI SDS spec
+    ss_lsb = sample_number & 0x7F
+    ss_msb = (sample_number >> 7) & 0x7F
+    return [0x7E, channel & 0x7F, 0x03, ss_lsb, ss_msb]
+
+
+def parse_dump_header(data_bytes):
+    # parse incoming universal dump header (sub-ID 0x01)
+    # data_bytes = message without F0/F7
+    # returns a dict: sample_number, bit_depth, sample_rate, sample_length, loop_start, loop_end, loop_type
+    sample_number = (data_bytes[3] & 0x7F) | ((data_bytes[4] & 0x7F) << 7)
+    bit_depth = data_bytes[5]
+    period_ns = from_3byte_lsb_first(data_bytes[6:9])
+    sample_length = from_3byte_lsb_first(data_bytes[9:12])
+    loop_start = from_3byte_lsb_first(data_bytes[12:15])
+    loop_end = from_3byte_lsb_first(data_bytes[15:18])
+    loop_type = data_bytes[18]
+
+    sample_rate = round(1_000_000_000 / period_ns) if period_ns else 0
+
+    return {
+        "sample_number": sample_number,
+        "bit_depth": bit_depth,
+        "sample_rate": sample_rate,
+        "sample_length": sample_length,
+        "loop_start": loop_start,
+        "loop_end": loop_end,
+        "loop_type": loop_type,
+    }
 
 
 def xor_checksum(bytes_list):
@@ -326,6 +382,32 @@ def build_sds_dump(samples, framerate, sample_number=0, channel=0, bit_depth=16)
     )
     data_packets = build_data_packets(samples, channel, bit_depth)
     return [header_packet] + data_packets
+
+
+def write_wav_file(path, samples, framerate, bit_depth=16):
+    # write samples (unsigned ints as decoded by sds_bytes_to_sample) to standard wav file
+    # standard WAV only has clean native support for 8 or 16 bit (nothing in between)
+    # 8 bit = unsigned WAV
+    # 16 bit = signed WAV
+    # anything else is upscaled to fit 16 bit range (left shifted)
+    # unused bits are just zeros
+    if bit_depth == 8:
+        sampwidth = 1
+        # wav 8 bit is unsigned
+        # shift our signed -128 - 127 range up to wav's unsigned 0-255 convention
+        frames = bytes((s + 128) & 0xFF for s in samples)
+    else:
+        if bit_depth != 16:
+            shift = 16 - bit_depth
+            samples = [s << shift for s in samples]
+        sampwidth = 2
+        frames = struct.pack("<" + "h" * len(samples), *samples)
+
+    with wave.open(path, "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(sampwidth)
+        wf.setframerate(framerate)
+        wf.writeframes(frames)
 
 
 if __name__ == "__main__":

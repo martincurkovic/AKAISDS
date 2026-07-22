@@ -1,6 +1,7 @@
 import os
 from PySide6.QtWidgets import (
     QCheckBox,
+    QFileDialog,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -34,6 +35,9 @@ class TransferDashboard(QWidget):
         self.sampler_controller.transfer_progress.connect(self.on_transfer_progress)
         self.sampler_controller.transfer_finished.connect(self.on_transfer_finished)
         self.sampler_controller.file_transferred.connect(self.on_file_transferred)
+        self.sampler_controller.sample_received.connect(self.on_sample_received)
+        self.sampler_controller.receive_finished.connect(self.on_receive_finished)
+        self.sampler_controller.receive_progress.connect(self.on_receive_progress)
 
         # tracks the current batch progress for the overall progress bar
         # how many files finished vs how many were queued when send was clicked
@@ -123,17 +127,18 @@ class TransferDashboard(QWidget):
         # ACtION CONTROL BAR (Horizontal layout)
         action_layout = QHBoxLayout()
         self.btn_send = QPushButton("Send Samples")
-        self.btn_recieve = QPushButton("Recieve Samples")
+        self.btn_receive = QPushButton("Receive Samples")
         self.btn_cancel = QPushButton("Cancel Transfer")
         self.btn_cancel.setEnabled(False)
 
         self.btn_send.clicked.connect(self.send_queued_samples)
+        self.btn_receive.clicked.connect(self.receive_selected_samples)
         self.btn_cancel.clicked.connect(self.cancel_transfer)
 
         # Add stretch spacer to push both control columns cleanly to the bottom of the window
         action_layout.addStretch()
         action_layout.addWidget(self.btn_cancel)
-        action_layout.addWidget(self.btn_recieve)
+        action_layout.addWidget(self.btn_receive)
         action_layout.addWidget(self.btn_send)
 
         # PROGRESS BAR BABYYYY
@@ -300,6 +305,78 @@ class TransferDashboard(QWidget):
     def cancel_transfer(self):
         self.sampler_controller.cancel_transfer()
 
+    def receive_selected_samples(self):
+        selected = []
+        for i in range(self.list_hardware.count()):
+            item = self.list_hardware.item(i)
+            row_widget = self.list_hardware.itemWidget(item)
+            checkbox = row_widget.findChild(QCheckBox)
+            if checkbox and checkbox.isChecked():
+                sample_number = item.data(Qt.ItemDataRole.UserRole)
+                selected.append((sample_number, checkbox.text().strip()))
+
+        if not selected:
+            self.status_bar.showMessage(
+                "No samples selected - check the boxes next to the samples you want to receive"
+            )
+            return
+
+        save_dir = QFileDialog.getExistingDirectory(
+            self, "Choose folder to save received samples"
+        )
+        if not save_dir:
+            return
+
+        requests = []
+        for sample_number, name in selected:
+            safe_name = self._sanitize_filename(name) or f"sample_{sample_number}"
+            save_path = os.path.join(save_dir, f"{safe_name}.wav")
+            requests.append((sample_number, save_path))
+
+        self.sampler_controller.receive_samples(requests)
+
+        # a receive is now running - disable Send/Receive so the user cant double click them
+        # also enable cancel
+        self.btn_send.setEnabled(False)
+        self.btn_receive.setEnabled(False)
+        self.btn_cancel.setEnabled(True)
+
+        self._queue_total = len(requests)
+        self._queue_completed = 0
+        self.progress_bar_current_smpl.setValue(0)
+        self.progress_bar_overall.setValue(0)
+        self.progress_bar_current_smpl.setVisible(True)
+        self.progress_bar_overall.setVisible(True)
+
+    @staticmethod
+    def _sanitize_filename(name):
+        name = name.strip()
+        return name.replace("/", "-").replace("\\", "-")
+
+    def on_receive_progress(self, received, total):
+        percent = int((received / total) * 100) if total else 0
+        self.progress_bar_current_smpl.setValue(percent)
+        self.status_bar.showMessage(f"Receiving: {received}/{total} samples")
+
+    def on_sample_received(self, path):
+        self._queue_completed += 1
+        if self._queue_total:
+            percent = int((self._queue_completed / self._queue_total) * 100)
+            self.progress_bar_overall.setValue(percent)
+
+    def on_receive_finished(self, completed):
+        self.btn_send.setEnabled(True)
+        self.btn_receive.setEnabled(True)
+        self.btn_cancel.setEnabled(False)
+        if completed:
+            self.progress_bar_current_smpl.setValue(100)
+            self.status_bar.showMessage("All samples received")
+        else:
+            self.progress_bar_current_smpl.setValue(0)
+            self.status_bar.showMessage("Receive cancelled")
+        self.progress_bar_current_smpl.setVisible(False)
+        self.progress_bar_overall.setVisible(False)
+
     def on_transfer_progress(self, sent, total):
         percent = int((sent / total) * 100) if total else 0
         self.progress_bar_current_smpl.setValue(percent)
@@ -424,6 +501,7 @@ class TransferDashboard(QWidget):
     def create_hardware_row(self, filename, sample_number):
         # build read only, fized row with leading checkbox and trailing action buttons
         item = QListWidgetItem(self.list_hardware)
+        item.setData(Qt.ItemDataRole.UserRole, sample_number)
 
         row_widget = QWidget()
         row_layout = QHBoxLayout(row_widget)
