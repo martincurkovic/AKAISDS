@@ -1,0 +1,158 @@
+/* ============================================================
+   AKAI SDS - stylesheet TEMPLATE
+   ------------------------------------------------------------
+   This is not a plain .qss file - it's a template. Every color
+   is a dollar-brace placeholder instead of a literal hex code, filled in
+   by ui/theme.py's DARK_PALETTE or LIGHT_PALETTE at load time
+   (see render_stylesheet() there).
+
+   Edit the STRUCTURE here (selectors, spacing, borders-widths,
+   which properties exist) - edit the ACTUAL COLORS in
+   ui/theme.py instead, so both the dark and light theme stay
+   in lockstep automatically.
+   ============================================================ */
+
+/* ---------- Base ---------- */
+QWidget {
+    background-color: ${bg};
+    color: ${text};
+    font-size: 13px;
+}
+
+QMainWindow {
+    background-color: ${bg};
+}
+
+QLabel {
+    background: transparent;
+    color: ${text};
+}
+
+/* ---------- Buttons ---------- */
+QPushButton {
+    background-color: ${bg_button};
+    border: 1px solid ${border};
+    border-radius: 4px;
+    padding: 5px 12px;
+    color: ${text};
+}
+
+QPushButton:hover {
+    background-color: ${bg_button_hover};
+    border-color: ${border_hover};
+}
+
+QPushButton:pressed {
+    background-color: ${bg_button_pressed};
+}
+
+QPushButton:disabled {
+    background-color: ${bg_disabled};
+    border-color: ${border_disabled};
+    color: ${text_disabled};
+}
+
+/* ---------- Line edits (queue row names, dialog fields) ---------- */
+QLineEdit {
+    background-color: ${bg_input};
+    border: 1px solid ${accent};
+    border-radius: 3px;
+    padding: 2px 4px;
+    color: ${text_bright};
+    selection-background-color: ${accent};
+}
+
+QLineEdit:read-only {
+    background: transparent;
+    border: 1px solid transparent;
+    color: ${text};
+}
+
+QLineEdit:disabled {
+    color: ${text_disabled};
+}
+
+/* ---------- Lists (file queue + hardware panel) ---------- */
+QListWidget {
+    background-color: ${bg_panel};
+    border: 1px solid ${border_list};
+    border-radius: 4px;
+    outline: none;
+}
+
+QListWidget::item {
+    border-bottom: 1px solid ${border_item};
+}
+
+QListWidget::item:selected {
+    background-color: ${bg_selected};
+}
+
+/* ---------- Checkboxes (hardware panel rows) ---------- */
+QCheckBox {
+    background: transparent;
+    color: ${text};
+    spacing: 6px;
+}
+
+QCheckBox::indicator {
+    width: 14px;
+    height: 14px;
+    border: 1px solid ${border_checkbox};
+    border-radius: 3px;
+    background: ${bg_input};
+}
+
+QCheckBox::indicator:checked {
+    background: ${accent};
+    border-color: ${accent};
+}
+
+/* ---------- Progress bars ---------- */
+QProgressBar {
+    background-color: ${bg_disabled};
+    border: 1px solid ${border_progress};
+    border-radius: 4px;
+    text-align: center;
+    color: ${text};
+}
+
+QProgressBar::chunk {
+    background-color: ${accent};
+    border-radius: 3px;
+}
+
+/* ---------- Status bar ---------- */
+QStatusBar {
+    background-color: ${bg_statusbar};
+    color: ${text_statusbar};
+}
+
+/* ---------- Dialogs (Edit sample, Global settings, MIDI settings) ---------- */
+QDialog {
+    background-color: ${bg_dialog};
+}
+
+QComboBox, QSpinBox {
+    background-color: ${bg_input};
+    border: 1px solid ${border};
+    border-radius: 3px;
+    padding: 2px 4px;
+    color: ${text_bright};
+}
+
+QComboBox:hover, QSpinBox:hover {
+    border-color: ${border_hover};
+}
+
+QComboBox QAbstractItemView {
+    background-color: ${bg_input};
+    color: ${text_bright};
+    selection-background-color: ${accent};
+    border: 1px solid ${border};
+}
+
+/* ---------- Message boxes (delete confirmation) ---------- */
+QMessageBox {
+    background-color: ${bg_dialog};
+}
