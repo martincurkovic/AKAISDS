@@ -87,6 +87,44 @@ class SamplerController(QObject):
         self.midi_manager.send_sysex(request)
 
     def on_sysex_received(self, data_bytes):
+        # entry point for catching any unexpected eception from handling logic
+        try:
+            self._on_sysex_received_impl(data_bytes)
+        except Exception as e:
+            print(f"[ERROR] Unhandled exception in on_sysex_received: {e!r}")
+            import traceback
+
+            traceback.print_exc()
+            self._recover_from_error(f"Unexpected error: {e}")
+
+    def _recover_from_error(self, message):
+        # reset every in-progress state of app back to idle and tell the UI
+        was_receiving = self._receiving or bool(self._receive_queue)
+
+        self._send_queue = []
+        self._send_index = 0
+        self._stereo_queue = []
+        self._file_queue = []
+        self._current_file_path = None
+        self._awaiting_count_for_queue = False
+        self._awaiting_pre_send_slist = False
+        self._awaiting_post_send_slist_for_rename = False
+        self._pending_generic_send = None
+        self._rename_after_send = None
+        self._pre_send_names = []
+        self._receiving = False
+        self._receive_queue = []
+        self._receive_header_info = None
+        self._receive_packets = []
+
+        self.status_changed.emit(message)
+
+        if was_receiving:
+            self.receive_finished.emit(False)
+        else:
+            self.transfer_finished.emit(False)
+
+    def _on_sysex_received_impl(self, data_bytes):
         if not data_bytes:
             return
 

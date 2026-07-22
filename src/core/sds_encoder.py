@@ -34,6 +34,40 @@ def classify_response(data_bytes):
 # WAV READING CODE
 
 
+def _normalize_to_16bit(raw_bytes, sampwidth):
+    # convert raw PCM sample bytes at any common bit depth into a list of signed 16 bit equivalent ints
+    if sampwidth == 1:
+        # wav is 8 bit unsigned (0-255 where 128=zero crossing)
+        # unsigned needs to be re-centered first
+        return [(b - 128) << 8 for b in raw_bytes]
+
+    elif sampwidth == 2:
+        # wav is 16 bit signed
+        fmt = "<" + "h" * (len(raw_bytes) // 2)
+        return list(struct.unpack(fmt, raw_bytes))
+
+    elif sampwidth == 3:
+        # wav is 24 bit signed
+        # struct.unpack() cant handle this i dont think, gotta do it manually (unless im missing something idk)
+        samples = []
+        for i in range(0, len(raw_bytes), 3):
+            chunk = raw_bytes[i : i + 3]
+            value = chunk[0] | (chunk[1] << 8) | (chunk[2] << 16)
+            if value & 0x800000:  # sign bit of 24 bit value
+                value -= 1 << 24
+            samples.append(value >> 8)  # scale 24 bit down to 16
+        return samples
+
+    elif sampwidth == 4:
+        # 32 bit SIGNED (note that 32 bit FLOAT is DIFFERENT AND NOT HANDLED HERE)
+        fmt = "<" + "i" * (len(raw_bytes) // 4)
+        values = struct.unpack(fmt, raw_bytes)
+        return [v >> 16 for v in values]  # scale 32 down to 16 bit
+
+    else:
+        raise ValueError(f"Unsupported WAV bit depth: {sampwidth * 8}-bit")
+
+
 def read_wav_samples(path):
     # reads 16 bit wav file and returns (samples, framerate)
     # samples: tuple of signed ints, one per mono channel (for now, stereo files are down-mixed to just left channel)
@@ -46,14 +80,7 @@ def read_wav_samples(path):
         n_frames = wf.getnframes()
         raw = wf.readframes(n_frames)
 
-    if sampwidth != 2:
-        raise ValueError(
-            f"Only 16 bit WAV files are supported for now (got {sampwidth * 8} bits)"
-        )
-
-    # '<' = little endian, 'h' = signed 16 bit int, one per sample
-    fmt = "<" + "h" * (len(raw) // 2)
-    samples = struct.unpack(fmt, raw)
+    samples = _normalize_to_16bit(raw, sampwidth)
 
     if n_channels == 2:
         # take left channel only if the input file is mono
@@ -83,13 +110,7 @@ def read_wav_channels(path):
         n_frames = wf.getnframes()
         raw = wf.readframes(n_frames)
 
-    if sampwidth != 2:
-        raise ValueError(
-            f"Only 16-bit PCM WAV files are supported right now (got {sampwidth * 8}-bit)"
-        )
-
-    fmt = "<" + "h" * (len(raw) // 2)
-    interleaved = struct.unpack(fmt, raw)
+    interleaved = _normalize_to_16bit(raw, sampwidth)
 
     if n_channels == 1:
         return [interleaved], framerate
