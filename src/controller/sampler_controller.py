@@ -44,7 +44,6 @@ class SamplerController(QObject):
         # Snapshot the sample list before and after, diff them, rename the slot that has changed
         self._awaiting_pre_send_slist = False
         self._pre_send_names = []
-        self._pending_generic_params = None
         self._rename_after_send = None
         self._awaiting_post_send_slist_for_rename = False
 
@@ -56,6 +55,7 @@ class SamplerController(QObject):
         self._receive_save_path = None
         self._receive_header_info = None
         self._receive_packets = []
+        self._receive_expected_packets = 0
         self._receive_queue = []
         self._receive_queue_total = 0
 
@@ -561,9 +561,20 @@ class SamplerController(QObject):
         self._receive_header_info = info
         self._receive_packets = []
 
+        bytes_per_word = (info["bit_depth"] + 6) // 7
+        words_per_packet = sds_encoder.DATA_BYTES_PER_PACKET // bytes_per_word
+        self._receive_expected_packets = -(-info["sample_length"] // words_per_packet)
+
+        print(
+            f"[DEBUG] Header received: sample_number={info['sample_number']} "
+            f"bit_depth={info['bit_depth']} sample_rate={info['sample_rate']} "
+            f"sample_length={info['sample_length']} expected_packets={self._receive_expected_packets}"
+        )
+
         self.status_changed.emit(
             f"Receiving sample {info['sample_number']}: {info['bit_depth']}-bit, "
-            f"{info['sample_rate']}Hz, {info['sample_length']} samples..."
+            f"{info['sample_rate']}Hz, {info['sample_length']} samples... "
+            f"({self._receive_expected_packets} packets expected)..."
         )
         self.receive_progress.emit(0, info["sample_length"])
 
@@ -586,12 +597,17 @@ class SamplerController(QObject):
             self.status_changed.emit(
                 f"Checksum error on packet {packet_num} - requesting resend"
             )
+            print(f"[DEBUG] Checksum FAILED on packet {packet_num}")
             self.midi_manager.send_sysex(
                 [0x7E, self._receive_channel & 0x7F, sds_encoder.NAK, packet_num]
             )
             return
 
         self._receive_packets.append(bytes(payload))
+        print(
+            f"[DEBUG] Packet {packet_num} OK - {len(payload)} bytes "
+            f"({len(self._receive_packets)}/{self._receive_expected_packets} packets so far)"
+        )
         self.midi_manager.send_sysex(
             [0x7E, self._receive_channel & 0x7F, sds_encoder.ACK, packet_num]
         )
@@ -605,7 +621,10 @@ class SamplerController(QObject):
             min(words_received, info["sample_length"]), info["sample_length"]
         )
 
-        if words_received >= info["sample_length"]:
+        if len(self._receive_packets) >= self._receive_expected_packets:
+            print(
+                f"[DEBUG] Reached expected packet count ({self._receive_expected_packets}) - finishing"
+            )
             self._finish_receiving()
 
     def _finish_receiving(self):

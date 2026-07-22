@@ -328,9 +328,11 @@ class TransferDashboard(QWidget):
             return
 
         requests = []
+        claimed_paths = set()
         for sample_number, name in selected:
             safe_name = self._sanitize_filename(name) or f"sample_{sample_number}"
-            save_path = os.path.join(save_dir, f"{safe_name}.wav")
+            save_path = self._unique_save_path(save_dir, safe_name, claimed_paths)
+            claimed_paths.add(save_path)
             requests.append((sample_number, save_path))
 
         self.sampler_controller.receive_samples(requests)
@@ -352,6 +354,16 @@ class TransferDashboard(QWidget):
     def _sanitize_filename(name):
         name = name.strip()
         return name.replace("/", "-").replace("\\", "-")
+
+    @staticmethod
+    def _unique_save_path(save_dir, base_name, claimed_paths=()):
+        # build a save path that doesnt collide with any other existing files
+        path = os.path.join(save_dir, f"{base_name}.wav")
+        counter = 2
+        while os.path.exists(path) or path in claimed_paths:
+            path = os.path.join(save_dir, f"{base_name} ({counter}).wav")
+            counter += 1
+        return path
 
     def on_receive_progress(self, received, total):
         percent = int((received / total) * 100) if total else 0

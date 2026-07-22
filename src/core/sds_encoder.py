@@ -85,7 +85,7 @@ def read_wav_channels(path):
 
     if sampwidth != 2:
         raise ValueError(
-            f"Only 16-bit PCM WAV files are supported right now (got {sampwidth * 8}-bit"
+            f"Only 16-bit PCM WAV files are supported right now (got {sampwidth * 8}-bit)"
         )
 
     fmt = "<" + "h" * (len(raw) // 2)
