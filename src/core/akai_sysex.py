@@ -100,6 +100,79 @@ def build_dels_request(sample_number, channel=0):
     return [0x47, channel & 0x7F, 0x14, 0x48, ss_lsb, ss_msb]
 
 
+def build_rsdata_request(sample_number, channel=0):
+    # build RSDATA request - asks for existing sample's header
+    ss_lsb = sample_number & 0x7F
+    ss_msb = (sample_number >> 7) & 0x7F
+    return [0x47, channel & 0x7F, 0x0A, 0x48, ss_lsb, ss_msb]
+
+
+def _to_4byte_lsb_first(value):
+    # encode unsigned int into 4 lsb first 7 bit midi bytes (up to 28 bits)
+    # used by RSPACK's offset/count fields which are wider than the header's 21 bit fields
+    return [
+        value & 0x7F,
+        (value >> 7) & 0x7F,
+        (value >> 14) & 0x7F,
+        (value >> 21) & 0x7F,
+    ]
+
+
+def build_rspack_request(
+    sample_number, offset, num_samples, interval=1, function=0, channel=0
+):
+    # build RSPACK (request sample data packet) request
+    # F0,47,cc,RSPACK(0x0C),48,
+    #     ss,ss              sample number (LSB-first 7-bit)
+    #     oo,oo,oo,oo        address offset from start of sample (LSB-first, up to 28 bits)
+    #     nn,nn,nn,nn        number of samples required (LSB-first, up to 28 bits)
+    #     ii                 interval between samples (1 = every sample, no decimation)
+    #     ff                 function (0 = plain samples, 1 = average, 2 = peak)
+    # F7
+    # after this, the akai sampler responds with standard universal data packets (sub-ID 0x02)
+    ss = [sample_number & 0x7F, (sample_number >> 7) & 0x7F]
+    oo = _to_4byte_lsb_first(offset)
+    nn = _to_4byte_lsb_first(num_samples)
+    return (
+        [0x47, channel & 0x7F, 0x0C, 0x48]
+        + ss
+        + oo
+        + nn
+        + [interval & 0x7F, function & 0x7F]
+    )
+
+
+def parse_sdata_response(data_bytes):
+    # decode incoming SDATA (0x0B) response
+    # returns sample_number, name, sample_length, sample_rate
+    # bit depth is NOT an explicit field in this structure:
+    # the whole S1000/S2000/S3000 family always store sample data internally as 16 bit
+    sample_number = (data_bytes[4] & 0x7F) | ((data_bytes[5] & 0x7F) << 7)
+    body_nibbles = data_bytes[6:]
+
+    raw = []
+    for i in range(0, len(body_nibbles) - 1, 2):
+        lo, hi = body_nibbles[i], body_nibbles[i + 1]
+        raw.append((lo & 0x0F) | ((hi & 0x0F) << 4))
+    raw = bytes(raw)
+
+    name = "".join(AKAI_CHAR_MAP.get(b, "?") for b in raw[3:15]).strip()
+
+    def _le_word(b, o):
+        return b[o] | (b[o + 1] << 8)
+
+    def _le_dword(b, o):
+        return _le_word(b, o) + _le_word(b, o + 2) * 65536
+
+    return {
+        "sample_number": sample_number,
+        "name": name,
+        "bit_depth": 16,  # fixed - see docstring
+        "sample_length": _le_dword(raw, 26),
+        "sample_rate": _le_word(raw, 138),
+    }
+
+
 # offset within the 192 byte raw sample header block where SHNAME lives
 _SHNAME_OFFSET = 3
 _SHNAME_LENGTH = 12

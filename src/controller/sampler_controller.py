@@ -44,6 +44,7 @@ class SamplerController(QObject):
         # Snapshot the sample list before and after, diff them, rename the slot that has changed
         self._awaiting_pre_send_slist = False
         self._pre_send_names = []
+        self._pending_generic_send = None
         self._rename_after_send = None
         self._awaiting_post_send_slist_for_rename = False
 
@@ -132,6 +133,16 @@ class SamplerController(QObject):
                     self._awaiting_count_for_queue = False
                     self._next_file_sample_number = len(names)
                     self._send_next_queued_file()
+
+            elif function_code == 0x0B:
+                # SDATA response - either the reply to our own RSDATA request while receiving sample
+                # or something we're not expecting rn
+                if self._receiving and self._receive_header_info is None:
+                    self._on_receive_sdata_header(data_bytes)
+                else:
+                    self.status_changed.emit(
+                        f"Received unexpected SDATA message: {bytes(data_bytes).hex(' ')}"
+                    )
 
             elif function_code == 0x16:
                 # S1000 command reply: F0, 47, cc, 16, 48, mm, F7 - mm: 0=ok, 1=error
@@ -550,11 +561,45 @@ class SamplerController(QObject):
         self._receive_header_info = None
         self._receive_packets = []
 
-        request = sds_encoder.build_dump_request(sample_number, self._receive_channel)
+        request = akai_sysex.build_rsdata_request(sample_number, self._receive_channel)
         self.midi_manager.send_sysex(request)
         self.status_changed.emit(
             f"Requesting sample {sample_number} ({current_index}/{self._receive_queue_total})..."
         )
+
+    def _on_receive_sdata_header(self, data_bytes):
+        # handles SDATA (0x0B) response to RSDATA requests
+        # real akai mechanism for getting sample's header
+        info = akai_sysex.parse_sdata_response(data_bytes)
+        self._receive_header_info = info
+        self._receive_packets = []
+
+        bytes_per_word = (info["bit_depth"] + 6) // 7
+        words_per_packet = sds_encoder.DATA_BYTES_PER_PACKET // bytes_per_word
+        self._receive_expected_packets = -(-info["sample_length"] // words_per_packet)
+
+        print(
+            f"[DEBUG] SDATA header: name={info['name']!r} bit_depth={info['bit_depth']} "
+            f"sample_rate={info['sample_rate']} sample_length={info['sample_length']} "
+            f"expected_packets={self._receive_expected_packets}"
+        )
+
+        self.status_changed.emit(
+            f"Requesting audio for '{info['name']}': {info['sample_length']} samples "
+            f"({self._receive_expected_packets} packets expected)..."
+        )
+        self.receive_progress.emit(0, info["sample_length"])
+
+        # RSPACK - trigger for bulk audio
+        request = akai_sysex.build_rspack_request(
+            self._receive_sample_number,
+            offset=0,
+            num_samples=info["sample_length"],
+            interval=1,
+            function=0,
+            channel=self._receive_channel,
+        )
+        self.midi_manager.send_sysex(request)
 
     def _on_receive_header(self, data_bytes):
         info = sds_encoder.parse_dump_header(data_bytes)
@@ -632,12 +677,21 @@ class SamplerController(QObject):
         bytes_per_word = (info["bit_depth"] + 6) // 7
 
         all_bytes = b"".join(self._receive_packets)
+        print(
+            f"[DEBUG] Finishing: {len(self._receive_packets)} packets accumulated, "
+            f"{len(all_bytes)} total raw bytes, expecting {info['sample_length']} samples"
+        )
+
         samples = []
         for i in range(0, len(all_bytes), bytes_per_word):
             chunk = all_bytes[i : i + bytes_per_word]
             if len(chunk) < bytes_per_word:
                 break  # trailing zero padding on final packet
             samples.append(sds_encoder.sds_bytes_to_sample(chunk, info["bit_depth"]))
+
+        print(
+            f"[DEBUG] Decoded {len(samples)} raw sample words before trimming to sample_length"
+        )
 
         samples = samples[
             : info["sample_length"]
@@ -688,6 +742,10 @@ class SamplerController(QObject):
                     self._active_sample_number, self._active_channel
                 )
             )
+        if self._receiving:
+            self.midi_manager.send_sysex(
+                [0x7E, self._receive_channel & 0x7F, sds_encoder.CANCEL, 0]
+            )
         self._stereo_queue = []
         self._file_queue = []
         self._awaiting_count_for_queue = False
@@ -697,8 +755,17 @@ class SamplerController(QObject):
         self._rename_after_send = None
         self._pre_send_names = []
 
+        was_receiving = self._receiving or bool(self._receive_queue)
+        self._receiving = False
+        self._receive_queue = []
+        self._receive_header_info = None
+        self._receive_packets = []
+
         self.status_changed.emit("Transfer cancelled")
-        self._abort_transfer(completed=False)
+        if was_receiving:
+            self.receive_finished.emit(False)
+        else:
+            self._abort_transfer(completed=False)
 
     def _send_current_packet(self):
         # send whatever packet self._send_index currently points to.
