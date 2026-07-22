@@ -461,24 +461,15 @@ class TransferDashboard(QWidget):
         display_name = os.path.splitext(os.path.basename(filepath))[0]
         edit_field = QLineEdit(display_name)
         edit_field.setReadOnly(True)
-        edit_field.setStyleSheet(
-            "background: transparent; border: none; font-size: 13px; color: black;"
-        )
 
         # interactive logic for editing file names
         def enable_editing(event):
             edit_field.setReadOnly(False)
             edit_field.setFocus()
-            edit_field.setStyleSheet(
-                "background: #2a2a35; border: 1px solid #3f3f4e; font-size: 13px; color: white;"
-            )
 
         def disable_editing():
             edit_field.setReadOnly(True)
             edit_field.clearFocus()
-            edit_field.setStyleSheet(
-                "background: transparent; border: none; font-size: 13px; color: black;"
-            )
 
         edit_field.mouseDoubleClickEvent = enable_editing
         edit_field.returnPressed.connect(disable_editing)

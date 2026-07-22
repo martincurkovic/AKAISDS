@@ -1,0 +1,155 @@
+/* ============================================================
+   AKAI SDS - global stylesheet
+   ------------------------------------------------------------
+   Edit this file to change the whole app's look. It's loaded
+   once, at startup, via app.setStyleSheet(...) in main.py.
+
+   Design principle: every color here is explicit. Nothing
+   relies on the OS's light/dark mode or Qt's native widget
+   styling. May add a light theme option later idk...
+   ============================================================ */
+
+/* ---------- Base ---------- */
+QWidget {
+    background-color: #1e1e24;
+    color: #e4e4ea;
+    font-size: 13px;
+}
+
+QMainWindow {
+    background-color: #1e1e24;
+}
+
+QLabel {
+    background: transparent;
+    color: #e4e4ea;
+}
+
+/* ---------- Buttons ---------- */
+QPushButton {
+    background-color: #2d2d38;
+    border: 1px solid #40404c;
+    border-radius: 4px;
+    padding: 5px 12px;
+    color: #e4e4ea;
+}
+
+QPushButton:hover {
+    background-color: #383846;
+    border-color: #4f4f5e;
+}
+
+QPushButton:pressed {
+    background-color: #232330;
+}
+
+QPushButton:disabled {
+    background-color: #26262e;
+    border-color: #333340;
+    color: #6a6a76;
+}
+
+/* ---------- Line edits (queue row names, dialog fields) ---------- */
+QLineEdit {
+    background-color: #2a2a35;
+    border: 1px solid #4a90d9;
+    border-radius: 3px;
+    padding: 2px 4px;
+    color: #f0f0f4;
+    selection-background-color: #4a90d9;
+}
+
+QLineEdit:read-only {
+    background: transparent;
+    border: 1px solid transparent;
+    color: #e4e4ea;
+}
+
+QLineEdit:disabled {
+    color: #6a6a76;
+}
+
+/* ---------- Lists (file queue + hardware panel) ---------- */
+QListWidget {
+    background-color: #202028;
+    border: 1px solid #33333e;
+    border-radius: 4px;
+    outline: none;
+}
+
+QListWidget::item {
+    border-bottom: 1px solid #2a2a34;
+}
+
+QListWidget::item:selected {
+    background-color: #2f3f57;
+}
+
+/* ---------- Checkboxes (hardware panel rows) ---------- */
+QCheckBox {
+    background: transparent;
+    color: #e4e4ea;
+    spacing: 6px;
+}
+
+QCheckBox::indicator {
+    width: 14px;
+    height: 14px;
+    border: 1px solid #55555f;
+    border-radius: 3px;
+    background: #2a2a35;
+}
+
+QCheckBox::indicator:checked {
+    background: #4a90d9;
+    border-color: #4a90d9;
+}
+
+/* ---------- Progress bars ---------- */
+QProgressBar {
+    background-color: #26262e;
+    border: 1px solid #3a3a44;
+    border-radius: 4px;
+    text-align: center;
+    color: #e4e4ea;
+}
+
+QProgressBar::chunk {
+    background-color: #4a90d9;
+    border-radius: 3px;
+}
+
+/* ---------- Status bar ---------- */
+QStatusBar {
+    background-color: #17171c;
+    color: #c8c8d0;
+}
+
+/* ---------- Dialogs (Edit sample, Global settings, MIDI settings) ---------- */
+QDialog {
+    background-color: #232330;
+}
+
+QComboBox, QSpinBox {
+    background-color: #2a2a35;
+    border: 1px solid #40404c;
+    border-radius: 3px;
+    padding: 2px 4px;
+    color: #f0f0f4;
+}
+
+QComboBox:hover, QSpinBox:hover {
+    border-color: #4f4f5e;
+}
+
+QComboBox QAbstractItemView {
+    background-color: #2a2a35;
+    color: #f0f0f4;
+    selection-background-color: #4a90d9;
+    border: 1px solid #40404c;
+}
+
+/* ---------- Message boxes (delete confirmation) ---------- */
+QMessageBox {
+    background-color: #232330;
+}
