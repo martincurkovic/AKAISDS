@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QFont
+from core import sds_encoder
 from ui.settings_dialog import MidiSettingsDialog
 from ui.drop_list_widget import DropListWidget
 from ui.sample_settings_dialog import SampleSettingsDialog
@@ -156,6 +157,9 @@ class TransferDashboard(QWidget):
         self.status_bar = QStatusBar()
         self.status_bar.showMessage("Ready")
 
+        # show controller's detailed status messages
+        self.sampler_controller.status_changed.connect(self.status_bar.showMessage)
+
         # FINAL ASSEMBLY
         master_layout.addLayout(top_bar)
         master_layout.addLayout(
@@ -177,7 +181,6 @@ class TransferDashboard(QWidget):
         self.list_hardware.clear()
         for sample_number, name in enumerate(names):
             self.create_hardware_row(name, sample_number)
-        self.status_bar.showMessage(f"Loaded {len(names)} sample(s) from hardware")
 
     def on_files_dropped(self, paths):
         added = 0
@@ -382,10 +385,8 @@ class TransferDashboard(QWidget):
         self.btn_cancel.setEnabled(False)
         if completed:
             self.progress_bar_current_smpl.setValue(100)
-            self.status_bar.showMessage("All samples received")
         else:
             self.progress_bar_current_smpl.setValue(0)
-            self.status_bar.showMessage("Receive cancelled")
         self.progress_bar_current_smpl.setVisible(False)
         self.progress_bar_overall.setVisible(False)
 
@@ -414,10 +415,8 @@ class TransferDashboard(QWidget):
         self.btn_cancel.setEnabled(False)
         if completed:
             self.progress_bar_current_smpl.setValue(100)
-            self.status_bar.showMessage("Transfer complete")
         else:
             self.progress_bar_current_smpl.setValue(0)
-            self.status_bar.showMessage("Transfer cancelled")
 
         # nothing happening anymore: hide both progress bars
         self.progress_bar_current_smpl.setVisible(False)
@@ -430,10 +429,18 @@ class TransferDashboard(QWidget):
         # create blank structural placeholder item inside real list
         item = QListWidgetItem(self.list_local)
         item.setData(Qt.ItemDataRole.UserRole, filepath)
+
+        try:
+            native_bit_depth = sds_encoder.read_wav_native_bit_depth(filepath)
+        except (OSError, ValueError):
+            native_bit_depth = 16  # cant tell, fall back to safe default
+
+        default_bit_depth = min(self._global_bit_depth, native_bit_depth)
+
         item.setData(
             SETTINGS_ROLE,
             {
-                "bit_depth": self._global_bit_depth,
+                "bit_depth": default_bit_depth,
                 "sample_rate": self._global_sample_rate,
                 "mono": self._global_mono,
             },

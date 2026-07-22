@@ -17,6 +17,7 @@ class SamplerController(QObject):
         super().__init__()
         self.midi_manager = midi_manager
         self.midi_manager.sysex_received.connect(self.on_sysex_received)
+        self._refresh_is_silent = False
 
         # state for an in-progress send - lets us dispatch one packet at a time
         # via QTtimer instead of blocking the GUI thread like a slow person walking in the middle of the aisles at Kmart
@@ -31,6 +32,9 @@ class SamplerController(QObject):
         # auto-numbered starting from however many samples already exist on the hardware
         self._file_queue = []
         self._file_queue_total = 0
+        self._file_queue_skipped = (
+            0  # how many files in the current batch failed to read
+        )
         self._file_queue_channel = 0
         self._awaiting_count_for_queue = False
         self._next_file_sample_number = 0
@@ -60,9 +64,11 @@ class SamplerController(QObject):
         self._receive_queue = []
         self._receive_queue_total = 0
 
-    def refresh_sample_list(self):
+    def refresh_sample_list(self, silent=False):
+        self._refresh_is_silent = silent
         self._send_rslist_request()
-        self.status_changed.emit("Requesting sample list...")
+        if not silent:
+            self.status_changed.emit("Requesting sample list...")
 
     def delete_sample(self, sample_number, channel=0):
         # delete the selected sample (DELS command in akai documentation)
@@ -105,6 +111,7 @@ class SamplerController(QObject):
         self._send_index = 0
         self._stereo_queue = []
         self._file_queue = []
+        self._file_queue_skipped = 0
         self._current_file_path = None
         self._awaiting_count_for_queue = False
         self._awaiting_pre_send_slist = False
@@ -171,6 +178,14 @@ class SamplerController(QObject):
                     self._awaiting_count_for_queue = False
                     self._next_file_sample_number = len(names)
                     self._send_next_queued_file()
+                else:
+                    # plain refresh - not part of other flow
+                    # only announce refresh in status bar if it wasnt a SILENT refresh
+                    if not self._refresh_is_silent:
+                        self.status_changed.emit(
+                            f"Loaded {len(names)} sample(s) from hardware"
+                        )
+                    self._refresh_is_silent = False
 
             elif function_code == 0x0B:
                 # SDATA response - either the reply to our own RSDATA request while receiving sample
@@ -466,6 +481,7 @@ class SamplerController(QObject):
 
         self._file_queue = list(file_entries)
         self._file_queue_total = len(file_entries)
+        self._file_queue_skipped = 0
         self._file_queue_channel = channel
         self._awaiting_count_for_queue = True
 
@@ -475,8 +491,19 @@ class SamplerController(QObject):
         self._send_rslist_request()
 
     def _send_next_queued_file(self):
+        try:
+            self._send_next_queued_file_impl()
+        except Exception as e:
+            print(f"[ERROR] Unhandled exception in _send_next_queued_file: {e!r}")
+            import traceback
+
+            traceback.print_exc()
+            self._recover_from_error(f"Error sending file: {e}")
+
+    def _send_next_queued_file_impl(self):
         if not self._file_queue:
             return
+
         entry = self._file_queue.pop(0)
         filepath = entry["filepath"]
         self._current_file_path = filepath
@@ -486,7 +513,14 @@ class SamplerController(QObject):
             channels, framerate = sds_encoder.read_wav_channels(filepath)
         except (OSError, ValueError) as e:
             self.status_changed.emit(f"Skipping {os.path.basename(filepath)}: {e}")
-            QTimer.singleShot(0, self._send_next_queued_file)
+            self._file_queue_skipped += 1
+            # tell the UI to remove this fiel from the queue too, same as succesfuly sent file
+            self.file_transferred.emit(filepath)
+            self._current_file_path = None
+            if self._file_queue:
+                QTimer.singleShot(0, self._send_next_queued_file)
+            else:
+                self._finish_unit(True)
             return
 
         base_name = entry.get("name") or os.path.splitext(os.path.basename(filepath))[0]
@@ -858,8 +892,15 @@ class SamplerController(QObject):
         self._file_queue = []
         self._rename_after_send = None
         if completed:
-            self.status_changed.emit("Transfer complete")
-            QTimer.singleShot(300, self.refresh_sample_list)
+            if self._file_queue_skipped:
+                self.status_changed.emit(
+                    f"Transfer complete ({self._file_queue_skipped} file"
+                    f"{'s' if self._file_queue_skipped != 1 else ''} skipped, incompatible WAV file)"
+                )
+            else:
+                self.status_changed.emit("Transfer complete")
+            # give the message above a real chance to be seen before the refresh's satus overwrites it
+            QTimer.singleShot(2500, self.refresh_sample_list)
         self.transfer_finished.emit(completed)
 
     def _start_send(self, name, samples, framerate, sample_number, channel):

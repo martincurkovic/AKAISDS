@@ -73,12 +73,17 @@ def read_wav_samples(path):
     # samples: tuple of signed ints, one per mono channel (for now, stereo files are down-mixed to just left channel)
     # framerate: samples per second (ie, 44100)
 
-    with wave.open(path, "rb") as wf:
-        n_channels = wf.getnchannels()
-        sampwidth = wf.getsampwidth()
-        framerate = wf.getframerate()
-        n_frames = wf.getnframes()
-        raw = wf.readframes(n_frames)
+    try:
+        with wave.open(path, "rb") as wf:
+            n_channels = wf.getnchannels()
+            sampwidth = wf.getsampwidth()
+            framerate = wf.getframerate()
+            n_frames = wf.getnframes()
+            raw = wf.readframes(n_frames)
+    except wave.Error as e:
+        raise ValueError(
+            f"Unsupported WAV format ({e}) - try converting to integer PCM"
+        ) from e
 
     samples = _normalize_to_16bit(raw, sampwidth)
 
@@ -93,9 +98,26 @@ def read_wav_info(path):
     # quickly read WAV's channel count and sample rate WITHOUT reading any audio data
     # fast enough to call every time a UI dialog opens
     # returns (n_channels, framerate)
+    try:
+        with wave.open(path, "rb") as wf:
+            return wf.getnchannels(), wf.getframerate()
+    except wave.Error as e:
+        raise ValueError(
+            f"Unsupported WAV format ({e}) - try converting to integer PCM"
+        ) from e
 
-    with wave.open(path, "rb") as wf:
-        return wf.getnchannels(), wf.getframerate()
+
+def read_wav_native_bit_depth(path):
+    # quickly read WAV file's native bit depth (without reading any of the other stuff)
+    # used ot default a new queue entry's target bit_depth to match its source file
+    # ie, 8 bit samples are sent as 8 bit instead of being upscaled to 16 bit (for the generic SDS path anyway)
+    try:
+        with wave.open(path, "rb") as wf:
+            return wf.getsampwidth() * 8
+    except wave.Error as e:
+        raise ValueError(
+            f"Unsupported WAV format ({e}) - try converting to integer PCM"
+        ) from e
 
 
 def read_wav_channels(path):
@@ -103,12 +125,17 @@ def read_wav_channels(path):
     # channels: list with one tuple per channel - [samples] for mono, [left_samples, right_samples] for stereo
     # framerate = samples per second (ie, 44100 or whaterver)
 
-    with wave.open(path, "rb") as wf:
-        n_channels = wf.getnchannels()
-        sampwidth = wf.getsampwidth()
-        framerate = wf.getframerate()
-        n_frames = wf.getnframes()
-        raw = wf.readframes(n_frames)
+    try:
+        with wave.open(path, "rb") as wf:
+            n_channels = wf.getnchannels()
+            sampwidth = wf.getsampwidth()
+            framerate = wf.getframerate()
+            n_frames = wf.getnframes()
+            raw = wf.readframes(n_frames)
+    except wave.Error as e:
+        raise ValueError(
+            f"Unsupported WAV format ({e}) - try converting to integer PCM"
+        ) from e
 
     interleaved = _normalize_to_16bit(raw, sampwidth)
 
