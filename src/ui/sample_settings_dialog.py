@@ -14,7 +14,9 @@ from PySide6.QtWidgets import (
 _RATE_OPTIONS = [
     ("Original", None),
     ("44100 Hz", 44100),
+    ("30000 Hz", 30000),
     ("22050 Hz", 22050),
+    ("15000 Hz", 15000),
     ("11025 Hz", 11025),
     ("8000 Hz", 8000),
 ]
