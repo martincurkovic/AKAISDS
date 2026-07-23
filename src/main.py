@@ -7,18 +7,17 @@ from PySide6.QtCore import Qt
 from ui import theme
 from ui.main_window import ApplicationWindow
 
-
-def _load_stylesheet(app):
-    # style.qss should live next to the ui/ package
-    # this points to it
-    qss_path = os.path.join(os.path.dirname(__file__), "ui", "style.qss")
-    try:
-        with open(qss_path, "r") as f:
-            app.setStyleSheet(f.read())
-    except OSError as e:
-        print(
-            f"[WARN] Couldn't load stylesheet ({e}) - continuing with default appearance"
-        )
+# def _load_stylesheet(app):
+#     # style.qss should live next to the ui/ package
+#     # this points to it
+#     qss_path = os.path.join(os.path.dirname(__file__), "ui", "style.qss")
+#     try:
+#         with open(qss_path, "r") as f:
+#             app.setStyleSheet(f.read())
+#     except OSError as e:
+#         print(
+#             f"[WARN] Couldn't load stylesheet ({e}) - continuing with default appearance"
+#         )
 
 
 def _palette_for_scheme(scheme):
@@ -38,6 +37,7 @@ def _apply_theme(app, scheme):
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
+    app.setStyle("Fusion")
     # _load_stylesheet(app)
 
     style_hints = QGuiApplication.styleHints()

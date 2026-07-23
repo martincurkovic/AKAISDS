@@ -1,5 +1,6 @@
 from PySide6.QtWidgets import QComboBox, QDialog, QDialogButtonBox, QFormLayout, QLabel
 from core import app_config
+from ui.qt_helpers import widen_popup_to_fit_items
 
 
 class MidiSettingsDialog(QDialog):
@@ -12,6 +13,12 @@ class MidiSettingsDialog(QDialog):
 
         self.combo_input = QComboBox()
         self.combo_output = QComboBox()
+        self.combo_input.setSizeAdjustPolicy(
+            QComboBox.SizeAdjustPolicy.AdjustToContents
+        )
+        self.combo_output.setSizeAdjustPolicy(
+            QComboBox.SizeAdjustPolicy.AdjustToContents
+        )
         self._populate_ports()
 
         layout.addRow(QLabel("MIDI Input:"), self.combo_input)
@@ -42,6 +49,9 @@ class MidiSettingsDialog(QDialog):
             idx = self.combo_output.findData(self.midi_manager.output_name)
             if idx >= 0:
                 self.combo_output.setCurrentIndex(idx)
+
+        widen_popup_to_fit_items(self.combo_input)
+        widen_popup_to_fit_items(self.combo_output)
 
     def _apply_and_close(self):
         input_name = self.combo_input.currentData()

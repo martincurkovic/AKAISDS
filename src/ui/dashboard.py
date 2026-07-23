@@ -40,6 +40,9 @@ class TransferDashboard(QWidget):
         self.sampler_controller.receive_finished.connect(self.on_receive_finished)
         self.sampler_controller.receive_progress.connect(self.on_receive_progress)
 
+        # tracks queue row's name edit field status
+        self._active_edit_field = None
+
         # tracks the current batch progress for the overall progress bar
         # how many files finished vs how many were queued when send was clicked
         self._queue_total = 0
@@ -155,6 +158,7 @@ class TransferDashboard(QWidget):
 
         # STATUS FEEDBACK BAR
         self.status_bar = QStatusBar()
+        self.status_bar.setSizeGripEnabled(False)
         self.status_bar.showMessage("Ready")
 
         # show controller's detailed status messages
@@ -423,6 +427,12 @@ class TransferDashboard(QWidget):
         self.progress_bar_overall.setVisible(False)
 
     # ROW BUILDER METHODS
+
+    def _remove_local_row(self, item, edit_field):
+        if self._active_edit_field is edit_field:
+            self._active_edit_field = None
+        self.list_local.takeItem(self.list_local.row(item))
+
     def create_local_row(self, filepath):
         # build an editable, drag-swappable row with action buttons pinned to right side
 
@@ -464,12 +474,26 @@ class TransferDashboard(QWidget):
 
         # interactive logic for editing file names
         def enable_editing(event):
+            # if a DIFFERENT row is being edited, close it explicitly first
+            if (
+                self._active_edit_field is not None
+                and self._active_edit_field is not edit_field
+            ):
+                try:
+                    self._active_edit_field.setReadOnly(True)
+                    self._active_edit_field.clearFocus()
+                except RuntimeError:
+                    pass  # ceebs handling this properly, whatever
+
             edit_field.setReadOnly(False)
             edit_field.setFocus()
+            self._active_edit_field = edit_field
 
         def disable_editing():
             edit_field.setReadOnly(True)
             edit_field.clearFocus()
+            if self._active_edit_field is edit_field:
+                self._active_edit_field = None
 
         edit_field.mouseDoubleClickEvent = enable_editing
         edit_field.returnPressed.connect(disable_editing)
@@ -491,9 +515,7 @@ class TransferDashboard(QWidget):
         # remove this file from the queue - ie remove this row
         # nothing has been sent to the hardware yet
         btn_del.clicked.connect(
-            lambda checked=False, it=item: self.list_local.takeItem(
-                self.list_local.row(it)
-            )
+            lambda checked=False, it=item, ef=edit_field: self._remove_local_row(it, ef)
         )
 
         # assemble row layout horizontaly

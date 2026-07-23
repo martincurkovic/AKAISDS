@@ -106,6 +106,7 @@ QCheckBox::indicator {
 QCheckBox::indicator:checked {
     background: ${accent};
     border-color: ${accent};
+    image: url(${checkmark_icon});
 }
 
 /* ---------- Progress bars ---------- */
@@ -150,6 +151,106 @@ QComboBox QAbstractItemView {
     color: ${text_bright};
     selection-background-color: ${accent};
     border: 1px solid ${border};
+}
+
+QComboBox QAbstractItemView::item {
+  padding: 4px 6px;
+}
+
+QComboBox QAbstractItemView::item:selected {
+  background-color: ${accent};
+  color: ${text_on_accent};
+}
+
+QComboBox::drop-down {
+  subcontrol-origin: padding;
+  subcontrol-position: top right;
+  width: 22px;
+  border: none;
+  background: transparent;
+}
+
+QComboBox::down-arrow {
+  image: url(${down_arrow_icon});
+  width: 10px;
+  height: 10px;
+}
+
+QComboBox::down-arrow:disabled {
+  image: url(${down_arrow_icon_disabled})
+}
+
+QSpinBox::up-button, QSpinBox::down-button {
+  subcontrol-origin: border;
+  width: 16px;
+  border: none;
+  background: transparent;
+}
+
+QSpinBox::up-arrow {
+  image: url(${up_arrow_icon});
+  width: 8px;
+  height: 8px;
+}
+
+QSpinBox::down-arrow {
+  image: url(${down_arrow_icon});
+  width: 8px;
+  height: 8px;
+}
+
+/* ---------- Scrollbars ---------- */
+/* thin, flat, overlay-style bars - no arrow buttons, no 3D bevel */
+QScrollBar:vertical {
+    background: transparent;
+    width: 10px;
+    margin: 0px;
+}
+
+QScrollBar::handle:vertical {
+    background: ${border_hover};
+    border-radius: 5px;
+    min-height: 24px;
+}
+
+QScrollBar::handle:vertical:hover {
+    background: ${accent};
+}
+
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+    height: 0px;
+    border: none;
+    background: none;
+}
+
+QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {
+    background: none;
+}
+
+QScrollBar:horizontal {
+    background: transparent;
+    height: 10px;
+    margin: 0px;
+}
+
+QScrollBar::handle:horizontal {
+    background: ${border_hover};
+    border-radius: 5px;
+    min-width: 24px;
+}
+
+QScrollBar::handle:horizontal:hover {
+    background: ${accent};
+}
+
+QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {
+    width: 0px;
+    border: none;
+    background: none;
+}
+
+QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal {
+    background: none;
 }
 
 /* ---------- Message boxes (delete confirmation) ---------- */

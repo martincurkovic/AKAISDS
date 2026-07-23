@@ -6,8 +6,8 @@ from PySide6.QtWidgets import (
     QFormLayout,
     QLabel,
     QLineEdit,
-    QSpinBox,
 )
+from ui.qt_helpers import widen_popup_to_fit_items
 
 # Common sample rates offerred in the dropdown
 # if a chosen rate isnt an exact integer divisor of the files real rate, sending falls back to original rate with a status message
@@ -20,6 +20,8 @@ _RATE_OPTIONS = [
     ("11025 Hz", 11025),
     ("8000 Hz", 8000),
 ]
+
+_BIT_DEPTH_OPTIONS = [8, 10, 12, 14, 16]
 
 
 class SampleSettingsDialog(QDialog):
@@ -48,19 +50,27 @@ class SampleSettingsDialog(QDialog):
             self.name_field = QLineEdit(name)
             layout.addRow(QLabel("Sample name:"), self.name_field)
 
-        self.bit_depth_spin = QSpinBox()
-        self.bit_depth_spin.setRange(8, 16)
-        self.bit_depth_spin.setValue(bit_depth)
-        self.bit_depth_spin.setToolTip(
+        self.bit_depth_combo = QComboBox()
+        for depth in _BIT_DEPTH_OPTIONS:
+            self.bit_depth_combo.addItem(f"{depth}-bit", depth)
+        closest = min(_BIT_DEPTH_OPTIONS, key=lambda d: abs(d - bit_depth))
+        self.bit_depth_combo.setCurrentIndex(_BIT_DEPTH_OPTIONS.index(closest))
+        self.bit_depth_combo.setToolTip(
             "Bit depths of 14 or lower will transmit faster than 16 bit samples"
         )
-        layout.addRow(QLabel("Bit depth:"), self.bit_depth_spin)
+        self.bit_depth_combo.setSizeAdjustPolicy(
+            QComboBox.SizeAdjustPolicy.AdjustToContents
+        )
+        widen_popup_to_fit_items(self.bit_depth_combo)
+        layout.addRow(QLabel("Bit depth:"), self.bit_depth_combo)
 
         self.rate_combo = QComboBox()
         for label, value in _RATE_OPTIONS:
             self.rate_combo.addItem(label, value)
         idx = self.rate_combo.findData(sample_rate)
         self.rate_combo.setCurrentIndex(idx if idx >= 0 else 0)
+        self.rate_combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToContents)
+        widen_popup_to_fit_items(self.rate_combo)
         layout.addRow(QLabel("Sample rate:"), self.rate_combo)
 
         self.mono_checkbox = None
@@ -86,7 +96,7 @@ class SampleSettingsDialog(QDialog):
         # "name" is None if the dialog was created with show_name-False
         return {
             "name": self.name_field.text().strip() if self.name_field else None,
-            "bit_depth": self.bit_depth_spin.value(),
+            "bit_depth": self.bit_depth_combo.currentData(),
             "sample_rate": self.rate_combo.currentData(),
             "mono": self.mono_checkbox.isChecked() if self.mono_checkbox else False,
         }
