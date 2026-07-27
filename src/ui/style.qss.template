@@ -88,6 +88,14 @@ QListWidget::item:selected {
     background-color: ${bg_selected};
 }
 
+/* placeholder text shown when file transfer queue is empty */ 
+#emptyQueueLabel {
+  color: ${text_disabled};
+  font-style: italic;
+  font-size: 14px;
+  background: transparent;
+}
+
 /* ---------- Checkboxes (hardware panel rows) ---------- */
 QCheckBox {
     background: transparent;

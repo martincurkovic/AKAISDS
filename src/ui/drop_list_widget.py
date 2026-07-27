@@ -10,6 +10,19 @@ class DropListWidget(QListWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setAcceptDrops(True)
+        self._overlay_widget = None
+
+    def set_overlay_widget(self, widget):
+        # register a widget (eg, placeholder text) to be kept sized to this list's viewport automatically
+        # call once after creating overlay = resizeEvent below keeps it in sync from then on
+        self._overlay_widget = widget
+        if widget is not None:
+            widget.setGeometry(self.viewport().rect())
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if self._overlay_widget is not None:
+            self._overlay_widget.setGeometry(self.viewport().rect())
 
     def dragEnterEvent(self, event):
         if event.mimeData().hasUrls():

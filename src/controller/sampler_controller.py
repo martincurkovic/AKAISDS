@@ -7,6 +7,7 @@ class SamplerController(QObject):
     sample_list_updated = Signal(list)
     status_changed = Signal(str)
     transfer_progress = Signal(int, int)  # (packets sent so far, total packets)
+    unit_progress = Signal(float)
     transfer_finished = Signal(bool)
     file_transferred = Signal(str)
     receive_progress = Signal(int, int)
@@ -65,6 +66,12 @@ class SamplerController(QObject):
         self._receive_queue = []
         self._receive_queue_total = 0
         self._awaiting_sample_info = False
+
+        # tracks which leg of hte current file's transfer is in progress
+        # 1 leg for mono, 2 for stereo
+        # this lets the overall progress bar report progress smoothly across the whole file
+        self._current_file_leg_index = 0
+        self._current_file_total_legs = 1
 
     def refresh_sample_list(self, silent=False):
         self._refresh_is_silent = silent
@@ -265,13 +272,22 @@ class SamplerController(QObject):
             f"Received unrecognised SysEx: {bytes(data_bytes).hex(' ')}"
         )
 
+    def _emit_progress(self, sent, total):
+        # emith both progress signals for one packet level update
+        self.transfer_progress.emit(sent, total)
+        leg_fraction = (sent / total) if total else 0
+        unit_fraction = (
+            self._current_file_leg_index + leg_fraction
+        ) / self._current_file_total_legs
+        self.unit_progress.emit(min(unit_fraction, 1.0))
+
     def _on_handshake_message(self, kind):
         if not self._send_queue:
             return
         if kind == "ack":
             # previous packet accepted - move on to next packet
             self._send_index += 1
-            self.transfer_progress.emit(self._send_index, len(self._send_queue))
+            self._emit_progress(self._send_index, len(self._send_queue))
             self._send_current_packet()
         elif kind == "wait":
             # Sampler still processing - do nothing and stfu
@@ -467,7 +483,7 @@ class SamplerController(QObject):
         self._active_sample_number = sample_number_hint
 
         self.status_changed.emit(f"Sending generic SDS dump ({bit_depth}-bit)...")
-        self.transfer_progress.emit(0, len(self._send_queue))
+        self._emit_progress(0, len(self._send_queue))
         self._send_current_packet()
 
     # ---------------------------------------------------------
@@ -558,6 +574,10 @@ class SamplerController(QObject):
         force_mono = entry.get("mono", False)
 
         send_stereo = (len(channels) == 2) and not force_mono
+
+        # reset leg tracking for this NEW file - once per file, not per leg
+        self._current_file_total_legs = 2 if send_stereo else 1
+        self._current_file_leg_index = 0
 
         if send_stereo:
             left_name = akai_sysex.build_stereo_channel_name(base_name, "-L")
@@ -903,6 +923,9 @@ class SamplerController(QObject):
                 self._stereo_queue.pop(0)
             )
             self.status_changed.emit("Left channel done - sending right channel...")
+            self._current_file_leg_index = (
+                1  # second leg's progress continues from here, not zero
+            )
             QTimer.singleShot(
                 300,
                 lambda: self._start_unit(
@@ -932,7 +955,7 @@ class SamplerController(QObject):
             else:
                 self.status_changed.emit("Transfer complete")
             # give the message above a real chance to be seen before the refresh's satus overwrites it
-            QTimer.singleShot(2500, self.refresh_sample_list)
+            QTimer.singleShot(2500, lambda: self.refresh_sample_list(silent=True))
         self.transfer_finished.emit(completed)
 
     def _start_send(self, name, samples, framerate, sample_number, channel):
@@ -962,5 +985,5 @@ class SamplerController(QObject):
         self.status_changed.emit(
             f"Sending SDATA header + {len(data_packets)} data packets..."
         )
-        self.transfer_progress.emit(0, len(self._send_queue))
+        self._emit_progress(0, len(self._send_queue))
         self._send_current_packet()

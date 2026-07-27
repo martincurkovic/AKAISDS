@@ -14,8 +14,9 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 from PySide6.QtCore import Qt, QTimer
-from PySide6.QtGui import QFont
+from PySide6.QtGui import QFont, QFontMetrics
 from core import sds_encoder
+from ui.qt_helpers import load_colored_pixmap
 from ui.settings_dialog import MidiSettingsDialog
 from ui.drop_list_widget import DropListWidget
 from ui.sample_settings_dialog import SampleSettingsDialog
@@ -35,6 +36,7 @@ class TransferDashboard(QWidget):
         self.sampler_controller = sampler_controller
         self.sampler_controller.sample_list_updated.connect(self.on_sample_list_updated)
         self.sampler_controller.transfer_progress.connect(self.on_transfer_progress)
+        self.sampler_controller.unit_progress.connect(self.on_unit_progress)
         self.sampler_controller.transfer_finished.connect(self.on_transfer_finished)
         self.sampler_controller.file_transferred.connect(self.on_file_transferred)
         self.sampler_controller.sample_received.connect(self.on_sample_received)
@@ -49,17 +51,19 @@ class TransferDashboard(QWidget):
 
         self._pending_deletions = []  # sample numbers queued for sequential deletion
 
+        # mono/stereo channel count icons, recoloured once from source svg's
+        icons_dir = os.path.join(os.path.dirname(__file__), "icons")
+        self._mono_icon = load_colored_pixmap(
+            os.path.join(icons_dir, "mono-svgrepo-com.svg"), "#888888", size=18
+        )
+        self._stereo_icon = load_colored_pixmap(
+            os.path.join(icons_dir, "stereo-svgrepo-com.svg"), "#888888", size=18
+        )
+
         # tracks the current batch progress for the overall progress bar
         # how many files finished vs how many were queued when send was clicked
         self._queue_total = 0
         self._queue_completed = 0
-
-        # separate UNIT-based tracking for send path specifically
-        # stereo file is one entry in the queue but TWO actual transfer legs (L and R)
-        # so the progress_bar_overall needs a different denominator than plain file count to move correctly for stereo only batch
-        self._queue_total_units = 0
-        self._queue_completed_units = 0
-        self._file_units = {}  # filepath -> 1 or 2 - set when a send batch starts
 
         # DEFAULT transmission values for newly dropped files
         self._global_bit_depth = 16
@@ -99,7 +103,7 @@ class TransferDashboard(QWidget):
         left_vbox = QVBoxLayout(left_container)
         left_vbox.setContentsMargins(0, 0, 0, 0)
 
-        lbl_local = QLabel("<b>File Transfer Queue</b> (drag WAV files here)")
+        lbl_local = QLabel("<b>File Transfer Queue</b>")
 
         local_header = QHBoxLayout()
         local_header.addWidget(lbl_local, stretch=1)
@@ -114,6 +118,19 @@ class TransferDashboard(QWidget):
         self.list_local.setDragDropMode(DropListWidget.DragDropMode.InternalMove)
         self.list_local.setSelectionMode(DropListWidget.SelectionMode.SingleSelection)
         self.list_local.filesDropped.connect(self.on_files_dropped)
+
+        # placeholder text shown when queue is empty
+        self.empty_queue_label = QLabel(
+            "Drag audio files here to add them to the queue", self.list_local.viewport()
+        )
+        self.empty_queue_label.setObjectName("emptyQueueLabel")
+        self.empty_queue_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.empty_queue_label.setWordWrap(True)
+        self.empty_queue_label.setAttribute(
+            Qt.WidgetAttribute.WA_TransparentForMouseEvents
+        )
+        self.list_local.set_overlay_widget(self.empty_queue_label)
+        self._update_empty_queue_placeholder()
 
         left_vbox.addLayout(local_header)
         left_vbox.addWidget(self.list_local)
@@ -135,6 +152,17 @@ class TransferDashboard(QWidget):
         hardware_header.addWidget(lbl_hardware, stretch=1)
         self.btn_select_all = QPushButton("Select All")
         self.btn_select_all.clicked.connect(self.toggle_select_all_hardware_samples)
+        # fixed width for select all button
+        # calculated width rather than guessing px values lmao
+        metrics = QFontMetrics(self.btn_select_all.font())
+        button_width = (
+            max(
+                metrics.horizontalAdvance("Select All"),
+                metrics.horizontalAdvance("Deselect All"),
+            )
+            + 24
+        )  # giving extra padding juuuuust in case
+        self.btn_select_all.setFixedWidth(button_width)
         hardware_header.addWidget(self.btn_select_all)
         self.btn_delete_selected = QPushButton("Delete Selected")
         self.btn_delete_selected.clicked.connect(
@@ -230,6 +258,10 @@ class TransferDashboard(QWidget):
                 )
         if added:
             self.status_bar.showMessage(f"Added {added} file(s) to the queue")
+        self._update_empty_queue_placeholder()
+
+    def _update_empty_queue_placeholder(self):
+        self.empty_queue_label.setVisible(self.list_local.count() == 0)
 
     def open_global_settings_dialog(self):
         dialog = SampleSettingsDialog(
@@ -342,7 +374,6 @@ class TransferDashboard(QWidget):
 
         # single stereo file is still 2 transfers (L and R)
         # determine real units to send so the second progress_bar_overall can be shown appropriately
-        self._file_units = {}
         total_units = 0
         for entry in entries:
             if entry["mono"]:
@@ -355,11 +386,8 @@ class TransferDashboard(QWidget):
                         1  # cant tell - the real sample send will show an actual error
                     )
                 units = 2 if n_channels == 2 else 1
-            self._file_units[entry["filepath"]] = units
             total_units += units
 
-        self._queue_total_units = total_units
-        self._queue_completed_units = 0
         self.progress_bar_overall.setVisible(total_units > 1)
 
     def cancel_transfer(self):
@@ -469,15 +497,11 @@ class TransferDashboard(QWidget):
         self.progress_bar_current_smpl.setValue(percent)
         self.status_bar.showMessage(f"Sending packet {sent}/{total}")
 
-        # move overall progress bar smoothly during the curren file's own transfer too, not just in jumps when each file finishes
-        if self._queue_total_units > 1:
-            current_file_fraction = (sent / total) if total else 0
+    def on_unit_progress(self, fraction):
+        # drives overall progress bar
+        if self._queue_total > 0:
             overall_percent = int(
-                (
-                    (self._queue_completed_units + current_file_fraction)
-                    / self._queue_total_units
-                )
-                * 100
+                ((self._queue_completed + fraction) / self._queue_total) * 100
             )
             self.progress_bar_overall.setValue(min(overall_percent, 100))
 
@@ -490,11 +514,12 @@ class TransferDashboard(QWidget):
                 self.list_local.takeItem(i)
                 break
 
+        self._update_empty_queue_placeholder()
+
         # one more file done out of however many were thrown in the queue
         self._queue_completed += 1
-        self._queue_completed_units += self._file_units.pop(filepath, 1)
-        if self._queue_total_units:
-            percent = int((self._queue_completed_units / self._queue_total_units) * 100)
+        if self._queue_total:
+            percent = int((self._queue_completed / self._queue_total) * 100)
             self.progress_bar_overall.setValue(percent)
 
     def on_transfer_finished(self, completed):
@@ -515,6 +540,7 @@ class TransferDashboard(QWidget):
         if self._active_edit_field is edit_field:
             self._active_edit_field = None
         self.list_local.takeItem(self.list_local.row(item))
+        self._update_empty_queue_placeholder()
 
     def create_local_row(self, filepath):
         # build an editable, drag-swappable row with action buttons pinned to right side
@@ -590,6 +616,20 @@ class TransferDashboard(QWidget):
         btn_edit.setFixedHeight(24)
         btn_del.setFixedHeight(24)
 
+        # mono/stereo indicator icon
+        try:
+            n_channels, _ = sds_encoder.read_wav_info(filepath)
+        except (OSError, ValueError):
+            n_channels = 1  # cant tell, fall back to the mono icon i guess??
+
+        lbl_channels = QLabel()
+        lbl_channels.setPixmap(
+            self._stereo_icon if n_channels == 2 else self._mono_icon
+        )
+        lbl_channels.setFixedSize(24, 24)
+        lbl_channels.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        lbl_channels.setToolTip("Stereo" if n_channels == 2 else "Mono")
+
         # opens the per-file settings dialog
         btn_edit.clicked.connect(
             lambda checked=False, it=item, ef=edit_field: self.open_edit_dialog(it, ef)
@@ -606,6 +646,7 @@ class TransferDashboard(QWidget):
         row_layout.addWidget(
             edit_field, stretch=1
         )  # stretch=1 forces file name to take maximum room
+        row_layout.addWidget(lbl_channels)
         row_layout.addWidget(btn_edit)
         row_layout.addWidget(btn_del)
 
@@ -675,6 +716,7 @@ class TransferDashboard(QWidget):
     def clear_local_queue(self):
         self.list_local.clear()
         self._active_edit_field = None
+        self._update_empty_queue_placeholder()
         self.status_bar.showMessage("Cleared the file transfer queue")
 
     def toggle_select_all_hardware_samples(self):
