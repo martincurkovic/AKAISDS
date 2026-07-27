@@ -1,4 +1,11 @@
-from PySide6.QtWidgets import QDialog, QDialogButtonBox, QFormLayout, QLabel, QLineEdit
+from PySide6.QtWidgets import (
+    QDialog,
+    QDialogButtonBox,
+    QFormLayout,
+    QLabel,
+    QLineEdit,
+    QLayout,
+)
 
 _NOTE_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
 
@@ -60,6 +67,9 @@ class SampleInfoDialog(QDialog):
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         layout.addRow(buttons)
+
+        # fixed window size - computed form actual content rather than hardcoded value
+        layout.setSizeConstraint(QLayout.SizeConstraint.SetFixedSize)
 
     def get_new_name(self):
         return self.name_field.text().strip()

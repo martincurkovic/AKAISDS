@@ -13,7 +13,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QFont
 from core import sds_encoder
 from ui.settings_dialog import MidiSettingsDialog
@@ -47,10 +47,19 @@ class TransferDashboard(QWidget):
         # tracks queue row's name edit field status
         self._active_edit_field = None
 
+        self._pending_deletions = []  # sample numbers queued for sequential deletion
+
         # tracks the current batch progress for the overall progress bar
         # how many files finished vs how many were queued when send was clicked
         self._queue_total = 0
-        self._quque_completed = 0
+        self._queue_completed = 0
+
+        # separate UNIT-based tracking for send path specifically
+        # stereo file is one entry in the queue but TWO actual transfer legs (L and R)
+        # so the progress_bar_overall needs a different denominator than plain file count to move correctly for stereo only batch
+        self._queue_total_units = 0
+        self._queue_completed_units = 0
+        self._file_units = {}  # filepath -> 1 or 2 - set when a send batch starts
 
         # DEFAULT transmission values for newly dropped files
         self._global_bit_depth = 16
@@ -94,6 +103,9 @@ class TransferDashboard(QWidget):
 
         local_header = QHBoxLayout()
         local_header.addWidget(lbl_local, stretch=1)
+        self.btn_clear_queue = QPushButton("Clear Queue")
+        self.btn_clear_queue.clicked.connect(self.clear_local_queue)
+        local_header.addWidget(self.btn_clear_queue)
         self.btn_global_settings = QPushButton("\u2699 Transmission Settings")
         self.btn_global_settings.clicked.connect(self.open_global_settings_dialog)
         local_header.addWidget(self.btn_global_settings)
@@ -121,6 +133,14 @@ class TransferDashboard(QWidget):
         # HEADER ROW - title + refresh button share one line
         hardware_header = QHBoxLayout()
         hardware_header.addWidget(lbl_hardware, stretch=1)
+        self.btn_select_all = QPushButton("Select All")
+        self.btn_select_all.clicked.connect(self.toggle_select_all_hardware_samples)
+        hardware_header.addWidget(self.btn_select_all)
+        self.btn_delete_selected = QPushButton("Delete Selected")
+        self.btn_delete_selected.clicked.connect(
+            self.confirm_and_delete_selected_samples
+        )
+        hardware_header.addWidget(self.btn_delete_selected)
         self.btn_refresh = QPushButton("\u27f3 Refresh")
         self.btn_refresh.clicked.connect(self.request_sample_list)
         hardware_header.addWidget(self.btn_refresh)
@@ -166,7 +186,7 @@ class TransferDashboard(QWidget):
         self.status_bar.showMessage("Ready")
 
         # show controller's detailed status messages
-        self.sampler_controller.status_changed.connect(self.status_bar.showMessage)
+        self.sampler_controller.status_changed.connect(self.on_status_message)
 
         # FINAL ASSEMBLY
         master_layout.addLayout(top_bar)
@@ -185,10 +205,15 @@ class TransferDashboard(QWidget):
     def request_sample_list(self):
         self.sampler_controller.refresh_sample_list()
 
+    def on_status_message(self, message):
+        # 5 second timeout  for status messages
+        self.status_bar.showMessage(message, 5000)
+
     def on_sample_list_updated(self, names):
         self.list_hardware.clear()
         for sample_number, name in enumerate(names):
             self.create_hardware_row(name, sample_number)
+        self.btn_select_all.setText("Select All")
 
     def on_files_dropped(self, paths):
         added = 0
@@ -314,7 +339,28 @@ class TransferDashboard(QWidget):
         self.progress_bar_current_smpl.setValue(0)
         self.progress_bar_overall.setValue(0)
         self.progress_bar_current_smpl.setVisible(True)
-        self.progress_bar_overall.setVisible(True)
+
+        # single stereo file is still 2 transfers (L and R)
+        # determine real units to send so the second progress_bar_overall can be shown appropriately
+        self._file_units = {}
+        total_units = 0
+        for entry in entries:
+            if entry["mono"]:
+                units = 1
+            else:
+                try:
+                    n_channels, _ = sds_encoder.read_wav_info(entry["filepath"])
+                except (OSError, ValueError):
+                    n_channels = (
+                        1  # cant tell - the real sample send will show an actual error
+                    )
+                units = 2 if n_channels == 2 else 1
+            self._file_units[entry["filepath"]] = units
+            total_units += units
+
+        self._queue_total_units = total_units
+        self._queue_completed_units = 0
+        self.progress_bar_overall.setVisible(total_units > 1)
 
     def cancel_transfer(self):
         self.sampler_controller.cancel_transfer()
@@ -362,7 +408,7 @@ class TransferDashboard(QWidget):
         self.progress_bar_current_smpl.setValue(0)
         self.progress_bar_overall.setValue(0)
         self.progress_bar_current_smpl.setVisible(True)
-        self.progress_bar_overall.setVisible(True)
+        self.progress_bar_overall.setVisible(self._queue_total > 1)
 
     @staticmethod
     def _sanitize_filename(name):
@@ -384,6 +430,14 @@ class TransferDashboard(QWidget):
         self.progress_bar_current_smpl.setValue(percent)
         self.status_bar.showMessage(f"Receiving: {received}/{total} samples")
 
+        if self._queue_total > 1:
+            current_file_fraction = (received / total) if total else 0
+            overall_percent = int(
+                ((self._queue_completed + current_file_fraction) / self._queue_total)
+                * 100
+            )
+            self.progress_bar_overall.setValue(overall_percent)
+
     def on_sample_received(self, path):
         self._queue_completed += 1
         if self._queue_total:
@@ -396,6 +450,15 @@ class TransferDashboard(QWidget):
         self.btn_cancel.setEnabled(False)
         if completed:
             self.progress_bar_current_smpl.setValue(100)
+            # samples that were just downloaded are done with - uncheck them so the list isn't left looking like theyre still queued
+            # left checked on cancel
+            for i in range(self.list_hardware.count()):
+                item = self.list_hardware.item(i)
+                row_widget = self.list_hardware.itemWidget(item)
+                checkbox = row_widget.findChild(QCheckBox)
+                if checkbox:
+                    checkbox.setChecked(False)
+            self.btn_select_all.setText("Select All")
         else:
             self.progress_bar_current_smpl.setValue(0)
         self.progress_bar_current_smpl.setVisible(False)
@@ -406,6 +469,18 @@ class TransferDashboard(QWidget):
         self.progress_bar_current_smpl.setValue(percent)
         self.status_bar.showMessage(f"Sending packet {sent}/{total}")
 
+        # move overall progress bar smoothly during the curren file's own transfer too, not just in jumps when each file finishes
+        if self._queue_total_units > 1:
+            current_file_fraction = (sent / total) if total else 0
+            overall_percent = int(
+                (
+                    (self._queue_completed_units + current_file_fraction)
+                    / self._queue_total_units
+                )
+                * 100
+            )
+            self.progress_bar_overall.setValue(min(overall_percent, 100))
+
     def on_file_transferred(self, filepath):
         # find and remove whichever row holds this exact file path
         # ie, the row's stored data (set in create_local_row) NOT its display text since the user may have renamed it
@@ -415,10 +490,11 @@ class TransferDashboard(QWidget):
                 self.list_local.takeItem(i)
                 break
 
-        # one more file done out of however many were thrown in the queu
+        # one more file done out of however many were thrown in the queue
         self._queue_completed += 1
-        if self._queue_total:
-            percent = int((self._queue_completed / self._queue_total) * 100)
+        self._queue_completed_units += self._file_units.pop(filepath, 1)
+        if self._queue_total_units:
+            percent = int((self._queue_completed_units / self._queue_total_units) * 100)
             self.progress_bar_overall.setValue(percent)
 
     def on_transfer_finished(self, completed):
@@ -595,3 +671,67 @@ class TransferDashboard(QWidget):
         )
         if reply == QMessageBox.StandardButton.Yes:
             self.sampler_controller.delete_sample(sample_number)
+
+    def clear_local_queue(self):
+        self.list_local.clear()
+        self._active_edit_field = None
+        self.status_bar.showMessage("Cleared the file transfer queue")
+
+    def toggle_select_all_hardware_samples(self):
+        now_selecting = self.btn_select_all.text() == "Select All"
+        for i in range(self.list_hardware.count()):
+            item = self.list_hardware.item(i)
+            row_widget = self.list_hardware.itemWidget(item)
+            checkbox = row_widget.findChild(QCheckBox)
+            if checkbox:
+                checkbox.setChecked(now_selecting)
+        self.btn_select_all.setText("Deselect All" if now_selecting else "Select All")
+
+    def confirm_and_delete_selected_samples(self):
+        to_delete = []
+        for i in range(self.list_hardware.count()):
+            item = self.list_hardware.item(i)
+            row_widget = self.list_hardware.itemWidget(item)
+            checkbox = row_widget.findChild(QCheckBox)
+            if checkbox and checkbox.isChecked():
+                sample_number = item.data(Qt.ItemDataRole.UserRole)
+                to_delete.append((checkbox.text().strip(), sample_number))
+
+        if not to_delete:
+            self.status_bar.showMessage(
+                "No samples selected - please select samples to delete"
+            )
+            return
+
+        preview_names = ", ".join(name for name, _ in to_delete[:5])
+        if len(to_delete) > 5:
+            preview_names += f", and {len(to_delete) - 5} more"
+
+        reply = QMessageBox.question(
+            self,
+            "Delete Selected Samples",
+            f"Delete {len(to_delete)} sample(s) from the sampler?\n({preview_names})\n"
+            f"This cannot be undone.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+
+        # delete HIGHEST sample number FIRST
+        # because removing a sample shifts every later sample's number down by one,
+        # so deleting in ASCENDING order will end up targetting the wrong samples partway thru
+        # also paced with a small gap instead of firing DELS messages b2b
+        # allows the MIDI interface and sampler to keep up
+        self._pending_deletions = sorted(
+            (sample_number for _, sample_number in to_delete), reverse=True
+        )
+        self._delete_next_pending_sample()
+
+    def _delete_next_pending_sample(self):
+        if not self._pending_deletions:
+            return
+        sample_number = self._pending_deletions.pop(0)
+        self.sampler_controller.delete_sample(sample_number)
+        if self._pending_deletions:
+            QTimer.singleShot(100, self._delete_next_pending_sample)

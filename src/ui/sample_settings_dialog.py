@@ -6,6 +6,7 @@ from PySide6.QtWidgets import (
     QFormLayout,
     QLabel,
     QLineEdit,
+    QLayout,
 )
 from ui.qt_helpers import widen_popup_to_fit_items
 
@@ -89,6 +90,9 @@ class SampleSettingsDialog(QDialog):
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         layout.addRow(buttons)
+
+        # fixed window size - computed form actual content rather than hardcoded value
+        layout.setSizeConstraint(QLayout.SizeConstraint.SetFixedSize)
 
     def get_settings(self):
         # returns a dict {"name": str or None, "bit_depth": int,
