@@ -189,7 +189,10 @@ class TransferDashboard(QWidget):
     def on_files_dropped(self, paths):
         added = 0
         for path in paths:
-            if path.lower().endswith(".wav"):
+            if (
+                os.path.splitext(path)[1].lower()
+                in sds_encoder.SUPPORTED_AUDIO_EXTENSIONS
+            ):
                 self.create_local_row(path)
                 added += 1
             else:
