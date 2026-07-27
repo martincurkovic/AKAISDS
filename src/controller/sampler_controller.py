@@ -12,6 +12,7 @@ class SamplerController(QObject):
     receive_progress = Signal(int, int)
     sample_received = Signal(str)
     receive_finished = Signal(bool)
+    sample_info_received = Signal(dict)
 
     def __init__(self, midi_manager):
         super().__init__()
@@ -63,6 +64,7 @@ class SamplerController(QObject):
         self._receive_expected_packets = 0
         self._receive_queue = []
         self._receive_queue_total = 0
+        self._awaiting_sample_info = False
 
     def refresh_sample_list(self, silent=False):
         self._refresh_is_silent = silent
@@ -87,6 +89,27 @@ class SamplerController(QObject):
             f"Renaming sample {sample_number} to '{new_name.strip()}'..."
         )
         QTimer.singleShot(300, self.refresh_sample_list)
+
+    def request_sample_info(self, sample_number, channel=0):
+        # fetch sample's header info (name, sample_rate, length, root_key, detune)
+        # for display purposes
+        if (
+            self._send_queue
+            or self._stereo_queue
+            or self._file_queue
+            or self._receiving
+            or self._receive_queue
+            or self._awaiting_sample_info
+        ):
+            self.status_changed.emit(
+                "A transfer is already in progress - please wait for it to finish"
+            )
+            return
+
+        self._awaiting_sample_info = True
+        request = akai_sysex.build_rsdata_request(sample_number, channel)
+        self.midi_manager.send_sysex(request)
+        self.status_changed.emit(f"Requesting info for sample {sample_number}...")
 
     def _send_rslist_request(self):
         request = akai_sysex.build_slist_request()
@@ -119,6 +142,7 @@ class SamplerController(QObject):
         self._pending_generic_send = None
         self._rename_after_send = None
         self._pre_send_names = []
+        self._awaiting_sample_info = False
         self._receiving = False
         self._receive_queue = []
         self._receive_header_info = None
@@ -190,7 +214,11 @@ class SamplerController(QObject):
             elif function_code == 0x0B:
                 # SDATA response - either the reply to our own RSDATA request while receiving sample
                 # or something we're not expecting rn
-                if self._receiving and self._receive_header_info is None:
+                if self._awaiting_sample_info:
+                    self._awaiting_sample_info = False
+                    info = akai_sysex.parse_sdata_response(data_bytes)
+                    self.sample_info_received.emit(info)
+                elif self._receiving and self._receive_header_info is None:
                     self._on_receive_sdata_header(data_bytes)
                 else:
                     self.status_changed.emit(
@@ -797,6 +825,9 @@ class SamplerController(QObject):
             or self._awaiting_count_for_queue
             or self._awaiting_pre_send_slist
             or self._awaiting_post_send_slist_for_rename
+            or self._receiving
+            or bool(self._receive_queue)
+            or self._awaiting_sample_info
         )
         if not in_progrss:
             return
@@ -826,6 +857,7 @@ class SamplerController(QObject):
         self._pending_generic_send = None
         self._rename_after_send = None
         self._pre_send_names = []
+        self._awaiting_sample_info = False
 
         was_receiving = self._receiving or bool(self._receive_queue)
         self._receiving = False

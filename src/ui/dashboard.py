@@ -19,6 +19,7 @@ from core import sds_encoder
 from ui.settings_dialog import MidiSettingsDialog
 from ui.drop_list_widget import DropListWidget
 from ui.sample_settings_dialog import SampleSettingsDialog
+from ui.sample_info_dialog import SampleInfoDialog
 from ui.ascii_logo import LOGO
 
 SETTINGS_ROLE = Qt.ItemDataRole.UserRole + 1
@@ -39,6 +40,9 @@ class TransferDashboard(QWidget):
         self.sampler_controller.sample_received.connect(self.on_sample_received)
         self.sampler_controller.receive_finished.connect(self.on_receive_finished)
         self.sampler_controller.receive_progress.connect(self.on_receive_progress)
+        self.sampler_controller.sample_info_received.connect(
+            self.on_sample_info_received
+        )
 
         # tracks queue row's name edit field status
         self._active_edit_field = None
@@ -558,6 +562,12 @@ class TransferDashboard(QWidget):
             )
         )
 
+        btn_edit.clicked.connect(
+            lambda checked=False, num=sample_number: (
+                self.sampler_controller.request_sample_info(num)
+            )
+        )
+
         # assemble row layout horizontally
         row_layout.addWidget(checkbox, stretch=1)
         row_layout.addWidget(btn_edit)
@@ -566,6 +576,13 @@ class TransferDashboard(QWidget):
         # inject canvas widget into list row framework
         item.setSizeHint(row_widget.sizeHint())
         self.list_hardware.setItemWidget(item, row_widget)
+
+    def on_sample_info_received(self, info):
+        dialog = SampleInfoDialog(self, info)
+        if dialog.exec():
+            new_name = dialog.get_new_name()
+            if new_name and new_name != info["name"]:
+                self.sampler_controller.rename_sample(info["sample_number"], new_name)
 
     def confirm_and_delete_sample(self, name, sample_number):
         reply = QMessageBox.question(

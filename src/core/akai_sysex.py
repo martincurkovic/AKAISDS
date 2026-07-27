@@ -144,9 +144,9 @@ def build_rspack_request(
 
 def parse_sdata_response(data_bytes):
     # decode incoming SDATA (0x0B) response
-    # returns sample_number, name, sample_length, sample_rate
+    # returns sample_number, name, sample_length, sample_rate, root_key, detune
     # bit depth is NOT an explicit field in this structure:
-    # the whole S1000/S2000/S3000 family always store sample data internally as 16 bit
+    # the whole S1000/S2000/S3000 family ALWAYS store sample data internally as 16 bit
     sample_number = (data_bytes[4] & 0x7F) | ((data_bytes[5] & 0x7F) << 7)
     body_nibbles = data_bytes[6:]
 
@@ -170,6 +170,12 @@ def parse_sdata_response(data_bytes):
         "bit_depth": 16,  # fixed - see docstring
         "sample_length": _le_dword(raw, 26),
         "sample_rate": _le_word(raw, 138),
+        "root_key": raw[
+            2
+        ],  # original_pitch, same offset build_sample_header_block writes to
+        "detune": decode_tuning_offset(
+            raw[20:22]
+        ),  # STUNO - semitone offset, eg 0.5 = half semitone sharp
     }
 
 
@@ -260,6 +266,15 @@ def encode_tuning_offset(semitone_offset):
     raw = round(semitone_offset * 256)
     raw &= 0xFFFF  # wrap negative values into 16 bit two's complement
     return _le_word(raw)
+
+
+def decode_tuning_offset(byte_pair):
+    # basically the exact opposite to encode_tuning_offset
+    # semitone_offset
+    raw = byte_pair[0] | (byte_pair[1] << 8)
+    if raw & 0x8000:
+        raw -= 0x10000  # sign-extend from 16 bit two's complement
+    return raw / 256
 
 
 def build_sample_header_block(
