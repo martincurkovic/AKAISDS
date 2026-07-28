@@ -41,7 +41,7 @@ class MidiSettingsDialog(QDialog):
         loopback_note = QLabel(
             "\nTo test a MIDI interface's SysEx reliability:\n"
             "Connect a cable from its MIDI OUT port back into\nits own MIDI IN port.\n\n"
-            "Select the ports above and then run the test \n(may take 5-10 seconds to complete)."
+            "Select the ports above and then run the test\n(may take 5-20 seconds to complete)."
         )
         layout.addRow(loopback_note)
 
