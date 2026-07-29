@@ -18,6 +18,10 @@ please check the table below for a list of tested hardware.
 |  MIDIPLUS MIDI 2x2 |  ✅* |  ？ |  ？ |  Max SysEx length = 256 bytes |
 |   PreSonus Studio 26  |  ✅ |  ？ |  ？ |   |
 
+Currently only closed loop transmission is supported (ie, ACK/NAK handshakes
+are required by the receiving hardware). Support for open loop communication
+(ie, no handshaking) is planned and currently in progress.
+
 Written in Python using Qt6 and mido.
 
 ---
