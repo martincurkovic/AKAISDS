@@ -7,6 +7,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QMessageBox,
     QPushButton,
+    QSpinBox,
 )
 from core import app_config
 from ui.qt_helpers import widen_popup_to_fit_items
@@ -18,10 +19,11 @@ _LOOPBACK_RECEIVE_TIMEOUT = 1.5  # seconds to wait for each message to return
 
 
 class MidiSettingsDialog(QDialog):
-    def __init__(self, midi_manager, parent=None):
+    def __init__(self, midi_manager, sampler_controller, parent=None):
         super().__init__(parent)
         self.setWindowTitle("MIDI Settings")
         self.midi_manager = midi_manager
+        self.sampler_controller = sampler_controller
 
         layout = QFormLayout(self)
 
@@ -37,6 +39,19 @@ class MidiSettingsDialog(QDialog):
 
         layout.addRow(QLabel("MIDI Input:"), self.combo_input)
         layout.addRow(QLabel("MIDI Output:"), self.combo_output)
+
+        # SysEx device ID (0-127) - NOT THE SAME AS MIDI CHANNELS 1-16!!!
+        # Set for daisy chained devices to avoid message conflicts
+        self.spin_channel = QSpinBox()
+        self.spin_channel.setRange(0, 127)
+        self.spin_channel.setValue(self.sampler_controller.channel)
+        self.spin_channel.setToolTip(
+            "The SysEx device ID your hardware is set to (0-127)\n"
+            "Only matters if you have more than one sampler on the\n"
+            "same MIDI chain. Note that some hardware may report\n"
+            "SysEx channels to be 1-128 instead of 0-127."
+        )
+        layout.addRow(QLabel("Device ID (SysEx channel 0-127):"), self.spin_channel)
 
         loopback_note = QLabel(
             "\nTo test a MIDI interface's SysEx reliability:\n"
@@ -81,12 +96,15 @@ class MidiSettingsDialog(QDialog):
     def _apply_and_close(self):
         input_name = self.combo_input.currentData()
         output_name = self.combo_output.currentData()
+        channel = self.spin_channel.value()
 
         self.midi_manager.open_input(input_name)
         self.midi_manager.open_output(output_name)
+        self.sampler_controller.set_channel(channel)
 
         # remember these for next launch
         app_config.save_ports(input_name, output_name)
+        app_config.save_channel(channel)
 
         self.accept()
 

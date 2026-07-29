@@ -68,8 +68,8 @@ def parse_slist_response(data_bytes):
     return count, sample_names
 
 
-def build_slist_request():
-    return [0x47, 0x00, 0x04, 0x48]
+def build_slist_request(channel=0):
+    return [0x47, channel & 0x7F, 0x04, 0x48]
 
 
 REVERSE_CHAR_MAP = {v: k for k, v in AKAI_CHAR_MAP.items()}

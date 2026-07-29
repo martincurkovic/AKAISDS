@@ -28,6 +28,7 @@ class ApplicationWindow(QMainWindow):
 
         # reconnect to whatever MIDI ports were used last time, if still exist
         self._restore_saved_ports()
+        self.sampler_controller.set_channel(app_config.get_saved_channel())
 
     def _restore_saved_ports(self):
         input_name, output_name = app_config.get_saved_ports()

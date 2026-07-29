@@ -21,6 +21,13 @@ class SamplerController(QObject):
         self.midi_manager.sysex_received.connect(self.on_sysex_received)
         self._refresh_is_silent = False
 
+        # global SysEx device ID/channel (0-127) - NOT THE SAME AS MIDI CHANNELS (1-16)!!!
+        # defaults to 0, otherwise it can be set manually for a daisy-chained setup
+        self.channel = 0
+
+    def set_channel(self, channel):
+        self.channel = channel & 0x7F
+
         # state for an in-progress send - lets us dispatch one packet at a time
         # via QTtimer instead of blocking the GUI thread like a slow person walking in the middle of the aisles at Kmart
         self._send_queue = []
@@ -79,14 +86,18 @@ class SamplerController(QObject):
         if not silent:
             self.status_changed.emit("Requesting sample list...")
 
-    def delete_sample(self, sample_number, channel=0):
+    def delete_sample(self, sample_number, channel=None):
+        if channel is None:
+            channel = self.channel
         # delete the selected sample (DELS command in akai documentation)
         request = akai_sysex.build_dels_request(sample_number, channel)
         self.midi_manager.send_sysex(request)
         self.status_changed.emit(f"Deleting sample {sample_number}...")
         QTimer.singleShot(300, self.refresh_sample_list)
 
-    def rename_sample(self, sample_number, new_name, channel=0):
+    def rename_sample(self, sample_number, new_name, channel=None):
+        if channel is None:
+            channel = self.channel
         # rename existing sample WITHOUT touching its audio data
         request = akai_sysex.build_rename_sample_request(
             sample_number, new_name, channel
@@ -97,7 +108,9 @@ class SamplerController(QObject):
         )
         QTimer.singleShot(300, self.refresh_sample_list)
 
-    def request_sample_info(self, sample_number, channel=0):
+    def request_sample_info(self, sample_number, channel=None):
+        if channel is None:
+            channel = self.channel
         # fetch sample's header info (name, sample_rate, length, root_key, detune)
         # for display purposes
         if (
@@ -119,7 +132,7 @@ class SamplerController(QObject):
         self.status_changed.emit(f"Requesting info for sample {sample_number}...")
 
     def _send_rslist_request(self):
-        request = akai_sysex.build_slist_request()
+        request = akai_sysex.build_slist_request(self.channel)
         self.midi_manager.send_sysex(request)
 
     def on_sysex_received(self, data_bytes):
@@ -313,10 +326,12 @@ class SamplerController(QObject):
         self,
         filepath,
         sample_number=0,
-        channel=0,
+        channel=None,
         effective_bits=16,
         target_sample_rate=None,
     ):
+        if channel is None:
+            channel = self.channel
         samples, framerate = sds_encoder.read_wav_samples(filepath)
         sample_name = os.path.splitext(os.path.basename(filepath))[0]
 
@@ -330,10 +345,12 @@ class SamplerController(QObject):
         filepath,
         sample_number_left,
         sample_number_right,
-        channel=0,
+        channel=None,
         effective_bits=16,
         target_sample_rate=None,
     ):
+        if channel is None:
+            channel = self.channel
         channels, framerate = sds_encoder.read_wav_channels(filepath)
         if len(channels) != 2:
             self.status_changed.emit(
@@ -367,8 +384,10 @@ class SamplerController(QObject):
         )
 
     def send_sample_file_generic(
-        self, filepath, sample_number=0, channel=0, bit_depth=16
+        self, filepath, sample_number=0, channel=None, bit_depth=16
     ):
+        if channel is None:
+            channel = self.channel
         # send sample using generic usiversal midi sds protocol (NOT THE AKAI ONE)
         # this actually sends samples at a lower bit depth across less bytes (ie, 12 bit samples sent across 2 midi bytes, not 3 like a 16 bit sample)
 
@@ -386,8 +405,10 @@ class SamplerController(QObject):
         )
 
     def send_sample_file_generic_and_rename(
-        self, filepath, new_name, channel=0, bit_depth=16
+        self, filepath, new_name, channel=None, bit_depth=16
     ):
+        if channel is None:
+            channel = self.channel
         # send via generic sds then rename it correctly using the diff sample slist logic
 
         if (
@@ -466,7 +487,7 @@ class SamplerController(QObject):
         self._pending_generic_send = (samples, framerate, channel, bit_depth)
         self._rename_after_send = (new_name, channel)
         self._awaiting_pre_send_slist = True
-        self.status_changed.emit("Checking current samples before sengin...")
+        self.status_changed.emit("Checking current samples before sending...")
         self._send_rslist_request()
 
     def _send_generic_packets(
@@ -490,7 +511,9 @@ class SamplerController(QObject):
     # FILE QUEUE - drag and drop batch sending, per file settings
     # ---------------------------------------------------------
 
-    def send_file_queue(self, file_entries, channel=0):
+    def send_file_queue(self, file_entries, channel=None):
+        if channel is None:
+            channel = self.channel
         # send batch of local wav files, one after another without overwriting anything already on the hardware
         # file_entries: list of dicts, each shaped like:
         #    {
@@ -643,7 +666,9 @@ class SamplerController(QObject):
     # RECEIVING - download samples from hardware and save as WAV files
     # -----------------------------------------------------------------------------
 
-    def receive_samples(self, sample_requests, channel=0):
+    def receive_samples(self, sample_requests, channel=None):
+        if channel is None:
+            channel = self.channel
         # download batch of samples from hardware, one after another, saving each as wav file
         # sample_requests = list of (sample_number, save_path) tuples
         if not sample_requests:

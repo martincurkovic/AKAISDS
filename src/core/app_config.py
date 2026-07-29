@@ -36,3 +36,14 @@ def save_ports(input_name, output_name):
     config["midi_input_port"] = input_name
     config["midi_output_port"] = output_name
     save_config(config)
+
+
+def get_saved_channel():
+    config = load_config()
+    return config.get("midi_channel", 0)
+
+
+def save_channel(channel):
+    config = load_config()
+    config["midi_channel"] = channel
+    save_config(config)

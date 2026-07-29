@@ -227,7 +227,7 @@ class TransferDashboard(QWidget):
         master_layout.addWidget(self.status_bar)
 
     def open_settings_dialog(self):
-        dialog = MidiSettingsDialog(self.midi_manager, self)
+        dialog = MidiSettingsDialog(self.midi_manager, self.sampler_controller, self)
         dialog.exec()
 
     def request_sample_list(self):
