@@ -53,6 +53,23 @@ class MidiSettingsDialog(QDialog):
         )
         layout.addRow(QLabel("Device ID (SysEx channel 0-127):"), self.spin_channel)
 
+        # sampler device type - determines which protocol family gets used for each step
+        # (send, receive, list, delete, rename etc)
+        self.combo_device_type = QComboBox()
+        self.combo_device_type.addItem("Akai Sampler", "akai")
+        self.combo_device_type.addItem("Generic SDS", "generic")
+        idx = self.combo_device_type.findData(self.sampler_controller.device_type)
+        if idx >= 0:
+            self.combo_device_type.setCurrentIndex(idx)
+        self.combo_device_type.setToolTip(
+            "Akai Sampler unlocks browsing/renaming/deleting samples on\n"
+            "the hardware (Akai-specific extension to the SDS standard).\n"
+            "Generic SDS used only the universal standard - sending and\n"
+            "receiving still work, but by sample number only, with no way\n"
+            "to browse, rename or delete what's on the device."
+        )
+        layout.addRow(QLabel("Sampler Type:"), self.combo_device_type)
+
         loopback_note = QLabel(
             "\nTo test a MIDI interface's SysEx reliability:\n"
             "Connect a cable from its MIDI OUT port back into\nits own MIDI IN port.\n\n"
@@ -97,14 +114,17 @@ class MidiSettingsDialog(QDialog):
         input_name = self.combo_input.currentData()
         output_name = self.combo_output.currentData()
         channel = self.spin_channel.value()
+        device_type = self.combo_device_type.currentData()
 
         self.midi_manager.open_input(input_name)
         self.midi_manager.open_output(output_name)
         self.sampler_controller.set_channel(channel)
+        self.sampler_controller.set_device_type(device_type)
 
         # remember these for next launch
         app_config.save_ports(input_name, output_name)
         app_config.save_channel(channel)
+        app_config.save_device_type(device_type)
 
         self.accept()
 
@@ -190,7 +210,7 @@ class MidiSettingsDialog(QDialog):
             min(len(expected_data), len(received_data)),
         )
         return False, (
-            f"corruped - sent {len(expected_data)} bytes, got {len(received_data)} "
+            f"corrupted - sent {len(expected_data)} bytes, got {len(received_data)} "
             f"back, first mismatch at byte {mismatch_at}"
         )
 

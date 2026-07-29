@@ -47,3 +47,16 @@ def save_channel(channel):
     config = load_config()
     config["midi_channel"] = channel
     save_config(config)
+
+
+def get_saved_device_type():
+    # returns the saved sampler device type (eg, akai, generic, etc)
+    # defaults to akai if nothing has been saved yet
+    config = load_config()
+    return config.get("device_type", "akai")
+
+
+def save_device_type(device_type):
+    config = load_config()
+    config["device_type"] = device_type
+    save_config(config)

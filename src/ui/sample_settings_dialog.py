@@ -7,6 +7,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QLayout,
+    QSpinBox,
 )
 from ui.qt_helpers import widen_popup_to_fit_items
 
@@ -40,6 +41,8 @@ class SampleSettingsDialog(QDialog):
         sample_rate=None,
         mono=False,
         show_mono=True,
+        show_starting_slot=False,
+        starting_sample_number=None,
     ):
         super().__init__(parent)
         self.setWindowTitle(title)
@@ -84,6 +87,22 @@ class SampleSettingsDialog(QDialog):
             )
             layout.addRow(self.mono_checkbox)
 
+        self.starting_slot_spin = None
+        if show_starting_slot:
+            self.starting_slot_spin = QSpinBox()
+            self.starting_slot_spin.setRange(-1, 127)
+            self.starting_slot_spin.setSpecialValueText("(not set)")
+            self.starting_slot_spin.setValue(
+                -1 if starting_sample_number is None else starting_sample_number
+            )
+            self.starting_slot_spin.setToolTip(
+                "Required for a Generic SDS device - it has no way to\n"
+                "auto-detect which slots are already in use, unlike an\n"
+                "Akai. Ignored entirely when talking to an Akai sampler,\n"
+                "which figures this out on its own."
+            )
+            layout.addRow(QLabel("Starting sample number:"), self.starting_slot_spin)
+
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
         )
@@ -91,16 +110,23 @@ class SampleSettingsDialog(QDialog):
         buttons.rejected.connect(self.reject)
         layout.addRow(buttons)
 
-        # fixed window size - computed form actual content rather than hardcoded value
+        # fixed window size - computed from actual content rather than hardcoded value
         layout.setSizeConstraint(QLayout.SizeConstraint.SetFixedSize)
 
     def get_settings(self):
         # returns a dict {"name": str or None, "bit_depth": int,
         # "sample_rate": int or  None, "mono": bool}
         # "name" is None if the dialog was created with show_name-False
+        # starting_sample_number is None if dialog was created with show_starting_slot=False
+        # or if it was was left at (not set)
+        starting_sample_number = None
+        if self.starting_slot_spin is not None:
+            value = self.starting_slot_spin.value()
+            starting_sample_number = None if value == -1 else value
         return {
             "name": self.name_field.text().strip() if self.name_field else None,
             "bit_depth": self.bit_depth_combo.currentData(),
             "sample_rate": self.rate_combo.currentData(),
             "mono": self.mono_checkbox.isChecked() if self.mono_checkbox else False,
+            "starting_sample_number": starting_sample_number,
         }

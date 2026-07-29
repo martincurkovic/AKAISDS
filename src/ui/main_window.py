@@ -15,6 +15,10 @@ class ApplicationWindow(QMainWindow):
         self.midi_manager = MidiManager()
         self.sampler_controller = SamplerController(self.midi_manager)
 
+        # restore saved channel/device type BEFORE building dashboard so the UI will be correct
+        self.sampler_controller.set_channel(app_config.get_saved_channel())
+        self.sampler_controller.set_device_type(app_config.get_saved_device_type())
+
         # TEMPORARY DEBUG WIRING - print EVERY status handshake message to console so we can debug responses from the sampler
         self.sampler_controller.status_changed.connect(print)
 
@@ -28,7 +32,6 @@ class ApplicationWindow(QMainWindow):
 
         # reconnect to whatever MIDI ports were used last time, if still exist
         self._restore_saved_ports()
-        self.sampler_controller.set_channel(app_config.get_saved_channel())
 
     def _restore_saved_ports(self):
         input_name, output_name = app_config.get_saved_ports()

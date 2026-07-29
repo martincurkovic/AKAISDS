@@ -3,6 +3,7 @@ from PySide6.QtWidgets import (
     QCheckBox,
     QFileDialog,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
     QLineEdit,
     QListWidgetItem,
@@ -69,6 +70,7 @@ class TransferDashboard(QWidget):
         self._global_bit_depth = 16
         self._global_sample_rate = None
         self._global_mono = False
+        self._global_starting_sample_number = None  # required for generic SDS sends
 
         # top level layout (vertical architecture)
         # everything will stack cleanly top to bottom
@@ -147,6 +149,16 @@ class TransferDashboard(QWidget):
         self.list_hardware.setSelectionMode(DropListWidget.SelectionMode.NoSelection)
         self.list_hardware.setAcceptDrops(False)
 
+        # placeholder overlay - reuses the same mechanism as file queue's "drag files here" placeholder
+        self.empty_hardware_label = QLabel("", self.list_hardware.viewport())
+        self.empty_hardware_label.setObjectName("emptyQueueLabel")
+        self.empty_hardware_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.empty_hardware_label.setWordWrap(True)
+        self.empty_hardware_label.setAttribute(
+            Qt.WidgetAttribute.WA_TransparentForMouseEvents
+        )
+        self.list_hardware.set_overlay_widget(self.empty_hardware_label)
+
         # HEADER ROW - title + refresh button share one line
         hardware_header = QHBoxLayout()
         hardware_header.addWidget(lbl_hardware, stretch=1)
@@ -188,7 +200,7 @@ class TransferDashboard(QWidget):
         self.btn_cancel.setEnabled(False)
 
         self.btn_send.clicked.connect(self.send_queued_samples)
-        self.btn_receive.clicked.connect(self.receive_selected_samples)
+        self.btn_receive.clicked.connect(self.on_receive_clicked)
         self.btn_cancel.clicked.connect(self.cancel_transfer)
 
         # Add stretch spacer to push both control columns cleanly to the bottom of the window
@@ -226,9 +238,13 @@ class TransferDashboard(QWidget):
         master_layout.addWidget(self.progress_bar_overall)
         master_layout.addWidget(self.status_bar)
 
+        # reflect whatever device type was ALREADY restored before the dashboard was constructed
+        self._update_device_type_ui()
+
     def open_settings_dialog(self):
         dialog = MidiSettingsDialog(self.midi_manager, self.sampler_controller, self)
         dialog.exec()
+        self._update_device_type_ui()
 
     def request_sample_list(self):
         self.sampler_controller.refresh_sample_list()
@@ -242,6 +258,7 @@ class TransferDashboard(QWidget):
         for sample_number, name in enumerate(names):
             self.create_hardware_row(name, sample_number)
         self.btn_select_all.setText("Select All")
+        self._update_empty_hardware_placeholder()
 
     def on_files_dropped(self, paths):
         added = 0
@@ -263,6 +280,32 @@ class TransferDashboard(QWidget):
     def _update_empty_queue_placeholder(self):
         self.empty_queue_label.setVisible(self.list_local.count() == 0)
 
+    def _update_empty_hardware_placeholder(self):
+        if self.sampler_controller.device_type == "akai":
+            self.empty_hardware_label.setText(
+                "No samples loaded - click Refresh to check"
+            )
+            self.empty_hardware_label.setVisible(self.list_hardware.count() == 0)
+
+    def _update_device_type_ui(self):
+        is_generic = self.sampler_controller.device_type == "generic"
+
+        self.list_hardware.setEnabled(not is_generic)
+        self.btn_select_all.setEnabled(not is_generic)
+        self.btn_delete_selected.setEnabled(not is_generic)
+        self.btn_refresh.setEnabled(not is_generic)
+
+        if is_generic:
+            self.list_hardware.clear()
+            self.empty_hardware_label.setText(
+                "Not available via Generic SDS - browsing, renaming, and\n"
+                "deleting samples relies on proprietary extensions to the\n"
+                "SDS standard, which a generic device cannot support."
+            )
+            self.empty_hardware_label.setVisible(True)
+        else:
+            self._update_empty_hardware_placeholder()
+
     def open_global_settings_dialog(self):
         dialog = SampleSettingsDialog(
             self,
@@ -271,12 +314,17 @@ class TransferDashboard(QWidget):
             bit_depth=self._global_bit_depth,
             sample_rate=self._global_sample_rate,
             mono=self._global_mono,
+            show_starting_slot=True,
+            starting_sample_number=self._global_starting_sample_number,
         )
-        if dialog.exec():
-            settings = dialog.get_settings()
-            self._global_bit_depth = settings["bit_depth"]
-            self._global_sample_rate = settings["sample_rate"]
-            self._global_mono = settings["mono"]
+        if not dialog.exec():
+            return
+
+        settings = dialog.get_settings()
+        self._global_bit_depth = settings["bit_depth"]
+        self._global_sample_rate = settings["sample_rate"]
+        self._global_mono = settings["mono"]
+        self._global_starting_sample_number = settings["starting_sample_number"]
 
         # bulk apply to every file in the queue (per file names are left untouched)
         # this dialog doesnt have a name field
@@ -299,7 +347,7 @@ class TransferDashboard(QWidget):
             )
         else:
             self.status_bar.showMessage(
-                "Gloabl settings saved - will apply to files added from now on"
+                "Global settings saved - will apply to files added from now on"
             )
 
     def open_edit_dialog(self, item, edit_field):
@@ -361,7 +409,9 @@ class TransferDashboard(QWidget):
             )
             return
 
-        self.sampler_controller.send_file_queue(entries)
+        self.sampler_controller.send_file_queue(
+            entries, starting_sample_number=self._global_starting_sample_number
+        )
 
         self.btn_send.setEnabled(False)
         self.btn_cancel.setEnabled(True)
@@ -392,6 +442,46 @@ class TransferDashboard(QWidget):
 
     def cancel_transfer(self):
         self.sampler_controller.cancel_transfer()
+
+    def on_receive_clicked(self):
+        if self.sampler_controller.device_type == "generic":
+            self.receive_sample_by_number_dialog()
+        else:
+            self.receive_selected_samples()
+
+    def receive_sample_by_number_dialog(self):
+        # generic SDS path
+        # no way to browse device's memory, so user needs to enter sample number to receive
+        sample_number, ok = QInputDialog.getInt(
+            self,
+            "Receive Sample",
+            "Sample number to receive:",
+            value=0,
+            minValue=0,
+            maxValue=16383,
+        )
+        if not ok:
+            return
+
+        save_path, _ = QFileDialog.getSaveFileName(
+            self, "Save Sample As", f"sample_{sample_number}.wav", "WAV Files (*.wav)"
+        )
+        if not save_path:
+            return
+
+        self.sampler_controller.receive_sample_generic(sample_number, save_path)
+
+        self.btn_send.setEnabled(False)
+        self.btn_receive.setEnabled(False)
+        self.btn_cancel.setEnabled(True)
+
+        # single item "batch"
+        self._queue_total = 1
+        self._queue_completed = 0
+        self.progress_bar_current_smpl.setValue(0)
+        self.progress_bar_overall.setValue(0)
+        self.progress_bar_current_smpl.setVisible(True)
+        self.progress_bar_overall.setVisible(False)
 
     def receive_selected_samples(self):
         selected = []

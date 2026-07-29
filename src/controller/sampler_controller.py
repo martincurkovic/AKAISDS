@@ -24,9 +24,13 @@ class SamplerController(QObject):
         # global SysEx device ID/channel (0-127) - NOT THE SAME AS MIDI CHANNELS (1-16)!!!
         # defaults to 0, otherwise it can be set manually for a daisy-chained setup
         self.channel = 0
+        self.device_type = "akai"
 
     def set_channel(self, channel):
         self.channel = channel & 0x7F
+
+    def set_device_type(self, device_type):
+        self.device_type = device_type
 
         # state for an in-progress send - lets us dispatch one packet at a time
         # via QTtimer instead of blocking the GUI thread like a slow person walking in the middle of the aisles at Kmart
@@ -473,8 +477,12 @@ class SamplerController(QObject):
     def _start_unit(
         self, name, samples, framerate, channel, bit_depth, sample_number=None
     ):
+        if self.device_type == "generic":
+            self._send_generic_packets(
+                samples, framerate, sample_number or 0, channel, bit_depth
+            )
         # send one sample, choosing Akai SDATA (bit depth = 16, needs a real sample number) or generic SDS + auto-rename (bit depth != 16, real slot determined automaticaly)
-        if bit_depth == 16:
+        elif bit_depth == 16:
             self._start_send(name, samples, framerate, sample_number, channel)
         else:
             self._begin_generic_with_rename(
@@ -511,7 +519,7 @@ class SamplerController(QObject):
     # FILE QUEUE - drag and drop batch sending, per file settings
     # ---------------------------------------------------------
 
-    def send_file_queue(self, file_entries, channel=None):
+    def send_file_queue(self, file_entries, channel=None, starting_sample_number=None):
         if channel is None:
             channel = self.channel
         # send batch of local wav files, one after another without overwriting anything already on the hardware
@@ -545,17 +553,28 @@ class SamplerController(QObject):
                 "A transfer is already in progress - please wait for it to finish"
             )
             return
+        if self.device_type == "generic" and starting_sample_number is None:
+            self.status_changed.emit(
+                "Set a starting sample number in Transmission Settings before "
+                "sending - generic SDS devices have no way to auto-detect one."
+            )
+            return
 
         self._file_queue = list(file_entries)
         self._file_queue_total = len(file_entries)
         self._file_queue_skipped = 0
         self._file_queue_channel = channel
-        self._awaiting_count_for_queue = True
 
-        self.status_changed.emit(
-            "Checking existing samples to choose a starting slot..."
-        )
-        self._send_rslist_request()
+        if self.device_type == "generic":
+            # no SLIST to check - go straight to user defined slot number
+            self._next_file_sample_number = starting_sample_number
+            self._send_next_queued_file()
+        else:
+            self._awaiting_count_for_queue = True
+            self.status_changed.emit(
+                "Checking existing samples to choose a starting slot..."
+            )
+            self._send_rslist_request()
 
     def _send_next_queued_file(self):
         try:
@@ -665,6 +684,37 @@ class SamplerController(QObject):
     # ----------------------------------------------------------------------------
     # RECEIVING - download samples from hardware and save as WAV files
     # -----------------------------------------------------------------------------
+
+    def receive_sample_generic(self, sample_number, save_path, channel=None):
+        # receive ONE sample from a generic SDS device
+        # the user must specify a sample number manually for generic SDS, no way to obtain a file list in generic SDS
+        # requests a sample dump from the device as per SDS protocol
+        if channel is None:
+            channel = self.channel
+
+        if (
+            self._send_queue
+            or self._stereo_queue
+            or self._file_queue
+            or self._receiving
+            or self._receive_queue
+            or self._awaiting_sample_info
+        ):
+            self.status_changed.emit(
+                "A transfer is already in progress - please wait for it to finish"
+            )
+            return
+
+        self._receiving = True
+        self._receive_channel = channel
+        self._receive_sample_number = sample_number
+        self._receive_save_path = save_path
+        self._receive_header_info = None
+        self._receive_packets = []
+
+        request = sds_encoder.build_dump_request(sample_number, channel)
+        self.midi_manager.send_sysex(request)
+        self.status_changed.emit(f"Requesting sample {sample_number} (generic SDS)...")
 
     def receive_samples(self, sample_requests, channel=None):
         if channel is None:
