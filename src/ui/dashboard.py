@@ -409,9 +409,11 @@ class TransferDashboard(QWidget):
             )
             return
 
-        self.sampler_controller.send_file_queue(
+        started = self.sampler_controller.send_file_queue(
             entries, starting_sample_number=self._global_starting_sample_number
         )
+        if not started:
+            return
 
         self.btn_send.setEnabled(False)
         self.btn_cancel.setEnabled(True)
@@ -463,8 +465,11 @@ class TransferDashboard(QWidget):
         if not ok:
             return
 
+        default_path = os.path.join(
+            os.path.expanduser("~"), f"sample_{sample_number}.wav"
+        )
         save_path, _ = QFileDialog.getSaveFileName(
-            self, "Save Sample As", f"sample_{sample_number}.wav", "WAV Files (*.wav)"
+            self, "Save Sample As", default_path, "WAV Files (*.wav)"
         )
         if not save_path:
             return
@@ -500,7 +505,7 @@ class TransferDashboard(QWidget):
             return
 
         save_dir = QFileDialog.getExistingDirectory(
-            self, "Choose folder to save received samples"
+            self, "Choose folder to save received samples", os.path.expanduser("~")
         )
         if not save_dir:
             return

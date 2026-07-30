@@ -85,6 +85,8 @@ class SamplerController(QObject):
         self._current_file_total_legs = 1
 
     def refresh_sample_list(self, silent=False):
+        if self.device_type == "generic":
+            return
         self._refresh_is_silent = silent
         self._send_rslist_request()
         if not silent:
@@ -520,6 +522,7 @@ class SamplerController(QObject):
     # ---------------------------------------------------------
 
     def send_file_queue(self, file_entries, channel=None, starting_sample_number=None):
+        print()
         if channel is None:
             channel = self.channel
         # send batch of local wav files, one after another without overwriting anything already on the hardware
@@ -542,7 +545,7 @@ class SamplerController(QObject):
         # that number entirely (the Akai always reallocates for generic
         # SDS) and get renamed correctly afterward instead.
         if not file_entries:
-            return
+            return False
         if (
             self._send_queue
             or self._stereo_queue
@@ -552,13 +555,13 @@ class SamplerController(QObject):
             self.status_changed.emit(
                 "A transfer is already in progress - please wait for it to finish"
             )
-            return
+            return False
         if self.device_type == "generic" and starting_sample_number is None:
             self.status_changed.emit(
                 "Set a starting sample number in Transmission Settings before "
                 "sending - generic SDS devices have no way to auto-detect one."
             )
-            return
+            return False
 
         self._file_queue = list(file_entries)
         self._file_queue_total = len(file_entries)
@@ -575,6 +578,8 @@ class SamplerController(QObject):
                 "Checking existing samples to choose a starting slot..."
             )
             self._send_rslist_request()
+
+        return True
 
     def _send_next_queued_file(self):
         try:
@@ -773,12 +778,6 @@ class SamplerController(QObject):
         words_per_packet = sds_encoder.DATA_BYTES_PER_PACKET // bytes_per_word
         self._receive_expected_packets = -(-info["sample_length"] // words_per_packet)
 
-        print(
-            f"[DEBUG] SDATA header: name={info['name']!r} bit_depth={info['bit_depth']} "
-            f"sample_rate={info['sample_rate']} sample_length={info['sample_length']} "
-            f"expected_packets={self._receive_expected_packets}"
-        )
-
         self.status_changed.emit(
             f"Requesting audio for '{info['name']}': {info['sample_length']} samples "
             f"({self._receive_expected_packets} packets expected)..."
@@ -804,12 +803,6 @@ class SamplerController(QObject):
         bytes_per_word = (info["bit_depth"] + 6) // 7
         words_per_packet = sds_encoder.DATA_BYTES_PER_PACKET // bytes_per_word
         self._receive_expected_packets = -(-info["sample_length"] // words_per_packet)
-
-        print(
-            f"[DEBUG] Header received: sample_number={info['sample_number']} "
-            f"bit_depth={info['bit_depth']} sample_rate={info['sample_rate']} "
-            f"sample_length={info['sample_length']} expected_packets={self._receive_expected_packets}"
-        )
 
         self.status_changed.emit(
             f"Receiving sample {info['sample_number']}: {info['bit_depth']}-bit, "
@@ -837,17 +830,12 @@ class SamplerController(QObject):
             self.status_changed.emit(
                 f"Checksum error on packet {packet_num} - requesting resend"
             )
-            print(f"[DEBUG] Checksum FAILED on packet {packet_num}")
             self.midi_manager.send_sysex(
                 [0x7E, self._receive_channel & 0x7F, sds_encoder.NAK, packet_num]
             )
             return
 
         self._receive_packets.append(bytes(payload))
-        print(
-            f"[DEBUG] Packet {packet_num} OK - {len(payload)} bytes "
-            f"({len(self._receive_packets)}/{self._receive_expected_packets} packets so far)"
-        )
         self.midi_manager.send_sysex(
             [0x7E, self._receive_channel & 0x7F, sds_encoder.ACK, packet_num]
         )
@@ -862,9 +850,6 @@ class SamplerController(QObject):
         )
 
         if len(self._receive_packets) >= self._receive_expected_packets:
-            print(
-                f"[DEBUG] Reached expected packet count ({self._receive_expected_packets}) - finishing"
-            )
             self._finish_receiving()
 
     def _finish_receiving(self):
@@ -872,10 +857,6 @@ class SamplerController(QObject):
         bytes_per_word = (info["bit_depth"] + 6) // 7
 
         all_bytes = b"".join(self._receive_packets)
-        print(
-            f"[DEBUG] Finishing: {len(self._receive_packets)} packets accumulated, "
-            f"{len(all_bytes)} total raw bytes, expecting {info['sample_length']} samples"
-        )
 
         samples = []
         for i in range(0, len(all_bytes), bytes_per_word):
@@ -883,10 +864,6 @@ class SamplerController(QObject):
             if len(chunk) < bytes_per_word:
                 break  # trailing zero padding on final packet
             samples.append(sds_encoder.sds_bytes_to_sample(chunk, info["bit_depth"]))
-
-        print(
-            f"[DEBUG] Decoded {len(samples)} raw sample words before trimming to sample_length"
-        )
 
         samples = samples[
             : info["sample_length"]
