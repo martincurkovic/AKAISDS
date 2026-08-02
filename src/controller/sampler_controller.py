@@ -26,6 +26,11 @@ class SamplerController(QObject):
         self.channel = 0
         self.device_type = "akai"
 
+        self._open_loop_delay_ms = 40  # pacing for open loop sending
+        self._handshake_timeout_ms = 500  # how long to wait for a reponse before switching to open-loop transmission
+        self._no_response_detected = False
+        self._packet_send_generation = 0
+
     def set_channel(self, channel):
         self.channel = channel & 0x7F
 
@@ -514,6 +519,7 @@ class SamplerController(QObject):
 
         self._send_queue = [header_packet] + data_packets
         self._send_index = 0
+        self._no_response_detected = False
         self._active_channel = channel
         self._active_sample_number = sample_number_hint
 
@@ -977,12 +983,36 @@ class SamplerController(QObject):
             list(packet[1:-1])
         )  # strip F0/F7 wrapper since mido adds these
 
-        if self._is_open_loop():
+        if self._is_open_loop() or self._no_response_detected:
             # no input port - can't wait for ACK because it will never arrive
             # pace packets ourselves using fixed delay (20ms per official MIDI spec)
+            # OR given up waiting for hardware to send a handshake after a fixed timeout
             self._send_index += 1
             self._emit_progress(self._send_index, len(self._send_queue))
-            QTimer.singleShot(40, self._send_current_packet)
+            QTimer.singleShot(self._open_loop_delay_ms, self._send_current_packet)
+        else:
+            # normal ACK driven path but with safety net:
+            # if nothing reponds within documented threshold, fall back to open loop comms
+            self._packet_send_generation += 1
+            expected_generation = self._packet_send_generation
+            QTimer.singleShot(
+                self._handshake_timeout_ms,
+                lambda: self._check_packet_timeout(expected_generation),
+            )
+
+    def _check_packet_timeout(self, expected_generation):
+        if not self._send_queue:
+            return  # transfer already finished or cancelled
+        if self._packet_send_generation != expected_generation:
+            return  # a real reponse has already arrived and move things on - stale timeout, ignore
+
+        # no reponse arrived in time - per spec, assume packet got thru and move past it
+        # ie, switch to open loop comms
+        self.status_changed.emit("No reponse from the sampler - assuming open loop...")
+        self._no_response_detected = True
+        self._send_index += 1
+        self._emit_progress(self._send_index, len(self._send_queue))
+        self._send_current_packet()
 
     def _abort_transfer(self, completed):
         self._send_queue = []
@@ -1060,6 +1090,7 @@ class SamplerController(QObject):
 
         self._send_queue = [sdata_message] + data_packets
         self._send_index = 0
+        self._no_response_detected = False
         self._active_channel = channel
         self._active_sample_number = sample_number
 
