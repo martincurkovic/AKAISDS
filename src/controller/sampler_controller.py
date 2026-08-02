@@ -648,7 +648,7 @@ class SamplerController(QObject):
                 channels[1], framerate, bit_depth, target_sample_rate
             )
 
-            if self.device_type == "generic" or bit_depth == 16:
+            if self.device_type == "generic" or bit_depth == 16 or self._is_open_loop():
                 sample_number_left = self._next_file_sample_number
                 sample_number_right = self._next_file_sample_number + 1
                 self._next_file_sample_number += 2
@@ -685,7 +685,7 @@ class SamplerController(QObject):
                 channels[0], framerate, bit_depth, target_sample_rate
             )
 
-            if self.device_type == "generic" or bit_depth == 16:
+            if self.device_type == "generic" or bit_depth == 16 or self._is_open_loop():
                 sample_number = self._next_file_sample_number
                 self._next_file_sample_number += 1
             else:
