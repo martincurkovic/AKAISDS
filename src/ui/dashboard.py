@@ -309,12 +309,15 @@ class TransferDashboard(QWidget):
     def open_global_settings_dialog(self):
         dialog = SampleSettingsDialog(
             self,
-            title="Global Transmission Settings",
+            title="Transmission Settings",
             show_name=False,
             bit_depth=self._global_bit_depth,
             sample_rate=self._global_sample_rate,
             mono=self._global_mono,
-            show_starting_slot=(self.sampler_controller.device_type == "generic"),
+            show_starting_slot=(
+                self.sampler_controller.device_type == "generic"
+                or self.sampler_controller.is_open_loop()
+            ),
             starting_sample_number=self._global_starting_sample_number,
         )
         if not dialog.exec():

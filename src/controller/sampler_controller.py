@@ -486,6 +486,10 @@ class SamplerController(QObject):
         # send one sample, choosing Akai SDATA (bit depth = 16, needs a real sample number) or generic SDS + auto-rename (bit depth != 16, real slot determined automaticaly)
         elif bit_depth == 16:
             self._start_send(name, samples, framerate, sample_number, channel)
+        elif self._is_open_loop():
+            self._send_generic_packets(
+                samples, framerate, sample_number or 0, channel, bit_depth
+            )
         else:
             self._begin_generic_with_rename(
                 samples, framerate, channel, bit_depth, name
@@ -513,7 +517,12 @@ class SamplerController(QObject):
         self._active_channel = channel
         self._active_sample_number = sample_number_hint
 
-        self.status_changed.emit(f"Sending generic SDS dump ({bit_depth}-bit)...")
+        mode_note = (
+            " (open loop - no MIDI input selected)" if self._is_open_loop() else ""
+        )
+        self.status_changed.emit(
+            f"Sending generic SDS dump ({bit_depth}-bit)... {mode_note}"
+        )
         self._emit_progress(0, len(self._send_queue))
         self._send_current_packet()
 
@@ -556,10 +565,13 @@ class SamplerController(QObject):
                 "A transfer is already in progress - please wait for it to finish"
             )
             return False
-        if self.device_type == "generic" and starting_sample_number is None:
+        if (
+            self.device_type == "generic" or self._is_open_loop()
+        ) and starting_sample_number is None:
             self.status_changed.emit(
                 "Set a starting sample number in Transmission Settings before "
-                "sending - generic SDS devices have no way to auto-detect one."
+                "sending - required for generic device, or when no MIDI input "
+                "is selected (open loop), since neither can auto-detect one."
             )
             return False
 
@@ -568,7 +580,7 @@ class SamplerController(QObject):
         self._file_queue_skipped = 0
         self._file_queue_channel = channel
 
-        if self.device_type == "generic":
+        if self.device_type == "generic" or self._is_open_loop():
             # no SLIST to check - go straight to user defined slot number
             self._next_file_sample_number = starting_sample_number
             self._send_next_queued_file()
@@ -636,7 +648,7 @@ class SamplerController(QObject):
                 channels[1], framerate, bit_depth, target_sample_rate
             )
 
-            if bit_depth == 16:
+            if self.device_type == "generic" or bit_depth == 16:
                 sample_number_left = self._next_file_sample_number
                 sample_number_right = self._next_file_sample_number + 1
                 self._next_file_sample_number += 2
@@ -673,7 +685,7 @@ class SamplerController(QObject):
                 channels[0], framerate, bit_depth, target_sample_rate
             )
 
-            if bit_depth == 16:
+            if self.device_type == "generic" or bit_depth == 16:
                 sample_number = self._next_file_sample_number
                 self._next_file_sample_number += 1
             else:
@@ -943,6 +955,16 @@ class SamplerController(QObject):
         else:
             self._abort_transfer(completed=False)
 
+    def _is_open_loop(self):
+        # True if no MIDI input port is selected
+        # ie- no ACK/NAK/WAIT/CANCEL handshaking
+        # Send packets with fixed pacing delay
+        return self.midi_manager.input_name is None
+
+    def is_open_loop(self):
+        # public version of _is_open_loop() - safe for UI layer to call directly
+        return self._is_open_loop()
+
     def _send_current_packet(self):
         # send whatever packet self._send_index currently points to.
         # called once to kick off transfer, then again every time the response tells us to advance or retry
@@ -953,7 +975,14 @@ class SamplerController(QObject):
         packet = self._send_queue[self._send_index]
         self.midi_manager.send_sysex(
             list(packet[1:-1])
-        )  # strip F0/F7 wrapper since mido adds those
+        )  # strip F0/F7 wrapper since mido adds these
+
+        if self._is_open_loop():
+            # no input port - can't wait for ACK because it will never arrive
+            # pace packets ourselves using fixed delay (20ms per official MIDI spec)
+            self._send_index += 1
+            self._emit_progress(self._send_index, len(self._send_queue))
+            QTimer.singleShot(40, self._send_current_packet)
 
     def _abort_transfer(self, completed):
         self._send_queue = []
@@ -1034,8 +1063,11 @@ class SamplerController(QObject):
         self._active_channel = channel
         self._active_sample_number = sample_number
 
+        mode_note = (
+            " (open loop - no MIDI input selected)" if self._is_open_loop() else ""
+        )
         self.status_changed.emit(
-            f"Sending SDATA header + {len(data_packets)} data packets..."
+            f"Sending SDATA header + {len(data_packets)} data packets...{mode_note}"
         )
         self._emit_progress(0, len(self._send_queue))
         self._send_current_packet()
