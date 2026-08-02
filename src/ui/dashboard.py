@@ -261,6 +261,7 @@ class TransferDashboard(QWidget):
         self._update_empty_hardware_placeholder()
 
     def on_files_dropped(self, paths):
+        paths = self._expand_dropped_paths(paths)
         added = 0
         for path in paths:
             if (
@@ -332,16 +333,19 @@ class TransferDashboard(QWidget):
         # bulk apply to every file in the queue (per file names are left untouched)
         # this dialog doesnt have a name field
         applied = 0
+        new_settings = {
+            "bit_depth": self._global_bit_depth,
+            "sample_rate": self._global_sample_rate,
+            "mono": self._global_mono,
+        }
+
         for i in range(self.list_local.count()):
             item = self.list_local.item(i)
-            item.setData(
-                SETTINGS_ROLE,
-                {
-                    "bit_depth": self._global_bit_depth,
-                    "sample_rate": self._global_sample_rate,
-                    "mono": self._global_mono,
-                },
-            )
+            item.setData(SETTINGS_ROLE, new_settings)
+            row_widget = self.list_local.itemWidget(item)
+            filepath = item.data(Qt.ItemDataRole.UserRole)
+            self._refresh_row_indicators(row_widget, filepath, new_settings)
+
             applied += 1
 
         if applied:
@@ -372,14 +376,18 @@ class TransferDashboard(QWidget):
         if dialog.exec():
             settings = dialog.get_settings()
             edit_field.setText(settings["name"])
-            item.setData(
-                SETTINGS_ROLE,
-                {
-                    "bit_depth": settings["bit_depth"],
-                    "sample_rate": settings["sample_rate"],
-                    "mono": settings["mono"],
-                },
-            )
+            edit_field.setCursorPosition(0)
+            # trying to setCursorPosition to 0 so the start of long file names appears, but
+            # i dont actually think this works, oh well. TODO: figure this out later
+            new_settings = {
+                "bit_depth": settings["bit_depth"],
+                "sample_rate": settings["sample_rate"],
+                "mono": settings["mono"],
+            }
+            item.setData(SETTINGS_ROLE, new_settings)
+            row_widget = self.list_local.itemWidget(item)
+            filepath = item.data(Qt.ItemDataRole.UserRole)
+            self._refresh_row_indicators(row_widget, filepath, new_settings)
 
     def send_queued_samples(self):
         entries = []
@@ -537,6 +545,20 @@ class TransferDashboard(QWidget):
         self.progress_bar_overall.setVisible(self._queue_total > 1)
 
     @staticmethod
+    def _expand_dropped_paths(paths):
+        # Expand directories in a list of dropped paths into every file found recrusively inside them (ie, incl subfolders)
+        # existing file extension check still decides what to accept from the drop
+        expanded = []
+        for path in paths:
+            if os.path.isdir(path):
+                for root, _dirs, files in os.walk(path):
+                    for filename in sorted(files):
+                        expanded.append(os.path.join(root, filename))
+            else:
+                expanded.append(path)
+        return expanded
+
+    @staticmethod
     def _sanitize_filename(name):
         name = name.strip()
         return name.replace("/", "-").replace("\\", "-")
@@ -640,6 +662,38 @@ class TransferDashboard(QWidget):
         self.list_local.takeItem(self.list_local.row(item))
         self._update_empty_queue_placeholder()
 
+    def _refresh_row_indicators(self, row_widget, filepath, settings):
+        # updates a queue row's mono/stereo icon (respecting explicit override)
+        # also updates the custom settings overrid easterisk
+        # called upon row creation, editing or bulk update via global settings
+        lbl_channels = row_widget.findChild(QLabel, "channelIcon")
+        if lbl_channels is not None:
+            try:
+                n_channels, _ = sds_encoder.read_wav_info(filepath)
+            except (OSError, ValueError):
+                n_channels = 1
+
+            is_effectively_stereo = (n_channels == 2) and not settings["mono"]
+            lbl_channels.setPixmap(
+                self._stereo_icon if is_effectively_stereo else self._mono_icon
+            )
+            lbl_channels.setToolTip("Stereo" if is_effectively_stereo else "Mono")
+
+        lbl_override = row_widget.findChild(QLabel, "overrideIndicator")
+        if lbl_override is not None:
+            is_overridden = (
+                settings["bit_depth"] != self._global_bit_depth
+                or settings["sample_rate"] != self._global_sample_rate
+                or settings["mono"] != self._global_mono
+            )
+            lbl_override.setText("*" if is_overridden else "")
+            lbl_override.setToolTip(
+                "Custom transmission settings for this file (differs from "
+                "the global defaults)"
+                if is_overridden
+                else ""
+            )
+
     def create_local_row(self, filepath):
         # build an editable, drag-swappable row with action buttons pinned to right side
 
@@ -678,6 +732,7 @@ class TransferDashboard(QWidget):
         display_name = os.path.splitext(os.path.basename(filepath))[0]
         edit_field = QLineEdit(display_name)
         edit_field.setReadOnly(True)
+        edit_field.setCursorPosition(0)
 
         # interactive logic for editing file names
         def enable_editing(event):
@@ -714,19 +769,17 @@ class TransferDashboard(QWidget):
         btn_edit.setFixedHeight(24)
         btn_del.setFixedHeight(24)
 
-        # mono/stereo indicator icon
-        try:
-            n_channels, _ = sds_encoder.read_wav_info(filepath)
-        except (OSError, ValueError):
-            n_channels = 1  # cant tell, fall back to the mono icon i guess??
+        # "custom settings" asterisk - updated by _refresh_row_indicators
+        lbl_override = QLabel()
+        lbl_override.setObjectName("overrideIndicator")
+        lbl_override.setFixedSize(12, 24)
+        lbl_override.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
+        # mono/stereo indicator icon - set by _refresh_row_indicators
         lbl_channels = QLabel()
-        lbl_channels.setPixmap(
-            self._stereo_icon if n_channels == 2 else self._mono_icon
-        )
-        lbl_channels.setFixedSize(24, 24)
+        lbl_channels.setObjectName("channelIcon")
+        lbl_channels.setFixedSize(24, 12)
         lbl_channels.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        lbl_channels.setToolTip("Stereo" if n_channels == 2 else "Mono")
 
         # opens the per-file settings dialog
         btn_edit.clicked.connect(
@@ -744,9 +797,11 @@ class TransferDashboard(QWidget):
         row_layout.addWidget(
             edit_field, stretch=1
         )  # stretch=1 forces file name to take maximum room
+        row_layout.addWidget(lbl_override)
         row_layout.addWidget(lbl_channels)
         row_layout.addWidget(btn_edit)
         row_layout.addWidget(btn_del)
+        self._refresh_row_indicators(row_widget, filepath, item.data(SETTINGS_ROLE))
 
         # inject custom canvas widget directly into list row framework
         item.setSizeHint(row_widget.sizeHint())
