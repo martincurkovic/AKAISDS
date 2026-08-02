@@ -1,5 +1,5 @@
 from PySide6.QtGui import QFontMetrics, QPixmap, QPainter, QColor
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QRectF
 from PySide6.QtSvg import QSvgRenderer
 
 
@@ -23,7 +23,7 @@ def load_colored_pixmap(svg_path, color, size=16, scale=3):
     pixmap.fill(Qt.GlobalColor.transparent)
 
     painter = QPainter(pixmap)
-    renderer.render(painter)
+    renderer.render(painter, QRectF(0, 0, physical_size, physical_size))
     painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceIn)
     painter.fillRect(pixmap.rect(), QColor(color))
     painter.end()

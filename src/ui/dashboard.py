@@ -778,7 +778,7 @@ class TransferDashboard(QWidget):
         # mono/stereo indicator icon - set by _refresh_row_indicators
         lbl_channels = QLabel()
         lbl_channels.setObjectName("channelIcon")
-        lbl_channels.setFixedSize(24, 12)
+        lbl_channels.setFixedSize(24, 16)
         lbl_channels.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
         # opens the per-file settings dialog
