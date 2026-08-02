@@ -219,6 +219,9 @@ class SamplerController(QObject):
                     )
                     self._pre_send_names = []
                     if actual_slot is not None:
+                        self._next_file_sample_number = max(
+                            self._next_file_sample_number, actual_slot + 1
+                        )
                         self.status_changed.emit(
                             f"Sample landed in slot {actual_slot} - renaming..."
                         )
