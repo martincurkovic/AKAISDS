@@ -16,11 +16,14 @@ if (-not (Test-Path $VenvDir)) {
     $FreshVenv = $true
 }
 
-& (Join-Path $VenvDir "Scripts\Activate.ps1")
+. (Join-Path $VenvDir "Scripts\Activate.ps1")
 
 if ($FreshVenv) {
     Write-Host "Fresh venv - installing requirements..."
     pip install -r (Join-Path $RootDir "requirements.txt")
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "pip install failed - fix the error above before continuing."
+    }
 }
 
 Set-Location $SrcDir
