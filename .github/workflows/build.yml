@@ -5,7 +5,7 @@ on:
 
 jobs:
   build-macos:
-    runs-on: macos-latest
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
       - name: Build
@@ -15,14 +15,31 @@ jobs:
       - name: Zip the .app bundle
         run: | 
           cd src
-          zip -r AKAISDS-macos.zip AKAISDS.app 
+          zip -r AKAISDS-macos-ARM.zip AKAISDS.app 
       - uses: actions/upload-artifact@v4
         with:
           name: AKAISDS-macos
-          path: src/AKAISDS-macos.zip
+          path: src/AKAISDS-macos-ARM.zip
+
+  build-macos-intel:
+    runs-on: macos-15-intel
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build
+        run: |
+          chmod +x scripts/build_macos.sh
+          ./scripts/build_macos.sh
+      - name: Zip the .app bundle
+        run: | 
+          cd src
+          zip -r AKAISDS-macos-intel.zip AKAISDS.app 
+      - uses: actions/upload-artifact@v4
+        with:
+          name: AKAISDS-macos
+          path: src/AKAISDS-macos-intel.zip
 
   build-linux:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
       - name: Install build tools
