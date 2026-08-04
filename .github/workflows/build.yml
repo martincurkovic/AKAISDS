@@ -4,7 +4,7 @@ on:
   workflow_dispatch:   # lets you trigger this manually from GitHub's website
 
 jobs:
-  build-macos:
+  build-macos-arm:
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
@@ -18,7 +18,7 @@ jobs:
           zip -r AKAISDS-macos-ARM.zip AKAISDS.app 
       - uses: actions/upload-artifact@v4
         with:
-          name: AKAISDS-macos
+          name: AKAISDS-macos-ARM
           path: src/AKAISDS-macos-ARM.zip
 
   build-macos-intel:
@@ -35,11 +35,11 @@ jobs:
           zip -r AKAISDS-macos-intel.zip AKAISDS.app 
       - uses: actions/upload-artifact@v4
         with:
-          name: AKAISDS-macos
+          name: AKAISDS-macos-intel
           path: src/AKAISDS-macos-intel.zip
 
   build-linux:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - name: Install build tools
