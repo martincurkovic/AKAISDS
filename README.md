@@ -14,9 +14,9 @@ please check the table below for a list of tested hardware.
 
 |Interface|macOS|Linux|Windows|Notes|
 |---|---|---|---|---|
-|   iCON MIDIPORT V1.01  |❌ |  ？ |  ？ |  Not supported under macOS |
-|  MIDIPLUS MIDI 2x2 |  ✅* |  ？ |  ？ |  Max SysEx length = 256 bytes |
-|   PreSonus Studio 26  |  ✅ |  ？ |  ？ |   |
+|   iCON MIDIPORT V1.01  |❌ |  ✅* |  ？ |  Not supported under macOS. Max SysEx length = 256 bytes |
+|  MIDIPLUS MIDI 2x2 |  ✅* |  ✅* |  ？ |  Max SysEx length = 256 bytes |
+|   PreSonus Studio 26  |  ✅ |  ✅ |  ？ |   |
 
 Currently only closed loop transmission is supported (ie, ACK/NAK handshakes
 are required by the receiving hardware). Support for open loop communication
