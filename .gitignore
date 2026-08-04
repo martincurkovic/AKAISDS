@@ -1,32 +1,38 @@
-# Python bytecode
+# Python
 __pycache__/
-*.pyc
-*.pyo
-
-# Virtual environment
+*.py[cod]
+*$py.class
+*.egg-info/
 .venv/
 venv/
-
-# Environment variables / secrets
 .env
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+*.log
 
-# macOS junk
-.DS_Store
-
-# PyInstaller build output
+# Build output
 build/
+*.build/
 dist/
+*.dist/
+*.onefile-build/
+*.app/
+deployment/
 *.spec
+*.exe
+*.dmg
+*.AppImage
 
 # Editor specific
 .zed/
+.DS_Store
+.vscode/
+.idea/
 
-/__pycache__
-/.venv
-**/__pycache__/
-*.py[cod]
-*$py.class
+# App specific runtime generated files
+/src/ui/icons/_generated
 
+# Misc
 /test_scripts
 /TODO.txt
-/src/ui/icons/_generated
