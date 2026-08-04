@@ -37,7 +37,7 @@ if (-not (Test-Path "pysidedeploy.spec")) {
     (Get-Content pysidedeploy.spec) -replace '^title = .*', 'title = AKAISDS' | Set-Content pysidedeploy.spec
     (Get-Content pysidedeploy.spec) -replace '^icon = .*', 'icon = ../assets/icon/icon_512x512.png' | Set-Content pysidedeploy.spec
     (Get-Content pysidedeploy.spec) -replace '^mode = .*', 'mode = onefile' | Set-Content pysidedeploy.spec
-    (Get-Content pysidedeploy.spec) -replace '^extra_args = .*', 'extra_args = --quiet --noinclude-qt-translations --windows-console-mode=disable --windows-product-name=AKAISDS --product-version=1.0.0.0 --include-module=mido.backends.rtmidi --include-data-dir=ui/icons=ui/icons --include-data-files=ui/style.qss.template=ui/style.qss.template' | Set-Content pysidedeploy.spec
+    (Get-Content pysidedeploy.spec) -replace '^extra_args = .*', 'extra_args = --quiet --assume-yes-for-downloads --noinclude-qt-translations --windows-console-mode=disable --windows-product-name=AKAISDS --product-version=1.0.0.0 --include-module=mido.backends.rtmidi --include-data-dir=ui/icons=ui/icons --include-data-files=ui/style.qss.template=ui/style.qss.template' | Set-Content pysidedeploy.spec
 
     Write-Host "Spec generated and configured."
 }
