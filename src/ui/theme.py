@@ -16,6 +16,7 @@ two separate .qss files that can quietly drift apart over time.
 """
 
 import os
+import sys
 from string import Template
 
 DARK_PALETTE = {
@@ -75,9 +76,25 @@ LIGHT_PALETTE = {
     "text_on_accent": "#ffffff",
 }
 
+
+def _user_data_dir():
+    # returns per-user location OUTSIDE the app bundle for runtime generated files
+    # writing inside the app bundle is fragile and seems to cause problems on macOS specifically
+    # will also cause issues in the future if code signing becomes feasable
+    if sys.platform == "darwin":
+        base = os.path.expanduser("~/Library/Application Support")
+    elif sys.platform == "win32":
+        base = os.environ.get("APPDATA", os.path.expanduser("~"))
+    else:
+        base = os.environ.get("XDG_CACHE_HOME", os.path.expanduser("~/.cache"))
+    path = os.path.join(base, "AKAISDS")
+    os.makedirs(path, exist_ok=True)
+    return path
+
+
 _TEMPLATE_PATH = os.path.join(os.path.dirname(__file__), "style.qss.template")
 _ICONS_DIR = os.path.join(os.path.dirname(__file__), "icons")
-_GENERATED_ICONS_DIR = os.path.join(_ICONS_DIR, "_generated")
+_GENERATED_ICONS_DIR = os.path.join(_user_data_dir(), "generated_icons")
 
 
 def _icon_path(filename):
