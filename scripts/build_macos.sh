@@ -19,7 +19,7 @@ source "$VENV_DIR/bin/activate"
 
 if [ "$FRESH_VENV" = true ]; then
   echo "Fresh venv - installing requirements..."
-  pip install -r "#ROOT_DIR/requirements.txt"
+  pip install -r "$ROOT_DIR/requirements.txt"
 fi
 
 cd "$SRC_DIR"
