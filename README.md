@@ -64,6 +64,8 @@ Note that some USB MIDI interfaces do not support MIDI SysEx messages. Please ch
 
 ## License & Acknowledgements
 
+Licensed under LGPLv3 - see LICENSE and COPYING for details.
+
 Written in Python using PySide6 (Qt), mido, python-rtmidi, soundfile and Nuitka.
 
 This project would not have been possible without the amazing work of Frank Neumann who transcribed the entire Akai SysEx implementation by hand from printed documentation. [That documentation can be found here](https://lakai.sourceforge.net/documentation.shtml.html)
