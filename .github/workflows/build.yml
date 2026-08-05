@@ -15,11 +15,11 @@ jobs:
       - name: Zip the .app bundle
         run: | 
           cd src
-          zip -r AKAISDS-macos-ARM.zip AKAISDS.app 
+          zip -r AKAISDS-macos-arm.zip AKAISDS.app 
       - uses: actions/upload-artifact@v4
         with:
-          name: AKAISDS-macos-ARM
-          path: src/AKAISDS-macos-ARM.zip
+          name: AKAISDS-macos-arm
+          path: src/AKAISDS-macos-arm.zip
 
   build-macos-intel:
     runs-on: macos-15-intel
