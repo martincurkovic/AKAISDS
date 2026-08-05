@@ -1,4 +1,5 @@
-from PySide6.QtWidgets import QMainWindow
+from PySide6.QtWidgets import QMainWindow, QFileDialog
+import os
 from PySide6.QtGui import QAction, QKeySequence
 from ui.dashboard import TransferDashboard
 from core.midi_manager import MidiManager
@@ -36,11 +37,69 @@ class ApplicationWindow(QMainWindow):
 
         # Settings menu action
         file_menu = self.menuBar().addMenu("File")
+
+        open_files_action = QAction("Open Files...", self)
+        open_files_action.setShortcut(QKeySequence.StandardKey.Open)
+        open_files_action.triggered.connect(self._open_files_dialog)
+        file_menu.addAction(open_files_action)
+
+        open_folder_action = QAction("Open Folder...", self)
+        open_folder_action.setShortcut("Ctrl+Shift+O")
+        open_folder_action.triggered.connect(self._open_folder_dialog)
+        file_menu.addAction(open_folder_action)
+
+        file_menu.addSeparator()
+
         settings_action = QAction("Settings...", self)
         settings_action.setMenuRole(QAction.MenuRole.PreferencesRole)
         settings_action.setShortcut(QKeySequence.StandardKey.Preferences)
         settings_action.triggered.connect(self.dashboard_view.open_settings_dialog)
         file_menu.addAction(settings_action)
+
+        transfer_menu = self.menuBar().addMenu("Transfer")
+
+        refresh_action = QAction("Refresh Sample List", self)
+        refresh_action.setShortcut("Ctrl+R")
+        refresh_action.triggered.connect(self.dashboard_view.request_sample_list)
+        transfer_menu.addAction(refresh_action)
+
+        transfer_menu.addSeparator()
+
+        send_action = QAction("Send Samples", self)
+        send_action.setShortcut("Ctrl+Shift+S")
+        send_action.triggered.connect(self.dashboard_view.send_queued_samples)
+        transfer_menu.addAction(send_action)
+
+        receive_action = QAction("Receive Samples", self)
+        receive_action.setShortcut("Ctrl+Shift+R")
+        receive_action.triggered.connect(self.dashboard_view.on_receive_clicked)
+        transfer_menu.addAction(receive_action)
+
+        transfer_menu.addSeparator()
+
+        transfer_settings_action = QAction("Transfer Settings...", self)
+        transfer_settings_action.setShortcut("Ctrl+Shift+,")
+        transfer_settings_action.triggered.connect(
+            self.dashboard_view.open_global_settings_dialog
+        )
+        transfer_menu.addAction(transfer_settings_action)
+
+    def _open_files_dialog(self):
+        paths, _ = QFileDialog.getOpenFileNames(
+            self,
+            "Open Audio Files",
+            os.path.expanduser("~"),
+            "Audio Files (*.wav *.aif *.aiff *.flac)",
+        )
+        if paths:
+            self.dashboard_view.on_files_dropped(paths)
+
+    def _open_folder_dialog(self):
+        folder = QFileDialog.getExistingDirectory(
+            self, "Open Folder", os.path.expanduser("~")
+        )
+        if folder:
+            self.dashboard_view.on_files_dropped([folder])
 
     def _restore_saved_ports(self):
         input_name, output_name = app_config.get_saved_ports()
