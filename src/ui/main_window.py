@@ -2,6 +2,7 @@ from PySide6.QtWidgets import QMainWindow, QFileDialog
 import os
 from PySide6.QtGui import QAction, QKeySequence
 from ui.dashboard import TransferDashboard
+from ui.about_dialog import AboutDialog
 from core.midi_manager import MidiManager
 from core import app_config
 from controller.sampler_controller import SamplerController
@@ -37,6 +38,13 @@ class ApplicationWindow(QMainWindow):
 
         # Settings menu action
         file_menu = self.menuBar().addMenu("File")
+
+        about_action = QAction("About AKAISDS...", self)
+        about_action.setMenuRole(QAction.MenuRole.AboutRole)
+        about_action.triggered.connect(self._show_about_dialog)
+        file_menu.addAction(about_action)
+
+        file_menu.addSeparator()
 
         open_files_action = QAction("Open Files...", self)
         open_files_action.setShortcut(QKeySequence.StandardKey.Open)
@@ -128,6 +136,10 @@ class ApplicationWindow(QMainWindow):
                 self.dashboard_view.btn_select_all: select_all_action,
             },
         )
+
+    def _show_about_dialog(self):
+        dialog = AboutDialog(self)
+        dialog.exec()
 
     def _open_files_dialog(self):
         paths, _ = QFileDialog.getOpenFileNames(
