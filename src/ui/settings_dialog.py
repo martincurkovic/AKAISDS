@@ -31,6 +31,7 @@ class MidiSettingsDialog(QDialog):
         self.sampler_controller = sampler_controller
 
         outer_layout = QVBoxLayout(self)
+        self.setMinimumHeight(250)
 
         tabs = QTabWidget()
         outer_layout.addWidget(tabs)
@@ -92,7 +93,7 @@ class MidiSettingsDialog(QDialog):
 
         loopback_note = QLabel(
             "To test a MIDI interface's SysEx reliability, "
-            "connect a cable from its MIDI OUT port back into its own MIDI IN port."
+            "connect a cable from its MIDI OUT port back into its own MIDI IN port. "
             "Select the ports on the MIDI Settings tab, then run the test below (may take 5-20 seconds to complete)."
         )
         loopback_note.setWordWrap(True)
@@ -100,6 +101,8 @@ class MidiSettingsDialog(QDialog):
             Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop
         )
         test_layout.addWidget(loopback_note)
+
+        test_layout.addStretch()
 
         self.btn_loopback_test = QPushButton("Loopback Test")
         self.btn_loopback_test.clicked.connect(self._run_loopback_test)
@@ -109,8 +112,6 @@ class MidiSettingsDialog(QDialog):
         self.loopback_progress.setRange(0, 0)
         self.loopback_progress.setVisible(False)
         test_layout.addWidget(self.loopback_progress)
-
-        test_layout.addStretch()
 
         tabs.addTab(test_tab, "MIDI Test")
 
@@ -231,6 +232,7 @@ class MidiSettingsDialog(QDialog):
             if incoming is not None and incoming.type == "sysex":
                 received = incoming
                 break
+            QApplication.processEvents()
             time.sleep(0.001)
 
         if received is None:

@@ -207,6 +207,41 @@ QSpinBox::down-arrow {
   height: 8px;
 }
 
+/* ------------------TABS (MIDI SETTINGS dialog) ---------------------------*/ 
+QTabWidget::pane {
+  border: 1px solid ${border};
+  border-radius: 4px;
+  top: -1px;
+  background-color: ${bg_dialog};
+}
+
+QTabBar::tab {
+    background-color: ${bg_button};
+    border: 1px solid ${border};
+    border-bottom: none;
+    border-top-left-radius: 4px;
+    border-top-right-radius: 4px;
+    padding: 6px 14px;
+    color: ${text};
+    margin-right: 2px;
+}
+
+QTabBar::tab:hover {
+    background-color: ${bg_button_hover};
+    border-color: ${border_hover};
+}
+
+QTabBar::tab:selected {
+    background-color: ${bg_dialog};
+    color: ${text_bright};
+    border-color: ${accent};
+    border-bottom: 1px solid ${bg_dialog};
+}
+
+QTabBar::tab:!selected {
+    margin-top: 2px;
+}
+
 /* ---------- Scrollbars ---------- */
 /* thin, flat, overlay-style bars - no arrow buttons, no 3D bevel */
 QScrollBar:vertical {
