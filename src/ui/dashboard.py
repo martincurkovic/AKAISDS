@@ -111,9 +111,11 @@ class TransferDashboard(QWidget):
         local_header.addWidget(lbl_local, stretch=1)
         self.btn_clear_queue = QPushButton("Clear Queue")
         self.btn_clear_queue.clicked.connect(self.clear_local_queue)
+        self.btn_clear_queue.setEnabled(False)
         local_header.addWidget(self.btn_clear_queue)
         self.btn_global_settings = QPushButton("\u2699 Transmission Settings")
         self.btn_global_settings.clicked.connect(self.open_global_settings_dialog)
+        self.btn_global_settings.setEnabled(False)
         local_header.addWidget(self.btn_global_settings)
 
         self.list_local = DropListWidget()
@@ -276,6 +278,8 @@ class TransferDashboard(QWidget):
                 )
         if added:
             self.status_bar.showMessage(f"Added {added} file(s) to the queue")
+            self.btn_clear_queue.setEnabled(True)
+            self.btn_global_settings.setEnabled(True)
         self._update_empty_queue_placeholder()
 
     def _update_empty_queue_placeholder(self):
@@ -660,6 +664,9 @@ class TransferDashboard(QWidget):
         if self._active_edit_field is edit_field:
             self._active_edit_field = None
         self.list_local.takeItem(self.list_local.row(item))
+        if self.list_local.count() == 0:
+            self.btn_clear_queue.setEnabled(False)
+            self.btn_global_settings.setEnabled(False)
         self._update_empty_queue_placeholder()
 
     def _refresh_row_indicators(self, row_widget, filepath, settings):
@@ -871,6 +878,8 @@ class TransferDashboard(QWidget):
         self._active_edit_field = None
         self._update_empty_queue_placeholder()
         self.status_bar.showMessage("Cleared the file transfer queue")
+        self.btn_clear_queue.setEnabled(False)
+        self.btn_global_settings.setEnabled(False)
 
     def toggle_select_all_hardware_samples(self):
         now_selecting = self.btn_select_all.text() == "Select All"
