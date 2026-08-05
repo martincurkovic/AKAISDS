@@ -1,4 +1,5 @@
 from PySide6.QtWidgets import QMainWindow
+from PySide6.QtGui import QAction, QKeySequence
 from ui.dashboard import TransferDashboard
 from core.midi_manager import MidiManager
 from core import app_config
@@ -32,6 +33,14 @@ class ApplicationWindow(QMainWindow):
 
         # mount layout into core central display panel area
         self.setCentralWidget(self.dashboard_view)
+
+        # Settings menu action
+        file_menu = self.menuBar().addMenu("File")
+        settings_action = QAction("Settings...", self)
+        settings_action.setMenuRole(QAction.MenuRole.PreferencesRole)
+        settings_action.setShortcut(QKeySequence.StandardKey.Preferences)
+        settings_action.triggered.connect(self.dashboard_view.open_settings_dialog)
+        file_menu.addAction(settings_action)
 
     def _restore_saved_ports(self):
         input_name, output_name = app_config.get_saved_ports()
