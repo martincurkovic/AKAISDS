@@ -9,7 +9,7 @@ class ApplicationWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("AKAI SDS")
-        self.setMinimumSize(950, 500)
+        self.setMinimumSize(1030, 600)
 
         # owns the real mido ports for the app's lifetime
         self.midi_manager = MidiManager()

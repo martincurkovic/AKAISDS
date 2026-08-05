@@ -104,7 +104,7 @@ class MidiSettingsDialog(QDialog):
 
         test_layout.addStretch()
 
-        self.btn_loopback_test = QPushButton("Loopback Test")
+        self.btn_loopback_test = QPushButton("Run Loopback Test")
         self.btn_loopback_test.clicked.connect(self._run_loopback_test)
         test_layout.addWidget(self.btn_loopback_test)
 
@@ -113,7 +113,7 @@ class MidiSettingsDialog(QDialog):
         self.loopback_progress.setVisible(False)
         test_layout.addWidget(self.loopback_progress)
 
-        tabs.addTab(test_tab, "MIDI Test")
+        tabs.addTab(test_tab, "MIDI Hardware Test")
 
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
