@@ -8,7 +8,12 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QSpinBox,
+    QProgressBar,
+    QTabWidget,
+    QVBoxLayout,
+    QWidget,
 )
+from PySide6.QtCore import Qt
 from core import app_config
 from ui.qt_helpers import widen_popup_to_fit_items
 import time
@@ -25,7 +30,14 @@ class MidiSettingsDialog(QDialog):
         self.midi_manager = midi_manager
         self.sampler_controller = sampler_controller
 
-        layout = QFormLayout(self)
+        outer_layout = QVBoxLayout(self)
+
+        tabs = QTabWidget()
+        outer_layout.addWidget(tabs)
+
+        # TAB 1 - MIDI SETTINGS ------------------------------
+        settings_tab = QWidget()
+        settings_layout = QFormLayout(settings_tab)
 
         self.combo_input = QComboBox()
         self.combo_output = QComboBox()
@@ -37,8 +49,8 @@ class MidiSettingsDialog(QDialog):
         )
         self._populate_ports()
 
-        layout.addRow(QLabel("MIDI Input:"), self.combo_input)
-        layout.addRow(QLabel("MIDI Output:"), self.combo_output)
+        settings_layout.addRow(QLabel("MIDI Input:"), self.combo_input)
+        settings_layout.addRow(QLabel("MIDI Output:"), self.combo_output)
 
         # SysEx device ID (0-127) - NOT THE SAME AS MIDI CHANNELS 1-16!!!
         # Set for daisy chained devices to avoid message conflicts
@@ -51,7 +63,9 @@ class MidiSettingsDialog(QDialog):
             "same MIDI chain. Note that some hardware may report\n"
             "SysEx channels to be 1-128 instead of 0-127."
         )
-        layout.addRow(QLabel("Device ID (SysEx channel 0-127):"), self.spin_channel)
+        settings_layout.addRow(
+            QLabel("Device ID (SysEx channel 0-127):"), self.spin_channel
+        )
 
         # sampler device type - determines which protocol family gets used for each step
         # (send, receive, list, delete, rename etc)
@@ -68,25 +82,44 @@ class MidiSettingsDialog(QDialog):
             "receiving still work, but by sample number only, with no way\n"
             "to browse, rename or delete what's on the device."
         )
-        layout.addRow(QLabel("Sampler Type:"), self.combo_device_type)
+        settings_layout.addRow(QLabel("Sampler Type:"), self.combo_device_type)
+
+        tabs.addTab(settings_tab, "MIDI Settings")
+
+        # TAB 2 - MIDI TEST ----------------------------------------------------
+        test_tab = QWidget()
+        test_layout = QVBoxLayout(test_tab)
 
         loopback_note = QLabel(
-            "\nTo test a MIDI interface's SysEx reliability:\n"
-            "Connect a cable from its MIDI OUT port back into\nits own MIDI IN port.\n\n"
-            "Select the ports above and then run the test\n(may take 5-20 seconds to complete)."
+            "To test a MIDI interface's SysEx reliability, "
+            "connect a cable from its MIDI OUT port back into its own MIDI IN port."
+            "Select the ports on the MIDI Settings tab, then run the test below (may take 5-20 seconds to complete)."
         )
-        layout.addRow(loopback_note)
+        loopback_note.setWordWrap(True)
+        loopback_note.setAlignment(
+            Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop
+        )
+        test_layout.addWidget(loopback_note)
 
         self.btn_loopback_test = QPushButton("Loopback Test")
         self.btn_loopback_test.clicked.connect(self._run_loopback_test)
-        layout.addRow(self.btn_loopback_test)
+        test_layout.addWidget(self.btn_loopback_test)
+
+        self.loopback_progress = QProgressBar()
+        self.loopback_progress.setRange(0, 0)
+        self.loopback_progress.setVisible(False)
+        test_layout.addWidget(self.loopback_progress)
+
+        test_layout.addStretch()
+
+        tabs.addTab(test_tab, "MIDI Test")
 
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
         )
         buttons.accepted.connect(self._apply_and_close)
         buttons.rejected.connect(self.reject)
-        layout.addRow(buttons)
+        outer_layout.addWidget(buttons)
 
     def _populate_ports(self):
         self.combo_input.addItem("(None)", None)
@@ -152,6 +185,7 @@ class MidiSettingsDialog(QDialog):
 
         self.btn_loopback_test.setEnabled(False)
         self.btn_loopback_test.setText("Testing...")
+        self.loopback_progress.setVisible(True)
         QApplication.processEvents()
 
         results = []  # (size, passed, detail)
@@ -175,6 +209,7 @@ class MidiSettingsDialog(QDialog):
             self.midi_manager.open_output(previous_output)
             self.btn_loopback_test.setEnabled(True)
             self.btn_loopback_test.setText("Loopback Test")
+            self.loopback_progress.setVisible(False)
 
         if results is not None:
             self._show_loopback_results(results)
