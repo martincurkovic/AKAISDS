@@ -837,18 +837,21 @@ class TransferDashboard(QWidget):
         item.setSizeHint(row_widget.sizeHint())
         self.list_local.setItemWidget(item, row_widget)
 
-    def register_menu_actions(self, action_map):
+    def register_menu_actions(self, enabled_sync_map, text_sync_map=None):
         # keeps the menu options in sync with the button states
         # runs on a set timer to check button states (i know, i KNOWWWWWW.....)
-        self._menu_action_map = action_map
+        self._enabled_sync_map = enabled_sync_map
+        self._text_sync_map = text_sync_map
         timer = QTimer(self)
-        timer.timeout.connect(self._sync_menu_action_states)
+        timer.timeout.connect(self._sync_menu_actions)
         timer.start(150)
-        self._sync_menu_action_states()
+        self._sync_menu_actions()
 
-    def _sync_menu_action_states(self):
-        for button, action in self._menu_action_map.items():
+    def _sync_menu_actions(self):
+        for button, action in self._enabled_sync_map.items():
             action.setEnabled(button.isEnabled())
+        for button, action in self._text_sync_map.items():
+            action.setText(button.text())
 
     def _update_queue_buttons_state(self):
         # updates the state of clear queue, transmission settings, send samples buttons
