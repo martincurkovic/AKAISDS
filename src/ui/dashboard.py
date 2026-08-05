@@ -111,11 +111,9 @@ class TransferDashboard(QWidget):
         local_header.addWidget(lbl_local, stretch=1)
         self.btn_clear_queue = QPushButton("Clear Queue")
         self.btn_clear_queue.clicked.connect(self.clear_local_queue)
-        self.btn_clear_queue.setEnabled(False)
         local_header.addWidget(self.btn_clear_queue)
         self.btn_global_settings = QPushButton("\u2699 Transmission Settings")
         self.btn_global_settings.clicked.connect(self.open_global_settings_dialog)
-        self.btn_global_settings.setEnabled(False)
         local_header.addWidget(self.btn_global_settings)
 
         self.list_local = DropListWidget()
@@ -177,11 +175,13 @@ class TransferDashboard(QWidget):
             + 24
         )  # giving extra padding juuuuust in case
         self.btn_select_all.setFixedWidth(button_width)
+        self.btn_select_all.setEnabled(False)
         hardware_header.addWidget(self.btn_select_all)
         self.btn_delete_selected = QPushButton("Delete Selected")
         self.btn_delete_selected.clicked.connect(
             self.confirm_and_delete_selected_samples
         )
+        self.btn_delete_selected.setEnabled(False)
         hardware_header.addWidget(self.btn_delete_selected)
         self.btn_refresh = QPushButton("\u27f3 Refresh")
         self.btn_refresh.clicked.connect(self.request_sample_list)
@@ -197,7 +197,9 @@ class TransferDashboard(QWidget):
         # ACtION CONTROL BAR (Horizontal layout)
         action_layout = QHBoxLayout()
         self.btn_send = QPushButton("Send Samples")
+        self.btn_send.setEnabled(False)
         self.btn_receive = QPushButton("Receive Samples")
+        self.btn_receive.setEnabled(False)
         self.btn_cancel = QPushButton("Cancel Transfer")
         self.btn_cancel.setEnabled(False)
 
@@ -242,6 +244,7 @@ class TransferDashboard(QWidget):
 
         # reflect whatever device type was ALREADY restored before the dashboard was constructed
         self._update_device_type_ui()
+        self._update_queue_buttons_state()
 
     def open_settings_dialog(self):
         dialog = MidiSettingsDialog(self.midi_manager, self.sampler_controller, self)
@@ -261,6 +264,12 @@ class TransferDashboard(QWidget):
             self.create_hardware_row(name, sample_number)
         self.btn_select_all.setText("Select All")
         self._update_empty_hardware_placeholder()
+        has_samples = len(names) > 0
+        self.btn_select_all.setEnabled(has_samples)
+        self.btn_receive.setEnabled(
+            not self.sampler_controller.is_open_loop() and has_samples
+        )
+        self.btn_delete_selected.setEnabled(False)
 
     def on_files_dropped(self, paths):
         paths = self._expand_dropped_paths(paths)
@@ -278,8 +287,7 @@ class TransferDashboard(QWidget):
                 )
         if added:
             self.status_bar.showMessage(f"Added {added} file(s) to the queue")
-            self.btn_clear_queue.setEnabled(True)
-            self.btn_global_settings.setEnabled(True)
+            self._update_queue_buttons_state()
         self._update_empty_queue_placeholder()
 
     def _update_empty_queue_placeholder(self):
@@ -287,18 +295,34 @@ class TransferDashboard(QWidget):
 
     def _update_empty_hardware_placeholder(self):
         if self.sampler_controller.device_type == "akai":
-            self.empty_hardware_label.setText(
-                "No samples loaded - click Refresh to check"
-            )
+            if self.sampler_controller.is_open_loop():
+                self.empty_hardware_label.setText(
+                    "No MIDI Input selected - can't refresh or receive samples\n"
+                    "(sending samples will still work without a MIDI Input)"
+                )
+            else:
+                self.empty_hardware_label.setText(
+                    "No samples loaded - click Refresh to check"
+                )
             self.empty_hardware_label.setVisible(self.list_hardware.count() == 0)
 
     def _update_device_type_ui(self):
-        is_generic = self.sampler_controller.device_type == "generic"
+        is_generic = self.sampler_controller.device_type == "generic"  # True or False
+        is_open_loop = self.sampler_controller.is_open_loop()
+        has_samples = self.list_hardware.count() > 0
 
-        self.list_hardware.setEnabled(not is_generic)
-        self.btn_select_all.setEnabled(not is_generic)
-        self.btn_delete_selected.setEnabled(not is_generic)
-        self.btn_refresh.setEnabled(not is_generic)
+        if is_generic:
+            self.list_hardware.setEnabled(False)
+            self.btn_select_all.setEnabled(False)
+            self.btn_delete_selected.setEnabled(False)
+            self.btn_refresh.setEnabled(False)
+            self.btn_receive.setEnabled(not is_open_loop)
+        else:
+            self.list_hardware.setEnabled(True)
+            self.btn_select_all.setEnabled(has_samples)
+            self.btn_refresh.setEnabled(not is_open_loop)
+            self.btn_receive.setEnabled(not is_open_loop and has_samples)
+            self._update_delete_selected_button_state()
 
         if is_generic:
             self.list_hardware.clear()
@@ -638,6 +662,7 @@ class TransferDashboard(QWidget):
                 self.list_local.takeItem(i)
                 break
 
+        self._update_queue_buttons_state()
         self._update_empty_queue_placeholder()
 
         # one more file done out of however many were thrown in the queue
@@ -647,7 +672,6 @@ class TransferDashboard(QWidget):
             self.progress_bar_overall.setValue(percent)
 
     def on_transfer_finished(self, completed):
-        self.btn_send.setEnabled(True)
         self.btn_cancel.setEnabled(False)
         if completed:
             self.progress_bar_current_smpl.setValue(100)
@@ -657,6 +681,7 @@ class TransferDashboard(QWidget):
         # nothing happening anymore: hide both progress bars
         self.progress_bar_current_smpl.setVisible(False)
         self.progress_bar_overall.setVisible(False)
+        self._update_queue_buttons_state()
 
     # ROW BUILDER METHODS
 
@@ -664,9 +689,7 @@ class TransferDashboard(QWidget):
         if self._active_edit_field is edit_field:
             self._active_edit_field = None
         self.list_local.takeItem(self.list_local.row(item))
-        if self.list_local.count() == 0:
-            self.btn_clear_queue.setEnabled(False)
-            self.btn_global_settings.setEnabled(False)
+        self._update_queue_buttons_state()
         self._update_empty_queue_placeholder()
 
     def _refresh_row_indicators(self, row_widget, filepath, settings):
@@ -814,6 +837,25 @@ class TransferDashboard(QWidget):
         item.setSizeHint(row_widget.sizeHint())
         self.list_local.setItemWidget(item, row_widget)
 
+    def _update_queue_buttons_state(self):
+        # updates the state of clear queue, transmission settings, send samples buttons
+        has_files = self.list_local.count() > 0
+        self.btn_clear_queue.setEnabled(has_files)
+        self.btn_global_settings.setEnabled(has_files)
+        self.btn_send.setEnabled(has_files)
+
+    def _update_delete_selected_button_state(self):
+        # enabled whenever at least ONE hardware checkbox is currently selected
+        any_checked = False
+        for i in range(self.list_hardware.count()):
+            item = self.list_hardware.item(i)
+            row_widget = self.list_hardware.itemWidget(item)
+            checkbox = row_widget.findChild(QCheckBox)
+            if checkbox and checkbox.isChecked():
+                any_checked = True
+                break
+        self.btn_delete_selected.setEnabled(any_checked)
+
     def create_hardware_row(self, filename, sample_number):
         # build read only, fized row with leading checkbox and trailing action buttons
         item = QListWidgetItem(self.list_hardware)
@@ -826,6 +868,7 @@ class TransferDashboard(QWidget):
         # left component - checkbox with name acting as its linked text
         checkbox = QCheckBox(filename)
         checkbox.setStyleSheet("font-size: 13px;")
+        checkbox.toggled.connect(self._update_delete_selected_button_state)
 
         # right components - action buttons
         btn_edit = QPushButton("Edit")
@@ -880,6 +923,7 @@ class TransferDashboard(QWidget):
         self.status_bar.showMessage("Cleared the file transfer queue")
         self.btn_clear_queue.setEnabled(False)
         self.btn_global_settings.setEnabled(False)
+        self.btn_send.setEnabled(False)
 
     def toggle_select_all_hardware_samples(self):
         now_selecting = self.btn_select_all.text() == "Select All"
@@ -890,6 +934,7 @@ class TransferDashboard(QWidget):
             if checkbox:
                 checkbox.setChecked(now_selecting)
         self.btn_select_all.setText("Deselect All" if now_selecting else "Select All")
+        self._update_delete_selected_button_state()
 
     def confirm_and_delete_selected_samples(self):
         to_delete = []
