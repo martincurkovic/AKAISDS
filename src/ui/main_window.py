@@ -56,6 +56,28 @@ class ApplicationWindow(QMainWindow):
         settings_action.triggered.connect(self.dashboard_view.open_settings_dialog)
         file_menu.addAction(settings_action)
 
+        edit_menu = self.menuBar().addMenu("Edit")
+
+        select_all_action = QAction("Select All", self)
+        select_all_action.setShortcut("Ctrl+A")
+        select_all_action.triggered.connect(
+            self.dashboard_view.toggle_select_all_hardware_samples
+        )
+        edit_menu.addAction(select_all_action)
+
+        delete_selected_action = QAction("Delete Selected Samples...", self)
+        delete_selected_action.setShortcuts(["Ctrl+backspace", "delete"])
+        delete_selected_action.triggered.connect(
+            self.dashboard_view.confirm_and_delete_selected_samples
+        )
+        edit_menu.addAction(delete_selected_action)
+
+        edit_menu.addSeparator()
+
+        clear_queue_action = QAction("Clear Transfer Queue", self)
+        clear_queue_action.triggered.connect(self.dashboard_view.clear_local_queue)
+        edit_menu.addAction(clear_queue_action)
+
         transfer_menu = self.menuBar().addMenu("Transfer")
 
         refresh_action = QAction("Refresh Sample List", self)
@@ -75,6 +97,10 @@ class ApplicationWindow(QMainWindow):
         receive_action.triggered.connect(self.dashboard_view.on_receive_clicked)
         transfer_menu.addAction(receive_action)
 
+        cancel_action = QAction("Cancel Transfer", self)
+        cancel_action.triggered.connect(self.dashboard_view.cancel_transfer)
+        transfer_menu.addAction(cancel_action)
+
         transfer_menu.addSeparator()
 
         transfer_settings_action = QAction("Transfer Settings...", self)
@@ -83,6 +109,20 @@ class ApplicationWindow(QMainWindow):
             self.dashboard_view.open_global_settings_dialog
         )
         transfer_menu.addAction(transfer_settings_action)
+
+        self.dashboard_view.register_menu_actions(
+            {
+                self.dashboard_view.btn_settings: settings_action,
+                self.dashboard_view.btn_refresh: refresh_action,
+                self.dashboard_view.btn_send: send_action,
+                self.dashboard_view.btn_receive: receive_action,
+                self.dashboard_view.btn_global_settings: transfer_settings_action,
+                self.dashboard_view.btn_select_all: select_all_action,
+                self.dashboard_view.btn_delete_selected: delete_selected_action,
+                self.dashboard_view.btn_clear_queue: clear_queue_action,
+                self.dashboard_view.btn_cancel: cancel_action,
+            }
+        )
 
     def _open_files_dialog(self):
         paths, _ = QFileDialog.getOpenFileNames(
