@@ -27,7 +27,7 @@ class AboutDialog(QDialog):
 
         description_label = QLabel(
             "A cross-platform MIDI Sample Dump Standard transfer tool\n"
-            "for Akai and gereric SDS-compatible samplers."
+            "for Akai and generic SDS-compatible samplers."
         )
         description_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         description_label.setWordWrap(True)
