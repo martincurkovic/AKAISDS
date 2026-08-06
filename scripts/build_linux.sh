@@ -39,6 +39,7 @@ else
   VERSION=$(echo "$RAW_TAG" | sed 's/^v//')
 fi
 echo "Building version: $VERSION"
+echo "APP_VERSION = \"$VERSION\"" >"$SRC_DIR/ui/_version.py"
 
 if [ ! -f "pysidedeploy.spec" ]; then
   echo "No spec file found - generating from defaults"

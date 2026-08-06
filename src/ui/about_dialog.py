@@ -3,7 +3,10 @@ from PySide6.QtCore import Qt
 from PySide6.QtGui import QFontDatabase
 from ui.ascii_logo import LOGO
 
-APP_VERSION = "1.0.0-dev"  # PLACHOLDER FOR NOW
+try:
+    from ui._version import APP_VERSION
+except ImportError:
+    APP_VERSION = "1.0.0-dev"  # fallback version number
 GITHUB_URL = "https://github.com/martincurkovic/AKAISDS"
 
 

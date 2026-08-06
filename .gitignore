@@ -23,6 +23,7 @@ deployment/
 *.exe
 *.dmg
 *.AppImage
+src/ui/_version.py
 
 # Editor specific
 .zed/

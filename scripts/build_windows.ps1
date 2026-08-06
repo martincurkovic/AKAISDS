@@ -38,6 +38,7 @@ if (-not $RawTag) {
     $Version = $RawTag -replace '^v', ''
 }
 Write-Host "Building version: $Version"
+"APP_VERSION = `"$Version`"" | Set-Content (Join-Path $SrcDir "ui\_version.py")
 
 # Windows --product-version needs EXACTLY 4 numeric parts, no suffix
 # allowed (eg "0.0.0-dev" is invalid) - strip any non-numeric suffix,
