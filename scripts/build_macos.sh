@@ -47,7 +47,7 @@ if [ ! -f "pysidedeploy.spec" ]; then
 fi
 
 # re-generate extra_args on EVERY run, that way version number can update correctly
-sed -i "s|^extra_args = .*|extra_args = --quiet --noinclude-qt-translations --assume-yes-for-downloads --macos-app-name=AKAISDS --macos-app-version=$VERSION --include-module=mido.backends.rtmidi --include-data-dir=ui/icons=ui/icons --include-data-files=ui/style.qss.template=ui/style.qss.template|" pysidedeploy.spec
+sed -i '' "s|^extra_args = .*|extra_args = --quiet --noinclude-qt-translations --assume-yes-for-downloads --macos-app-name=AKAISDS --macos-app-version=$VERSION --include-module=mido.backends.rtmidi --include-data-dir=ui/icons=ui/icons --include-data-files=ui/style.qss.template=ui/style.qss.template|" pysidedeploy.spec
 
 echo "Building AKAISDS.app..."
 pyside6-deploy -c pysidedeploy.spec
