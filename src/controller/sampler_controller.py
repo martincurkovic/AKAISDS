@@ -31,12 +31,6 @@ class SamplerController(QObject):
         self._no_response_detected = False
         self._packet_send_generation = 0
 
-    def set_channel(self, channel):
-        self.channel = channel & 0x7F
-
-    def set_device_type(self, device_type):
-        self.device_type = device_type
-
         # state for an in-progress send - lets us dispatch one packet at a time
         # via QTtimer instead of blocking the GUI thread like a slow person walking in the middle of the aisles at Kmart
         self._send_queue = []
@@ -88,6 +82,12 @@ class SamplerController(QObject):
         # this lets the overall progress bar report progress smoothly across the whole file
         self._current_file_leg_index = 0
         self._current_file_total_legs = 1
+
+    def set_channel(self, channel):
+        self.channel = channel & 0x7F
+
+    def set_device_type(self, device_type):
+        self.device_type = device_type
 
     def refresh_sample_list(self, silent=False):
         if self.device_type == "generic":
