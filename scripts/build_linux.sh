@@ -32,7 +32,7 @@ fi
 cd "$SRC_DIR"
 
 # derive version from nearest git tag
-RAW_TAG=$(git -C "$ROOT_DIR" describe --tags --abbrev=0 2>/dev/null)
+RAW_TAG=$(git -C "$ROOT_DIR" describe --tags --abbrev=0 2>/dev/null || true)
 if [ -z "$RAW_TAG" ]; then
   VERSION="0.0.0-dev"
 else
