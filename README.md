@@ -17,17 +17,21 @@ A simple way to send and receive audio samples (WAV, AIFF, FLAC) to an Akai S100
 ## Quick Start & Screenshots
 
 **1. Connect your sampler and open MIDI Settings**
-Select your MIDI Input/Output ports and choose your sampler type (Akai or Generic SDS). You can test your interface's MIDI SysEx compatibility in the MIDI Hardware Test tab.
-![MIDI Settings](assets/screenshots/midi-settings.png)
+
+Select your MIDI Input/Output ports and choose your sampler type (Akai or Generic SDS). You can test your interface's MIDI SysEx compatibility in the MIDI Hardware Test tab.![MIDI Settings](assets/screenshots/midi-settings.png "MIDI Settings"))
+
 **2. Drag audio files into the queue**
+
 WAV, AIFF and FLAC are all supported. Dragging in entire folders works too.
 
 ![File Queue](assets/screenshots/file-queue.png)
 
 **3. Adjust quality settings (optional)**
+
 You can set quality globally via the Transmission Settings button or individually via the Edit button next to each sample. Reducing quality will significantly reduce the transfer time (MIDI Sample Dumps are notoriously slowwwww 🐌).
 
 ![Transmission Settings](assets/screenshots/transmission-settings.png)
+
 **4. Hit Send!**
 
 ![Main Window Dark Mode](assets/screenshots/main-window-dark.png)
