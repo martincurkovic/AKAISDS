@@ -2,6 +2,8 @@
 
 A simple way to send and receive audio samples (WAV, AIFF, FLAC) to an Akai S1000/S2000/S3000 series sampler over MIDI using the sample dump standard (MIDI SDS). Also supports generic MIDI SDS transmission for non-Akai samplers.
 
+![Main window theme fade](assets/screenshots/theme-fade.webp "Main window theme fade")
+
 ## Features
 
 - Akai-native sample browsing & management (list, rename, delete) as well as universal generic SDS support for non-Akai hardware
@@ -11,6 +13,24 @@ A simple way to send and receive audio samples (WAV, AIFF, FLAC) to an Akai S100
 - Open-loop fallback for one-way MIDI cable setups, including timeout detection if a cable is unplugged mid-transfer
 - Built in MIDI loopback diagnostics, for testing whether your MIDI interface can support MIDI SysEx traffic
 - Native builds for macOS (Apple Silicon & Intel), Linux and Windows (note that Windows support has not been thoroughly tested yet)
+
+## Quick Start & Screenshots
+
+**1. Connect your sampler and open MIDI Settings**
+Select your MIDI Input/Output ports and choose your sampler type (Akai or Generic SDS). You can test your interface's MIDI SysEx compatibility in the MIDI Hardware Test tab.
+![MIDI Settings](assets/screenshots/midi-settings.png)
+**2. Drag audio files into the queue**
+WAV, AIFF and FLAC are all supported. Dragging in entire folders works too.
+
+![File Queue](assets/screenshots/file-queue.png)
+
+**3. Adjust quality settings (optional)**
+You can set quality globally via the Transmission Settings button or individually via the Edit button next to each sample. Reducing quality will significantly reduce the transfer time (MIDI Sample Dumps are notoriously slowwwww 🐌).
+
+![Transmission Settings](assets/screenshots/transmission-settings.png)
+**4. Hit Send!**
+
+![Main Window Dark Mode](assets/screenshots/main-window-dark.png)
 
 ## Download & Installation
 
@@ -22,15 +42,11 @@ Unzip the download and drag AKAISDS to your applications folder. See the disclai
 
 #### Windows Instructions
 
-Unzip the download and run AKAISDS.exe from wherever you downloaded it, _or_ move it to anywhere conventient like your Desktop or Documents folder. I am in the process of planning out creating a proper Windows installer, but I'm not much of a Windows user. If you happen to know more about creating Windows installers, your contribution would be much appreciated. See the disclaimer section below for instructions about how to bypass Windows SmartScreen & Defender.
+Unzip the download and run AKAISDS.exe from wherever you downloaded it, _or_ move it to anywhere convenient like your Desktop or Documents folder. I am in the process of planning out creating a proper Windows installer, but I'm not much of a Windows user. If you happen to know more about creating Windows installers, your contribution would be much appreciated. See the disclaimer section below for instructions about how to bypass Windows SmartScreen & Defender.
 
 #### Linux Instructions
 
-Unzip the download and run the AKAISDS.bin file from any directory. Depending on your distribution you may need to `chmod +x AKAISDS.bin` to allow execution. No security tweaks should be necessary, at least not on Ubuntu 26.04 LTS. I am currently looking at creating AKAISDS in different packaging formats. If you are knowledgeable about Linux packaging formats, I would LOVE a hand.
-
-## Quick Start & Screenshots
-
-TODO: (insert a short walkthru with screenshots)
+Unzip the download and run the AKAISDS.bin file from any directory. Depending on your distribution you may need to run `chmod +x AKAISDS.bin` to allow execution. No security tweaks should be necessary, at least not on Ubuntu 26.04 LTS. I am currently looking into packaging AKAISDS in different Linux package formats. If you are knowledgeable about Linux packaging formats, I would LOVE a hand.
 
 ## Disclaimer
 
@@ -72,7 +88,7 @@ This project would not have been possible without the amazing work of Frank Neum
 
 _Here I stand on the shoulders of giants._
 
-I make exactly zero dollars from AKAISDS. If you find this project useful in any way shape or form, I would appreciate any support you can offer, be it by spreading the word of AKAISDS, donations via Ko-Fi (TODO: insert link here) or by listening to my music (TODO: insert link here) on whatever platform works best for you (sketchy torrent sites included).
+I make exactly zero dollars from AKAISDS. If you find this project useful in any way shape or form, I would appreciate any support you can offer, be it by spreading the word of AKAISDS, [donating via Ko-Fi](https://ko-fi.com/martincurkovic) or by [listening to my music](https://martin.fanlink.tv/putitdown) on whatever platform works best for you (sketchy torrent sites included).
 
 Much love,
 
