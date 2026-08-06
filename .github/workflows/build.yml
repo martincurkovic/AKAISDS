@@ -1,13 +1,33 @@
 name: Build
 
 on:
-  workflow_dispatch:   # lets you trigger this manually from GitHub's website
+  workflow_dispatch:   # allows for manual triggering
+  push:
+    tags:
+      - "v*.*.*"
 
 jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4 
+      - uses: actions/setup-python@v5 
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: | 
+          pip install -r requirements.txt 
+          pip install -r requirements-dev.txt 
+      - name: Run tests 
+        run: pytest tests/ -v 
+
   build-macos-arm:
+    needs: test
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - name: Build
         run: |
           chmod +x scripts/build_macos.sh
@@ -22,9 +42,12 @@ jobs:
           path: src/AKAISDS-macos-arm.zip
 
   build-macos-intel:
+    needs: test
     runs-on: macos-15-intel
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - name: Build
         run: |
           chmod +x scripts/build_macos.sh
@@ -39,9 +62,12 @@ jobs:
           path: src/AKAISDS-macos-intel.zip
 
   build-linux:
+    needs: test
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - name: Install build tools
         run: sudo apt-get update && sudo apt-get install -y build-essential
       - name: Build
@@ -54,12 +80,31 @@ jobs:
           path: src/AKAISDS.bin
 
   build-windows:
+    needs: test
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - name: Build
         run: .\scripts\build_windows.ps1
       - uses: actions/upload-artifact@v4
         with:
           name: AKAISDS-windows
           path: src/AKAISDS.exe
+
+  release:
+    needs: [build-macos-arm, build-macos-intel, build_linux, build-windows]
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write 
+    steps:
+      - name: Download all artifacts 
+        uses: actions/download-artifact@v4 
+        with:
+          path: release-files
+      - name: Create Release 
+        uses: softprops/action-gh-release@v3
+        with: 
+          files: release-files/**/*
