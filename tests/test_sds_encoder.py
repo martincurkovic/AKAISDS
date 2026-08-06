@@ -51,7 +51,7 @@ def test_read_wav_samples_16bit(tmp_path):
             interleaved.extend([l, r])
         wf.writeframes(struct.pack("<" + "h" * len(interleaved), *interleaved))
 
-    samples, rate = sds_encoder.read_wav_channels(str(wav_path))
+    samples, rate = sds_encoder.read_wav_samples(str(wav_path))
     assert list(samples) == left
     assert rate == 44100
 

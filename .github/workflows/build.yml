@@ -94,7 +94,7 @@ jobs:
           path: src/AKAISDS.exe
 
   release:
-    needs: [build-macos-arm, build-macos-intel, build_linux, build-windows]
+    needs: [build-macos-arm, build-macos-intel, build-linux, build-windows]
     if: github.ref_type == 'tag'
     runs-on: ubuntu-latest
     permissions:

@@ -34,6 +34,11 @@ class _FakeSignal:
         return getattr(obj, key)
 
 
+class _FakeQObject:
+    def __init__(self, *_a, **_k):
+        pass
+
+
 class _FakeQTimer:
     @staticmethod
     def singleShot(_ms, fn):
