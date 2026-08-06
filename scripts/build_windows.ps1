@@ -29,18 +29,42 @@ if ($FreshVenv) {
 
 Set-Location $SrcDir
 
+# derive version from the nearest git tag - falls back to a dev
+# placeholder if no tags exist yet
+$RawTag = git -C $RootDir describe --tags --abbrev=0 2>$null
+if (-not $RawTag) {
+    $Version = "0.0.0-dev"
+} else {
+    $Version = $RawTag -replace '^v', ''
+}
+Write-Host "Building version: $Version"
+
+# Windows --product-version needs EXACTLY 4 numeric parts, no suffix
+# allowed (eg "0.0.0-dev" is invalid) - strip any non-numeric suffix,
+# then pad or trim to exactly 4 parts
+$NumericVersion = $Version -replace '[^0-9.].*$', ''
+$Parts = $NumericVersion.Split('.')
+while ($Parts.Count -lt 4) {
+    $Parts += "0"
+}
+$ProductVersion = ($Parts[0..3] -join '.')
+Write-Host "Windows product version: $ProductVersion"
+
 if (-not (Test-Path "pysidedeploy.spec")) {
-    Write-Host "No spec file found - generating from defaults"
+    Write-Host "No spec file found - generating one with our known-good settings..."
 
     pyside6-deploy --init main.py
 
     (Get-Content pysidedeploy.spec) -replace '^title = .*', 'title = AKAISDS' | Set-Content pysidedeploy.spec
     (Get-Content pysidedeploy.spec) -replace '^icon = .*', 'icon = ../assets/icon/icon_512x512.png' | Set-Content pysidedeploy.spec
-    (Get-Content pysidedeploy.spec) -replace '^mode = .*', 'mode = onefile' | Set-Content pysidedeploy.spec
-    (Get-Content pysidedeploy.spec) -replace '^extra_args = .*', 'extra_args = --quiet --assume-yes-for-downloads --noinclude-qt-translations --windows-console-mode=disable --windows-product-name=AKAISDS --product-version=1.0.0.0 --include-module=mido.backends.rtmidi --include-data-dir=ui/icons=ui/icons --include-data-files=ui/style.qss.template=ui/style.qss.template' | Set-Content pysidedeploy.spec
+    (Get-Content pysidedeploy.spec) -replace '^mode = .*', 'mode = standalone' | Set-Content pysidedeploy.spec
 
     Write-Host "Spec generated and configured."
 }
+
+# extra_args is regenerated on EVERY run (not just first-time setup),
+# specifically so the version stays current even on an existing spec
+(Get-Content pysidedeploy.spec) -replace '^extra_args = .*', "extra_args = --quiet --noinclude-qt-translations --assume-yes-for-downloads --windows-console-mode=disable --windows-product-name=AKAISDS --product-version=$ProductVersion --include-module=mido.backends.rtmidi --include-data-dir=ui/icons=ui/icons --include-data-files=ui/style.qss.template=ui/style.qss.template" | Set-Content pysidedeploy.spec
 
 Write-Host "Building AKAISDS..."
 pyside6-deploy -c pysidedeploy.spec
