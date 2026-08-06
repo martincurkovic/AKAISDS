@@ -31,6 +31,15 @@ fi
 
 cd "$SRC_DIR"
 
+# derive version from nearest git tag
+RAW_TAG=$(git -C "$ROOT_DIR" describe --tags --abbrev=0 2>/dev/null)
+if [ -z "$RAW_TAG" ]; then
+  VERSION="0.0.0-dev"
+else
+  VERSION=$(echo "$RAW_TAG" | sed 's/^v//')
+fi
+echo "Building version: $VERSION"
+
 if [ ! -f "pysidedeploy.spec" ]; then
   echo "No spec file found - generating from defaults"
 
