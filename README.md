@@ -12,13 +12,14 @@ A simple way to send and receive audio samples (WAV, AIFF, FLAC) to an Akai S100
 - Batch transmission queue for sending and receiving samples
 - Open-loop fallback for one-way MIDI cable setups, including timeout detection if a cable is unplugged mid-transfer
 - Built in MIDI loopback diagnostics, for testing whether your MIDI interface can support MIDI SysEx traffic
+- Built in MIDI hardware diagnostics, for testing whether your MIDI sampler is connected and configured correctly
 - Native builds for macOS (Apple Silicon & Intel), Linux and Windows (note that Windows support has not been thoroughly tested yet)
 
 ## Quick Start & Screenshots
 
 **1. Connect your sampler and open MIDI Settings**
 
-Select your MIDI Input/Output ports and choose your sampler type (Akai or Generic SDS). You can test your interface's MIDI SysEx compatibility in the MIDI Hardware Test tab.
+Select your MIDI Input/Output ports and choose your sampler type (Akai or Generic SDS). You can test your MIDI setup in the **MIDI Hardware Test** tab. If you're having connectivity issues, you can check your interface's MIDI SysEx compatibility by doing a loopback test in the **MIDI Interface Test** tab. Not all MIDI interfaces are able to support SysEx messages.
 
 ![MIDI Settings](assets/screenshots/midi-settings.png "MIDI Settings")
 
@@ -57,7 +58,7 @@ These are theoretical best-case figures based on MIDI's fixed wire speed of 31,2
 
 ## Download & Installation
 
-TODO: (link to download goes here, update once first build is done)
+Download the latest release from the Releases tab on GitHub
 
 #### macOS Instructions
 
@@ -89,7 +90,7 @@ To bypass Windows SmartScreen & Defender you will need to do the following:
 1. Delete Windows 11 immediately and switch to Linux
 2. Fine, if you insist on Windows: open Windows Security → Virus & threat protection → Protection history, find AKAISDS in the list and restore it.
 3. To stop it happening on every future download: same app → Manage settings → Exclusions → Add an exclusion → File → Select AKAISDS.exe
-4. Alternatively you can build AKAISDS on your machine locally and it _might potentially_ bypass Windows Defender, but YMMV
+4. Alternatively you can build AKAISDS on your machine locally and it _might_ potentially bypass Windows Defender, but YMMV
 
 Generic SDS mode has been implemented and tested via simulation but only has limited verification on real hardware. Bugs will likely be present, so if you encounter one please log an issue on GitHub and be as descriptive as possible :)
 

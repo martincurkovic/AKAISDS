@@ -90,35 +90,7 @@ class MidiSettingsDialog(QDialog):
 
         tabs.addTab(settings_tab, "MIDI Settings")
 
-        # TAB 2 - MIDI Interface TEST ----------------------------------------------------
-        test_tab = QWidget()
-        test_layout = QVBoxLayout(test_tab)
-
-        loopback_note = QLabel(
-            "To test a MIDI interface's SysEx reliability, "
-            "connect a cable from its MIDI OUT port back into its own MIDI IN port. "
-            "Select the ports on the MIDI Settings tab, then run the test below (may take 5-20 seconds to complete)."
-        )
-        loopback_note.setWordWrap(True)
-        loopback_note.setAlignment(
-            Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop
-        )
-        test_layout.addWidget(loopback_note)
-
-        test_layout.addStretch()
-
-        self.btn_loopback_test = QPushButton("Run Loopback Test")
-        self.btn_loopback_test.clicked.connect(self._run_loopback_test)
-        test_layout.addWidget(self.btn_loopback_test)
-
-        self.loopback_progress = QProgressBar()
-        self.loopback_progress.setRange(0, 0)
-        self.loopback_progress.setVisible(False)
-        test_layout.addWidget(self.loopback_progress)
-
-        tabs.addTab(test_tab, "MIDI Interface Test")
-
-        # TAB 3 = MIDI Hardware Test -----------------------------------------------------
+        # TAB 2 = MIDI Hardware Test -----------------------------------------------------
         device_id_tab = QWidget()
         device_id_layout = QVBoxLayout(device_id_tab)
 
@@ -151,6 +123,34 @@ class MidiSettingsDialog(QDialog):
         device_id_layout.addWidget(self.id_progress)
 
         tabs.addTab(device_id_tab, "MIDI Hardware Test")
+
+        # TAB 3 - MIDI Interface TEST ----------------------------------------------------
+        test_tab = QWidget()
+        test_layout = QVBoxLayout(test_tab)
+
+        loopback_note = QLabel(
+            "To test a MIDI interface's SysEx reliability, "
+            "connect a cable from its MIDI OUT port back into its own MIDI IN port. "
+            "Select the ports on the MIDI Settings tab, then run the test below (may take 5-20 seconds to complete)."
+        )
+        loopback_note.setWordWrap(True)
+        loopback_note.setAlignment(
+            Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop
+        )
+        test_layout.addWidget(loopback_note)
+
+        test_layout.addStretch()
+
+        self.btn_loopback_test = QPushButton("Run Loopback Test")
+        self.btn_loopback_test.clicked.connect(self._run_loopback_test)
+        test_layout.addWidget(self.btn_loopback_test)
+
+        self.loopback_progress = QProgressBar()
+        self.loopback_progress.setRange(0, 0)
+        self.loopback_progress.setVisible(False)
+        test_layout.addWidget(self.loopback_progress)
+
+        tabs.addTab(test_tab, "MIDI Interface Test")
 
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
