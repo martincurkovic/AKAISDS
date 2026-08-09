@@ -14,13 +14,15 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 from PySide6.QtCore import Qt
-from core import app_config
+from core import app_config, midi_identity
 from ui.qt_helpers import widen_popup_to_fit_items
 import time
 import mido
 
 _LOOPBACK_TEST_SIZES = [8, 32, 64, 127, 256, 512, 1024, 1536, 2048, 2560, 3072]
-_LOOPBACK_RECEIVE_TIMEOUT = 1.5  # seconds to wait for each message to return
+
+# seconds to wait for each message to return. also used for hardware test
+_LOOPBACK_RECEIVE_TIMEOUT = 1.5
 
 
 class MidiSettingsDialog(QDialog):
@@ -31,7 +33,8 @@ class MidiSettingsDialog(QDialog):
         self.sampler_controller = sampler_controller
 
         outer_layout = QVBoxLayout(self)
-        self.setMinimumHeight(250)
+        self.setMinimumHeight(300)
+        self.setMinimumWidth(430)
 
         tabs = QTabWidget()
         outer_layout.addWidget(tabs)
@@ -87,7 +90,7 @@ class MidiSettingsDialog(QDialog):
 
         tabs.addTab(settings_tab, "MIDI Settings")
 
-        # TAB 2 - MIDI TEST ----------------------------------------------------
+        # TAB 2 - MIDI Interface TEST ----------------------------------------------------
         test_tab = QWidget()
         test_layout = QVBoxLayout(test_tab)
 
@@ -113,7 +116,41 @@ class MidiSettingsDialog(QDialog):
         self.loopback_progress.setVisible(False)
         test_layout.addWidget(self.loopback_progress)
 
-        tabs.addTab(test_tab, "MIDI Hardware Test")
+        tabs.addTab(test_tab, "MIDI Interface Test")
+
+        # TAB 3 = MIDI Hardware Test -----------------------------------------------------
+        device_id_tab = QWidget()
+        device_id_layout = QVBoxLayout(device_id_tab)
+
+        hardware_test_note = QLabel(
+            "To test your MIDI hardware setup, "
+            "connect your MIDI device to both your interface's MIDI IN and OUT ports. "
+            "Select the ports on the MIDI Settings tab, then run the test below."
+        )
+        hardware_test_note.setWordWrap(True)
+        hardware_test_note.setAlignment(
+            Qt.AlignmentFlag.AlignCenter | Qt.AlignmentFlag.AlignTop
+        )
+        device_id_layout.addWidget(hardware_test_note)
+
+        device_id_layout.addStretch()
+
+        self.id_results_label = QLabel()
+        self.id_results_label.setWordWrap(True)
+        device_id_layout.addWidget(self.id_results_label)
+
+        device_id_layout.addStretch()
+
+        self.btn_run_id_request = QPushButton("Run Hardware Test")
+        self.btn_run_id_request.clicked.connect(self._run_identity_request)
+        device_id_layout.addWidget(self.btn_run_id_request)
+
+        self.id_progress = QProgressBar()
+        self.id_progress.setRange(0, 0)
+        self.id_progress.setVisible(False)
+        device_id_layout.addWidget(self.id_progress)
+
+        tabs.addTab(device_id_tab, "MIDI Hardware Test")
 
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
@@ -162,6 +199,119 @@ class MidiSettingsDialog(QDialog):
 
         self.accept()
 
+    def _run_identity_request(self):
+        input_name = self.combo_input.currentData()
+        output_name = self.combo_output.currentData()
+
+        if not input_name or not output_name:
+            QMessageBox.warning(
+                self,
+                "Identity Request",
+                "Select both a MIDI Input and MIDI Output first - "
+                "the ports connected to and from the sampler.",
+            )
+            return
+
+        # release the current open midi connection for the duration of the identity request.
+        # prevents conflict with 2 different ports open
+        previous_input = self.midi_manager.input_name
+        previous_output = self.midi_manager.output_name
+        self.midi_manager.open_input(None)
+        self.midi_manager.open_output(None)
+
+        self.btn_run_id_request.setEnabled(False)
+        self.btn_run_id_request.setText("Testing...")
+        self.id_progress.setVisible(True)
+        QApplication.processEvents()
+
+        try:
+            midi_id_input = mido.open_input(input_name)
+            midi_id_output = mido.open_output(output_name)
+            try:
+                # send identity request message and parse response
+                success, id_response = self._send_identity_request(
+                    midi_id_input, midi_id_output
+                )
+                if success:
+                    device_type = self.combo_device_type.currentData()
+                    if device_type == "akai":
+                        self.id_results_label.setText(
+                            self._format_stat_result(id_response)
+                        )
+                    else:
+                        self.id_results_label.setText(
+                            self._format_identity_result(id_response)
+                        )
+                else:
+                    self.id_results_label.setText(str(id_response))
+                QApplication.processEvents()
+            finally:
+                midi_id_input.close()
+                midi_id_output.close()
+        except Exception as e:
+            self.id_progress.setVisible(False)
+            QMessageBox.critical(
+                self, "Identity Request", f"Couldn't run the test: {e}"
+            )
+        finally:
+            # restore the app's REAL connection
+            self.midi_manager.open_input(previous_input)
+            self.midi_manager.open_output(previous_output)
+            self.btn_run_id_request.setEnabled(True)
+            self.btn_run_id_request.setText("Run Hardware Test")
+            self.id_progress.setVisible(False)
+
+    def _send_identity_request(self, input_port, output_port):
+        while input_port.poll() is not None:
+            pass  # drain any stale bytes in the buffer
+
+        device_type = self.combo_device_type.currentData()
+
+        if device_type == "akai":
+            output_port.send(
+                mido.Message("sysex", data=midi_identity.build_rstat_request_message())
+            )
+        else:
+            output_port.send(
+                mido.Message(
+                    "sysex", data=midi_identity.build_identity_request_message()
+                )
+            )
+        deadline = time.monotonic() + _LOOPBACK_RECEIVE_TIMEOUT
+        response = None
+        while time.monotonic() < deadline:
+            incoming = input_port.poll()
+            if incoming is not None and incoming.type == "sysex":
+                response = incoming
+                break
+            QApplication.processEvents()
+
+        if response is None:
+            return False, "Sampler hardware not found - please check your MIDI setup"
+
+        if device_type == "akai":
+            received_data = midi_identity.parse_stat_response(response.data)
+        else:
+            received_data = midi_identity.parse_identity_response(response.data)
+        return True, received_data
+
+    def _format_stat_result(self, data):
+        return (
+            f"Akai S1000/S2000/S3000-family sampler\n"
+            f"OS Version: {data['version_string']}\n"
+            f"Program/sample slots free: {data['num_blocks_free']} / {data['max_num_blocks']}\n"
+            f"Sample memory free: {data['num_words_free']:,} / {data['max_num_samp_words']:,} words"
+        )
+
+    def _format_identity_result(self, data):
+        manuf_name = midi_identity.lookup_manufacturer(data["manuf_id"])
+        return (
+            f"Manufacturer: {manuf_name}\n"
+            f"Family Code: {data['family_code']}\n"
+            f"Model Number: {data['model_number']}\n"
+            f"Version: {data['version_number']}"
+        )
+
     def _run_loopback_test(self):
         input_name = self.combo_input.currentData()
         output_name = self.combo_output.currentData()
@@ -170,7 +320,7 @@ class MidiSettingsDialog(QDialog):
             QMessageBox.warning(
                 self,
                 "Loopback Test",
-                "Select both a MIDI Input and MIDI Output above first - "
+                "Select both a MIDI Input and MIDI Output first - "
                 "the same interface's own ports, connected to each other "
                 "with a physical MIDI cable.",
             )
@@ -202,7 +352,8 @@ class MidiSettingsDialog(QDialog):
                 test_input.close()
                 test_output.close()
         except Exception as e:
-            QMessageBox.critical(self, "Loopback Test", f"Couldn't run the test {e}")
+            self.loopback_progress.setVisible(False)
+            QMessageBox.critical(self, "Loopback Test", f"Couldn't run the test: {e}")
             results = None
         finally:
             # restore th app's real midi connection upon test completion
