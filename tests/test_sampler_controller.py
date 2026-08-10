@@ -86,11 +86,81 @@ def controller(controller_module):
     return controller_module.SamplerController(midi)
 
 
-def test_channel_propagates_into_rslist_request(controller):
+def test_channel_propagates_into_rstat_request(controller):
     controller.set_channel(5)
     controller.refresh_sample_list()
     sent = controller.midi_manager.sent[-1]
     assert sent[1] == 5  # channel byte
+
+
+def test_refresh_sample_list_sends_rstat_and_sets_flag(controller):
+    controller.refresh_sample_list()
+    sent = controller.midi_manager.sent[-1]
+    assert sent[2] == 0x00
+    assert controller._awaiting_memory_status is True
+
+
+def test_stat_reply_updates_memory_status_and_chains_into_slist(controller):
+    controller._awaiting_memory_status = True
+    stat_reply = [
+        0x47,
+        0x00,
+        0x01,
+        0x48,
+        0x00,
+        0x11,
+        0x6E,
+        0x07,
+        0x68,
+        0x07,
+        0x00,
+        0x00,
+        0x40,
+        0x02,
+        0x00,
+        0x76,
+        0x3B,
+        0x02,
+        0x00,
+    ]
+    captured = []
+    controller.memory_status_updated.connect(lambda info: captured.append(info))
+    controller.on_sysex_received(stat_reply)
+    assert controller._awaiting_memory_status is False
+    assert len(captured) == 1
+    assert captured[0]["version_string"] == "2.00"
+    sent = controller.midi_manager.sent[-1]
+    assert sent[2] == 0x04
+
+
+def test_unexpected_stat_falls_through_without_crashing(controller):
+    stat_reply = [
+        0x47,
+        0x00,
+        0x01,
+        0x48,
+        0x00,
+        0x11,
+        0x6E,
+        0x07,
+        0x68,
+        0x07,
+        0x00,
+        0x00,
+        0x40,
+        0x02,
+        0x00,
+        0x76,
+        0x3B,
+        0x02,
+        0x00,
+    ]
+
+    captured = []
+    controller.memory_status_updated.connect(lambda info: captured.append(info))
+    controller.on_sysex_received(stat_reply)
+    assert controller._awaiting_memory_status is False
+    assert len(captured) == 0
 
 
 def test_channel_can_be_overridden_per_call(controller):

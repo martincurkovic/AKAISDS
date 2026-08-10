@@ -97,7 +97,7 @@ class SamplerController(QObject):
         self._refresh_is_silent = silent
         self._awaiting_memory_status = True
         self._send_rstat_request()
-        # self._send_rslist_request() cant send this now, message collision if send them b2b
+        # self._send_rslist_request() # cant send this now, message collision if send them b2b
         if not silent:
             self.status_changed.emit("Requesting available memory...")
 
@@ -151,7 +151,7 @@ class SamplerController(QObject):
         self.midi_manager.send_sysex(request)
 
     def _send_rstat_request(self):
-        request = midi_identity.build_rstat_request_message()
+        request = midi_identity.build_rstat_request_message(self.channel)
         self.midi_manager.send_sysex(request)
 
     def on_sysex_received(self, data_bytes):

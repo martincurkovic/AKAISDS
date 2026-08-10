@@ -48,10 +48,10 @@ def lookup_manufacturer(manuf_id):
     return MANUFACTURERS.get(manuf_id, "Unknown manufacturer")
 
 
-def build_rstat_request_message():
+def build_rstat_request_message(channel=0):
     # send Akai specific identity request string because it doesnt understand regular ID requests
     # (yeah i know, akai's gotta be special again instead of implementing a generic sysex function...)
-    return [0x47, 0x00, 0x00, 0x48]
+    return [0x47, channel, 0x00, 0x48]
 
 
 def parse_stat_response(data_bytes):
