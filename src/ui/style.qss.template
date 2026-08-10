@@ -131,6 +131,13 @@ QProgressBar::chunk {
     border-radius: 3px;
 }
 
+QProgressBar[memoryLevel="warning"]::chunk {
+  background-color: ${warning};
+}
+
+QProgressBar[memoryLevel="critical"]::chunk {
+  background-color: ${critical};
+}
 /* ---------- Status bar ---------- */
 QStatusBar {
     background-color: ${bg_statusbar};

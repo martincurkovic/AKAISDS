@@ -43,6 +43,8 @@ DARK_PALETTE = {
     "border_progress": "#3a3a44",
     "accent": "#4a90d9",
     "text_on_accent": "#ffffff",
+    "warning": "#d9a94a",
+    "critical": "#d9544a",
 }
 
 LIGHT_PALETTE = {
@@ -74,6 +76,8 @@ LIGHT_PALETTE = {
     # family as the dark theme's neutrals without
     # just being a flat grey/blue inversion
     "text_on_accent": "#ffffff",
+    "warning": "#f57927",
+    "critical": "#d54439",
 }
 
 

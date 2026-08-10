@@ -46,6 +46,9 @@ class TransferDashboard(QWidget):
         self.sampler_controller.sample_info_received.connect(
             self.on_sample_info_received
         )
+        self.sampler_controller.memory_status_updated.connect(
+            self.on_memory_status_updated
+        )
 
         # tracks queue row's name edit field status
         self._active_edit_field = None
@@ -159,6 +162,13 @@ class TransferDashboard(QWidget):
         )
         self.list_hardware.set_overlay_widget(self.empty_hardware_label)
 
+        # MEMORY AVAILABILITY PROGRESS BAR
+        self.memory_avail_prog_bar = QProgressBar()
+        self.memory_avail_prog_bar.setRange(0, 100)
+        self.memory_avail_prog_bar.setVisible(True)
+        self.memory_avail_prog_bar.setFormat("%p% memory used")
+        # self.memory_avail_prog_bar.setFixedHeight(20) # nup, this looks shit, dont worry about it
+
         # HEADER ROW - title + refresh button share one line
         hardware_header = QHBoxLayout()
         hardware_header.addWidget(lbl_hardware, stretch=1)
@@ -189,6 +199,7 @@ class TransferDashboard(QWidget):
 
         right_vbox.addLayout(hardware_header)
         right_vbox.addWidget(self.list_hardware)
+        right_vbox.addWidget(self.memory_avail_prog_bar)
 
         # NEST BOTH CONNTAINERS SIDE BY SIDE INTO HORIZONTAL LAYOUT
         panel_layout.addWidget(left_container)
@@ -317,11 +328,14 @@ class TransferDashboard(QWidget):
             self.btn_delete_selected.setEnabled(False)
             self.btn_refresh.setEnabled(False)
             self.btn_receive.setEnabled(not is_open_loop)
+            self.memory_avail_prog_bar.setVisible(False)
         else:
             self.list_hardware.setEnabled(True)
             self.btn_select_all.setEnabled(has_samples)
             self.btn_refresh.setEnabled(not is_open_loop)
             self.btn_receive.setEnabled(not is_open_loop and has_samples)
+            self.memory_avail_prog_bar.setVisible(True)
+            self.memory_avail_prog_bar.setEnabled(not is_open_loop)
             self._update_delete_selected_button_state()
 
         if is_generic:
@@ -919,6 +933,31 @@ class TransferDashboard(QWidget):
             new_name = dialog.get_new_name()
             if new_name and new_name != info["name"]:
                 self.sampler_controller.rename_sample(info["sample_number"], new_name)
+
+    def on_memory_status_updated(self, info):
+        if info["max_num_samp_words"] > 0:
+            percent_used = int(
+                (info["max_num_samp_words"] - info["num_words_free"])
+                / info["max_num_samp_words"]
+                * 100
+            )
+        else:
+            percent_used = 0
+
+        if percent_used >= 90:
+            self.memory_avail_prog_bar.setProperty("memoryLevel", "critical")
+        elif percent_used >= 70:
+            self.memory_avail_prog_bar.setProperty("memoryLevel", "warning")
+        else:
+            self.memory_avail_prog_bar.setProperty("memoryLevel", "normal")
+
+        self.memory_avail_prog_bar.setValue(percent_used)
+        self.memory_avail_prog_bar.setToolTip(
+            f"{info['num_words_free']:,} sample words free\n"
+            f"{info['num_blocks_free']:,} sample blocks/slots free"
+        )
+        self.memory_avail_prog_bar.style().unpolish(self.memory_avail_prog_bar)
+        self.memory_avail_prog_bar.style().polish(self.memory_avail_prog_bar)
 
     def confirm_and_delete_sample(self, name, sample_number):
         reply = QMessageBox.question(

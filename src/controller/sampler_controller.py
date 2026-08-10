@@ -1,5 +1,5 @@
 from PySide6.QtCore import QObject, Signal, QTimer
-from core import akai_sysex, sds_encoder
+from core import akai_sysex, sds_encoder, midi_identity
 import os
 
 
@@ -14,6 +14,7 @@ class SamplerController(QObject):
     sample_received = Signal(str)
     receive_finished = Signal(bool)
     sample_info_received = Signal(dict)
+    memory_status_updated = Signal(dict)
 
     def __init__(self, midi_manager):
         super().__init__()
@@ -76,6 +77,7 @@ class SamplerController(QObject):
         self._receive_queue = []
         self._receive_queue_total = 0
         self._awaiting_sample_info = False
+        self._awaiting_memory_status = False
 
         # tracks which leg of hte current file's transfer is in progress
         # 1 leg for mono, 2 for stereo
@@ -93,9 +95,11 @@ class SamplerController(QObject):
         if self.device_type == "generic":
             return
         self._refresh_is_silent = silent
-        self._send_rslist_request()
+        self._awaiting_memory_status = True
+        self._send_rstat_request()
+        # self._send_rslist_request() cant send this now, message collision if send them b2b
         if not silent:
-            self.status_changed.emit("Requesting sample list...")
+            self.status_changed.emit("Requesting available memory...")
 
     def delete_sample(self, sample_number, channel=None):
         if channel is None:
@@ -146,6 +150,10 @@ class SamplerController(QObject):
         request = akai_sysex.build_slist_request(self.channel)
         self.midi_manager.send_sysex(request)
 
+    def _send_rstat_request(self):
+        request = midi_identity.build_rstat_request_message()
+        self.midi_manager.send_sysex(request)
+
     def on_sysex_received(self, data_bytes):
         # entry point for catching any unexpected eception from handling logic
         try:
@@ -174,6 +182,7 @@ class SamplerController(QObject):
         self._rename_after_send = None
         self._pre_send_names = []
         self._awaiting_sample_info = False
+        self._awaiting_memory_status = False
         self._receiving = False
         self._receive_queue = []
         self._receive_header_info = None
@@ -257,6 +266,18 @@ class SamplerController(QObject):
                 else:
                     self.status_changed.emit(
                         f"Received unexpected SDATA message: {bytes(data_bytes).hex(' ')}"
+                    )
+
+            elif function_code == 0x01:
+                # STAT reponse to RSTAT
+                if self._awaiting_memory_status:
+                    self._awaiting_memory_status = False
+                    info = midi_identity.parse_stat_response(data_bytes)
+                    self.memory_status_updated.emit(info)
+                    self._send_rslist_request()
+                else:
+                    self.status_changed.emit(
+                        f"Received unexpected STAT message {bytes(data_bytes).hex(' ')}"
                     )
 
             elif function_code == 0x16:
