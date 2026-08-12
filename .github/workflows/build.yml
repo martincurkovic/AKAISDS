@@ -1,7 +1,7 @@
 name: Build
 
 on:
-  workflow_dispatch:   # allows for manual triggering
+  workflow_dispatch: # allows for manual triggering
   push:
     tags:
       - "v*.*.*"
@@ -10,16 +10,16 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4 
-      - uses: actions/setup-python@v5 
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
       - name: Install dependencies
-        run: | 
+        run: |
           pip install -r requirements.txt 
-          pip install -r requirements-dev.txt 
-      - name: Run tests 
-        run: pytest tests/ -v 
+          pip install -r requirements-dev.txt
+      - name: Run tests
+        run: pytest tests/ -v
 
   build-macos-arm:
     needs: test
@@ -33,9 +33,9 @@ jobs:
           chmod +x scripts/build_macos.sh
           ./scripts/build_macos.sh
       - name: Zip the .app bundle
-        run: | 
+        run: |
           cd src
-          zip -r AKAISDS-macos-arm.zip AKAISDS.app 
+          zip -r AKAISDS-macos-arm.zip AKAISDS.app
       - uses: actions/upload-artifact@v4
         with:
           name: AKAISDS-macos-arm
@@ -53,9 +53,9 @@ jobs:
           chmod +x scripts/build_macos.sh
           ./scripts/build_macos.sh
       - name: Zip the .app bundle
-        run: | 
+        run: |
           cd src
-          zip -r AKAISDS-macos-intel.zip AKAISDS.app 
+          zip -r AKAISDS-macos-intel.zip AKAISDS.app
       - uses: actions/upload-artifact@v4
         with:
           name: AKAISDS-macos-intel
@@ -74,10 +74,14 @@ jobs:
         run: |
           chmod +x scripts/build_linux.sh
           ./scripts/build_linux.sh
+      - name: Zip the binary
+        run: |
+          cd src 
+          zip AKAISDS-linux.zip AKAISDS.bin
       - uses: actions/upload-artifact@v4
         with:
           name: AKAISDS-linux
-          path: src/AKAISDS.bin
+          path: src/AKAISDS-linuz.zip
 
   build-windows:
     needs: test
@@ -88,23 +92,27 @@ jobs:
           fetch-depth: 0
       - name: Build
         run: .\scripts\build_windows.ps1
+      - name: Zip the binary
+        run: |
+          cd src
+          Compress-Archive -Path AKAISDS.exe -DestinationPath AKAISDS-windows.zip
       - uses: actions/upload-artifact@v4
         with:
           name: AKAISDS-windows
-          path: src/AKAISDS.exe
+          path: src/AKAISDS-windows.zip
 
   release:
     needs: [build-macos-arm, build-macos-intel, build-linux, build-windows]
     if: github.ref_type == 'tag'
     runs-on: ubuntu-latest
     permissions:
-      contents: write 
+      contents: write
     steps:
-      - name: Download all artifacts 
-        uses: actions/download-artifact@v4 
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
         with:
           path: release-files
-      - name: Create Release 
+      - name: Create Release
         uses: softprops/action-gh-release@v3
-        with: 
+        with:
           files: release-files/**/*
