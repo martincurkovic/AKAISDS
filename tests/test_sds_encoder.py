@@ -8,7 +8,7 @@ import soundfile as sf
 from core import sds_encoder
 
 
-def test_sample_to_sds_bytes_around_trip_16bit():
+def test_sample_to_sds_bytes_round_trip_16bit():
     for sample in [0, 1, -1, 32767, -32768, 12345, -12345]:
         encoded = sds_encoder.sample_to_sds_bytes(sample, bit_depth=16)
         decoded = sds_encoder.sds_bytes_to_sample(encoded, bit_depth=16)

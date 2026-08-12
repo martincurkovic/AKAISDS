@@ -26,7 +26,7 @@ class ApplicationWindow(QMainWindow):
         self._restore_saved_ports()
 
         # TEMPORARY DEBUG WIRING - print EVERY status handshake message to console so we can debug responses from the sampler
-        self.sampler_controller.status_changed.connect(print)
+        # self.sampler_controller.status_changed.connect(print)
 
         # instantiate custom UI layout components
         self.dashboard_view = TransferDashboard(

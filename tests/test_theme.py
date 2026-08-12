@@ -14,14 +14,14 @@ def _use_temp_icons_dir(monkeypatch, tmp_path):
     )
 
 
-def test_dark_palette_renders_succesfully(monkeypatch, tmp_path):
+def test_dark_palette_renders_successfully(monkeypatch, tmp_path):
     _use_temp_icons_dir(monkeypatch, tmp_path)
     result = theme.render_stylesheet(theme.DARK_PALETTE)
     assert isinstance(result, str)
     assert len(result) > 0
 
 
-def test_light_palette_renders_succesfully(monkeypatch, tmp_path):
+def test_light_palette_renders_successfully(monkeypatch, tmp_path):
     _use_temp_icons_dir(monkeypatch, tmp_path)
     result = theme.render_stylesheet(theme.LIGHT_PALETTE)
     assert isinstance(result, str)
