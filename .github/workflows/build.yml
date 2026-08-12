@@ -81,7 +81,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: AKAISDS-linux
-          path: src/AKAISDS-linuz.zip
+          path: src/AKAISDS-linux.zip
 
   build-windows:
     needs: test
