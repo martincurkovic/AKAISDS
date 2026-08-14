@@ -48,7 +48,7 @@ if [ ! -f "pysidedeploy.spec" ]; then
 
   sed -i 's/^title = .*/title = AKAISDS/' pysidedeploy.spec
   sed -i 's|^icon = .*|icon = ../assets/icon/icon_512x512.png|' pysidedeploy.spec
-  sed -i 's/^mode = .*/mode = onefile/' pysidedeploy.spec
+  sed -i 's/^mode = .*/mode = standalone/' pysidedeploy.spec
   sed -i 's|^extra_args = .*|extra_args = --quiet --noinclude-qt-translations --assume-yes-for-downloads --include-module=mido.backends.rtmidi --include-data-dir=ui/icons=ui/icons --include-data-files=ui/style.qss.template=ui/style.qss.template|' pysidedeploy.spec
 
   echo "Spec generated and configured."

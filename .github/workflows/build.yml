@@ -74,10 +74,24 @@ jobs:
         run: |
           chmod +x scripts/build_linux.sh
           ./scripts/build_linux.sh
-      - name: Zip the binary
+      - name: Build AppImage
         run: |
-          cd src 
-          zip AKAISDS-linux.zip AKAISDS.bin
+          mkdir -p AppDir/usr/bin
+          cp -r src/AKAISDS.dist/* AppDir/usr/bin 
+
+          wget -O linuxdeploy-x86_64.AppImage https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage
+          chmod +x linuxdeploy-x86_64.AppImage
+
+          LDAI_OUTPUT=AKAISDS-linux.AppImage ./linuxdeploy-x86_64.AppImage --appimage-extract-and-run \
+            --appdir AppDir \
+            --executable AppDir/usr/bin/main.bin \
+            --desktop-file assets/linux/AKAISDS.desktop \
+            --icon-file assets/icon/icon_512x512.png \
+            --output appimage
+
+          ls -la *.AppImage
+      - name: Zip the AppImage
+        run: zip AKAISDS-linux.zip AKAISDS-linux.AppImage
       - uses: actions/upload-artifact@v4
         with:
           name: AKAISDS-linux
