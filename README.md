@@ -69,11 +69,11 @@ Unzip the download and drag AKAISDS to your applications folder. See the disclai
 
 #### Windows Instructions
 
-Unzip the download and run AKAISDS.exe from wherever you downloaded it, _or_ move it to anywhere convenient like your Desktop or Documents folder. I am in the process of planning out creating a proper Windows installer, but I'm not much of a Windows user. If you happen to know more about creating Windows installers, your contribution would be much appreciated - see [CONTRIBUTING](CONTRIBUTING.md). See the disclaimer section below for instructions about how to bypass Windows SmartScreen & Defender.
+Unzip the download and run AKAISDS-Setup.exe to install. It should create a shortcut on your Desktop and in your Start Menu. I'm not much of a Windows user, so if you happen to know more about creating Windows installers, your contribution would be much appreciated - see [CONTRIBUTING](CONTRIBUTING.md). See the disclaimer section below for instructions about how to bypass Windows SmartScreen & Defender.
 
 #### Linux Instructions
 
-Unzip the download and run the AKAISDS.bin file from any directory. Depending on your distribution you may need to run `chmod +x AKAISDS.bin` to allow execution. No security tweaks should be necessary, at least not on Ubuntu 26.04 LTS. I am currently looking into packaging AKAISDS in different Linux package formats. If you are knowledgeable about Linux packaging formats, I would LOVE a hand - see [CONTRIBUTING](CONTRIBUTING.md).
+Unzip the download and run the AKAISDS AppImage from any directory. Depending on your distribution you may need to run `chmod +x AKAISDS-x86_64.AppImage` to allow execution. No security tweaks should be necessary, at least not on Ubuntu 26.04 LTS. I am currently looking into packaging AKAISDS in different Linux package formats. If you are knowledgeable about Linux packaging formats, I would LOVE a hand - see [CONTRIBUTING](CONTRIBUTING.md).
 
 ## Disclaimer
 
@@ -91,8 +91,8 @@ To bypass macOS Gatekeeper you will need to do the following:
 To bypass Windows SmartScreen & Defender you will need to do the following:
 
 1. Delete Windows 11 immediately and switch to Linux
-2. Fine, if you insist on Windows: open Windows Security → Virus & threat protection → Protection history, find AKAISDS in the list and restore it.
-3. To stop it happening on every future download: same app → Manage settings → Exclusions → Add an exclusion → File → Select AKAISDS.exe
+2. Fine, if you insist on Windows: open Windows Security → Virus & threat protection → Protection history, find AKAISDS-Setup.exe in the list and restore it.
+3. To stop it happening on every future download: same app → Manage settings → Exclusions → Add an exclusion → File → Select AKAISDS-Setup.exe
 4. Alternatively you can build AKAISDS on your machine locally and it _might_ potentially bypass Windows Defender, but YMMV
 
 Generic SDS mode has been implemented and tested via simulation but only has limited verification on real hardware. Bugs will likely be present, so if you encounter one please log an issue on GitHub and be as descriptive as possible :) See [CONTRIBUTING.md](CONTRIBUTING.md#reporting-bugs) for what's helpful to include.
