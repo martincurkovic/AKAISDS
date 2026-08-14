@@ -106,14 +106,16 @@ jobs:
           fetch-depth: 0
       - name: Build
         run: .\scripts\build_windows.ps1
-      - name: Zip the binary
+      - name: Build installer
         run: |
-          cd src
-          Compress-Archive -Path AKAISDS.exe -DestinationPath AKAISDS-windows.zip
+          choco install innosetup -y
+          $VersionLine = Get-Content src\ui\_version.py
+          $Version = ($VersionLine -replace '.*"(.+)".*', '$1')
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" /DMyAppVersion=$Version assets\windows\AKAISDS.iss
       - uses: actions/upload-artifact@v4
         with:
           name: AKAISDS-windows
-          path: src/AKAISDS-windows.zip
+          path: AKAISDS-Setup.exe
 
   release:
     needs: [build-macos-arm, build-macos-intel, build-linux, build-windows]
