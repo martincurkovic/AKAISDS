@@ -77,17 +77,17 @@ jobs:
       - name: Build AppImage
         run: |
           mkdir -p AppDir/usr/bin
-          cp -r src/AKAISDS.dist/* AppDir/usr/bin 
+          cp -r src/AKAISDS.dist/* AppDir/usr/bin
+          cp assets/linux/AKAISDS.desktop AppDir/AKAISDS.desktop
+          cp assets/icon/icon_512x512.png AppDir/icon_512x512.png
+          ln -s icon_512x512.png AppDir/.DirIcon
+          printf '#!/bin/sh\nHERE="$(dirname "$(readlink -f "$0")")"\nexec "$HERE/usr/bin/main.bin" "$@"\n' > AppDir/AppRun
+          chmod +x AppDir/AppRun
 
-          wget -O linuxdeploy-x86_64.AppImage https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage
-          chmod +x linuxdeploy-x86_64.AppImage
+          wget -O appimagetool-x86_64.AppImage https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage
+          chmod +x appimagetool-x86_64.AppImage
 
-          LDAI_OUTPUT=AKAISDS-linux.AppImage ./linuxdeploy-x86_64.AppImage --appimage-extract-and-run \
-            --appdir AppDir \
-            --executable AppDir/usr/bin/main.bin \
-            --desktop-file assets/linux/AKAISDS.desktop \
-            --icon-file assets/icon/icon_512x512.png \
-            --output appimage
+          ARCH=x86_64 ./appimagetool-x86_64.AppImage --appimage-extract-and-run AppDir AKAISDS-linux.AppImage
 
           ls -la *.AppImage
       - name: Zip the AppImage

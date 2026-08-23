@@ -82,7 +82,7 @@ class MidiSettingsDialog(QDialog):
         self.combo_device_type.setToolTip(
             "Akai Sampler unlocks browsing/renaming/deleting samples on\n"
             "the hardware (Akai-specific extension to the SDS standard).\n"
-            "Generic SDS used only the universal standard - sending and\n"
+            "Generic SDS uses only the universal standard - sending and\n"
             "receiving still work, but by sample number only, with no way\n"
             "to browse, rename or delete what's on the device."
         )
