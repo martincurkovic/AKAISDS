@@ -6,6 +6,8 @@
 AppName={#MyAppName}
 AppVersion={#MyAppVersion}
 AppPublisher={#MyAppPublisher}
+AppId={{1B7BBB59-F925-454B-90D1-A9D7E1AE24CC}
+ArchitecturesInstallIn64BitMode=x64compatible
 DefaultDirName={autopf}\{#MyAppName}
 DefaultGroupName={#MyAppName}
 OutputBaseFilename=AKAISDS-Setup
