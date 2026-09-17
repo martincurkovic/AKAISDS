@@ -4,7 +4,7 @@ from PySide6.QtGui import QAction, QKeySequence
 from ui.dashboard import TransferDashboard
 from ui.about_dialog import AboutDialog
 from core.midi_manager import MidiManager
-from core import app_config
+from core import app_config, sds_encoder
 from controller.sampler_controller import SamplerController
 
 
@@ -146,7 +146,7 @@ class ApplicationWindow(QMainWindow):
             self,
             "Open Audio Files",
             os.path.expanduser("~"),
-            "Audio Files (*.wav *.aif *.aiff *.flac)",
+            _build_audio_filter_string(),
         )
         if paths:
             self.dashboard_view.on_files_dropped(paths)
@@ -175,3 +175,10 @@ class ApplicationWindow(QMainWindow):
         self.midi_manager.close_input()
         self.midi_manager.close_output()
         super().closeEvent(event)
+
+
+def _build_audio_filter_string():
+    extensions = " ".join(
+        f"*{ext}" for ext in sorted(sds_encoder.SUPPORTED_AUDIO_EXTENSIONS)
+    )
+    return f"Audio Files ({extensions})"
