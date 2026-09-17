@@ -37,14 +37,16 @@ jobs:
         run: |
           chmod +x scripts/build_macos.sh
           ./scripts/build_macos.sh
-      - name: Zip the .app bundle
+      - name: Build DMG
         run: |
-          cd src
-          zip -r AKAISDS-macos-arm.zip AKAISDS.app
+          mkdir -p dmg-staging
+          cp -r src/AKAISDS.app dmg-stating/
+          ln -s /Applications dmg-staging/Applications
+          hdiutil create -volname "AKAISDS" -srcfolder dmg-stating -ov -format UDZO AKAISDS-macos-arm.dmg
       - uses: actions/upload-artifact@v4
         with:
           name: AKAISDS-macos-arm
-          path: src/AKAISDS-macos-arm.zip
+          path: AKAISDS-macos-arm.zip
 
   build-macos-intel:
     needs: test
@@ -63,14 +65,16 @@ jobs:
         run: |
           chmod +x scripts/build_macos.sh
           ./scripts/build_macos.sh
-      - name: Zip the .app bundle
+      - name: Build DMG
         run: |
-          cd src
-          zip -r AKAISDS-macos-intel.zip AKAISDS.app
+          mkdir -p dmg-staging
+          cp -r src/AKAISDS.app dmg-stating/
+          ln -s /Applications dmg-staging/Applications
+          hdiutil create -volname "AKAISDS" -srcfolder dmg-stating -ov -format UDZO AKAISDS-macos-intel.dmg
       - uses: actions/upload-artifact@v4
         with:
           name: AKAISDS-macos-intel
-          path: src/AKAISDS-macos-intel.zip
+          path: AKAISDS-macos-intel.dmg
 
   build-linux:
     needs: test
