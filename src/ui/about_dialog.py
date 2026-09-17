@@ -42,7 +42,8 @@ class AboutDialog(QDialog):
         layout.addWidget(link_label)
 
         credits_label = QLabel(
-            "Built with PySide6 (Qt), mido, python-rtmidi, soundfile and Nuitka."
+            "Built with PySide6 (Qt), mido, python-rtmidi, soundfile and Nuitka.\n"
+            "Licensed under GPL-3.0"
         )
         credits_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         credits_label.setWordWrap(True)
