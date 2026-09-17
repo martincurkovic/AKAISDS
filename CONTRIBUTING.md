@@ -1,6 +1,6 @@
 # Contributing to AKAISDS
 
-First of all, thank you for even _considering_ contributing to AKAISDS. This is a small, single person hobby project that just so happened to get enough steam to even make it out into the wild, so the documentation is intentionally short. If something in the documentation is unclear, it's not you, it's me. 
+First of all, thank you for even _considering_ contributing to AKAISDS. This is a small, single person hobby project that just so happened to get enough steam to even make it out into the wild, so the documentation is intentionally short. If something in the documentation is unclear, it's not you, it's me.
 
 ## Ways to contribute that aren't code
 
@@ -28,7 +28,8 @@ git clone https://github.com/martincurkovic/AKAISDS
 cd AKAISDS
 pip install -r requirements.txt
 pip install -r requirements-dev.txt
-``` 
+```
+
 It is also recommended you create a `venv` when installing dependencies. I'll leave that choice up to you tho.
 
 #### Before you open a PR
@@ -43,7 +44,7 @@ If you're fixing a real bug, consider adding a regression test for if it fits th
 
 #### Code Style
 
-No enforced formatter or linter at the moment - just try to be respectful of your code's neighbours :) 
+No enforced formatter or linter at the moment - just try to be respectful of your code's neighbours :)
 
 #### Submitting
 
@@ -54,15 +55,17 @@ No enforced formatter or linter at the moment - just try to be respectful of you
 
 #### License
 
-By contributing you agree that your contribution is licensed under the same terms as the rest of the project (that being LGPLv3 - see `LICENSE` and `COPYING`).
+By contributing you agree that your contribution is licensed under the same terms as the rest of the project (that being GPLv3 - see `LICENSE`).
 
 ## For maintainers…
 
 Well ok it's just me rn, but documenting it anyway just in case.
 
 Releases are cut by pushing a version tag, which triggers the whole build + release pipeline.
+
 ```
 git tag v1.0.0
 git push origin v1.0.0
 ```
+
 That builds for all platforms currently supported. If all tests and builds pass, then a GitHub Release is created with all the artifacts attached. See BUILDING.md for the manual build process.

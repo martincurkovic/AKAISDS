@@ -111,7 +111,7 @@ Want to build AKAISDS yourself or help contribute to the project? See [BUILDING.
 
 ## License & Acknowledgements
 
-Licensed under [LGPLv3](LICENSE) - see [LICENSE](LICENSE) and [COPYING](COPYING) for details.
+Licensed under [LGPLv3](LICENSE) - see [LICENSE](LICENSE) for details
 
 Written in Python using PySide6 (Qt), mido, python-rtmidi, soundfile and Nuitka.
 
