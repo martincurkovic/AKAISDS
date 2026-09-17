@@ -5,6 +5,7 @@ import wave
 import struct
 import numpy as np
 import soundfile as sf
+import pytest
 from core import sds_encoder
 
 
@@ -60,6 +61,95 @@ def test_read_wav_samples_16bit(tmp_path):
     assert list(channels[1]) == right
 
 
+def _pack_24bit_le(value):
+    # helper for writing raw 24 bit PCM frames - stdlib wave/struct have no
+    # native 3 byte format, so pack it manually (little endian, matches what
+    # _normalize_to_16bit expects to unpack)
+    value &= 0xFFFFFF
+    return bytes([value & 0xFF, (value >> 8) & 0xFF, (value >> 16) & 0xFF])
+
+
+def test_read_wav_samples_24bit_scales_down_to_16bit(tmp_path):
+    # _normalize_to_16bit scales 24 bit down to 16 bit via "value >> 8" -
+    # using desired-value * 256 as the raw 24 bit sample makes that scaling
+    # lossless (low 8 bits are all zero), so the round trip is exact
+    desired = [0, 1000, -1000, 32767, -32768]
+    raw24 = [d * 256 for d in desired]
+
+    wav_path = tmp_path / "test24.wav"
+    with wave.open(str(wav_path), "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(3)
+        wf.setframerate(44100)
+        wf.writeframes(b"".join(_pack_24bit_le(v) for v in raw24))
+
+    samples, rate = sds_encoder.read_wav_samples(str(wav_path))
+    assert list(samples) == desired
+    assert rate == 44100
+
+
+def test_read_wav_samples_32bit_scales_down_to_16bit(tmp_path):
+    # same lossless-scaling trick as the 24 bit test above, but for the
+    # sampwidth == 4 branch (32 bit signed PCM, scaled down via ">> 16")
+    desired = [0, 1000, -1000, 32767, -32768]
+    raw32 = [d << 16 for d in desired]
+
+    wav_path = tmp_path / "test32.wav"
+    with wave.open(str(wav_path), "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(4)
+        wf.setframerate(48000)
+        wf.writeframes(struct.pack("<" + "i" * len(raw32), *raw32))
+
+    samples, rate = sds_encoder.read_wav_samples(str(wav_path))
+    assert list(samples) == desired
+    assert rate == 48000
+
+
+def test_read_wav_channels_32bit_stereo_scales_and_deinterleaves(tmp_path):
+    left = [0, 1000, -1000]
+    right = [0, -500, 32767]
+    interleaved = []
+    for l, r in zip(left, right):
+        interleaved.extend([l << 16, r << 16])
+
+    wav_path = tmp_path / "stereo32.wav"
+    with wave.open(str(wav_path), "wb") as wf:
+        wf.setnchannels(2)
+        wf.setsampwidth(4)
+        wf.setframerate(44100)
+        wf.writeframes(struct.pack("<" + "i" * len(interleaved), *interleaved))
+
+    channels, rate = sds_encoder.read_wav_channels(str(wav_path))
+    assert list(channels[0]) == left
+    assert list(channels[1]) == right
+    assert rate == 44100
+
+
+def test_read_wav_samples_32bit_float_raises_clean_value_error(tmp_path):
+    # 32 bit FLOAT wav is explicitly called out in _normalize_to_16bit's
+    # comments as a different, unhandled case from 32 bit signed int (same
+    # sampwidth, totally different byte layout). stdlib 'wave' can't open a
+    # non-PCM format at all (raises wave.Error: unknown format), and
+    # _read_wav_samples_via_wave re-raises that as a ValueError - confirming
+    # this fails LOUDLY rather than silently decoding the float bits as
+    # garbage integers
+    float_wav_path = tmp_path / "float32.wav"
+    sf.write(str(float_wav_path), np.array([0.0, 0.5, -0.5], dtype=np.float32), 44100, subtype="FLOAT")
+
+    with pytest.raises(ValueError):
+        sds_encoder.read_wav_samples(str(float_wav_path))
+
+
+def test_normalize_to_16bit_rejects_unsupported_bit_depth():
+    # sampwidths other than 1/2/3/4 bytes (ie, bit depths other than
+    # 8/16/24/32) aren't realistically producible via a real WAV file with
+    # the stdlib 'wave' module, so exercise the guard directly instead of
+    # contriving an invalid file
+    with pytest.raises(ValueError, match="Unsupported WAV bit depth"):
+        sds_encoder._normalize_to_16bit(b"\x00" * 10, sampwidth=5)
+
+
 def test_read_aiff_samples(tmp_path):
     left = np.array([0, 1000, -1000, 32767, -32768], dtype=np.int16)
     right = np.array([0, -500, 500, -32768, 32767], dtype=np.int16)
@@ -83,3 +173,138 @@ def test_classify_response_ack_nak_wait_cancel():
     assert sds_encoder.classify_response([0x7E, 0x00, 0x7E, 0x00]) == "nak"
     assert sds_encoder.classify_response([0x7E, 0x00, 0x7C, 0x00]) == "wait"
     assert sds_encoder.classify_response([0x7E, 0x00, 0x7D, 0x00]) == "cancel"
+
+
+def test_classify_response_eof():
+    assert sds_encoder.classify_response([0x7E, 0x00, 0x7B, 0x00]) == "eof"
+
+
+def test_classify_response_none_for_non_sds_message():
+    # akai manufacturer ID (0x47), not universal (0x7E) - not a handshake at all
+    assert sds_encoder.classify_response([0x47, 0x00, 0x01, 0x48]) is None
+
+
+def test_classify_response_none_for_too_short_message():
+    assert sds_encoder.classify_response([0x7E, 0x00]) is None
+
+
+# -----------------------
+# RESAMPLING
+# -----------------------
+
+
+def test_resample_same_rate_returns_a_copy_unchanged():
+    samples = [1, 2, 3]
+    out, rate = sds_encoder.resample_to_target_rate(samples, 44100, 44100)
+    assert out == samples
+    assert out is not samples  # must be a copy, not the same list object
+    assert rate == 44100
+
+
+def test_resample_rejects_non_positive_target_rate():
+    with pytest.raises(ValueError):
+        sds_encoder.resample_to_target_rate([1, 2, 3], 44100, 0)
+
+
+def test_resample_empty_input_returns_empty():
+    out, rate = sds_encoder.resample_to_target_rate([], 44100, 22050)
+    assert out == []
+    assert rate == 22050
+
+
+def test_resample_upsampling_produces_more_samples():
+    samples = list(range(100))
+    out, rate = sds_encoder.resample_to_target_rate(samples, 22050, 44100)
+    assert rate == 44100
+    assert len(out) > len(samples)
+    assert out[0] == samples[0]  # interpolation must start exactly at the source
+
+
+def test_resample_downsampling_produces_fewer_samples():
+    samples = list(range(1000))
+    out, rate = sds_encoder.resample_to_target_rate(samples, 44100, 22050)
+    assert rate == 22050
+    assert len(out) < len(samples)
+
+
+# -----------------------
+# WAV WRITING
+# -----------------------
+
+
+def test_write_wav_file_16bit_round_trips(tmp_path):
+    samples = [0, 1000, -1000, 32767, -32768]
+    path = tmp_path / "out16.wav"
+    sds_encoder.write_wav_file(str(path), samples, framerate=44100, bit_depth=16)
+
+    read_back, rate = sds_encoder.read_wav_samples(str(path))
+    assert list(read_back) == samples
+    assert rate == 44100
+
+
+def test_write_wav_file_8bit_uses_unsigned_pcm(tmp_path):
+    samples = [-128, -1, 0, 1, 127]
+    path = tmp_path / "out8.wav"
+    sds_encoder.write_wav_file(str(path), samples, framerate=22050, bit_depth=8)
+
+    with wave.open(str(path), "rb") as wf:
+        assert wf.getsampwidth() == 1
+        assert wf.getframerate() == 22050
+        raw = wf.readframes(wf.getnframes())
+
+    # 8 bit WAV is unsigned, zero-centered at 128 - opposite of our signed samples
+    assert list(raw) == [(s + 128) & 0xFF for s in samples]
+
+
+def test_write_wav_file_non_16bit_upscales_to_fit_16bit_container(tmp_path):
+    samples = [1, -1, 100]
+    path = tmp_path / "out12.wav"
+    sds_encoder.write_wav_file(str(path), samples, framerate=44100, bit_depth=12)
+
+    read_back, _rate = sds_encoder.read_wav_samples(str(path))
+    assert list(read_back) == [s << 4 for s in samples]  # left-shifted by (16 - 12)
+
+
+# -----------------------
+# MISC HEADER/PACKET HELPERS
+# -----------------------
+
+
+def test_xor_checksum_known_value():
+    assert sds_encoder.xor_checksum([0x01, 0x02, 0x03]) == (0x01 ^ 0x02 ^ 0x03)
+
+
+def test_xor_checksum_masks_to_7_bits():
+    assert sds_encoder.xor_checksum([0xFF]) == 0xFF & 0x7F
+
+
+def test_build_dump_request_encodes_sample_number_and_channel():
+    request = sds_encoder.build_dump_request(sample_number=300, channel=5)
+    assert request[0] == 0x7E
+    assert request[1] == 5
+    assert request[2] == 0x03
+    assert request[3] == 300 & 0x7F
+    assert request[4] == (300 >> 7) & 0x7F
+
+
+def test_build_data_packets_splits_and_zero_pads_final_packet():
+    samples = list(range(45))  # more than one packet's worth (40 words/packet @ 16 bit)
+    packets = sds_encoder.build_data_packets(samples, channel=0, bit_depth=16)
+    assert len(packets) == 2
+
+    # F0, header(4), 120 data bytes, checksum, F7 - both packets always this length,
+    # the second one just has trailing zero-padded words
+    assert len(packets[0]) == 1 + 4 + 120 + 1 + 1
+    assert len(packets[1]) == 1 + 4 + 120 + 1 + 1
+
+    # packet layout is F0, 0x7E, channel, 0x02, packet_num, ...data..., checksum, F7
+    assert packets[0][4] == 0  # packet_num
+    assert packets[1][4] == 1
+
+
+def test_build_data_packets_packet_number_wraps_at_128():
+    samples = list(range(40 * 130))  # forces just over 128 packets
+    packets = sds_encoder.build_data_packets(samples, channel=0, bit_depth=16)
+    assert len(packets) == 130
+    assert packets[127][4] == 127
+    assert packets[128][4] == 0  # wrapped back around per SDS spec

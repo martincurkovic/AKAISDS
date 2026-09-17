@@ -302,3 +302,485 @@ def test_open_loop_detected_when_no_input_port(controller):
 def test_not_open_loop_when_input_port_present(controller):
     controller.midi_manager.input_name = "Some Real Interface"
     assert controller.is_open_loop() is False
+
+
+# -----------------------------------------------------------------
+# CANCEL TRANSFER
+# -----------------------------------------------------------------
+
+
+def test_cancel_transfer_during_send_sends_cancel_and_dels(controller):
+    from core import sds_encoder
+
+    controller._send_queue = [b"\xf0fake\xf7"]
+    controller._send_index = 2
+    controller._active_channel = 3
+    controller._active_sample_number = 9
+
+    finished = []
+    controller.transfer_finished.connect(lambda ok: finished.append(ok))
+
+    controller.cancel_transfer()
+
+    cancel_msg = controller.midi_manager.sent[0]
+    assert cancel_msg[0] == 0x7E
+    assert cancel_msg[1] == 3
+    assert cancel_msg[2] == sds_encoder.CANCEL
+    assert cancel_msg[3] == 2
+
+    dels_msg = controller.midi_manager.sent[1]
+    assert dels_msg[2] == 0x14  # DELS
+    assert dels_msg[4] == 9  # sample number LSB
+
+    assert controller._send_queue == []
+    assert finished == [False]
+
+
+def test_cancel_transfer_during_receive_sends_cancel_and_emits_receive_finished(controller):
+    from core import sds_encoder
+
+    controller._receiving = True
+    controller._receive_channel = 4
+
+    finished = []
+    controller.receive_finished.connect(lambda ok: finished.append(ok))
+
+    controller.cancel_transfer()
+
+    cancel_msg = controller.midi_manager.sent[-1]
+    assert cancel_msg[0] == 0x7E
+    assert cancel_msg[1] == 4
+    assert cancel_msg[2] == sds_encoder.CANCEL
+
+    assert controller._receiving is False
+    assert finished == [False]
+
+
+def test_cancel_transfer_is_a_noop_when_nothing_in_progress(controller):
+    controller.cancel_transfer()
+    assert controller.midi_manager.sent == []
+
+
+# -----------------------------------------------------------------
+# HANDSHAKE DISPATCH (_on_handshake_message)
+# monkeypatching _send_current_packet here to isolate the dispatch
+# logic itself from the packet-pacing/timeout machinery below
+# -----------------------------------------------------------------
+
+
+def test_handshake_ack_advances_send_index_and_sends_next_packet(controller):
+    controller._send_queue = [b"pkt0", b"pkt1", b"pkt2"]
+    controller._send_index = 0
+    calls = []
+    controller._send_current_packet = lambda: calls.append(controller._send_index)
+
+    progress = []
+    controller.transfer_progress.connect(lambda sent, total: progress.append((sent, total)))
+
+    controller._on_handshake_message("ack")
+
+    assert controller._send_index == 1
+    assert progress == [(1, 3)]
+    assert calls == [1]
+
+
+def test_handshake_nak_resends_current_packet_without_advancing(controller):
+    controller._send_queue = [b"pkt0", b"pkt1"]
+    controller._send_index = 0
+    calls = []
+    controller._send_current_packet = lambda: calls.append(controller._send_index)
+
+    controller._on_handshake_message("nak")
+
+    assert controller._send_index == 0
+    assert calls == [0]
+
+
+def test_handshake_wait_does_nothing(controller):
+    controller._send_queue = [b"pkt0"]
+    controller._send_index = 0
+    calls = []
+    controller._send_current_packet = lambda: calls.append("called")
+
+    status = []
+    controller.status_changed.connect(lambda msg: status.append(msg))
+
+    controller._on_handshake_message("wait")
+
+    assert controller._send_index == 0
+    assert calls == []
+    assert any("wait" in s.lower() for s in status)
+
+
+def test_handshake_cancel_aborts_transfer(controller):
+    controller._send_queue = [b"pkt0"]
+    controller._send_index = 0
+
+    finished = []
+    controller.transfer_finished.connect(lambda ok: finished.append(ok))
+
+    controller._on_handshake_message("cancel")
+
+    assert controller._send_queue == []
+    assert finished == [False]
+
+
+def test_handshake_ignored_when_no_send_in_progress(controller):
+    controller._send_queue = []
+    controller._on_handshake_message("ack")  # should not raise
+
+
+# -----------------------------------------------------------------
+# ACK-TIMEOUT -> OPEN LOOP FALLBACK (_check_packet_timeout)
+# -----------------------------------------------------------------
+
+
+def test_check_packet_timeout_switches_to_open_loop_when_generation_matches(controller):
+    controller._send_queue = [b"pkt0", b"pkt1"]
+    controller._send_index = 0
+    controller._packet_send_generation = 5
+    calls = []
+    controller._send_current_packet = lambda: calls.append(controller._send_index)
+
+    controller._check_packet_timeout(5)
+
+    assert controller._no_response_detected is True
+    assert controller._send_index == 1
+    assert calls == [1]
+
+
+def test_check_packet_timeout_ignored_when_generation_is_stale(controller):
+    # a real ACK/NAK already arrived and moved things on since the timeout was scheduled
+    controller._send_queue = [b"pkt0"]
+    controller._send_index = 0
+    controller._packet_send_generation = 7
+    calls = []
+    controller._send_current_packet = lambda: calls.append("called")
+
+    controller._check_packet_timeout(5)
+
+    assert controller._no_response_detected is False
+    assert calls == []
+
+
+def test_check_packet_timeout_ignored_when_transfer_already_finished(controller):
+    controller._send_queue = []
+    controller._check_packet_timeout(1)  # should not raise
+    assert controller._no_response_detected is False
+
+
+def test_open_loop_send_paces_through_whole_queue_without_waiting_for_ack(controller):
+    controller.set_device_type("generic")  # keeps the post-completion refresh a no-op
+    controller.midi_manager.input_name = None  # open loop - no input port selected
+    controller._send_queue = [b"\xf0hdr\xf7", b"\xf0d1\xf7", b"\xf0d2\xf7"]
+    controller._send_index = 0
+
+    finished = []
+    controller.transfer_finished.connect(lambda ok: finished.append(ok))
+
+    controller._send_current_packet()
+
+    assert finished == [True]
+    assert controller._send_index == 0  # reset by _abort_transfer on completion
+    assert len(controller.midi_manager.sent) == 3
+
+
+# -----------------------------------------------------------------
+# STEREO CONTINUATION
+# -----------------------------------------------------------------
+
+
+def test_stereo_send_continues_to_right_channel_after_left_completes(controller, monkeypatch):
+    from core import sds_encoder
+
+    monkeypatch.setattr(
+        sds_encoder, "read_wav_channels", lambda _p: ([[1, 2], [3, 4]], 44100)
+    )
+
+    status_messages = []
+    controller.status_changed.connect(lambda msg: status_messages.append(msg))
+    finished = []
+    controller.transfer_finished.connect(lambda ok: finished.append(ok))
+
+    controller.send_stereo_sample_file(
+        "/fake/stereo.wav", sample_number_left=10, sample_number_right=11, channel=0
+    )
+
+    assert any("left channel first" in m.lower() for m in status_messages)
+    assert any("right channel" in m.lower() for m in status_messages)
+    assert finished == [True]
+    assert controller._stereo_queue == []
+
+    right_sdata_messages = [
+        m
+        for m in controller.midi_manager.sent
+        if len(m) > 4 and m[0] == 0x47 and m[2] == 0x0B and m[4] == 11
+    ]
+    assert right_sdata_messages
+
+
+# -----------------------------------------------------------------
+# SAMPLE INFO REQUEST
+# -----------------------------------------------------------------
+
+
+def test_request_sample_info_sends_rsdata_and_sets_flag(controller):
+    controller.request_sample_info(7, channel=2)
+    sent = controller.midi_manager.sent[-1]
+    assert sent[1] == 2
+    assert sent[2] == 0x0A  # RSDATA
+    assert controller._awaiting_sample_info is True
+
+
+def test_request_sample_info_blocked_when_transfer_in_progress(controller):
+    controller._send_queue = [b"pkt"]
+    controller.request_sample_info(7)
+    assert controller.midi_manager.sent == []
+    assert controller._awaiting_sample_info is False
+
+
+def test_sample_info_response_emits_parsed_info(controller):
+    from core import akai_sysex
+
+    controller._awaiting_sample_info = True
+    msg = akai_sysex.build_sdata_message(
+        name="INFO TEST", sample_length=123, sample_rate=22050, sample_number=9, channel=0
+    )
+    captured = []
+    controller.sample_info_received.connect(lambda info: captured.append(info))
+
+    controller.on_sysex_received(list(msg[1:-1]))
+
+    assert controller._awaiting_sample_info is False
+    assert captured[0]["name"] == "INFO TEST"
+    assert captured[0]["sample_length"] == 123
+    assert captured[0]["sample_rate"] == 22050
+
+
+# -----------------------------------------------------------------
+# FILE QUEUE - SKIPPING UNREADABLE FILES
+# -----------------------------------------------------------------
+
+
+def test_file_queue_skips_unreadable_file_and_continues_with_the_rest(controller, monkeypatch):
+    from core import sds_encoder
+
+    def fake_read_wav_channels(path):
+        if "bad" in path:
+            raise ValueError("corrupt file")
+        return [[1, 2, 3]], 44100
+
+    monkeypatch.setattr(sds_encoder, "read_wav_channels", fake_read_wav_channels)
+    controller.set_device_type("generic")  # skip the SLIST round trip, go straight to sending
+
+    transferred = []
+    controller.file_transferred.connect(lambda path: transferred.append(path))
+    finished = []
+    controller.transfer_finished.connect(lambda ok: finished.append(ok))
+    status_messages = []
+    controller.status_changed.connect(lambda msg: status_messages.append(msg))
+
+    controller.send_file_queue(
+        [
+            {
+                "filepath": "/fake/bad.wav",
+                "name": None,
+                "bit_depth": 16,
+                "sample_rate": None,
+                "mono": False,
+            },
+            {
+                "filepath": "/fake/good.wav",
+                "name": None,
+                "bit_depth": 16,
+                "sample_rate": None,
+                "mono": False,
+            },
+        ],
+        starting_sample_number=0,
+    )
+
+    # bad file still gets reported as "transferred" so the UI removes it from the queue
+    assert "/fake/bad.wav" in transferred
+    assert controller._file_queue_skipped == 1
+    assert finished == [True]
+    assert any("skip" in m.lower() for m in status_messages)
+
+
+# -----------------------------------------------------------------
+# IN-PROGRESS GUARDS
+# -----------------------------------------------------------------
+
+
+def test_send_sample_file_generic_blocked_when_transfer_in_progress(controller, monkeypatch):
+    from core import sds_encoder
+
+    monkeypatch.setattr(sds_encoder, "read_wav_samples", lambda _p: ([1, 2, 3], 44100))
+
+    controller._send_queue = [b"pkt"]
+    controller.send_sample_file_generic("/fake/a.wav", sample_number=0)
+
+    assert controller.midi_manager.sent == []
+
+
+def test_receive_sample_generic_blocked_when_transfer_in_progress(controller):
+    controller._send_queue = [b"pkt"]
+    controller.receive_sample_generic(1, "/fake/out.wav")
+    assert controller.midi_manager.sent == []
+    assert controller._receiving is False
+
+
+def test_receive_samples_blocked_when_transfer_in_progress(controller):
+    controller._receiving = True
+    controller.receive_samples([(1, "/fake/out.wav")])
+    assert controller._receive_queue == []
+
+
+# -----------------------------------------------------------------
+# ERROR RECOVERY (on_sysex_received catching unexpected exceptions)
+# -----------------------------------------------------------------
+
+
+def test_unhandled_exception_during_send_recovers_state_and_emits_finished(
+    controller, monkeypatch
+):
+    from core import akai_sysex
+
+    def boom(_data_bytes):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(akai_sysex, "parse_slist_response", boom)
+
+    controller._send_queue = [b"pkt"]
+    finished = []
+    controller.transfer_finished.connect(lambda ok: finished.append(ok))
+    status_messages = []
+    controller.status_changed.connect(lambda msg: status_messages.append(msg))
+
+    controller.on_sysex_received([0x47, 0x00, 0x05, 0x48, 0x00, 0x00])
+
+    assert controller._send_queue == []
+    assert finished == [False]
+    assert any("unexpected error" in m.lower() for m in status_messages)
+
+
+def test_unhandled_exception_during_receive_emits_receive_finished(controller, monkeypatch):
+    from core import akai_sysex
+
+    def boom(_data_bytes):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(akai_sysex, "parse_slist_response", boom)
+
+    controller._receiving = True
+    finished = []
+    controller.receive_finished.connect(lambda ok: finished.append(ok))
+
+    controller.on_sysex_received([0x47, 0x00, 0x05, 0x48, 0x00, 0x00])
+
+    assert controller._receiving is False
+    assert finished == [False]
+
+
+# -----------------------------------------------------------------
+# RECEIVING - GENERIC SDS (universal dump header/data packets)
+# -----------------------------------------------------------------
+
+
+def test_generic_receive_full_round_trip_writes_wav(controller, tmp_path):
+    from core import sds_encoder
+
+    samples = [100, -100, 200, -200, 300]
+    framerate = 44100
+    save_path = str(tmp_path / "received.wav")
+
+    controller.receive_sample_generic(sample_number=5, save_path=save_path, channel=0)
+    assert controller._receiving is True
+
+    header_packet = sds_encoder.build_dump_header(
+        samples, framerate, sample_number=5, channel=0, bit_depth=16
+    )
+    controller.on_sysex_received(list(header_packet[1:-1]))
+
+    assert controller._receive_header_info is not None
+    ack_msg = controller.midi_manager.sent[-1]
+    assert ack_msg[0] == 0x7E
+    assert ack_msg[2] == sds_encoder.ACK
+
+    data_packets = sds_encoder.build_data_packets(samples, channel=0, bit_depth=16)
+    received = []
+    controller.sample_received.connect(lambda path: received.append(path))
+
+    for packet in data_packets:
+        controller.on_sysex_received(list(packet[1:-1]))
+
+    assert received == [save_path]
+    assert controller._receiving is False
+
+    read_back, rate = sds_encoder.read_wav_samples(save_path)
+    assert list(read_back) == samples
+    assert abs(rate - framerate) <= 1  # tiny precision loss from the ns-period round trip
+
+
+def test_receive_data_packet_checksum_failure_sends_nak_and_holds_the_packet(controller):
+    from core import sds_encoder
+
+    controller._receiving = True
+    controller._receive_channel = 0
+    controller._receive_header_info = {
+        "bit_depth": 16,
+        "sample_length": 5,
+        "sample_number": 1,
+        "sample_rate": 44100,
+    }
+    controller._receive_expected_packets = 1
+    controller._receive_packets = []
+
+    packets = sds_encoder.build_data_packets([1, 2, 3], channel=0, bit_depth=16)
+    corrupted = bytearray(packets[0][1:-1])
+    corrupted[5] ^= 0x7F  # flip a data byte so the checksum no longer matches
+
+    controller.on_sysex_received(list(corrupted))
+
+    assert controller._receive_packets == []  # rejected, not accepted
+    nak_msg = controller.midi_manager.sent[-1]
+    assert nak_msg[0] == 0x7E
+    assert nak_msg[2] == sds_encoder.NAK
+
+
+# -----------------------------------------------------------------
+# RECEIVING - AKAI SDATA/RSPACK FLOW
+# -----------------------------------------------------------------
+
+
+def test_akai_receive_flow_requests_rspack_and_saves_wav(controller, tmp_path):
+    from core import akai_sysex, sds_encoder
+
+    save_path = str(tmp_path / "akai_received.wav")
+    controller.receive_samples([(3, save_path)], channel=0)
+
+    request = controller.midi_manager.sent[-1]
+    assert request[2] == 0x0A  # RSDATA
+
+    sdata_msg = akai_sysex.build_sdata_message(
+        name="AKAI SAMP", sample_length=5, sample_rate=44100, sample_number=3, channel=0
+    )
+    controller.on_sysex_received(list(sdata_msg[1:-1]))
+
+    rspack_msg = controller.midi_manager.sent[-1]
+    assert rspack_msg[2] == 0x0C  # RSPACK
+
+    samples = [10, -10, 20, -20, 30]
+    data_packets = sds_encoder.build_data_packets(samples, channel=0, bit_depth=16)
+
+    finished = []
+    controller.receive_finished.connect(lambda ok: finished.append(ok))
+
+    for packet in data_packets:
+        controller.on_sysex_received(list(packet[1:-1]))
+
+    assert finished == [True]  # queue now empty after this one sample
+
+    read_back, rate = sds_encoder.read_wav_samples(save_path)
+    assert list(read_back) == samples
+    assert rate == 44100

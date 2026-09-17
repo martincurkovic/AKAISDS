@@ -64,3 +64,124 @@ def test_rename_request_only_touches_name_bytes():
     # just confirm functino code is in the expected offset write (0x2C) not full SDATA send (0x0B)
     request = akai_sysex.build_rename_sample_request(3, "NEW NAME", channel=0)
     assert request[2] == 0x2C
+
+
+# -----------------------
+# NAME ENCODING
+# -----------------------
+
+
+def test_encode_name_pads_and_uppercases():
+    encoded = akai_sysex.encode_name("kick")
+    assert len(encoded) == 12
+    assert akai_sysex.decode_name(encoded) == "KICK        "
+
+
+def test_encode_name_truncates_long_names():
+    encoded = akai_sysex.encode_name("A VERY LONG SAMPLE NAME")
+    assert len(encoded) == 12
+    assert akai_sysex.decode_name(encoded) == "A VERY LONG "
+
+
+def test_encode_name_unknown_char_falls_back_to_space():
+    encoded = akai_sysex.encode_name("HI!")
+    decoded = akai_sysex.decode_name(encoded)
+    assert decoded[2] == " "  # '!' isn't in AKAI_CHAR_MAP
+
+
+def test_build_stereo_channel_name_appends_suffix():
+    assert akai_sysex.build_stereo_channel_name("KICK", "-L") == "KICK-L"
+
+
+def test_build_stereo_channel_name_truncates_to_fit_total_length():
+    name = akai_sysex.build_stereo_channel_name(
+        "A VERY LONG SAMPLE NAME", "-R", total_length=12
+    )
+    assert len(name) == 12
+    assert name.endswith("-R")
+
+
+# -----------------------
+# SLIST PARSING
+# -----------------------
+
+
+def test_parse_slist_response_decodes_names():
+    names_in = ["KICK", "SNARE", "HAT"]
+    payload = [0x47, 0x00, 0x05, 0x48, len(names_in), 0x00]
+    for name in names_in:
+        payload.extend(akai_sysex.encode_name(name))
+
+    count, names = akai_sysex.parse_slist_response(payload)
+    assert count == len(names_in)
+    assert names == [
+        akai_sysex.decode_name(akai_sysex.encode_name(n)) for n in names_in
+    ]
+
+
+# -----------------------
+# REQUEST BUILDERS
+# -----------------------
+
+
+def test_build_rsdata_request_encodes_sample_and_channel():
+    # deliberately using a sample number > 127 so both LSB and MSB bytes get exercised
+    request = akai_sysex.build_rsdata_request(sample_number=200, channel=3)
+    assert request[1] == 3
+    assert request[2] == 0x0A
+    assert request[4] == (200 & 0x7F)
+    assert request[5] == (200 >> 7) & 0x7F
+
+
+def test_build_rspack_request_encodes_offset_and_count():
+    request = akai_sysex.build_rspack_request(
+        sample_number=5, offset=1000, num_samples=2000, interval=1, function=0, channel=2
+    )
+    assert request[1] == 2
+    assert request[2] == 0x0C
+    assert request[4] == 5  # sample number LSB
+    assert request[5] == 0  # sample number MSB
+
+    offset_bytes = request[6:10]
+    decoded_offset = (
+        offset_bytes[0]
+        | (offset_bytes[1] << 7)
+        | (offset_bytes[2] << 14)
+        | (offset_bytes[3] << 21)
+    )
+    assert decoded_offset == 1000
+
+    num_bytes = request[10:14]
+    decoded_num = (
+        num_bytes[0] | (num_bytes[1] << 7) | (num_bytes[2] << 14) | (num_bytes[3] << 21)
+    )
+    assert decoded_num == 2000
+
+    assert request[14] == 1  # interval
+    assert request[15] == 0  # function
+
+
+# -----------------------
+# BANDWIDTH/TUNING
+# -----------------------
+
+
+def test_compute_bandwidth_and_tuning_picks_native_rates_with_no_offset():
+    bandwidth, offset = akai_sysex.compute_bandwidth_and_tuning(44100)
+    assert bandwidth == 1
+    assert abs(offset) < 0.01
+
+    bandwidth, offset = akai_sysex.compute_bandwidth_and_tuning(22050)
+    assert bandwidth == 0
+    assert abs(offset) < 0.01
+
+
+def test_compute_bandwidth_and_tuning_offsets_non_native_rate():
+    bandwidth, offset = akai_sysex.compute_bandwidth_and_tuning(48000)
+    assert bandwidth == 1  # closer to 44100 than 22050
+    assert offset > 0  # 48000 plays sharper/faster than native 44100
+
+
+def test_to_nibble_pairs_splits_low_high_nibbles():
+    assert akai_sysex.to_nibble_pairs([0xAB]) == [0x0B, 0x0A]
+    assert akai_sysex.to_nibble_pairs([0x00, 0xFF]) == [0x00, 0x00, 0x0F, 0x0F]
