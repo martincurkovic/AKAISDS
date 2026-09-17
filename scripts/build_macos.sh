@@ -10,6 +10,7 @@ SRC_DIR="$ROOT_DIR/src"
 cd "$ROOT_DIR"
 echo "Syncing environment with uv..."
 uv sync
+uv pip install pip
 
 cd "$SRC_DIR"
 

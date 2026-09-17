@@ -11,6 +11,7 @@ $SrcDir  = Join-Path $RootDir "src"
 Set-Location $RootDir
 Write-Host "Syncing environment with uv..."
 uv sync
+uv pip install pip
 if ($LASTEXITCODE -ne 0) {
         Write-Host "uv sync failed - fix the error before continuing"
         exit 1
@@ -58,6 +59,9 @@ if (-not (Test-Path "pysidedeploy.spec")) {
 
 Write-Host "Building AKAISDS..."
 uv run pyside6-deploy -c pysidedeploy.spec
-
+if ($LASTEXITCODE -ne 0) {
+        Write-Host "pyside6-deploy failed - fix the error above before continuing."
+        exit 1
+    }
 Write-Host ""
 Write-Host "Done - check the output above for exactly where the build landed."
