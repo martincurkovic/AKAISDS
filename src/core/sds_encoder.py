@@ -1,6 +1,7 @@
 import struct
 import wave
 import os
+import soundfile as sf
 
 DATA_BYTES_PER_PACKET = 120  # fixed by SDS spec
 NO_LOOP = 0x7F  # loop type byte which translated to one-shot or no loop
@@ -36,68 +37,7 @@ def classify_response(data_bytes):
 # WAV READING CODE
 # -----------------------
 
-
-def _normalize_to_16bit(raw_bytes, sampwidth):
-    # convert raw PCM sample bytes at any common bit depth into a list of signed 16 bit equivalent ints
-    if sampwidth == 1:
-        # wav is 8 bit unsigned (0-255 where 128=zero crossing)
-        # unsigned needs to be re-centered first
-        return [(b - 128) << 8 for b in raw_bytes]
-
-    elif sampwidth == 2:
-        # wav is 16 bit signed
-        fmt = "<" + "h" * (len(raw_bytes) // 2)
-        return list(struct.unpack(fmt, raw_bytes))
-
-    elif sampwidth == 3:
-        # wav is 24 bit signed
-        # struct.unpack() cant handle this i dont think, gotta do it manually (unless im missing something idk)
-        samples = []
-        for i in range(0, len(raw_bytes), 3):
-            chunk = raw_bytes[i : i + 3]
-            value = chunk[0] | (chunk[1] << 8) | (chunk[2] << 16)
-            if value & 0x800000:  # sign bit of 24 bit value
-                value -= 1 << 24
-            samples.append(value >> 8)  # scale 24 bit down to 16
-        return samples
-
-    elif sampwidth == 4:
-        # 32 bit SIGNED (note that 32 bit FLOAT is DIFFERENT AND NOT HANDLED HERE)
-        fmt = "<" + "i" * (len(raw_bytes) // 4)
-        values = struct.unpack(fmt, raw_bytes)
-        return [v >> 16 for v in values]  # scale 32 down to 16 bit
-
-    else:
-        raise ValueError(f"Unsupported WAV bit depth: {sampwidth * 8}-bit")
-
-
-try:
-    import soundfile as sf
-
-    _SOUNDFILE_AVAILABLE = True
-except ImportError:
-    sf = None
-    _SOUNDFILE_AVAILABLE = False
-
-_SOUNDFILE_EXTENSIONS = {".aif", ".aiff", ".flac"}
-
-# list of every extension that we can accept
-# the UI should check this list, not its own hardcoded list
-SUPPORTED_AUDIO_EXTENSIONS = {".wav"} | _SOUNDFILE_EXTENSIONS
-
-
-def _needs_soundfile(path):
-    return os.path.splitext(path)[1].lower() in _SOUNDFILE_EXTENSIONS
-
-
-def _require_soundfile(path):
-    if not _SOUNDFILE_AVAILABLE:
-        ext = os.path.splitext(path)[1]
-        raise ValueError(
-            f"Reading {ext} files requires the 'soundfile' package - "
-            f"Install it with: pip install soundfile"
-        )
-
+SUPPORTED_AUDIO_EXTENSIONS = {".aif", ".aiff", ".flac", ".wav", ".wave"}
 
 _SOUNDFILE_SUBTYPE_TO_BIT_DEPTH = {
     "PCM_S8": 8,
@@ -111,46 +51,15 @@ _SOUNDFILE_SUBTYPE_TO_BIT_DEPTH = {
 
 
 def read_wav_samples(path):
-    # reads 16 bit wav file and returns (samples, framerate)
-    # .wav goes thru wave module
-    # .aif, .aiff, .flac files go thru soundfile module
-    # samples: tuple of signed ints, one per mono channel (for now, stereo files are down-mixed to just left channel)
+    # reads audio file and returns (samples, framerate)
+    # samples: tuple of signed ints, one per mono channel (stereo files are down-mixed to just left channel)
     # framerate: samples per second (ie, 44100)
-    if _needs_soundfile(path):
-        return _read_samples_via_soundfile(path)
-    return _read_wav_samples_via_wave(path)
-
-
-def _read_wav_samples_via_wave(path):
-    try:
-        with wave.open(path, "rb") as wf:
-            n_channels = wf.getnchannels()
-            sampwidth = wf.getsampwidth()
-            framerate = wf.getframerate()
-            n_frames = wf.getnframes()
-            raw = wf.readframes(n_frames)
-    except wave.Error as e:
-        raise ValueError(
-            f"Unsupported WAV format ({e}) - try converting to integer PCM"
-        ) from e
-
-    samples = _normalize_to_16bit(raw, sampwidth)
-
-    if n_channels == 2:
-        # take left channel only if the input file is mono
-        samples = samples[0::2]
-
-    return samples, framerate
-
-
-def _read_samples_via_soundfile(path):
-    _require_soundfile(path)
     try:
         data, samplerate = sf.read(path, dtype="int16", always_2d=True)
     except Exception as e:
         raise ValueError(f"Couldn't read {os.path.basename(path)}: {e}") from e
 
-    samples = data[:, 0].tolist()  # left channel only, same as the WAV path
+    samples = data[:, 0].tolist()  # left channel only
     return samples, samplerate
 
 
@@ -158,24 +67,6 @@ def read_wav_info(path):
     # quickly read audio file's channel count and sample rate WITHOUT reading any audio data
     # fast enough to call every time a UI dialog opens
     # returns (n_channels, framerate)
-
-    if _needs_soundfile(path):
-        return _read_info_via_soundfile(path)
-    return _read_wav_info_via_wave(path)
-
-
-def _read_wav_info_via_wave(path):
-    try:
-        with wave.open(path, "rb") as wf:
-            return wf.getnchannels(), wf.getframerate()
-    except wave.Error as e:
-        raise ValueError(
-            f"Unsupported WAV format ({e}) - try converting to integer PCM"
-        ) from e
-
-
-def _read_info_via_soundfile(path):
-    _require_soundfile(path)
     try:
         info = sf.info(path)
     except Exception as e:
@@ -187,23 +78,6 @@ def read_wav_native_bit_depth(path):
     # quickly read WAV file's native bit depth (without reading any of the other stuff)
     # used ot default a new queue entry's target bit_depth to match its source file
     # ie, 8 bit samples are sent as 8 bit instead of being upscaled to 16 bit (for the generic SDS path anyway)
-    if _needs_soundfile(path):
-        return _read_native_bit_depth_via_soundfile(path)
-    return _read_wav_native_bit_depth_via_wave(path)
-
-
-def _read_wav_native_bit_depth_via_wave(path):
-    try:
-        with wave.open(path, "rb") as wf:
-            return wf.getsampwidth() * 8
-    except wave.Error as e:
-        raise ValueError(
-            f"Unsupported WAV format ({e}) - try converting to integer PCM"
-        ) from e
-
-
-def _read_native_bit_depth_via_soundfile(path):
-    _require_soundfile(path)
     try:
         info = sf.info(path)
     except Exception as e:
@@ -217,41 +91,6 @@ def read_wav_channels(path):
     # .aif, .aiff, .flac goes thru soundfile module
     # channels: list with one tuple per channel - [samples] for mono, [left_samples, right_samples] for stereo
     # framerate = samples per second (ie, 44100 or whaterver)
-
-    if _needs_soundfile(path):
-        return _read_channels_via_soundfile(path)
-    return _read_wav_channels_via_wave(path)
-
-
-def _read_wav_channels_via_wave(path):
-    try:
-        with wave.open(path, "rb") as wf:
-            n_channels = wf.getnchannels()
-            sampwidth = wf.getsampwidth()
-            framerate = wf.getframerate()
-            n_frames = wf.getnframes()
-            raw = wf.readframes(n_frames)
-    except wave.Error as e:
-        raise ValueError(
-            f"Unsupported WAV format ({e}) - try converting to integer PCM"
-        ) from e
-
-    interleaved = _normalize_to_16bit(raw, sampwidth)
-
-    if n_channels == 1:
-        return [interleaved], framerate
-    elif n_channels == 2:
-        left = interleaved[0::2]
-        right = interleaved[1::2]
-        return [left, right], framerate
-    else:
-        raise ValueError(
-            f"Only mono or stereo WAV files are supported right now (got {n_channels} channels)"
-        )
-
-
-def _read_channels_via_soundfile(path):
-    _require_soundfile(path)
     try:
         data, samplerate = sf.read(path, dtype="int16", always_2d=True)
     except Exception as e:

@@ -126,28 +126,21 @@ def test_read_wav_channels_32bit_stereo_scales_and_deinterleaves(tmp_path):
     assert rate == 44100
 
 
-def test_read_wav_samples_32bit_float_raises_clean_value_error(tmp_path):
-    # 32 bit FLOAT wav is explicitly called out in _normalize_to_16bit's
-    # comments as a different, unhandled case from 32 bit signed int (same
-    # sampwidth, totally different byte layout). stdlib 'wave' can't open a
-    # non-PCM format at all (raises wave.Error: unknown format), and
-    # _read_wav_samples_via_wave re-raises that as a ValueError - confirming
-    # this fails LOUDLY rather than silently decoding the float bits as
-    # garbage integers
+def test_read_wav_samples_32bit_float_reads_successfully(tmp_path):
+    # unlike stdlib 'wave', soundfile can read FLOAT wav data directly and
+    # convert it to int16 via the dtype argument - this is a real capability
+    # gain from moving off stdlib wave, not something to guard against
     float_wav_path = tmp_path / "float32.wav"
-    sf.write(str(float_wav_path), np.array([0.0, 0.5, -0.5], dtype=np.float32), 44100, subtype="FLOAT")
+    sf.write(
+        str(float_wav_path),
+        np.array([0.0, 0.5, -0.5], dtype=np.float32),
+        44100,
+        subtype="FLOAT",
+    )
 
-    with pytest.raises(ValueError):
-        sds_encoder.read_wav_samples(str(float_wav_path))
-
-
-def test_normalize_to_16bit_rejects_unsupported_bit_depth():
-    # sampwidths other than 1/2/3/4 bytes (ie, bit depths other than
-    # 8/16/24/32) aren't realistically producible via a real WAV file with
-    # the stdlib 'wave' module, so exercise the guard directly instead of
-    # contriving an invalid file
-    with pytest.raises(ValueError, match="Unsupported WAV bit depth"):
-        sds_encoder._normalize_to_16bit(b"\x00" * 10, sampwidth=5)
+    samples, rate = sds_encoder.read_wav_samples(str(float_wav_path))
+    assert rate == 44100
+    assert len(samples) == 3
 
 
 def test_read_aiff_samples(tmp_path):
