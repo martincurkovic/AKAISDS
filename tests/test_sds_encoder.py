@@ -143,6 +143,24 @@ def test_read_wav_samples_32bit_float_reads_successfully(tmp_path):
     assert len(samples) == 3
 
 
+def test_read_wav_samples_8bit_recentres_unsigned_to_signed(tmp_path):
+    # 8 bit WAV is unsigned (0-255, 128=silence) - reading it back through
+    # read_wav_samples should hand back proper signed values, not raw
+    # unsigned bytes. Chose values that land on clean signed round numbers
+    # once re-centred: unsigned 0/128/255 -> signed -128/0/127
+    unsigned_bytes = bytes([0, 128, 255])
+    wav_path = tmp_path / "test8.wav"
+    with wave.open(str(wav_path), "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(1)
+        wf.setframerate(22050)
+        wf.writeframes(unsigned_bytes)
+
+    samples, rate = sds_encoder.read_wav_samples(str(wav_path))
+    assert list(samples) == [-32768, 0, 32512]
+    assert rate == 22050
+
+
 def test_read_aiff_samples(tmp_path):
     left = np.array([0, 1000, -1000, 32767, -32768], dtype=np.int16)
     right = np.array([0, -500, 500, -32768, 32767], dtype=np.int16)
