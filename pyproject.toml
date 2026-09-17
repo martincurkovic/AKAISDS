@@ -1,6 +1,8 @@
 [project]
 name = "AKAISDS"
 version = "0.0.0" # placeholder, real value derived from git tags in build stage
+description = "A cross-platform MIDI Sample Dump Standard transfer tool for Akai and generic SDS-compatible samplers. Built with PySide6 (Qt), Mido, python-rtmidi, soundfile and Nuitka."
+authors = [{ name = "Martin Curkovic", email = "martincurkovic@icloud.com" }]
 requires-python = ">=3.12"
 dependencies = [
     "imageio>=2.37.4",
