@@ -1,3 +1,4 @@
+from PySide6.QtGui import Qt
 from PySide6.QtWidgets import (
     QGridLayout,
     QHBoxLayout,
@@ -5,6 +6,7 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QLabel,
     QPushButton,
+    QSizePolicy,
     QVBoxLayout,
     QWidget,
 )
@@ -38,19 +40,33 @@ class ProgramEditorWindow(QMainWindow):
         self.cutoff_knob = Knob()
         self.cutoff_knob.setRange(0, 99)
         self.cutoff_knob.setFixedSize(80, 80)
+        self.cutoff_value_label = QLabel("-")
+        self.resonance_knob = Knob()
+        self.resonance_knob.setRange(0, 15)
+        self.resonance_knob.setFixedSize(80, 80)
+        self.resonance_value_label = QLabel("-")
+
+        self.cutoff_knob = Knob()
+        self.cutoff_knob.setRange(0, 99)
+        self.cutoff_knob.setFixedSize(80, 80)
         self.resonance_knob = Knob()
         self.resonance_knob.setRange(0, 15)
         self.resonance_knob.setFixedSize(80, 80)
 
-        detail_grid = QGridLayout()
-        detail_grid.addWidget(QLabel("Cutoff"), 0, 0)
-        detail_grid.addWidget(self.cutoff_knob, 1, 0)
-        detail_grid.addWidget(QLabel("Resonance"), 0, 1)
-        detail_grid.addWidget(self.resonance_knob, 1, 1)
+        cutoff_column, self.cutoff_value_label = self._build_knob_column(
+            "Cutoff", self.cutoff_knob
+        )
+        resonance_column, self.resonance_value_label = self._build_knob_column(
+            "Resonance", self.resonance_knob
+        )
+
+        knobs_layout = QHBoxLayout()
+        knobs_layout.addLayout(cutoff_column)
+        knobs_layout.addLayout(resonance_column)
 
         detail_container_layout = QVBoxLayout()
         detail_container_layout.addWidget(self.detail_label)
-        detail_container_layout.addLayout(detail_grid)
+        detail_container_layout.addLayout(knobs_layout)
         detail_container = QWidget()
         detail_container.setLayout(detail_container_layout)
 
@@ -133,7 +149,9 @@ class ProgramEditorWindow(QMainWindow):
         ):
             return  # stale result from selection the user has already moved past
         self.cutoff_knob.setValue(values["FILFRQ"])
+        self.cutoff_value_label.setText(str(values["FILFRQ"]))
         self.resonance_knob.setValue(values["FILQ"])
+        self.resonance_value_label.setText(str(values["FILQ"]))
 
     def _on_detail_load_failed(self, program_index, keygroup_index, error_message):
         if (
@@ -149,3 +167,20 @@ class ProgramEditorWindow(QMainWindow):
                 loader.wait()
         self._main_window.show()
         event.accept()
+
+    def _build_knob_column(self, label_text, knob):
+        name_label = QLabel(label_text)
+        name_label.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+        name_label.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+
+        value_label = QLabel("-")
+        value_label.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+        value_label.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+
+        column = QVBoxLayout()
+        column.setSpacing(4)  # fixed gap, in pixels - never stretches
+        column.addWidget(name_label, alignment=Qt.AlignmentFlag.AlignHCenter)
+        column.addWidget(knob, alignment=Qt.AlignmentFlag.AlignHCenter)
+        column.addWidget(value_label)
+
+        return column, value_label
