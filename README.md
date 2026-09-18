@@ -112,11 +112,13 @@ Want to build AKAISDS yourself or help contribute to the project? See [BUILDING.
 
 ## License & Acknowledgements
 
-Licensed under [LGPLv3](LICENSE) - see [LICENSE](LICENSE) for details
+Licensed under [GPLv3](LICENSE) - see [LICENSE](LICENSE) for details
 
-Written in Python using PySide6 (Qt), mido, python-rtmidi, soundfile and Nuitka.
+Written in Python using PySide6 (Qt), mido, python-rtmidi, soundfile, s3ked and Nuitka.
 
 This project would not have been possible without the amazing work of Frank Neumann who transcribed the entire Akai SysEx implementation by hand from printed documentation. [That documentation can be found here](https://lakai.sourceforge.net/documentation.shtml.html)
+
+Additionally the program and keygroup editor is built on top of the [s3ked](https://github.com/lentferj/s3ked) project by _Jan Lentfer._
 
 _I stand on the shoulders of giants._
 

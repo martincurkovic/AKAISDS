@@ -5,9 +5,8 @@ AKAISDS has a small pytest suite covering the bare minimum (`core/` and `control
 ## Running the tests
 
 ```
-pip install -r requirements.txt
-pip install -r requirements-dev.txt
-pytest tests/ -v
+uv sync
+uv run pytest tests/ -v
 ```
 
 This is the same command that the CI pipeline runs. The whole testing suite takes less than a second. Again, very minimal and very quickly added. No UI or hardware testing just yet.
@@ -18,11 +17,11 @@ This is the same command that the CI pipeline runs. The whole testing suite take
 
 `tests/test_sds_encoder.py` is the universal SDS byte encoding. Also contains real WAV/AIFF file I/O against some very small dummy files. Confirms for both AIFF and WAV.
 
-`tests/test_midi_identity.py` is the universal MIDI identity request AND the Akai specific RSTAT and STAT request and response pair. 
+`tests/test_midi_identity.py` is the universal MIDI identity request AND the Akai specific RSTAT and STAT request and response pair.
 
 `tests/test_app_config.py` is the settings persistence testing. Uses `monkeypatch`/`tmp_path` to redirect `CONFIG_PATH` to a temp file, so that way it never touches the user's real config file.
 
-`tests/test_theme.py` is the stylesheet renderer which generates both light and dark themes. Also uses `monkeypatch/tmp_path`. 
+`tests/test_theme.py` is the stylesheet renderer which generates both light and dark themes. Also uses `monkeypatch/tmp_path`.
 
 `tests/test_sampler_controller.py` is the big dawg test. This one might require some explanation cos it's very much not like the others. See below for details
 
