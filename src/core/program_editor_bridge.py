@@ -63,6 +63,10 @@ class KeygroupDetailLoader(QThread):
         "DECAY2",
         "SUSTN2",
         "RELSE2",
+        "ENV2R2",
+        "ENV2L1",
+        "ENV2L2",
+        "ENV2L4",
     ]
 
     def __init__(self, bridge, program_index, keygroup_index):
