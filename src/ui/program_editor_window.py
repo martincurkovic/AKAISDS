@@ -7,25 +7,21 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+import s3k.params as p
 
 
 class ProgramEditorWindow(QMainWindow):
-    def __init__(self, main_window):
+    def __init__(self, main_window, bridge):
         super().__init__()
         self.setWindowTitle("AKAISDS - Program Editor")
         self.setMinimumSize(800, 500)
 
         self._main_window = main_window
+        self._bridge = bridge
 
         # placeholder - real program, keygroup panels come later
-        self._fake_keygroups_by_program = {
-            "Bass stab": ["C1 - F2", "F#2 - C4", "C#4 - C6"],
-            "EPiano warm": ["A0 - G3", "G#3 - C8"],
-            "Brass hit": ["C1 - C8"],
-            "Pad strings": ["C1 - E3", "F3 - C6", "C#6 - C8"],
-        }
         self.program_list = QListWidget()
-        self.program_list.addItems(list(self._fake_keygroups_by_program.keys()))
+        self.program_list.addItems(self._bridge.program_list())
         self.program_list.setFixedWidth(160)
 
         self.keygroup_list = QListWidget()
@@ -58,8 +54,27 @@ class ProgramEditorWindow(QMainWindow):
         self.detail_label.setText("Select a keygroup")
         if current is None:
             return
-        keygroups = self._fake_keygroups_by_program[current.text()]
-        self.keygroup_list.addItems(keygroups)
+
+        program_index = self.program_list.currentRow()
+        keygroup_ranges = []
+        keygroup_index = 0
+        while True:
+            try:
+                lo = self._bridge.get_parameter(
+                    p.lookup("LONOTE", "keygroup"),
+                    program_index,
+                    keygroup=keygroup_index,
+                )
+                hi = self._bridge.get_parameter(
+                    p.lookup("HINOTE", "keygroup"),
+                    program_index,
+                    keygroup=keygroup_index,
+                )
+            except ValueError:
+                break  # ran past the last real keygroup for this program
+            keygroup_ranges.append(f"{lo} - {hi}")
+            keygroup_index += 1
+        self.keygroup_list.addItems(keygroup_ranges)
 
     def _on_keygroup_selected(self, current, previous):
         if current is not None:

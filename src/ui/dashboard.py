@@ -16,7 +16,7 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QFont, QFontMetrics
-from core import sds_encoder
+from core import sds_encoder, program_editor_bridge
 from ui.qt_helpers import load_colored_pixmap
 from ui.settings_dialog import MidiSettingsDialog
 from ui.drop_list_widget import DropListWidget
@@ -263,8 +263,16 @@ class TransferDashboard(QWidget):
         self._update_queue_buttons_state()
 
     def _open_program_editor(self):
+
         main_window = self.window()
-        self.editor_window = ProgramEditorWindow(main_window)
+        try:
+            bridge = program_editor_bridge.connect()
+        except Exception as e:
+            QMessageBox.warning(
+                self, "Couldn't connect", f"Couldn't reach the sampler: {e}"
+            )
+            return
+        self.editor_window = ProgramEditorWindow(main_window, bridge=bridge)
         self.editor_window.show()
         main_window.hide()
 
