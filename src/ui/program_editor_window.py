@@ -42,8 +42,6 @@ class ProgramEditorWindow(QMainWindow):
         self.resonance_knob.setRange(0, 15)
         self.resonance_knob.setFixedSize(80, 80)
 
-        self.pan_label = QLabel("Pan: -")
-
         detail_grid = QGridLayout()
         detail_grid.addWidget(QLabel("Cutoff"), 0, 0)
         detail_grid.addWidget(self.cutoff_knob, 1, 0)
@@ -116,7 +114,7 @@ class ProgramEditorWindow(QMainWindow):
         self.detail_label.setText(f"Couldn't load keygroups: {error_message}")
 
     def _on_keygroup_selected(self, current, previous):
-        if current is not None:
+        if current is None:
             return
         program_index = self.program_list.currentRow()
         keygroup_index = self.keygroup_list.currentRow()
