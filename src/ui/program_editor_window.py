@@ -59,9 +59,12 @@ class ProgramEditorWindow(QMainWindow):
         self.env2_graph = Envelope2Graph()
         self.env2_graph.setFixedSize(160, 60)
 
+        env1_column = self._build_labeled_column("ENV1", self.env1_graph)
+        env2_column = self._build_labeled_column("ENV2", self.env2_graph)
+
         envelopes_layout = QHBoxLayout()
-        envelopes_layout.addWidget(self.env1_graph)
-        envelopes_layout.addWidget(self.env2_graph)
+        envelopes_layout.addLayout(env1_column)
+        envelopes_layout.addLayout(env2_column)
 
         cutoff_column, self.cutoff_value_label = self._build_knob_column(
             "Cutoff", self.cutoff_knob
@@ -226,3 +229,16 @@ class ProgramEditorWindow(QMainWindow):
         column.addWidget(value_label)
 
         return column, value_label
+
+    def _build_labeled_column(self, label_text, widget):
+        name_label = QLabel(label_text)
+        name_label.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+        name_label.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+
+        column = QVBoxLayout()
+        column.setSpacing(4)
+        column.addWidget(name_label, alignment=Qt.AlignmentFlag.AlignHCenter)
+        column.addWidget(widget, alignment=Qt.AlignmentFlag.AlignHCenter)
+        column.addStretch()
+
+        return column
