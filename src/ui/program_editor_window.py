@@ -1,4 +1,5 @@
 from PySide6.QtWidgets import (
+    QGridLayout,
     QHBoxLayout,
     QListWidget,
     QMainWindow,
@@ -7,7 +8,12 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
-from core.program_editor_bridge import KeygroupLoader, ProgramListLoader
+from ui.knob import Knob
+from core.program_editor_bridge import (
+    KeygroupLoader,
+    ProgramListLoader,
+    KeygroupDetailLoader,
+)
 
 
 class ProgramEditorWindow(QMainWindow):
@@ -29,15 +35,39 @@ class ProgramEditorWindow(QMainWindow):
 
         self.detail_label = QLabel("Loading programs...")
 
+        self.cutoff_knob = Knob()
+        self.cutoff_knob.setRange(0, 99)
+        self.cutoff_knob.setFixedSize(80, 80)
+        self.resonance_knob = Knob()
+        self.resonance_knob.setRange(0, 15)
+        self.resonance_knob.setFixedSize(80, 80)
+
+        self.pan_label = QLabel("Pan: -")
+
+        detail_grid = QGridLayout()
+        detail_grid.addWidget(QLabel("Cutoff"), 0, 0)
+        detail_grid.addWidget(self.cutoff_knob, 1, 0)
+        detail_grid.addWidget(QLabel("Resonance"), 0, 1)
+        detail_grid.addWidget(self.resonance_knob, 1, 1)
+
+        detail_container_layout = QVBoxLayout()
+        detail_container_layout.addWidget(self.detail_label)
+        detail_container_layout.addLayout(detail_grid)
+        detail_container = QWidget()
+        detail_container.setLayout(detail_container_layout)
+
+        self.pan_label = QLabel("Pan: -")
+
         close_button = QPushButton("Close")
         close_button.clicked.connect(self.close)
 
         content_layout = QHBoxLayout()
         content_layout.addWidget(self.program_list)
         content_layout.addWidget(self.keygroup_list)
-        content_layout.addWidget(self.detail_label, stretch=1)
+        content_layout.addWidget(detail_container, stretch=1)
 
         main_layout = QVBoxLayout()
+        main_layout.addWidget(self.pan_label)
         main_layout.addLayout(content_layout)
         main_layout.addWidget(close_button)
 
@@ -87,7 +117,32 @@ class ProgramEditorWindow(QMainWindow):
 
     def _on_keygroup_selected(self, current, previous):
         if current is not None:
-            self.detail_label.setText(f"Keygroup range: {current.text()}")
+            return
+        program_index = self.program_list.currentRow()
+        keygroup_index = self.keygroup_list.currentRow()
+
+        self._detail_loader = KeygroupDetailLoader(
+            self._bridge, program_index, keygroup_index
+        )
+        self._detail_loader.detail_loaded.connect(self._on_detail_loaded)
+        self._detail_loader.load_failed.connect(self._on_detail_load_failed)
+        self._detail_loader.start()
+
+    def _on_detail_loaded(self, program_index, keygroup_index, values):
+        if (
+            program_index != self.program_list.currentRow()
+            or keygroup_index != self.keygroup_list.currentRow()
+        ):
+            return  # stale result from selection the user has already moved past
+        self.cutoff_knob.setValue(values["FILFRQ"])
+        self.resonance_knob.setValue(values["FILQ"])
+
+    def _on_detail_load_failed(self, program_index, keygroup_index, error_message):
+        if (
+            program_index == self.program_list.currentRow()
+            and keygroup_index == self.keygroup_list.currentRow()
+        ):
+            self.detail_label.setText(f"Couldn't load detail: {error_message}")
 
     def closeEvent(self, event):
         # runs regardless of how the window closes (close button, command + w, etc)

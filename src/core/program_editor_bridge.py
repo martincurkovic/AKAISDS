@@ -45,6 +45,44 @@ class KeygroupLoader(QThread):
         self.keygroups_loaded.emit(self._program_index, keygroup_ranges)
 
 
+class KeygroupDetailLoader(QThread):
+    detail_loaded = Signal(int, int, dict)  # program_index, keygroup_index, values
+    load_failed = Signal(int, int, str)
+
+    _FIELDS = [
+        "FILFRQ",
+        "FILQ",
+        "ATTAK1",
+        "DECAY1",
+        "SUSTN1",
+        "RELSE1",
+        "ATTAK2",
+        "DECAY2",
+        "SUSTN2",
+        "RELSE2",
+    ]
+
+    def __init__(self, bridge, program_index, keygroup_index):
+        super().__init__()
+        self._bridge = bridge
+        self._program_index = program_index
+        self._keygroup_index = keygroup_index
+
+    def run(self):
+        values = {}
+        try:
+            for field in self._FIELDS:
+                values[field] = self._bridge.get_parameter(
+                    p.lookup(field, "keygroup"),
+                    self._program_index,
+                    keygroup=self._keygroup_index,
+                )
+        except Exception as e:
+            self.load_failed.emit(self._program_index, self._keygroup_index, str(e))
+            return
+        self.detail_loaded.emit(self._program_index, self._keygroup_index, values)
+
+
 class ProgramListLoader(QThread):
     programs_loaded = Signal(list)
     load_failed = Signal(str)

@@ -39,3 +39,4 @@ src/ui/_version.py
 /TODO.txt
 /src/AKAISDS.bin
 /dmg-staging
+scratch_*.py
