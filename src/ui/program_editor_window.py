@@ -34,7 +34,6 @@ class ProgramEditorWindow(QMainWindow):
 
         self.keygroup_list = QListWidget()
         self.keygroup_list.setFixedWidth(160)
-        self.keygroup_list.currentItemChanged.connect(self._on_keygroup_selected)
 
         self.detail_label = QLabel("Loading programs...")
 
@@ -101,7 +100,13 @@ class ProgramEditorWindow(QMainWindow):
         self.setCentralWidget(container)
 
         self.program_list.currentItemChanged.connect(self._on_program_selected)
-
+        self.program_list.itemClicked.connect(
+            lambda item: self.detail_stack.setCurrentIndex(0)
+        )
+        self.keygroup_list.currentItemChanged.connect(self._on_keygroup_selected)
+        self.keygroup_list.itemClicked.connect(
+            lambda item: self.detail_stack.setCurrentIndex(1)
+        )
         self._program_loader = ProgramListLoader(self._bridge)
         self._program_loader.programs_loaded.connect(self._on_programs_loaded)
         self._program_loader.load_failed.connect(self._on_program_load_failed)
