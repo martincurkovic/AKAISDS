@@ -2,13 +2,19 @@ from PySide6.QtWidgets import QDial
 from PySide6.QtGui import QPainter, QPen, QColor
 from PySide6.QtCore import Qt
 
+# Qt measures angles counterclockwise from 3 o'clock, in 16ths of a degree.
+# 240 degrees in that convention lands at 7 o'clock; sweeping 300 degrees
+# clockwise from there passes through 12 o'clock and ends at 5 o'clock -
+# verified by rendering offscreen at min/mid/max and checking which
+# regions actually filled in, including that the bottom gap stays clear.
+START_ANGLE_DEG = 240
+SWEEP_DEG = 300
+
 
 class Knob(QDial):
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setEnabled(False)  # read-only for now - a disabled QDial
-        # can't be dragged, and Qt greys it out automatically so this
-        # reads as "display only" without any extra styling work
+        self.setEnabled(False)  # read-only for now
 
     def paintEvent(self, event):
         painter = QPainter(self)
@@ -18,17 +24,12 @@ class Knob(QDial):
         track_pen = QPen(QColor("#3d3f56"))
         track_pen.setWidth(4)
         painter.setPen(track_pen)
-        painter.drawArc(rect, 0, 360 * 16)
+        painter.drawArc(rect, START_ANGLE_DEG * 16, -SWEEP_DEG * 16)
 
-        span = self.maximum() - self.minimum()
-        fraction = (self.value() - self.minimum()) / span if span else 0
+        value_range = self.maximum() - self.minimum()
+        fraction = (self.value() - self.minimum()) / value_range if value_range else 0
         value_pen = QPen(QColor("#3aa88a"))
         value_pen.setWidth(4)
         value_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
         painter.setPen(value_pen)
-        # Qt measures angles counterclockwise from 3 o'clock, in 16ths of
-        # a degree - 90*16 starts us at 12 o'clock, and the negative span
-        # makes it sweep clockwise as the value increases, matching the
-        # mockup's visual convention (verified by rendering this offscreen
-        # at several values and checking which quadrants actually filled)
-        painter.drawArc(rect, 90 * 16, -int(360 * fraction * 16))
+        painter.drawArc(rect, START_ANGLE_DEG * 16, -int(SWEEP_DEG * fraction * 16))
