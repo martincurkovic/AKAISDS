@@ -20,6 +20,7 @@ from core import sds_encoder
 from ui.qt_helpers import load_colored_pixmap
 from ui.settings_dialog import MidiSettingsDialog
 from ui.drop_list_widget import DropListWidget
+from ui.program_editor_window import ProgramEditorWindow
 from ui.sample_settings_dialog import SampleSettingsDialog
 from ui.sample_info_dialog import SampleInfoDialog
 from ui.ascii_logo import LOGO
@@ -98,6 +99,10 @@ class TransferDashboard(QWidget):
         self.btn_settings = QPushButton("\u2699 MIDI Settings")
         self.btn_settings.clicked.connect(self.open_settings_dialog)
         top_bar.addWidget(self.btn_settings)
+
+        self.btn_open_editor = QPushButton("Open Editor")
+        self.btn_open_editor.clicked.connect(self._open_program_editor)
+        top_bar.addWidget(self.btn_open_editor)
 
         # TWIN PANELS BABYYYY (horizontal layout nesting)
         panel_layout = QHBoxLayout()
@@ -256,6 +261,12 @@ class TransferDashboard(QWidget):
         # reflect whatever device type was ALREADY restored before the dashboard was constructed
         self._update_device_type_ui()
         self._update_queue_buttons_state()
+
+    def _open_program_editor(self):
+        main_window = self.window()
+        self.editor_window = ProgramEditorWindow(main_window)
+        self.editor_window.show()
+        main_window.hide()
 
     def open_settings_dialog(self):
         dialog = MidiSettingsDialog(self.midi_manager, self.sampler_controller, self)
