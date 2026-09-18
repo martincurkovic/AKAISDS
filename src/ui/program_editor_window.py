@@ -7,7 +7,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
-import s3k.params as p
+from core.program_editor_bridge import KeygroupLoader
 
 
 class ProgramEditorWindow(QMainWindow):
@@ -56,25 +56,22 @@ class ProgramEditorWindow(QMainWindow):
             return
 
         program_index = self.program_list.currentRow()
-        keygroup_ranges = []
-        keygroup_index = 0
-        while True:
-            try:
-                lo = self._bridge.get_parameter(
-                    p.lookup("LONOTE", "keygroup"),
-                    program_index,
-                    keygroup=keygroup_index,
-                )
-                hi = self._bridge.get_parameter(
-                    p.lookup("HINOTE", "keygroup"),
-                    program_index,
-                    keygroup=keygroup_index,
-                )
-            except ValueError:
-                break  # ran past the last real keygroup for this program
-            keygroup_ranges.append(f"{lo} - {hi}")
-            keygroup_index += 1
+        self._loader = KeygroupLoader(self._bridge, program_index)
+        self._loader.keygroups_loaded.connect(self._on_keygroups_loaded)
+        self._loader.load_failed.connect(self._on_load_failed)
+        self._loader.start()
+
+    def _on_keygroups_loaded(self, program_index, keygroup_ranges):
+        # ignore result for program the user has already clicked away from
+        if program_index != self.program_list.currentRow():
+            return
         self.keygroup_list.addItems(keygroup_ranges)
+        self.detail_label.setText("Select a keygroup")
+
+    def _on_load_failed(self, program_index, error_message):
+        if program_index != self.program_list.currentRow():
+            return
+        self.detail_label.setText(f"Couldn't load keygroups: {error_message}")
 
     def _on_keygroup_selected(self, current, previous):
         if current is not None:

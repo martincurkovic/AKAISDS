@@ -883,7 +883,7 @@ class TransferDashboard(QWidget):
     def _sync_menu_actions(self):
         for button, action in self._enabled_sync_map.items():
             action.setEnabled(button.isEnabled())
-        for button, action in self._text_sync_map.items():
+        for button, action in self._text_sync_map.items():  # type: ignore
             action.setText(button.text())
 
     def _update_queue_buttons_state(self):

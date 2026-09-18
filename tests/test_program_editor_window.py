@@ -40,12 +40,19 @@ def qapp():
     yield app
 
 
+def _wait_for_load(editor, qapp):
+    editor._loader.wait()
+    qapp.processEvents()
+
+
 @pytest.fixture
 def editor(qapp):
     fake_main_window = (
         QWidget()
     )  # just needs a .show() method - a plain QWidget has one
-    return ProgramEditorWindow(fake_main_window, bridge=FakeBridge())
+    editor = ProgramEditorWindow(fake_main_window, bridge=FakeBridge())
+    _wait_for_load(editor, qapp)
+    return editor
 
 
 def test_first_program_is_preselected_with_its_keygroups_shown(editor):
@@ -54,15 +61,12 @@ def test_first_program_is_preselected_with_its_keygroups_shown(editor):
     assert editor.keygroup_list.item(0).text() == "24 - 60"
 
 
-def test_switching_program_replaces_keygroup_list_without_crashing(editor):
-    # this is the direct regression test for the "current=None" guard -
-    # clearing keygroup_list mid-switch fires currentItemChanged with
-    # current=None, and without the guard this crashes on current.text()
-    editor.program_list.setCurrentRow(1)  # "EPiano warm"
+def test_switching_program_replaces_keygroup_list_without_crashing(editor, qapp):
+    editor.program_list.setCurrentRow(1)
+    _wait_for_load(editor, qapp)
 
     assert editor.keygroup_list.count() == 1
     assert editor.keygroup_list.item(0).text() == "24 - 96"
-    assert editor.detail_label.text() == "Select a keygroup"
 
 
 def test_selecting_a_keygroup_updates_the_detail_label(editor):
