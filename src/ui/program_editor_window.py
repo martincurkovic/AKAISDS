@@ -12,7 +12,7 @@ from PySide6.QtWidgets import (
     QStackedWidget,
 )
 from ui.knob import Knob
-from ui.envelope_graph import EnvelopeGraph
+from ui.envelope_graph import ADSREnvelopeGraph, Envelope2Graph
 from core.program_editor_bridge import (
     KeygroupLoader,
     ProgramListLoader,
@@ -54,14 +54,14 @@ class ProgramEditorWindow(QMainWindow):
         self.resonance_knob.setRange(0, 15)
         self.resonance_knob.setFixedSize(80, 80)
 
-        self.filter_env_graph = EnvelopeGraph()
-        self.filter_env_graph.setFixedSize(160, 60)
-        self.amp_env_graph = EnvelopeGraph()
-        self.amp_env_graph.setFixedSize(160, 60)
+        self.env1_graph = ADSREnvelopeGraph()
+        self.env1_graph.setFixedSize(160, 60)
+        self.env2_graph = Envelope2Graph()
+        self.env2_graph.setFixedSize(160, 60)
 
         envelopes_layout = QHBoxLayout()
-        envelopes_layout.addWidget(self.filter_env_graph)
-        envelopes_layout.addWidget(self.amp_env_graph)
+        envelopes_layout.addWidget(self.env1_graph)
+        envelopes_layout.addWidget(self.env2_graph)
 
         cutoff_column, self.cutoff_value_label = self._build_knob_column(
             "Cutoff", self.cutoff_knob
@@ -181,11 +181,18 @@ class ProgramEditorWindow(QMainWindow):
         self.cutoff_value_label.setText(str(values["FILFRQ"]))
         self.resonance_knob.setValue(values["FILQ"])
         self.resonance_value_label.setText(str(values["FILQ"]))
-        self.filter_env_graph.set_values(
+        self.env1_graph.set_values(
             values["ATTAK1"], values["DECAY1"], values["SUSTN1"], values["RELSE1"]
         )
-        self.amp_env_graph.set_values(
-            values["ATTAK2"], values["DECAY2"], values["SUSTN2"], values["RELSE2"]
+        self.env2_graph.set_values(
+            values["ATTAK2"],
+            values["ENV2L1"],
+            values["ENV2R2"],
+            values["ENV2L2"],
+            values["DECAY2"],
+            values["SUSTN2"],
+            values["RELSE2"],
+            values["ENV2L4"],
         )
 
     def _on_detail_load_failed(self, program_index, keygroup_index, error_message):

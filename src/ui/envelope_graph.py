@@ -6,7 +6,7 @@ SUSTAIN_HOLD_FRACTION = 0.15  # sustain is a LEVEL, not a duration - this
 # reserves a fixed-width segment to show it
 
 
-class EnvelopeGraph(QWidget):
+class ADSREnvelopeGraph(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._attack = 0
@@ -52,6 +52,44 @@ class EnvelopeGraph(QWidget):
             QPointF(x4, y4),
         ]
         pen = QPen(QColor("#3aa88a"))
+        pen.setWidth(2)
+        painter.setPen(pen)
+        painter.drawPolyline(QPolygonF(points))
+
+
+class Envelope2Graph(QWidget):
+    # ENV2 is a 4-stage rate/level generator, NOT an ADSR shape - levels
+    # can rise or fall freely between stages (confirmed against the S2000
+    # manual's own example envelope shapes). Verified offscreen: correctly
+    # renders a non-monotonic dip-rise-dip shape, which EnvelopeGraph
+    # (built for ENV1's genuine ADSR shape) cannot represent.
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._stages = [(0, 0)] * 4  # (rate, level) per stage, in order
+
+    def set_values(self, rate1, level1, rate2, level2, rate3, level3, rate4, level4):
+        self._stages = [
+            (rate1, level1),
+            (rate2, level2),
+            (rate3, level3),
+            (rate4, level4),
+        ]
+        self.update()
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        w, h = self.width(), self.height()
+
+        total_rate = sum(r for r, l in self._stages) or 1
+        points = [QPointF(0, h)]  # starts at silence
+        x = 0
+        for rate, level in self._stages:
+            x += (rate / total_rate) * w
+            y = h - (level / 99) * h
+            points.append(QPointF(x, y))
+
+        pen = QPen(QColor("#d97757"))
         pen.setWidth(2)
         painter.setPen(pen)
         painter.drawPolyline(QPolygonF(points))
