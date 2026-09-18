@@ -7,7 +7,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
-from core.program_editor_bridge import KeygroupLoader
+from core.program_editor_bridge import KeygroupLoader, ProgramListLoader
 
 
 class ProgramEditorWindow(QMainWindow):
@@ -21,14 +21,13 @@ class ProgramEditorWindow(QMainWindow):
 
         # placeholder - real program, keygroup panels come later
         self.program_list = QListWidget()
-        self.program_list.addItems(self._bridge.program_list())
         self.program_list.setFixedWidth(160)
 
         self.keygroup_list = QListWidget()
         self.keygroup_list.setFixedWidth(160)
         self.keygroup_list.currentItemChanged.connect(self._on_keygroup_selected)
 
-        self.detail_label = QLabel("Select a program")
+        self.detail_label = QLabel("Loading programs...")
 
         close_button = QPushButton("Close")
         close_button.clicked.connect(self.close)
@@ -47,7 +46,20 @@ class ProgramEditorWindow(QMainWindow):
         self.setCentralWidget(container)
 
         self.program_list.currentItemChanged.connect(self._on_program_selected)
-        self.program_list.setCurrentRow(0)
+
+        self._program_loader = ProgramListLoader(self._bridge)
+        self._program_loader.programs_loaded.connect(self._on_programs_loaded)
+        self._program_loader.load_failed.connect(self._on_program_load_failed)
+        self._program_loader.start()
+
+    def _on_programs_loaded(self, programs):
+        self.program_list.addItems(programs)
+        self.program_list.setCurrentRow(
+            0
+        )  # this is what triggers keygroup loading for the first program
+
+    def _on_program_load_failed(self, error_message):
+        self.detail_label.setText(f"Couldn't load programs: {error_message}")
 
     def _on_program_selected(self, current, previous):
         self.keygroup_list.clear()
@@ -79,5 +91,8 @@ class ProgramEditorWindow(QMainWindow):
 
     def closeEvent(self, event):
         # runs regardless of how the window closes (close button, command + w, etc)
+        for loader in (self._program_loader, getattr(self, "_loader", None)):
+            if loader is not None and loader.isRunning():
+                loader.wait()
         self._main_window.show()
         event.accept()

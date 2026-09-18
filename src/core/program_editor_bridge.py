@@ -43,3 +43,20 @@ class KeygroupLoader(QThread):
             self.load_failed.emit(self._program_index, str(e))
             return
         self.keygroups_loaded.emit(self._program_index, keygroup_ranges)
+
+
+class ProgramListLoader(QThread):
+    programs_loaded = Signal(list)
+    load_failed = Signal(str)
+
+    def __init__(self, bridge):
+        super().__init__()
+        self._bridge = bridge
+
+    def run(self):
+        try:
+            programs = self._bridge.program_list()
+        except Exception as e:
+            self.load_failed.emit(str(e))
+            return
+        self.programs_loaded.emit(programs)

@@ -34,24 +34,26 @@ class FakeBridge:
 
 @pytest.fixture(scope="session")
 def qapp():
-    # Qt allows exactly one QApplication per process - share it across
-    # every test in this file rather than creating a new one each time
     app = QApplication.instance() or QApplication([])
     yield app
 
 
-def _wait_for_load(editor, qapp):
+def _wait_for_program_load(editor, qapp):
+    editor._program_loader.wait()
+    qapp.processEvents()
+
+
+def _wait_for_keygroup_load(editor, qapp):
     editor._loader.wait()
     qapp.processEvents()
 
 
 @pytest.fixture
 def editor(qapp):
-    fake_main_window = (
-        QWidget()
-    )  # just needs a .show() method - a plain QWidget has one
+    fake_main_window = QWidget()
     editor = ProgramEditorWindow(fake_main_window, bridge=FakeBridge())
-    _wait_for_load(editor, qapp)
+    _wait_for_program_load(editor, qapp)
+    _wait_for_keygroup_load(editor, qapp)
     return editor
 
 
@@ -63,7 +65,7 @@ def test_first_program_is_preselected_with_its_keygroups_shown(editor):
 
 def test_switching_program_replaces_keygroup_list_without_crashing(editor, qapp):
     editor.program_list.setCurrentRow(1)
-    _wait_for_load(editor, qapp)
+    _wait_for_keygroup_load(editor, qapp)
 
     assert editor.keygroup_list.count() == 1
     assert editor.keygroup_list.item(0).text() == "24 - 96"
