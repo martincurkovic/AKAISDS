@@ -10,7 +10,7 @@ def connect():
 
 
 class KeygroupLoader(QThread):
-    keygroups_loaded = Signal(int, list)
+    keygroups_loaded = Signal(int, list, int)  # program_index, ranges, pan_value
     load_failed = Signal(int, str)
 
     def __init__(self, bridge, program_index):
@@ -25,6 +25,9 @@ class KeygroupLoader(QThread):
         try:
             while True:
                 try:
+                    pan_value = self._bridge.get_parameter(
+                        p.lookup("PANPOS", "program"), self._program_index
+                    )
                     lo = self._bridge.get_parameter(
                         p.lookup("LONOTE", "keygroup"),
                         self._program_index,
@@ -42,7 +45,7 @@ class KeygroupLoader(QThread):
         except Exception as e:
             self.load_failed.emit(self._program_index, str(e))
             return
-        self.keygroups_loaded.emit(self._program_index, keygroup_ranges)
+        self.keygroups_loaded.emit(self._program_index, keygroup_ranges, pan_value)  # type: ignore
 
 
 class KeygroupDetailLoader(QThread):

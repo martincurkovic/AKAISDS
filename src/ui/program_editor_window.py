@@ -9,6 +9,7 @@ from PySide6.QtWidgets import (
     QSizePolicy,
     QVBoxLayout,
     QWidget,
+    QStackedWidget,
 )
 from ui.knob import Knob
 from core.program_editor_bridge import (
@@ -70,7 +71,18 @@ class ProgramEditorWindow(QMainWindow):
         detail_container = QWidget()
         detail_container.setLayout(detail_container_layout)
 
-        self.pan_label = QLabel("Pan: -")
+        self.pan_knob = Knob()
+        self.pan_knob.setRange(-50, 50)
+        self.pan_knob.setFixedSize(80, 80)
+        pan_column, self.pan_value_label = self._build_knob_column("Pan", self.pan_knob)
+        pan_page = QWidget()
+        pan_page_layout = QVBoxLayout()
+        pan_page_layout.addLayout(pan_column)
+        pan_page.setLayout(pan_page_layout)
+
+        self.detail_stack = QStackedWidget()
+        self.detail_stack.addWidget(pan_page)
+        self.detail_stack.addWidget(detail_container)
 
         close_button = QPushButton("Close")
         close_button.clicked.connect(self.close)
@@ -78,10 +90,9 @@ class ProgramEditorWindow(QMainWindow):
         content_layout = QHBoxLayout()
         content_layout.addWidget(self.program_list)
         content_layout.addWidget(self.keygroup_list)
-        content_layout.addWidget(detail_container, stretch=1)
+        content_layout.addWidget(self.detail_stack, stretch=1)
 
         main_layout = QVBoxLayout()
-        main_layout.addWidget(self.pan_label)
         main_layout.addLayout(content_layout)
         main_layout.addWidget(close_button)
 
@@ -108,21 +119,22 @@ class ProgramEditorWindow(QMainWindow):
     def _on_program_selected(self, current, previous):
         self.keygroup_list.clear()
         self.detail_label.setText("Select a keygroup")
+        self.detail_stack.setCurrentIndex(0)
         if current is None:
             return
-
         program_index = self.program_list.currentRow()
         self._loader = KeygroupLoader(self._bridge, program_index)
         self._loader.keygroups_loaded.connect(self._on_keygroups_loaded)
         self._loader.load_failed.connect(self._on_load_failed)
         self._loader.start()
 
-    def _on_keygroups_loaded(self, program_index, keygroup_ranges):
+    def _on_keygroups_loaded(self, program_index, keygroup_ranges, pan_value):
         # ignore result for program the user has already clicked away from
         if program_index != self.program_list.currentRow():
             return
         self.keygroup_list.addItems(keygroup_ranges)
-        self.detail_label.setText("Select a keygroup")
+        self.pan_knob.setValue(pan_value)
+        self.pan_value_label.setText(str(pan_value))
 
     def _on_load_failed(self, program_index, error_message):
         if program_index != self.program_list.currentRow():
@@ -132,6 +144,7 @@ class ProgramEditorWindow(QMainWindow):
     def _on_keygroup_selected(self, current, previous):
         if current is None:
             return
+        self.detail_stack.setCurrentIndex(1)
         program_index = self.program_list.currentRow()
         keygroup_index = self.keygroup_list.currentRow()
 
@@ -175,7 +188,7 @@ class ProgramEditorWindow(QMainWindow):
 
         value_label = QLabel("-")
         value_label.setAlignment(Qt.AlignmentFlag.AlignHCenter)
-        value_label.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        # value_label.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
 
         column = QVBoxLayout()
         column.setSpacing(4)  # fixed gap, in pixels - never stretches
