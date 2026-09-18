@@ -30,3 +30,22 @@ exactly what the panel shows, no translation needed.
 | PTUNO     | program  | scaled    | raw units are 1/256 semitone, snapped to nearest cent (2.56 raw/cent). Confirmed against real hardware: cents 1/2/3/4 -> raw 2/5/7/10, exactly matching s3ked's documented trunc(cents*2.56) formula. Display as raw/256 semitones. |
 | KGTUNO    | keygroup | untested  | keygroup-wide tune offset (same field shape as PTUNO). Distinct from VTUNO1-4, which are per-zone. Location on the S2000's own panel not yet found - what was assumed to be this field was actually VTUNO1 (see below). |
 | VTUNO1    | keygroup | identified | zone 1 tuning offset. What was originally mistaken for KGTUNO on the panel - editing "tune" for a specific zone changes this, not the keygroup-wide field. Same trunc(cents*2.56) formula as PTUNO (not yet independently re-confirmed under this name, but same underlying mechanism already verified). |
+
+## Important correction - envelope assignment was backwards
+
+Confirmed directly from the S2000 Operator's Manual (v1.30), not
+inferred: **ENV1 is the amplitude envelope** ("a simple ADSR type"),
+and **ENV2 is the filter envelope** - a 4-stage, freely-shapeable
+rate/level generator (RATE1->LEVEL1, RATE2->LEVEL2, RATE3->LEVEL3
+"sustain level", RATE4->LEVEL4), NOT a simple ADSR. Levels can rise or
+fall in any combination between stages - the manual shows several
+non-monotonic example shapes.
+
+s3ked's ATTAK2/DECAY2/SUSTN2/RELSE2 names are legacy aliases for what
+the manual calls RATE1/LEVEL1/RATE2/LEVEL2 etc (confirmed by ATTAK2's
+own table note: "also called ENV2R1 in later OS versions").
+
+| Parameter          | Region   | Result | Notes |
+|--------------------|----------|--------|-------|
+| ATTAK1/DECAY1/SUSTN1/RELSE1 | keygroup | direct | ENV1 = amplitude envelope, genuinely simple ADSR, confirmed by manual |
+| ATTAK2/DECAY2/SUSTN2/RELSE2 | keygroup | direct (values match panel) | ENV2 = filter envelope, NOT ADSR-shaped - a 4-stage rate->level generator per the manual's own diagram. Raw values already verified against panel; the SHAPE this app draws from them needs its own widget, not the ADSR graph. |
