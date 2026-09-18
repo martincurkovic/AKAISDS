@@ -12,6 +12,7 @@ from PySide6.QtWidgets import (
     QStackedWidget,
 )
 from ui.knob import Knob
+from ui.envelope_graph import EnvelopeGraph
 from core.program_editor_bridge import (
     KeygroupLoader,
     ProgramListLoader,
@@ -53,6 +54,15 @@ class ProgramEditorWindow(QMainWindow):
         self.resonance_knob.setRange(0, 15)
         self.resonance_knob.setFixedSize(80, 80)
 
+        self.filter_env_graph = EnvelopeGraph()
+        self.filter_env_graph.setFixedSize(160, 60)
+        self.amp_env_graph = EnvelopeGraph()
+        self.amp_env_graph.setFixedSize(160, 60)
+
+        envelopes_layout = QHBoxLayout()
+        envelopes_layout.addWidget(self.filter_env_graph)
+        envelopes_layout.addWidget(self.amp_env_graph)
+
         cutoff_column, self.cutoff_value_label = self._build_knob_column(
             "Cutoff", self.cutoff_knob
         )
@@ -67,6 +77,7 @@ class ProgramEditorWindow(QMainWindow):
         detail_container_layout = QVBoxLayout()
         detail_container_layout.addWidget(self.detail_label)
         detail_container_layout.addLayout(knobs_layout)
+        detail_container_layout.addLayout(envelopes_layout)
         detail_container = QWidget()
         detail_container.setLayout(detail_container_layout)
 
@@ -170,6 +181,12 @@ class ProgramEditorWindow(QMainWindow):
         self.cutoff_value_label.setText(str(values["FILFRQ"]))
         self.resonance_knob.setValue(values["FILQ"])
         self.resonance_value_label.setText(str(values["FILQ"]))
+        self.filter_env_graph.set_values(
+            values["ATTAK1"], values["DECAY1"], values["SUSTN1"], values["RELSE1"]
+        )
+        self.amp_env_graph.set_values(
+            values["ATTAK2"], values["DECAY2"], values["SUSTN2"], values["RELSE2"]
+        )
 
     def _on_detail_load_failed(self, program_index, keygroup_index, error_message):
         if (
