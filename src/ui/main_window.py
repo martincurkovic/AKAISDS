@@ -25,9 +25,6 @@ class ApplicationWindow(QMainWindow):
         # reconnect to whatever MIDI ports were used last time, if still exist
         self._restore_saved_ports()
 
-        # TEMPORARY DEBUG WIRING - print EVERY status handshake message to console so we can debug responses from the sampler
-        # self.sampler_controller.status_changed.connect(print)
-
         # instantiate custom UI layout components
         self.dashboard_view = TransferDashboard(
             self.sampler_controller, self.midi_manager

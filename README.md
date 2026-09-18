@@ -1,6 +1,7 @@
 # AKAISDS
 
 ![Build](https://github.com/martincurkovic/AKAISDS/actions/workflows/build.yml/badge.svg)
+[![Python 3.12+](https://img.shields.io/badge/python-3.12%2B-blue)](pyproject.toml)
 
 A simple way to send and receive audio samples (WAV, AIFF, FLAC) to an Akai S1000/S2000/S3000 series sampler over MIDI using the sample dump standard (MIDI SDS). Also supports generic MIDI SDS transmission for non-Akai samplers.
 

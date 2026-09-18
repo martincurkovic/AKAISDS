@@ -26,17 +26,14 @@ Open a GitHub Issue. The more info the better, especially when it comes to anyth
 ```
 git clone https://github.com/martincurkovic/AKAISDS
 cd AKAISDS
-pip install -r requirements.txt
-pip install -r requirements-dev.txt
+uv sync
 ```
-
-It is also recommended you create a `venv` when installing dependencies. I'll leave that choice up to you tho.
 
 #### Before you open a PR
 
 Run the test suite - see TESTING.md for details
 
-`pytest tests/ -v`
+`uv run pytest tests/ -v`
 
 CI won't actually build anything if the tests fail (ie, every build job is reliant on the tests passing first). So if a red X on your PR is present, it might be related to the tests, not necessarily because your PR was rejected.
 

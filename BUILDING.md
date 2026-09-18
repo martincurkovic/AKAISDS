@@ -2,8 +2,8 @@
 
 ## Prerequisites
 
-- Python 3.10-3.13 recommended. I found that Python 3.14 works but some dependencies may lack pre-built wheels, requiring a C++ compiler to build from source
-- Other dependencies are in the `requirements.txt` file which will be installed automatically when running one of the build scripts below
+- Python 3.12 or higher
+- Other dependencies are in the `pyproject.toml` file which will be installed automatically when running one of the build scripts below
   
 #### macOS
 
@@ -11,11 +11,11 @@
 
 #### Linux
 
-- `build-essential` (can be installed with `sudo apt install build-essential` on Ubuntu-based distributions)
+- `build-essential` and `patchelf` (can be installed with `sudo apt install build-essential patchelf` on Ubuntu-based distributions)
 
 #### Windows
 
-- A C++ compiler - Visual Studio Build Tools is what I used
+- A C++ compiler
 
 ## Setup and Build
 
@@ -25,4 +25,4 @@
 
 ## Running Tests
 
-Right now there is a _very_ basic test suite included in the `tests` directory. These can be run with the `pytest tests/ -v` command. Remember to install the dependencies via: `pip install -r requirements.txt` and `pip install -r requirements-dev.txt`
+Right now there is a _very_ basic test suite included in the `tests` directory. These can be run with the `pytest tests/ -v` command. Remember to sync the environment first by running the command `uv sync`
