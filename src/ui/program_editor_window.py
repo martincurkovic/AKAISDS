@@ -1,3 +1,12 @@
+import os
+import sys
+
+if __name__ == "__main__":
+    # running this file directly (not through main.py) puts src/ui on
+    # sys.path, not src/ - so the ui./core. imports below would otherwise
+    # fail with "No module named 'ui'"
+    sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+
 from PySide6.QtGui import Qt
 from PySide6.QtWidgets import (
     QHBoxLayout,
@@ -657,3 +666,23 @@ class ProgramEditorWindow(QMainWindow):
             self._zone_pan[z].setValue(pan_val)
             self._zone_pan_labels[z].setText(str(pan_val))
             self._zone_pan[z].blockSignals(False)
+
+
+if __name__ == "__main__":
+    # standalone launch for UI work away from the hardware sampler - always
+    # against the demo bridge, never a real port. For the real thing, go
+    # through main.py, which wires the dashboard's "Program Editor" button to
+    # program_editor_bridge.connect() instead.
+    from PySide6.QtWidgets import QApplication
+    from s3ked.demo import DemoBridge
+
+    class _StandaloneHost:
+        # ProgramEditorWindow.closeEvent() calls main_window.show() to bring
+        # the dashboard back - there is none here, so close the app instead
+        def show(self):
+            QApplication.instance().quit()
+
+    app = QApplication(sys.argv)
+    window = ProgramEditorWindow(_StandaloneHost(), bridge=DemoBridge())
+    window.show()
+    sys.exit(app.exec())
