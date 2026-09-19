@@ -9,6 +9,23 @@ def connect():
     return S3kBridge.standard(output_name)  # type: ignore
 
 
+class ProgramListLoader(QThread):
+    programs_loaded = Signal(list)
+    load_failed = Signal(str)
+
+    def __init__(self, bridge):
+        super().__init__()
+        self._bridge = bridge
+
+    def run(self):
+        try:
+            programs = self._bridge.program_list()
+        except Exception as e:
+            self.load_failed.emit(str(e))
+            return
+        self.programs_loaded.emit(programs)
+
+
 class KeygroupLoader(QThread):
     keygroups_loaded = Signal(int, list, dict)  # program_index, ranges, program_values
     load_failed = Signal(int, str)
@@ -20,6 +37,8 @@ class KeygroupLoader(QThread):
 
     def run(self):
         # runs on background thread
+        keygroup_index = 0
+        keygroup_ranges = []
         try:
             program_values = {
                 "PANPOS": self._bridge.get_parameter(
@@ -38,8 +57,6 @@ class KeygroupLoader(QThread):
                     p.lookup("LFO1WAVE", "program"), self._program_index
                 ),
             }
-            keygroup_index = 0
-            keygroup_ranges = []
             while True:
                 try:
                     lo = self._bridge.get_parameter(
@@ -105,18 +122,23 @@ class KeygroupDetailLoader(QThread):
         self.detail_loaded.emit(self._program_index, self._keygroup_index, values)
 
 
-class ProgramListLoader(QThread):
-    programs_loaded = Signal(list)
-    load_failed = Signal(str)
+class ParameterWriter(QThread):
+    write_succeeded = Signal(int)  # new_value, for ui to confirm against
+    write_failed = Signal(str)
 
-    def __init__(self, bridge):
+    def __init__(self, bridge, param_name, region, program_index, new_value):
         super().__init__()
         self._bridge = bridge
+        self._param_name = param_name
+        self._region = region
+        self._program_index = program_index
+        self._new_value = new_value
 
     def run(self):
         try:
-            programs = self._bridge.program_list()
+            param = p.lookup(self._param_name, self._region)
+            self._bridge.set_parameter(param, self._program_index, self._new_value)
         except Exception as e:
-            self.load_failed.emit(str(e))
+            self.write_failed.emit(str(e))
             return
-        self.programs_loaded.emit(programs)
+        self.write_succeeded.emit(self._new_value)

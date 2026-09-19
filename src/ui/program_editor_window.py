@@ -17,9 +17,11 @@ from ui.knob import Knob
 from ui.envelope_graph import ADSREnvelopeGraph, Envelope2Graph
 from core.program_editor_bridge import (
     KeygroupLoader,
+    ParameterWriter,
     ProgramListLoader,
     KeygroupDetailLoader,
 )
+import s3k.params as p
 
 
 class ProgramEditorWindow(QMainWindow):
@@ -111,7 +113,8 @@ class ProgramEditorWindow(QMainWindow):
 
         self.lfo_shape_combo = QComboBox()
         self.lfo_shape_combo.addItems(["Triangle", "Sawtooth", "Square", "Random"])
-        self.lfo_shape_combo.setEnabled(False)
+        self.lfo_shape_combo.setEnabled(True)
+        self.lfo_shape_combo.currentIndexChanged.connect(self._on_lfo_shape_changed)
 
         lfo_shape_label = QLabel("LFO shape")
         lfo_shape_label.setAlignment(Qt.AlignmentFlag.AlignHCenter)
@@ -208,7 +211,9 @@ class ProgramEditorWindow(QMainWindow):
         self.lfo_depth_value_label.setText(str(program_values["LFODEP"]))
         self.lfo_delay_knob.setValue(program_values["LFODEL"])
         self.lfo_delay_value_label.setText(str(program_values["LFODEL"]))
+        self.lfo_shape_combo.blockSignals(True)
         self.lfo_shape_combo.setCurrentIndex(program_values["LFO1WAVE"])
+        self.lfo_shape_combo.blockSignals(False)
 
     def _on_load_failed(self, program_index, error_message):
         if program_index != self.program_list.currentRow():
@@ -306,3 +311,35 @@ class ProgramEditorWindow(QMainWindow):
 
     def _semitones_to_tune_offset(self, semitones):
         return round(semitones * 100 * 2.56)
+
+    def _on_lfo_shape_changed(self, new_index):
+        self._pending_lfo_shape_writer = ParameterWriter(
+            self._bridge,
+            "LFO1WAVE",
+            "program",
+            self.program_list.currentRow(),
+            new_index,
+        )
+        self._pending_lfo_shape_writer.write_succeeded.connect(
+            self._on_lfo_shape_write_succeeded
+        )
+        self._pending_lfo_shape_writer.write_failed.connect(
+            self._on_lfo_shape_write_failed
+        )
+        self._pending_lfo_shape_writer.start()
+
+    def _on_lfo_shape_write_succeeded(self, new_value):
+        self.detail_label.setText(
+            f"LFO shape updated ({self.lfo_shape_combo.currentText()})"
+        )
+
+    def _on_lfo_shape_write_failed(self, error_message):
+        # revert combobox to whatever the sampler actually has, since the ui has diverged from hardware
+        self.detail_label.setText(f"Write failed: {error_message}")
+        program_index = self.program_list.currentRow()
+        self.lfo_shape_combo.blockSignals(True)
+        correct_value = self._bridge.get_parameter(
+            p.lookup("LFO1WAVE", "program"), program_index
+        )
+        self.lfo_shape_combo.setCurrentIndex(correct_value)
+        self.lfo_shape_combo.blockSignals(False)
