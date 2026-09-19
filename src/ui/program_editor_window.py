@@ -1,6 +1,5 @@
 from PySide6.QtGui import Qt
 from PySide6.QtWidgets import (
-    QGridLayout,
     QHBoxLayout,
     QListWidget,
     QMainWindow,
@@ -42,7 +41,7 @@ class ProgramEditorWindow(QMainWindow):
         self.keygroup_list = QListWidget()
         self.keygroup_list.setFixedWidth(160)
 
-        self.detail_label = QLabel("Loading programs...")
+        self.detail_label = QLabel("Select a keygroup")
 
         self.cutoff_knob = Knob()
         self.cutoff_knob.setRange(0, 99)
@@ -52,9 +51,9 @@ class ProgramEditorWindow(QMainWindow):
         self.resonance_knob.setFixedSize(80, 80)
 
         self.env1_graph = ADSREnvelopeGraph()
-        self.env1_graph.setFixedSize(160, 60)
+        self.env1_graph.setFixedSize(200, 90)
         self.env2_graph = Envelope2Graph()
-        self.env2_graph.setFixedSize(160, 60)
+        self.env2_graph.setFixedSize(200, 90)
 
         env1_column = self._build_labeled_column("ENV1", self.env1_graph)
         env2_column = self._build_labeled_column("ENV2", self.env2_graph)
@@ -71,6 +70,7 @@ class ProgramEditorWindow(QMainWindow):
         )
 
         self.zone1_tune_spinbox = QDoubleSpinBox()
+        self.zone1_tune_spinbox.setFixedWidth(110)
         self.zone1_tune_spinbox.setRange(-50.00, 50.00)
         self.zone1_tune_spinbox.setSingleStep(0.01)
         self.zone1_tune_spinbox.setDecimals(2)
@@ -93,9 +93,11 @@ class ProgramEditorWindow(QMainWindow):
         knobs_layout.addLayout(zone1_tune_column)
 
         detail_container_layout = QVBoxLayout()
-        detail_container_layout.addWidget(self.detail_label)
+        detail_container_layout.setSpacing(10)
         detail_container_layout.addLayout(knobs_layout)
+        detail_container_layout.addWidget(self.detail_label)
         detail_container_layout.addLayout(envelopes_layout)
+        detail_container_layout.addStretch()
         detail_container = QWidget()
         detail_container.setLayout(detail_container_layout)
 
@@ -117,7 +119,9 @@ class ProgramEditorWindow(QMainWindow):
         self.lfo_shape_combo = QComboBox()
         self.lfo_shape_combo.addItems(["Triangle", "Sawtooth", "Square", "Random"])
         self.lfo_shape_combo.setEnabled(True)
-        self.lfo_shape_combo.currentIndexChanged.connect(self._on_lfo_shape_changed)
+        self.lfo_shape_combo.currentIndexChanged.connect(
+            lambda i: self._write_knob_value("LFO1WAVE", "program", i)
+        )
 
         lfo_shape_label = QLabel("LFO shape")
         lfo_shape_label.setAlignment(Qt.AlignmentFlag.AlignHCenter)
@@ -150,18 +154,37 @@ class ProgramEditorWindow(QMainWindow):
         polyph_column.addWidget(polyph_label, alignment=Qt.AlignmentFlag.AlignHCenter)
         polyph_column.addWidget(self.polyph_spinbox)
 
-        pan_page = QWidget()
-        pan_page_layout = QVBoxLayout()
-        pan_page_layout.addLayout(pan_column)
-        pan_page_layout.addLayout(lfo_rate_column)
-        pan_page_layout.addLayout(lfo_depth_column)
-        pan_page_layout.addLayout(lfo_delay_column)
-        pan_page_layout.addLayout(lfo_shape_column)
-        pan_page_layout.addLayout(polyph_column)
-        pan_page.setLayout(pan_page_layout)
+        # row 1: Pan, LFO rate, LFO depth
+        program_knobs_row1 = QHBoxLayout()
+        program_knobs_row1.addLayout(pan_column)
+        program_knobs_row1.addLayout(lfo_rate_column)
+        program_knobs_row1.addLayout(lfo_depth_column)
+        program_knobs_row1.addStretch()
+
+        # row 2: LFO delay (only one knob in this row currently)
+        program_knobs_row2 = QHBoxLayout()
+        program_knobs_row2.addLayout(lfo_delay_column)
+        program_knobs_row2.addStretch()
+
+        # row 3: LFO shape and Polyphony side by side, constrained width
+        self.lfo_shape_combo.setMaximumWidth(180)
+        self.polyph_spinbox.setMaximumWidth(80)
+        program_controls_row = QHBoxLayout()
+        program_controls_row.addLayout(lfo_shape_column)
+        program_controls_row.addLayout(polyph_column)
+        program_controls_row.addStretch()
+
+        program_page = QWidget()
+        program_page_layout = QVBoxLayout()
+        program_page_layout.setSpacing(12)
+        program_page_layout.addLayout(program_knobs_row1)
+        program_page_layout.addLayout(program_knobs_row2)
+        program_page_layout.addLayout(program_controls_row)
+        program_page_layout.addStretch()
+        program_page.setLayout(program_page_layout)
 
         self.detail_stack = QStackedWidget()
-        self.detail_stack.addWidget(pan_page)
+        self.detail_stack.addWidget(program_page)
         self.detail_stack.addWidget(detail_container)
 
         close_button = QPushButton("Close")
@@ -251,10 +274,10 @@ class ProgramEditorWindow(QMainWindow):
         if current is None:
             return
         program_index = self.program_list.currentRow()
-        self._loader = KeygroupLoader(self._bridge, program_index)
-        self._loader.keygroups_loaded.connect(self._on_keygroups_loaded)
-        self._loader.load_failed.connect(self._on_load_failed)
-        self._loader.start()
+        self._keygroup_loader = KeygroupLoader(self._bridge, program_index)
+        self._keygroup_loader.keygroups_loaded.connect(self._on_keygroups_loaded)
+        self._keygroup_loader.load_failed.connect(self._on_load_failed)
+        self._keygroup_loader.start()
 
     def _on_keygroups_loaded(self, program_index, keygroup_ranges, program_values):
         # ignore result for program the user has already clicked away from
@@ -335,7 +358,7 @@ class ProgramEditorWindow(QMainWindow):
         # runs regardless of how the window closes (close button, command + w, etc)
         loaders = [
             self._program_loader,
-            getattr(self, "_loader", None),
+            getattr(self, "_keygroup_loader", None),
             getattr(self, "_detail_loader", None),
         ] + list(self._active_writers.values())
 
@@ -381,38 +404,6 @@ class ProgramEditorWindow(QMainWindow):
 
     def _semitones_to_tune_offset(self, semitones):
         return round(semitones * 100 * 2.56)
-
-    def _on_lfo_shape_changed(self, new_index):
-        self._pending_lfo_shape_writer = ParameterWriter(
-            self._bridge,
-            "LFO1WAVE",
-            "program",
-            self.program_list.currentRow(),
-            new_index,
-        )
-        self._pending_lfo_shape_writer.write_succeeded.connect(
-            self._on_lfo_shape_write_succeeded
-        )
-        self._pending_lfo_shape_writer.write_failed.connect(
-            self._on_lfo_shape_write_failed
-        )
-        self._pending_lfo_shape_writer.start()
-
-    def _on_lfo_shape_write_succeeded(self, new_value):
-        self.detail_label.setText(
-            f"LFO shape updated ({self.lfo_shape_combo.currentText()})"
-        )
-
-    def _on_lfo_shape_write_failed(self, error_message):
-        # revert combobox to whatever the sampler actually has, since the ui has diverged from hardware
-        self.detail_label.setText(f"Write failed: {error_message}")
-        program_index = self.program_list.currentRow()
-        self.lfo_shape_combo.blockSignals(True)
-        correct_value = self._bridge.get_parameter(
-            p.lookup("LFO1WAVE", "program"), program_index
-        )
-        self.lfo_shape_combo.setCurrentIndex(correct_value)
-        self.lfo_shape_combo.blockSignals(False)
 
     def _write_knob_value(self, param_name, region, value, *, keygroup_index=0):
         program_index = self.program_list.currentRow()
