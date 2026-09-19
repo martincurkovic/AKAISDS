@@ -8,6 +8,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QSizePolicy,
     QVBoxLayout,
+    QComboBox,
     QWidget,
     QStackedWidget,
     QDoubleSpinBox,
@@ -108,6 +109,19 @@ class ProgramEditorWindow(QMainWindow):
         self.lfo_delay_knob.setRange(0, 99)
         self.lfo_delay_knob.setFixedSize(80, 80)
 
+        self.lfo_shape_combo = QComboBox()
+        self.lfo_shape_combo.addItems(["Triangle", "Sawtooth", "Square", "Random"])
+        self.lfo_shape_combo.setEnabled(False)
+
+        lfo_shape_label = QLabel("LFO shape")
+        lfo_shape_label.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+        lfo_shape_column = QVBoxLayout()
+        lfo_shape_column.setSpacing(4)
+        lfo_shape_column.addWidget(
+            lfo_shape_label, alignment=Qt.AlignmentFlag.AlignHCenter
+        )
+        lfo_shape_column.addWidget(self.lfo_shape_combo)
+
         lfo_rate_column, self.lfo_rate_value_label = self._build_knob_column(
             "LFO rate", self.lfo_rate_knob
         )
@@ -124,6 +138,7 @@ class ProgramEditorWindow(QMainWindow):
         pan_page_layout.addLayout(lfo_rate_column)
         pan_page_layout.addLayout(lfo_depth_column)
         pan_page_layout.addLayout(lfo_delay_column)
+        pan_page_layout.addLayout(lfo_shape_column)
         pan_page.setLayout(pan_page_layout)
 
         self.detail_stack = QStackedWidget()
@@ -193,6 +208,7 @@ class ProgramEditorWindow(QMainWindow):
         self.lfo_depth_value_label.setText(str(program_values["LFODEP"]))
         self.lfo_delay_knob.setValue(program_values["LFODEL"])
         self.lfo_delay_value_label.setText(str(program_values["LFODEL"]))
+        self.lfo_shape_combo.setCurrentIndex(program_values["LFO1WAVE"])
 
     def _on_load_failed(self, program_index, error_message):
         if program_index != self.program_list.currentRow():

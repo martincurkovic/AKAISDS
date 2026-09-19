@@ -34,6 +34,9 @@ class KeygroupLoader(QThread):
                 "LFODEL": self._bridge.get_parameter(
                     p.lookup("LFODEL", "program"), self._program_index
                 ),
+                "LFO1WAVE": self._bridge.get_parameter(
+                    p.lookup("LFO1WAVE", "program"), self._program_index
+                ),
             }
             keygroup_index = 0
             keygroup_ranges = []
