@@ -11,6 +11,7 @@ from PySide6.QtWidgets import (
     QWidget,
     QStackedWidget,
     QDoubleSpinBox,
+    QButtonGroup,
     QSpinBox,
 )
 from ui.knob import Knob
@@ -70,55 +71,170 @@ class ProgramEditorWindow(QMainWindow):
             "Resonance", self.resonance_knob
         )
 
-        self.zone1_tune_spinbox = QDoubleSpinBox()
-        self.zone1_tune_spinbox.setFixedWidth(110)
-        self.zone1_tune_spinbox.setRange(-50.00, 50.00)
-        self.zone1_tune_spinbox.setSingleStep(0.01)
-        self.zone1_tune_spinbox.setDecimals(2)
-        self.zone1_tune_spinbox.setSuffix(" st")
-        self.zone1_tune_spinbox.setEnabled(True)
-        self.zone1_tune_spinbox.editingFinished.connect(self._on_zone1_tune_changed)
-        zone1_tune_label = QLabel("Zone 1 tune")
-        zone1_tune_label.setAlignment(Qt.AlignmentFlag.AlignHCenter)
-
-        zone1_tune_column = QVBoxLayout()
-        zone1_tune_column.setSpacing(4)
-        zone1_tune_column.addWidget(
-            zone1_tune_label, alignment=Qt.AlignmentFlag.AlignHCenter
-        )
-        zone1_tune_column.addWidget(self.zone1_tune_spinbox)
-
         knobs_layout = QHBoxLayout()
         knobs_layout.addLayout(cutoff_column)
         knobs_layout.addLayout(resonance_column)
-        knobs_layout.addLayout(zone1_tune_column)
 
+        # per-zone control lists — indexed 0-3
         self._zone_combos = []
-        zones_layout = QVBoxLayout()
-        zones_layout.setSpacing(6)
-        zones_label = QLabel("Zone samples")
-        zones_label.setAlignment(Qt.AlignmentFlag.AlignHCenter)
-        zones_layout.addWidget(zones_label)
+        self._zone_vel_lo = []
+        self._zone_vel_hi = []
+        self._zone_tune = []
+        self._zone_loudness = []
+        self._zone_pan = []
 
-        for zone_num in range(1, 5):
-            row = QHBoxLayout()
-            row.setSpacing(8)
-            label = QLabel(f"Zone {zone_num}")
-            label.setFixedWidth(48)
+        _ZONE_FIELDS = [
+            ("SNAME1", "LOVEL1", "HIVEL1", "VTUNO1", "VLOUD1", "VPANO1"),
+            ("SNAME2", "LOVEL2", "HIVEL2", "VTUNO2", "VLOUD2", "VPANO2"),
+            ("SNAME3", "LOVEL3", "HIVEL3", "VTUNO3", "VLOUD3", "VPANO3"),
+            ("SNAME4", "LOVEL4", "HIVEL4", "VTUNO4", "VLOUD4", "VPANO4"),
+        ]
+
+        zone_selector_row = QHBoxLayout()
+        self._zone_button_group = QButtonGroup(self)
+        self._zone_button_group.setExclusive(True)
+
+        self._zone_stack = QStackedWidget()
+
+        for zone_idx, (sname, lovel, hivel, vtuno, vloud, vpano) in enumerate(
+            _ZONE_FIELDS
+        ):
+            btn = QPushButton(f"Zone {zone_idx + 1}")
+            btn.setCheckable(True)
+            btn.setChecked(zone_idx == 0)
+            self._zone_button_group.addButton(btn, zone_idx)
+            zone_selector_row.addWidget(btn)
+
+            page = QWidget()
+            page_layout = QVBoxLayout()
+            page_layout.setSpacing(6)
+
+            # sample row
+            sample_row = QHBoxLayout()
+            sample_label = QLabel("Sample")
+            sample_label.setFixedWidth(55)
             combo = QComboBox()
-            combo.setMinimumWidth(120)
-            combo.setEnabled(False)  # enabled once sample list arrives
-            row.addWidget(label)
-            row.addWidget(combo, stretch=1)
-            zones_layout.addLayout(row)
+            combo.setEnabled(False)
+            sample_row.addWidget(sample_label)
+            sample_row.addWidget(combo, stretch=1)
+            page_layout.addLayout(sample_row)
             self._zone_combos.append(combo)
+
+            # velocity row
+            vel_row = QHBoxLayout()
+            vel_lo_label = QLabel("Velocity Low")
+            vel_lo_label.setFixedWidth(80)
+            vel_lo = QSpinBox()
+            vel_lo.setRange(0, 127)
+            vel_lo.setFixedWidth(60)
+            vel_hi_label = QLabel("Velocity High")
+            vel_hi_label.setFixedWidth(80)
+            vel_hi = QSpinBox()
+            vel_hi.setRange(0, 127)
+            vel_hi.setFixedWidth(60)
+            vel_row.addWidget(vel_lo_label)
+            vel_row.addWidget(vel_lo)
+            vel_row.addSpacing(12)
+            vel_row.addWidget(vel_hi_label)
+            vel_row.addWidget(vel_hi)
+            vel_row.addStretch()
+            page_layout.addLayout(vel_row)
+            self._zone_vel_lo.append(vel_lo)
+            self._zone_vel_hi.append(vel_hi)
+
+            # tune / loudness / pan row
+            param_row = QHBoxLayout()
+            tune_label = QLabel("Tune")
+            tune_label.setFixedWidth(35)
+            tune = QDoubleSpinBox()
+            tune.setRange(-50.0, 50.0)
+            tune.setSingleStep(0.01)
+            tune.setDecimals(2)
+            tune.setSuffix(" st")
+            tune.setFixedWidth(90)
+            loud_label = QLabel("Level")
+            loud_label.setFixedWidth(35)
+            loudness = QSpinBox()
+            loudness.setRange(-50, 50)
+            loudness.setFixedWidth(58)
+            pan_label = QLabel("Pan")
+            pan_label.setFixedWidth(28)
+            pan = QSpinBox()
+            pan.setRange(-50, 50)
+            pan.setFixedWidth(58)
+            param_row.addWidget(tune_label)
+            param_row.addWidget(tune)
+            param_row.addSpacing(12)
+            param_row.addWidget(loud_label)
+            param_row.addWidget(loudness)
+            param_row.addSpacing(12)
+            param_row.addWidget(pan_label)
+            param_row.addWidget(pan)
+            param_row.addStretch()
+            page_layout.addLayout(param_row)
+            page_layout.addStretch()
+            self._zone_tune.append(tune)
+            self._zone_loudness.append(loudness)
+            self._zone_pan.append(pan)
+
+            page.setLayout(page_layout)
+            self._zone_stack.addWidget(page)
+
+            # wire write signals for this zone's controls
+            vel_lo.editingFinished.connect(
+                lambda z=zone_idx, f=lovel: self._write_knob_value(
+                    f,
+                    "keygroup",
+                    self._zone_vel_lo[z].value(),
+                    keygroup_index=self.keygroup_list.currentRow(),
+                )
+            )
+            vel_hi.editingFinished.connect(
+                lambda z=zone_idx, f=hivel: self._write_knob_value(
+                    f,
+                    "keygroup",
+                    self._zone_vel_hi[z].value(),
+                    keygroup_index=self.keygroup_list.currentRow(),
+                )
+            )
+            tune.editingFinished.connect(
+                lambda z=zone_idx, f=vtuno: self._write_knob_value(
+                    f,
+                    "keygroup",
+                    self._semitones_to_tune_offset(self._zone_tune[z].value()),
+                    keygroup_index=self.keygroup_list.currentRow(),
+                )
+            )
+            loudness.editingFinished.connect(
+                lambda z=zone_idx, f=vloud: self._write_knob_value(
+                    f,
+                    "keygroup",
+                    self._zone_loudness[z].value(),
+                    keygroup_index=self.keygroup_list.currentRow(),
+                )
+            )
+            pan.editingFinished.connect(
+                lambda z=zone_idx, f=vpano: self._write_knob_value(
+                    f,
+                    "keygroup",
+                    self._zone_pan[z].value(),
+                    keygroup_index=self.keygroup_list.currentRow(),
+                )
+            )
+
+        self._zone_button_group.idClicked.connect(self._zone_stack.setCurrentIndex)
+
+        zone_section = QVBoxLayout()
+        zone_section.setSpacing(4)
+        zone_section.addLayout(zone_selector_row)
+        zone_section.addWidget(self._zone_stack)
 
         detail_container_layout = QVBoxLayout()
         detail_container_layout.setSpacing(10)
         detail_container_layout.addLayout(knobs_layout)
         detail_container_layout.addWidget(self.detail_label)
         detail_container_layout.addLayout(envelopes_layout)
-        detail_container_layout.addLayout(zones_layout)
+        detail_container_layout.addLayout(zone_section)
         detail_container_layout.addStretch()
         detail_container = QWidget()
         detail_container.setLayout(detail_container_layout)
@@ -332,6 +448,8 @@ class ProgramEditorWindow(QMainWindow):
     def _on_keygroup_selected(self, current, previous):
         if current is None:
             return
+        self._zone_stack.setCurrentIndex(0)
+        self._zone_button_group.button(0).setChecked(True)
         self.detail_stack.setCurrentIndex(1)
         program_index = self.program_list.currentRow()
         keygroup_index = self.keygroup_list.currentRow()
@@ -366,12 +484,7 @@ class ProgramEditorWindow(QMainWindow):
             values["RELSE2"],
             values["ENV2L4"],
         )
-        self.zone1_tune_spinbox.blockSignals(True)
-        self.zone1_tune_spinbox.setValue(
-            self._tune_offset_to_semitones(values["VTUNO1"])
-        )
-        self.zone1_tune_spinbox.blockSignals(False)
-        self._update_zone_combos(values)
+        self._update_zone_panels(values)
 
     def _on_detail_load_failed(self, program_index, keygroup_index, error_message):
         if (
@@ -452,15 +565,6 @@ class ProgramEditorWindow(QMainWindow):
         self._active_writers[param_name] = writer
         writer.start()
 
-    def _on_zone1_tune_changed(self):
-        raw_value = self._semitones_to_tune_offset(self.zone1_tune_spinbox.value())
-        self._write_knob_value(
-            "VTUNO1",
-            "keygroup",
-            raw_value,
-            keygroup_index=self.keygroup_list.currentRow(),
-        )
-
     def _on_polyph_changed(self):
         self._write_knob_value("POLYPH", "program", self.polyph_spinbox.value())
 
@@ -496,11 +600,33 @@ class ProgramEditorWindow(QMainWindow):
             keygroup_index=self.keygroup_list.currentRow(),
         )
 
-    def _update_zone_combos(self, values):
-        sname_fields = ["SNAME1", "SNAME2", "SNAME3", "SNAME4"]
-        for combo, field in zip(self._zone_combos, sname_fields):
-            name = values.get(field, "").strip()
+    def _update_zone_panels(self, values):
+        zone_field_map = [
+            ("SNAME1", "LOVEL1", "HIVEL1", "VTUNO1", "VLOUD1", "VPANO1"),
+            ("SNAME2", "LOVEL2", "HIVEL2", "VTUNO2", "VLOUD2", "VPANO2"),
+            ("SNAME3", "LOVEL3", "HIVEL3", "VTUNO3", "VLOUD3", "VPANO3"),
+            ("SNAME4", "LOVEL4", "HIVEL4", "VTUNO4", "VLOUD4", "VPANO4"),
+        ]
+        for z, (sname, lovel, hivel, vtuno, vloud, vpano) in enumerate(zone_field_map):
+            combo = self._zone_combos[z]
+            name = values.get(sname, "").strip()
             idx = combo.findText(name)
             combo.blockSignals(True)
             combo.setCurrentIndex(idx if idx >= 0 else 0)
             combo.blockSignals(False)
+
+            for widget, field in [
+                (self._zone_vel_lo[z], lovel),
+                (self._zone_vel_hi[z], hivel),
+                (self._zone_loudness[z], vloud),
+                (self._zone_pan[z], vpano),
+            ]:
+                widget.blockSignals(True)
+                widget.setValue(values.get(field, 0))
+                widget.blockSignals(False)
+
+            self._zone_tune[z].blockSignals(True)
+            self._zone_tune[z].setValue(
+                self._tune_offset_to_semitones(values.get(vtuno, 0))
+            )
+            self._zone_tune[z].blockSignals(False)
