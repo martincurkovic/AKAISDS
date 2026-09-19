@@ -24,6 +24,7 @@ from PySide6.QtWidgets import (
     QSpinBox,
 )
 from ui.knob import Knob
+from ui.note_spinbox import NoteSpinBox
 from ui.envelope_graph import ADSREnvelopeGraph, Envelope2Graph
 from core.midi_notes import midi_note_to_name
 from core.program_editor_bridge import (
@@ -54,6 +55,17 @@ class ProgramEditorWindow(QMainWindow):
         self.keygroup_list.setFixedWidth(190)  # fits "Keygroup 12: C#1 - D#7"
 
         self.detail_label = QLabel("Select a keygroup")
+
+        self.note_lo_spinbox = NoteSpinBox()
+        self.note_hi_spinbox = NoteSpinBox()
+        note_range_row = QHBoxLayout()
+        note_range_label = QLabel("Note Range")
+        note_range_label.setFixedWidth(80)
+        note_range_row.addWidget(note_range_label)
+        note_range_row.addWidget(self.note_lo_spinbox)
+        note_range_row.addWidget(QLabel("-"))
+        note_range_row.addWidget(self.note_hi_spinbox)
+        note_range_row.addStretch()
 
         self.cutoff_knob = Knob()
         self.cutoff_knob.setRange(0, 99)
@@ -250,6 +262,7 @@ class ProgramEditorWindow(QMainWindow):
 
         detail_container_layout = QVBoxLayout()
         detail_container_layout.setSpacing(10)
+        detail_container_layout.addLayout(note_range_row)
         detail_container_layout.addLayout(knobs_layout)
         detail_container_layout.addWidget(self.detail_label)
         detail_container_layout.addLayout(envelopes_layout)
@@ -395,6 +408,26 @@ class ProgramEditorWindow(QMainWindow):
                 keygroup_index=self.keygroup_list.currentRow(),
             )
         )
+        self.note_lo_spinbox.setEnabled(True)
+        self.note_lo_spinbox.valueChanged.connect(self._on_note_range_changed)
+        self.note_lo_spinbox.editingFinished.connect(
+            lambda: self._write_knob_value(
+                "LONOTE",
+                "keygroup",
+                self.note_lo_spinbox.value(),
+                keygroup_index=self.keygroup_list.currentRow(),
+            )
+        )
+        self.note_hi_spinbox.setEnabled(True)
+        self.note_hi_spinbox.valueChanged.connect(self._on_note_range_changed)
+        self.note_hi_spinbox.editingFinished.connect(
+            lambda: self._write_knob_value(
+                "HINOTE",
+                "keygroup",
+                self.note_hi_spinbox.value(),
+                keygroup_index=self.keygroup_list.currentRow(),
+            )
+        )
         self.pan_knob.setEnabled(True)
         self.pan_knob.sliderReleased.connect(
             lambda: self._write_knob_value("PANPOS", "program", self.pan_knob.value())
@@ -508,6 +541,12 @@ class ProgramEditorWindow(QMainWindow):
             or keygroup_index != self.keygroup_list.currentRow()
         ):
             return  # stale result from selection the user has already moved past
+        self.note_lo_spinbox.blockSignals(True)
+        self.note_lo_spinbox.setValue(values["LONOTE"])
+        self.note_lo_spinbox.blockSignals(False)
+        self.note_hi_spinbox.blockSignals(True)
+        self.note_hi_spinbox.setValue(values["HINOTE"])
+        self.note_hi_spinbox.blockSignals(False)
         self.cutoff_knob.setValue(values["FILFRQ"])
         self.cutoff_value_label.setText(str(values["FILFRQ"]))
         self.resonance_knob.setValue(values["FILQ"])
@@ -610,6 +649,17 @@ class ProgramEditorWindow(QMainWindow):
 
     def _on_polyph_changed(self):
         self._write_knob_value("POLYPH", "program", self.polyph_spinbox.value())
+
+    def _on_note_range_changed(self):
+        # keeps the keygroup list's "Keygroup N: lo - hi" label in step while
+        # the user edits, rather than only after the write round-trips back
+        item = self.keygroup_list.currentItem()
+        if item is None:
+            return
+        index = self.keygroup_list.currentRow()
+        lo = self.note_lo_spinbox.value()
+        hi = self.note_hi_spinbox.value()
+        item.setText(f"Keygroup {index + 1}: {midi_note_to_name(lo)} - {midi_note_to_name(hi)}")
 
     def _on_samples_loaded(self, samples):
         self._sample_list = samples

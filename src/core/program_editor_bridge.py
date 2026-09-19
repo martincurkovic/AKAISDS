@@ -120,6 +120,8 @@ class KeygroupDetailLoader(QThread):
     load_failed = Signal(int, int, str)
 
     _FIELDS = [
+        "LONOTE",
+        "HINOTE",
         "FILFRQ",
         "FILQ",
         "ATTAK1",
