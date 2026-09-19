@@ -121,3 +121,5 @@ def test_selecting_a_keygroup_shows_the_keygroup_panel_with_real_values(editor, 
     assert editor.detail_stack.currentIndex() == 1  # switched to the keygroup panel
     assert editor.cutoff_knob.value() == 72
     assert editor.resonance_knob.value() == 8
+    assert editor.note_lo_spinbox.value() == 61
+    assert editor.note_hi_spinbox.value() == 96
