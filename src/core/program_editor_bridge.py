@@ -1,3 +1,5 @@
+import os
+
 from core import app_config
 from s3k.bridge import S3kBridge
 from PySide6.QtCore import QThread, Signal
@@ -5,6 +7,13 @@ import s3k.params as p
 
 
 def connect():
+    # lets the editor be developed away from the hardware sampler - same
+    # dummy sampler s3ked itself ships for its --demo flag, duck-typing the
+    # slice of S3kBridge this module's loaders/writers actually call
+    if os.environ.get("AKAISDS_DEMO_SAMPLER"):
+        from s3ked.demo import DemoBridge
+
+        return DemoBridge()
     _input_name, output_name = app_config.get_saved_ports()
     return S3kBridge.standard(output_name)  # type: ignore
 
@@ -57,7 +66,6 @@ class KeygroupLoader(QThread):
 
     def run(self):
         # runs on background thread
-        keygroup_index = 0
         keygroup_ranges = []
         try:
             program_values = {
@@ -80,22 +88,26 @@ class KeygroupLoader(QThread):
                     p.lookup("POLYPH", "program"), self._program_index
                 ),
             }
-            while True:
-                try:
-                    lo = self._bridge.get_parameter(
-                        p.lookup("LONOTE", "keygroup"),
-                        self._program_index,
-                        keygroup=keygroup_index,
-                    )
-                    hi = self._bridge.get_parameter(
-                        p.lookup("HINOTE", "keygroup"),
-                        self._program_index,
-                        keygroup=keygroup_index,
-                    )
-                except ValueError:
-                    break  # ran past the last real keygroup for this program
+            # read the real keygroup count off the program header rather than
+            # probing until an out-of-range read fails: the real bridge signals
+            # that with ValueError, but s3ked's DemoBridge raises its own
+            # DemoError, so probing silently dropped every keygroup when
+            # running against the demo sampler
+            group_count = self._bridge.get_parameter(
+                p.lookup("GROUPS", "program"), self._program_index
+            )
+            for keygroup_index in range(group_count):
+                lo = self._bridge.get_parameter(
+                    p.lookup("LONOTE", "keygroup"),
+                    self._program_index,
+                    keygroup=keygroup_index,
+                )
+                hi = self._bridge.get_parameter(
+                    p.lookup("HINOTE", "keygroup"),
+                    self._program_index,
+                    keygroup=keygroup_index,
+                )
                 keygroup_ranges.append(f"{lo} - {hi}")
-                keygroup_index += 1
         except Exception as e:
             self.load_failed.emit(self._program_index, str(e))
             return
