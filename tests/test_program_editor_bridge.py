@@ -164,7 +164,7 @@ def test_keygroup_loader_reads_exactly_groups_count_keygroups():
     assert failed == []
     program_index, ranges, _values = loaded[0]
     assert program_index == 0
-    assert ranges == ["21 - 30", "31 - 40", "41 - 50"]
+    assert ranges == [(21, 30), (31, 40), (41, 50)]
 
 
 def test_keygroup_loader_handles_a_program_with_no_keygroups():

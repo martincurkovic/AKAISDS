@@ -100,7 +100,7 @@ def editor(qapp):
 def test_first_program_is_preselected_with_its_keygroups_shown(editor):
     assert editor.program_list.currentItem().text() == "Bass stab"
     assert editor.keygroup_list.count() == 2
-    assert editor.keygroup_list.item(0).text() == "24 - 60"
+    assert editor.keygroup_list.item(0).text() == "Keygroup 1: C1 - C4"
 
 
 def test_switching_program_replaces_keygroup_list_without_crashing(editor, qapp):
@@ -108,7 +108,7 @@ def test_switching_program_replaces_keygroup_list_without_crashing(editor, qapp)
     _wait_for_keygroup_load(editor, qapp, expected_count=1)  # program 1 has 1
 
     assert editor.keygroup_list.count() == 1
-    assert editor.keygroup_list.item(0).text() == "24 - 96"
+    assert editor.keygroup_list.item(0).text() == "Keygroup 1: C1 - C7"
 
 
 def test_selecting_a_keygroup_shows_the_keygroup_panel_with_real_values(editor, qapp):
