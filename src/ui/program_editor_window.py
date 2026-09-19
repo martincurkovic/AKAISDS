@@ -56,9 +56,11 @@ class ProgramEditorWindow(QMainWindow):
 
         self.cutoff_knob = Knob()
         self.cutoff_knob.setRange(0, 99)
+        self.cutoff_knob.setDefaultValue(99)  # fully open - no filtering
         self.cutoff_knob.setFixedSize(80, 80)
         self.resonance_knob = Knob()
         self.resonance_knob.setRange(0, 15)
+        self.resonance_knob.setDefaultValue(0)  # no resonance
         self.resonance_knob.setFixedSize(80, 80)
 
         self.env1_graph = ADSREnvelopeGraph()
@@ -262,12 +264,15 @@ class ProgramEditorWindow(QMainWindow):
 
         self.lfo_rate_knob = Knob()
         self.lfo_rate_knob.setRange(0, 99)
+        self.lfo_rate_knob.setDefaultValue(0)  # no modulation without depth anyway
         self.lfo_rate_knob.setFixedSize(80, 80)
         self.lfo_depth_knob = Knob()
         self.lfo_depth_knob.setRange(0, 99)
+        self.lfo_depth_knob.setDefaultValue(0)  # no modulation
         self.lfo_depth_knob.setFixedSize(80, 80)
         self.lfo_delay_knob = Knob()
         self.lfo_delay_knob.setRange(0, 99)
+        self.lfo_delay_knob.setDefaultValue(0)  # no delay before the LFO starts
         self.lfo_delay_knob.setFixedSize(80, 80)
 
         self.lfo_shape_combo = QComboBox()

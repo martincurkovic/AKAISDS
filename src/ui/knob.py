@@ -15,11 +15,26 @@ class Knob(QDial):
         self.setEnabled(False)  # read-only for now
         self._drag_start_y = None
         self._drag_start_value = None
+        self._default_value = None
+
+    def defaultValue(self):
+        if self._default_value is not None:
+            return self._default_value
+        return (self.minimum() + self.maximum()) // 2
+
+    def setDefaultValue(self, value):
+        self._default_value = value
 
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
             self._drag_start_y = event.position().y()
             self._drag_start_value = self.value()
+
+    def mouseDoubleClickEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            # the release that Qt sends right after this event does the
+            # actual commit (sliderReleased), same as an ordinary drag
+            self.setValue(self.defaultValue())
 
     def mouseMoveEvent(self, event):
         if self._drag_start_y is None:
