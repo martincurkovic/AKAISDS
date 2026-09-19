@@ -56,7 +56,8 @@ class SampleListLoader(QThread):
 
 
 class KeygroupLoader(QThread):
-    keygroups_loaded = Signal(int, list, dict)  # program_index, ranges, program_values
+    # program_index, [(lo_note, hi_note), ...] per keygroup, program_values
+    keygroups_loaded = Signal(int, list, dict)
     load_failed = Signal(int, str)
 
     def __init__(self, bridge, program_index):
@@ -107,7 +108,7 @@ class KeygroupLoader(QThread):
                     self._program_index,
                     keygroup=keygroup_index,
                 )
-                keygroup_ranges.append(f"{lo} - {hi}")
+                keygroup_ranges.append((lo, hi))
         except Exception as e:
             self.load_failed.emit(self._program_index, str(e))
             return

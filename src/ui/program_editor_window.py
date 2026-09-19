@@ -25,6 +25,7 @@ from PySide6.QtWidgets import (
 )
 from ui.knob import Knob
 from ui.envelope_graph import ADSREnvelopeGraph, Envelope2Graph
+from core.midi_notes import midi_note_to_name
 from core.program_editor_bridge import (
     KeygroupLoader,
     ParameterWriter,
@@ -50,7 +51,7 @@ class ProgramEditorWindow(QMainWindow):
         self.program_list.setFixedWidth(160)
 
         self.keygroup_list = QListWidget()
-        self.keygroup_list.setFixedWidth(160)
+        self.keygroup_list.setFixedWidth(190)  # fits "Keygroup 12: C#1 - D#7"
 
         self.detail_label = QLabel("Select a keygroup")
 
@@ -453,7 +454,12 @@ class ProgramEditorWindow(QMainWindow):
         # ignore result for program the user has already clicked away from
         if program_index != self.program_list.currentRow():
             return
-        self.keygroup_list.addItems(keygroup_ranges)
+        self.keygroup_list.addItems(
+            [
+                f"Keygroup {i + 1}: {midi_note_to_name(lo)} - {midi_note_to_name(hi)}"
+                for i, (lo, hi) in enumerate(keygroup_ranges)
+            ]
+        )
         self.pan_knob.setValue(program_values["PANPOS"])
         self.pan_value_label.setText(str(program_values["PANPOS"]))
         self.lfo_rate_knob.setValue(program_values["LFORAT"])
