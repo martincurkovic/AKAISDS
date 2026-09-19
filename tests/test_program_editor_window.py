@@ -15,11 +15,15 @@ class FakeBridge:
     def __init__(self):
         self._programs = ["Bass stab", "EPiano warm"]
         self._pan = {0: -10, 1: 25}
+        self._samples = ["SQUARE", "SAWTOOTH", "PULSE", "SINE"]
         self._keygroups = {
             0: [(24, 60), (61, 96)],  # (LONOTE, HINOTE) per keygroup
             1: [(24, 96)],
         }
         self._details = {0: 72, 1: 8, 2: 30, 3: 60, 4: 90}
+
+    def sample_list(self):
+        return self._samples
 
     def program_list(self):
         return self._programs
@@ -27,6 +31,12 @@ class FakeBridge:
     def get_parameter(self, param, program_index, keygroup=0, **kwargs):
         if param.name == "PANPOS":
             return self._pan[program_index]
+        if param.name == "POLYPH":
+            return 8
+        if param.name in ("LFORAT", "LFODEP", "LFODEL", "LFO1WAVE"):
+            return 0
+        if param.name in ("SNAME1", "SNAME2", "SNAME3", "SNAME4"):
+            return "SQUARE"  # a real sample name that matches _samples below
         keygroups = self._keygroups[program_index]
         if keygroup >= len(keygroups):
             raise ValueError(
@@ -55,7 +65,7 @@ def _wait_for_program_load(editor, qapp):
 
 
 def _wait_for_keygroup_load(editor, qapp):
-    editor._loader.wait()
+    editor._keygroup_loader.wait()
     qapp.processEvents()
 
 
