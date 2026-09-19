@@ -78,6 +78,7 @@ class KeygroupDetailLoader(QThread):
         "ENV2L1",
         "ENV2L2",
         "ENV2L4",
+        "VTUNO1",
     ]
 
     def __init__(self, bridge, program_index, keygroup_index):

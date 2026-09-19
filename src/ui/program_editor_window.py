@@ -10,6 +10,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
     QStackedWidget,
+    QDoubleSpinBox,
 )
 from ui.knob import Knob
 from ui.envelope_graph import ADSREnvelopeGraph, Envelope2Graph
@@ -64,9 +65,26 @@ class ProgramEditorWindow(QMainWindow):
             "Resonance", self.resonance_knob
         )
 
+        self.zone1_tune_spinbox = QDoubleSpinBox()
+        self.zone1_tune_spinbox.setRange(-50.00, 50.00)
+        self.zone1_tune_spinbox.setSingleStep(0.01)
+        self.zone1_tune_spinbox.setDecimals(2)
+        self.zone1_tune_spinbox.setSuffix(" st")
+        self.zone1_tune_spinbox.setEnabled(False)  # read only for now
+        zone1_tune_label = QLabel("Zone 1 tune")
+        zone1_tune_label.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+
+        zone1_tune_column = QVBoxLayout()
+        zone1_tune_column.setSpacing(4)
+        zone1_tune_column.addWidget(
+            zone1_tune_label, alignment=Qt.AlignmentFlag.AlignHCenter
+        )
+        zone1_tune_column.addWidget(self.zone1_tune_spinbox)
+
         knobs_layout = QHBoxLayout()
         knobs_layout.addLayout(cutoff_column)
         knobs_layout.addLayout(resonance_column)
+        knobs_layout.addLayout(zone1_tune_column)
 
         detail_container_layout = QVBoxLayout()
         detail_container_layout.addWidget(self.detail_label)
@@ -218,6 +236,9 @@ class ProgramEditorWindow(QMainWindow):
             values["RELSE2"],
             values["ENV2L4"],
         )
+        self.zone1_tune_spinbox.setValue(
+            self._tune_offset_to_semitones(values["VTUNO1"])
+        )
 
     def _on_detail_load_failed(self, program_index, keygroup_index, error_message):
         if (
@@ -263,3 +284,9 @@ class ProgramEditorWindow(QMainWindow):
         column.addStretch()
 
         return column
+
+    def _tune_offset_to_semitones(self, raw_value):
+        return round(raw_value / 2.56) / 100
+
+    def _semitones_to_tune_offset(self, semitones):
+        return round(semitones * 100 * 2.56)
