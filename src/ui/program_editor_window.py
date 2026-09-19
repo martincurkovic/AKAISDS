@@ -20,8 +20,8 @@ from core.program_editor_bridge import (
     ParameterWriter,
     ProgramListLoader,
     KeygroupDetailLoader,
+    SampleListLoader,
 )
-import s3k.params as p
 
 
 class ProgramEditorWindow(QMainWindow):
@@ -30,6 +30,7 @@ class ProgramEditorWindow(QMainWindow):
         self.setWindowTitle("AKAISDS - Program Editor")
         self.setMinimumSize(800, 500)
         self._active_writers = {}
+        self._sample_list = []
 
         self._main_window = main_window
         self._bridge = bridge
@@ -92,11 +93,32 @@ class ProgramEditorWindow(QMainWindow):
         knobs_layout.addLayout(resonance_column)
         knobs_layout.addLayout(zone1_tune_column)
 
+        self._zone_combos = []
+        zones_layout = QVBoxLayout()
+        zones_layout.setSpacing(6)
+        zones_label = QLabel("Zone samples")
+        zones_label.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+        zones_layout.addWidget(zones_label)
+
+        for zone_num in range(1, 5):
+            row = QHBoxLayout()
+            row.setSpacing(8)
+            label = QLabel(f"Zone {zone_num}")
+            label.setFixedWidth(48)
+            combo = QComboBox()
+            combo.setMinimumWidth(120)
+            combo.setEnabled(False)  # enabled once sample list arrives
+            row.addWidget(label)
+            row.addWidget(combo, stretch=1)
+            zones_layout.addLayout(row)
+            self._zone_combos.append(combo)
+
         detail_container_layout = QVBoxLayout()
         detail_container_layout.setSpacing(10)
         detail_container_layout.addLayout(knobs_layout)
         detail_container_layout.addWidget(self.detail_label)
         detail_container_layout.addLayout(envelopes_layout)
+        detail_container_layout.addLayout(zones_layout)
         detail_container_layout.addStretch()
         detail_container = QWidget()
         detail_container.setLayout(detail_container_layout)
@@ -260,9 +282,12 @@ class ProgramEditorWindow(QMainWindow):
 
     def _on_programs_loaded(self, programs):
         self.program_list.addItems(programs)
-        self.program_list.setCurrentRow(
-            0
-        )  # this is what triggers keygroup loading for the first program
+        self._sample_loader = SampleListLoader(self._bridge)
+        self._sample_loader.samples_loaded.connect(self._on_samples_loaded)
+        self._sample_loader.load_failed.connect(
+            lambda e: self.detail_label.setText(f"Couldn't load samples: {e}")
+        )
+        self._sample_loader.start()
 
     def _on_program_load_failed(self, error_message):
         self.detail_label.setText(f"Couldn't load programs: {error_message}")
@@ -346,6 +371,7 @@ class ProgramEditorWindow(QMainWindow):
             self._tune_offset_to_semitones(values["VTUNO1"])
         )
         self.zone1_tune_spinbox.blockSignals(False)
+        self._update_zone_combos(values)
 
     def _on_detail_load_failed(self, program_index, keygroup_index, error_message):
         if (
@@ -360,6 +386,7 @@ class ProgramEditorWindow(QMainWindow):
             self._program_loader,
             getattr(self, "_keygroup_loader", None),
             getattr(self, "_detail_loader", None),
+            getattr(self, "_sample_loader", None),
         ] + list(self._active_writers.values())
 
         for loader in loaders:
@@ -436,3 +463,44 @@ class ProgramEditorWindow(QMainWindow):
 
     def _on_polyph_changed(self):
         self._write_knob_value("POLYPH", "program", self.polyph_spinbox.value())
+
+    def _on_samples_loaded(self, samples):
+        self._sample_list = samples
+        for combo in self._zone_combos:
+            combo.blockSignals(True)
+            combo.clear()
+            combo.addItem("-")
+            combo.addItems(samples)
+            combo.setEnabled(True)
+            combo.blockSignals(False)
+        # wire write signal now that items exist - doing it here rather than
+        # in __init__ avoids currentIndexChanged firing before the list is populated
+        sname_fields = ["SNAME1", "SNAME2", "SNAME3", "SNAME4"]
+        for zone_idx, (combo, field) in enumerate(zip(self._zone_combos, sname_fields)):
+            combo.currentIndexChanged.connect(
+                lambda _, f=field, z=zone_idx: self._on_zone_sample_changed(f, z)
+            )
+
+        if self.program_list.count() > 0:
+            self.program_list.setCurrentRow(
+                0
+            )  # this is what triggers keygroup loading for the first program
+
+    def _on_zone_sample_changed(self, field, zone_idx):
+        text = self._zone_combos[zone_idx].currentText()
+        sample_name = "" if text == "-" else text
+        self._write_knob_value(
+            field,
+            "keygroup",
+            sample_name,
+            keygroup_index=self.keygroup_list.currentRow(),
+        )
+
+    def _update_zone_combos(self, values):
+        sname_fields = ["SNAME1", "SNAME2", "SNAME3", "SNAME4"]
+        for combo, field in zip(self._zone_combos, sname_fields):
+            name = values.get(field, "").strip()
+            idx = combo.findText(name)
+            combo.blockSignals(True)
+            combo.setCurrentIndex(idx if idx >= 0 else 0)
+            combo.blockSignals(False)

@@ -26,6 +26,26 @@ class ProgramListLoader(QThread):
         self.programs_loaded.emit(programs)
 
 
+class SampleListLoader(QThread):
+    # fetches the full list of sample names currently resident in the
+    # sampler's memory - global, not per-program or per-keygroup, so
+    # this runs once when the editor opens rather than on every selection
+    samples_loaded = Signal(list)
+    load_failed = Signal(str)
+
+    def __init__(self, bridge):
+        super().__init__()
+        self._bridge = bridge
+
+    def run(self):
+        try:
+            samples = self._bridge.sample_list()
+        except Exception as e:
+            self.load_failed.emit(str(e))
+            return
+        self.samples_loaded.emit(samples)
+
+
 class KeygroupLoader(QThread):
     keygroups_loaded = Signal(int, list, dict)  # program_index, ranges, program_values
     load_failed = Signal(int, str)
@@ -102,6 +122,10 @@ class KeygroupDetailLoader(QThread):
         "ENV2L2",
         "ENV2L4",
         "VTUNO1",
+        "SNAME1",
+        "SNAME2",
+        "SNAME3",
+        "SNAME4",
     ]
 
     def __init__(self, bridge, program_index, keygroup_index):
@@ -126,7 +150,9 @@ class KeygroupDetailLoader(QThread):
 
 
 class ParameterWriter(QThread):
-    write_succeeded = Signal(int)  # new_value, for ui to confirm against
+    write_succeeded = Signal(
+        object
+    )  # new_value = int for numeric params, str for text params
     write_failed = Signal(str)
 
     def __init__(
