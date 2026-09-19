@@ -10,7 +10,7 @@ def connect():
 
 
 class KeygroupLoader(QThread):
-    keygroups_loaded = Signal(int, list, int)  # program_index, ranges, pan_value
+    keygroups_loaded = Signal(int, list, dict)  # program_index, ranges, program_values
     load_failed = Signal(int, str)
 
     def __init__(self, bridge, program_index):
@@ -20,14 +20,25 @@ class KeygroupLoader(QThread):
 
     def run(self):
         # runs on background thread
-        keygroup_ranges = []
-        keygroup_index = 0
         try:
+            program_values = {
+                "PANPOS": self._bridge.get_parameter(
+                    p.lookup("PANPOS", "program"), self._program_index
+                ),
+                "LFORAT": self._bridge.get_parameter(
+                    p.lookup("LFORAT", "program"), self._program_index
+                ),
+                "LFODEP": self._bridge.get_parameter(
+                    p.lookup("LFODEP", "program"), self._program_index
+                ),
+                "LFODEL": self._bridge.get_parameter(
+                    p.lookup("LFODEL", "program"), self._program_index
+                ),
+            }
+            keygroup_index = 0
+            keygroup_ranges = []
             while True:
                 try:
-                    pan_value = self._bridge.get_parameter(
-                        p.lookup("PANPOS", "program"), self._program_index
-                    )
                     lo = self._bridge.get_parameter(
                         p.lookup("LONOTE", "keygroup"),
                         self._program_index,
@@ -45,7 +56,7 @@ class KeygroupLoader(QThread):
         except Exception as e:
             self.load_failed.emit(self._program_index, str(e))
             return
-        self.keygroups_loaded.emit(self._program_index, keygroup_ranges, pan_value)  # type: ignore
+        self.keygroups_loaded.emit(self._program_index, keygroup_ranges, program_values)
 
 
 class KeygroupDetailLoader(QThread):

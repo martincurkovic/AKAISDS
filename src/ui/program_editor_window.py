@@ -41,15 +41,6 @@ class ProgramEditorWindow(QMainWindow):
         self.cutoff_knob = Knob()
         self.cutoff_knob.setRange(0, 99)
         self.cutoff_knob.setFixedSize(80, 80)
-        self.cutoff_value_label = QLabel("-")
-        self.resonance_knob = Knob()
-        self.resonance_knob.setRange(0, 15)
-        self.resonance_knob.setFixedSize(80, 80)
-        self.resonance_value_label = QLabel("-")
-
-        self.cutoff_knob = Knob()
-        self.cutoff_knob.setRange(0, 99)
-        self.cutoff_knob.setFixedSize(80, 80)
         self.resonance_knob = Knob()
         self.resonance_knob.setRange(0, 15)
         self.resonance_knob.setFixedSize(80, 80)
@@ -88,9 +79,33 @@ class ProgramEditorWindow(QMainWindow):
         self.pan_knob.setRange(-50, 50)
         self.pan_knob.setFixedSize(80, 80)
         pan_column, self.pan_value_label = self._build_knob_column("Pan", self.pan_knob)
+
+        self.lfo_rate_knob = Knob()
+        self.lfo_rate_knob.setRange(0, 99)
+        self.lfo_rate_knob.setFixedSize(80, 80)
+        self.lfo_depth_knob = Knob()
+        self.lfo_depth_knob.setRange(0, 99)
+        self.lfo_depth_knob.setFixedSize(80, 80)
+        self.lfo_delay_knob = Knob()
+        self.lfo_delay_knob.setRange(0, 99)
+        self.lfo_delay_knob.setFixedSize(80, 80)
+
+        lfo_rate_column, self.lfo_rate_value_label = self._build_knob_column(
+            "LFO rate", self.lfo_rate_knob
+        )
+        lfo_depth_column, self.lfo_depth_value_label = self._build_knob_column(
+            "LFO depth", self.lfo_depth_knob
+        )
+        lfo_delay_column, self.lfo_delay_value_label = self._build_knob_column(
+            "LFO delay", self.lfo_delay_knob
+        )
+
         pan_page = QWidget()
         pan_page_layout = QVBoxLayout()
         pan_page_layout.addLayout(pan_column)
+        pan_page_layout.addLayout(lfo_rate_column)
+        pan_page_layout.addLayout(lfo_depth_column)
+        pan_page_layout.addLayout(lfo_delay_column)
         pan_page.setLayout(pan_page_layout)
 
         self.detail_stack = QStackedWidget()
@@ -147,13 +162,19 @@ class ProgramEditorWindow(QMainWindow):
         self._loader.load_failed.connect(self._on_load_failed)
         self._loader.start()
 
-    def _on_keygroups_loaded(self, program_index, keygroup_ranges, pan_value):
+    def _on_keygroups_loaded(self, program_index, keygroup_ranges, program_values):
         # ignore result for program the user has already clicked away from
         if program_index != self.program_list.currentRow():
             return
         self.keygroup_list.addItems(keygroup_ranges)
-        self.pan_knob.setValue(pan_value)
-        self.pan_value_label.setText(str(pan_value))
+        self.pan_knob.setValue(program_values["PANPOS"])
+        self.pan_value_label.setText(str(program_values["PANPOS"]))
+        self.lfo_rate_knob.setValue(program_values["LFORAT"])
+        self.lfo_rate_value_label.setText(str(program_values["LFORAT"]))
+        self.lfo_depth_knob.setValue(program_values["LFODEP"])
+        self.lfo_depth_value_label.setText(str(program_values["LFODEP"]))
+        self.lfo_delay_knob.setValue(program_values["LFODEL"])
+        self.lfo_delay_value_label.setText(str(program_values["LFODEL"]))
 
     def _on_load_failed(self, program_index, error_message):
         if program_index != self.program_list.currentRow():
