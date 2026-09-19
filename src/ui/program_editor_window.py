@@ -410,24 +410,10 @@ class ProgramEditorWindow(QMainWindow):
         )
         self.note_lo_spinbox.setEnabled(True)
         self.note_lo_spinbox.valueChanged.connect(self._on_note_range_changed)
-        self.note_lo_spinbox.editingFinished.connect(
-            lambda: self._write_knob_value(
-                "LONOTE",
-                "keygroup",
-                self.note_lo_spinbox.value(),
-                keygroup_index=self.keygroup_list.currentRow(),
-            )
-        )
+        self.note_lo_spinbox.editingFinished.connect(self._commit_note_range)
         self.note_hi_spinbox.setEnabled(True)
         self.note_hi_spinbox.valueChanged.connect(self._on_note_range_changed)
-        self.note_hi_spinbox.editingFinished.connect(
-            lambda: self._write_knob_value(
-                "HINOTE",
-                "keygroup",
-                self.note_hi_spinbox.value(),
-                keygroup_index=self.keygroup_list.currentRow(),
-            )
-        )
+        self.note_hi_spinbox.editingFinished.connect(self._commit_note_range)
         self.pan_knob.setEnabled(True)
         self.pan_knob.sliderReleased.connect(
             lambda: self._write_knob_value("PANPOS", "program", self.pan_knob.value())
@@ -651,6 +637,20 @@ class ProgramEditorWindow(QMainWindow):
         self._write_knob_value("POLYPH", "program", self.polyph_spinbox.value())
 
     def _on_note_range_changed(self):
+        # low can't be raised past high (or high dropped past low) - the
+        # bound that got pushed follows, same as the sampler is believed to
+        # do on the front panel, so the UI never shows/sends an inverted range
+        if self.sender() is self.note_lo_spinbox:
+            if self.note_lo_spinbox.value() > self.note_hi_spinbox.value():
+                self.note_hi_spinbox.blockSignals(True)
+                self.note_hi_spinbox.setValue(self.note_lo_spinbox.value())
+                self.note_hi_spinbox.blockSignals(False)
+        elif self.sender() is self.note_hi_spinbox:
+            if self.note_hi_spinbox.value() < self.note_lo_spinbox.value():
+                self.note_lo_spinbox.blockSignals(True)
+                self.note_lo_spinbox.setValue(self.note_hi_spinbox.value())
+                self.note_lo_spinbox.blockSignals(False)
+
         # keeps the keygroup list's "Keygroup N: lo - hi" label in step while
         # the user edits, rather than only after the write round-trips back
         item = self.keygroup_list.currentItem()
@@ -660,6 +660,20 @@ class ProgramEditorWindow(QMainWindow):
         lo = self.note_lo_spinbox.value()
         hi = self.note_hi_spinbox.value()
         item.setText(f"Keygroup {index + 1}: {midi_note_to_name(lo)} - {midi_note_to_name(hi)}")
+
+    def _commit_note_range(self):
+        # both bounds are written together (not just the one the user
+        # touched), so a pushed value that this round's push-clamp changed
+        # programmatically never gets left stale on the sampler
+        keygroup_index = self.keygroup_list.currentRow()
+        self._write_knob_value(
+            "LONOTE", "keygroup", self.note_lo_spinbox.value(),
+            keygroup_index=keygroup_index,
+        )
+        self._write_knob_value(
+            "HINOTE", "keygroup", self.note_hi_spinbox.value(),
+            keygroup_index=keygroup_index,
+        )
 
     def _on_samples_loaded(self, samples):
         self._sample_list = samples
