@@ -126,18 +126,26 @@ class ParameterWriter(QThread):
     write_succeeded = Signal(int)  # new_value, for ui to confirm against
     write_failed = Signal(str)
 
-    def __init__(self, bridge, param_name, region, program_index, new_value):
+    def __init__(
+        self, bridge, param_name, region, program_index, new_value, *, keygroup_index=0
+    ):
         super().__init__()
         self._bridge = bridge
         self._param_name = param_name
         self._region = region
         self._program_index = program_index
+        self._keygroup_index = keygroup_index
         self._new_value = new_value
 
     def run(self):
         try:
             param = p.lookup(self._param_name, self._region)
-            self._bridge.set_parameter(param, self._program_index, self._new_value)
+            self._bridge.set_parameter(
+                param,
+                self._program_index,
+                self._new_value,
+                keygroup=self._keygroup_index,
+            )
         except Exception as e:
             self.write_failed.emit(str(e))
             return

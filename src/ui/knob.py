@@ -6,11 +6,36 @@ from PySide6.QtCore import Qt, QPointF
 START_ANGLE_DEG = 240
 SWEEP_DEG = 300
 
+_DRAG_SENSITIVITY_PX = 150
+
 
 class Knob(QDial):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setEnabled(False)  # read-only for now
+        self._drag_start_y = None
+        self._drag_start_value = None
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._drag_start_y = event.position().y()
+            self._drag_start_value = self.value()
+
+    def mouseMoveEvent(self, event):
+        if self._drag_start_y is None:
+            return
+        delta_y = self._drag_start_y - event.position().y()
+        value_range = self.maximum() - self.minimum()
+        sensitivity = value_range / _DRAG_SENSITIVITY_PX
+        new_value = int(self._drag_start_value + delta_y * sensitivity)
+        new_value = max(self.minimum(), min(self.maximum(), new_value))
+        self.setValue(new_value)
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._drag_start_y = None
+            self._drag_start_value = None
+            self.sliderReleased.emit()
 
     def paintEvent(self, event):
         painter = QPainter(self)

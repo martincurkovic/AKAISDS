@@ -29,6 +29,7 @@ class ProgramEditorWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle("AKAISDS - Program Editor")
         self.setMinimumSize(800, 500)
+        self._active_writers = {}
 
         self._main_window = main_window
         self._bridge = bridge
@@ -73,7 +74,8 @@ class ProgramEditorWindow(QMainWindow):
         self.zone1_tune_spinbox.setSingleStep(0.01)
         self.zone1_tune_spinbox.setDecimals(2)
         self.zone1_tune_spinbox.setSuffix(" st")
-        self.zone1_tune_spinbox.setEnabled(False)  # read only for now
+        self.zone1_tune_spinbox.setEnabled(True)
+        self.zone1_tune_spinbox.editingFinished.connect(self._on_zone1_tune_changed)
         zone1_tune_label = QLabel("Zone 1 tune")
         zone1_tune_label.setAlignment(Qt.AlignmentFlag.AlignHCenter)
 
@@ -177,6 +179,48 @@ class ProgramEditorWindow(QMainWindow):
         self._program_loader.load_failed.connect(self._on_program_load_failed)
         self._program_loader.start()
 
+        # enable knobs and wire sliderReleased
+        self.cutoff_knob.setEnabled(True)
+        self.cutoff_knob.sliderReleased.connect(
+            lambda: self._write_knob_value(
+                "FILFRQ",
+                "keygroup",
+                self.cutoff_knob.value(),
+                keygroup_index=self.keygroup_list.currentRow(),
+            )
+        )
+        self.resonance_knob.setEnabled(True)
+        self.resonance_knob.sliderReleased.connect(
+            lambda: self._write_knob_value(
+                "FILQ",
+                "keygroup",
+                self.resonance_knob.value(),
+                keygroup_index=self.keygroup_list.currentRow(),
+            )
+        )
+        self.pan_knob.setEnabled(True)
+        self.pan_knob.sliderReleased.connect(
+            lambda: self._write_knob_value("PANPOS", "program", self.pan_knob.value())
+        )
+        self.lfo_rate_knob.setEnabled(True)
+        self.lfo_rate_knob.sliderReleased.connect(
+            lambda: self._write_knob_value(
+                "LFORAT", "program", self.lfo_rate_knob.value()
+            )
+        )
+        self.lfo_depth_knob.setEnabled(True)
+        self.lfo_depth_knob.sliderReleased.connect(
+            lambda: self._write_knob_value(
+                "LFODEP", "program", self.lfo_depth_knob.value()
+            )
+        )
+        self.lfo_delay_knob.setEnabled(True)
+        self.lfo_delay_knob.sliderReleased.connect(
+            lambda: self._write_knob_value(
+                "LFODEL", "program", self.lfo_delay_knob.value()
+            )
+        )
+
     def _on_programs_loaded(self, programs):
         self.program_list.addItems(programs)
         self.program_list.setCurrentRow(
@@ -257,9 +301,11 @@ class ProgramEditorWindow(QMainWindow):
             values["RELSE2"],
             values["ENV2L4"],
         )
+        self.zone1_tune_spinbox.blockSignals(True)
         self.zone1_tune_spinbox.setValue(
             self._tune_offset_to_semitones(values["VTUNO1"])
         )
+        self.zone1_tune_spinbox.blockSignals(False)
 
     def _on_detail_load_failed(self, program_index, keygroup_index, error_message):
         if (
@@ -270,9 +316,16 @@ class ProgramEditorWindow(QMainWindow):
 
     def closeEvent(self, event):
         # runs regardless of how the window closes (close button, command + w, etc)
-        for loader in (self._program_loader, getattr(self, "_loader", None)):
+        loaders = [
+            self._program_loader,
+            getattr(self, "_loader", None),
+            getattr(self, "_detail_loader", None),
+        ] + list(self._active_writers.values())
+
+        for loader in loaders:
             if loader is not None and loader.isRunning():
                 loader.wait()
+
         self._main_window.show()
         event.accept()
 
@@ -343,3 +396,32 @@ class ProgramEditorWindow(QMainWindow):
         )
         self.lfo_shape_combo.setCurrentIndex(correct_value)
         self.lfo_shape_combo.blockSignals(False)
+
+    def _write_knob_value(self, param_name, region, value, *, keygroup_index=0):
+        program_index = self.program_list.currentRow()
+        writer = ParameterWriter(
+            self._bridge,
+            param_name,
+            region,
+            program_index,
+            value,
+            keygroup_index=keygroup_index,
+        )
+        writer.write_succeeded.connect(
+            lambda v: self.detail_label.setText(f"{param_name} → {v}")
+        )
+        writer.write_failed.connect(
+            lambda e: self.detail_label.setText(f"Write failed ({param_name}): {e}")
+        )
+        # store writer per-param so it can't be garbage collected before the thread finishes
+        self._active_writers[param_name] = writer
+        writer.start()
+
+    def _on_zone1_tune_changed(self):
+        raw_value = self._semitones_to_tune_offset(self.zone1_tune_spinbox.value())
+        self._write_knob_value(
+            "VTUNO1",
+            "keygroup",
+            raw_value,
+            keygroup_index=self.keygroup_list.currentRow(),
+        )
