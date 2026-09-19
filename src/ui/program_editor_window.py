@@ -12,6 +12,7 @@ from PySide6.QtWidgets import (
     QWidget,
     QStackedWidget,
     QDoubleSpinBox,
+    QSpinBox,
 )
 from ui.knob import Knob
 from ui.envelope_graph import ADSREnvelopeGraph, Envelope2Graph
@@ -137,6 +138,18 @@ class ProgramEditorWindow(QMainWindow):
             "LFO delay", self.lfo_delay_knob
         )
 
+        self.polyph_spinbox = QSpinBox()
+        self.polyph_spinbox.setRange(1, 32)
+        self.polyph_spinbox.setEnabled(True)
+        self.polyph_spinbox.editingFinished.connect(self._on_polyph_changed)
+        polyph_label = QLabel("Polyphony")
+        polyph_label.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+
+        polyph_column = QVBoxLayout()
+        polyph_column.setSpacing(4)
+        polyph_column.addWidget(polyph_label, alignment=Qt.AlignmentFlag.AlignHCenter)
+        polyph_column.addWidget(self.polyph_spinbox)
+
         pan_page = QWidget()
         pan_page_layout = QVBoxLayout()
         pan_page_layout.addLayout(pan_column)
@@ -144,6 +157,7 @@ class ProgramEditorWindow(QMainWindow):
         pan_page_layout.addLayout(lfo_depth_column)
         pan_page_layout.addLayout(lfo_delay_column)
         pan_page_layout.addLayout(lfo_shape_column)
+        pan_page_layout.addLayout(polyph_column)
         pan_page.setLayout(pan_page_layout)
 
         self.detail_stack = QStackedWidget()
@@ -258,6 +272,9 @@ class ProgramEditorWindow(QMainWindow):
         self.lfo_shape_combo.blockSignals(True)
         self.lfo_shape_combo.setCurrentIndex(program_values["LFO1WAVE"])
         self.lfo_shape_combo.blockSignals(False)
+        self.polyph_spinbox.blockSignals(True)
+        self.polyph_spinbox.setValue(program_values["POLYPH"])
+        self.polyph_spinbox.blockSignals(False)
 
     def _on_load_failed(self, program_index, error_message):
         if program_index != self.program_list.currentRow():
@@ -425,3 +442,6 @@ class ProgramEditorWindow(QMainWindow):
             raw_value,
             keygroup_index=self.keygroup_list.currentRow(),
         )
+
+    def _on_polyph_changed(self):
+        self._write_knob_value("POLYPH", "program", self.polyph_spinbox.value())

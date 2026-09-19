@@ -56,6 +56,9 @@ class KeygroupLoader(QThread):
                 "LFO1WAVE": self._bridge.get_parameter(
                     p.lookup("LFO1WAVE", "program"), self._program_index
                 ),
+                "POLYPH": self._bridge.get_parameter(
+                    p.lookup("POLYPH", "program"), self._program_index
+                ),
             }
             while True:
                 try:
