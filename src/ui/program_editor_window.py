@@ -96,6 +96,8 @@ class ProgramEditorWindow(QMainWindow):
 
         self._zone_stack = QStackedWidget()
 
+        self._zone_loudness_labels = []
+        self._zone_pan_labels = []
         for zone_idx, (sname, lovel, hivel, vtuno, vloud, vpano) in enumerate(
             _ZONE_FIELDS
         ):
@@ -142,40 +144,45 @@ class ProgramEditorWindow(QMainWindow):
             self._zone_vel_lo.append(vel_lo)
             self._zone_vel_hi.append(vel_hi)
 
-            # tune / loudness / pan row
-            param_row = QHBoxLayout()
-            tune_label = QLabel("Tune")
-            tune_label.setFixedWidth(35)
+            # tune stays as a spinbox — precision decimal values need it
+            tune_row = QHBoxLayout()
+            tune_row_label = QLabel("Tune")
+            tune_row_label.setFixedWidth(35)
             tune = QDoubleSpinBox()
             tune.setRange(-50.0, 50.0)
             tune.setSingleStep(0.01)
             tune.setDecimals(2)
             tune.setSuffix(" st")
             tune.setFixedWidth(90)
-            loud_label = QLabel("Level")
-            loud_label.setFixedWidth(35)
-            loudness = QSpinBox()
-            loudness.setRange(-50, 50)
-            loudness.setFixedWidth(58)
-            pan_label = QLabel("Pan")
-            pan_label.setFixedWidth(28)
-            pan = QSpinBox()
-            pan.setRange(-50, 50)
-            pan.setFixedWidth(58)
-            param_row.addWidget(tune_label)
-            param_row.addWidget(tune)
-            param_row.addSpacing(12)
-            param_row.addWidget(loud_label)
-            param_row.addWidget(loudness)
-            param_row.addSpacing(12)
-            param_row.addWidget(pan_label)
-            param_row.addWidget(pan)
-            param_row.addStretch()
-            page_layout.addLayout(param_row)
-            page_layout.addStretch()
+            tune_row.addWidget(tune_row_label)
+            tune_row.addWidget(tune)
+            tune_row.addStretch()
+            page_layout.addLayout(tune_row)
             self._zone_tune.append(tune)
-            self._zone_loudness.append(loudness)
-            self._zone_pan.append(pan)
+
+            # loudness and pan as small knobs — ±50 range maps naturally
+            loud_knob = Knob()
+            loud_knob.setRange(-50, 50)
+            loud_knob.setFixedSize(40, 40)
+            loud_knob.setEnabled(True)
+            pan_knob = Knob()
+            pan_knob.setRange(-50, 50)
+            pan_knob.setFixedSize(40, 40)
+            pan_knob.setEnabled(True)
+
+            loud_col, loud_val_label = self._build_knob_column("Loud", loud_knob)
+            pan_col, pan_val_label = self._build_knob_column("Pan", pan_knob)
+
+            zone_knob_row = QHBoxLayout()
+            zone_knob_row.addLayout(loud_col)
+            zone_knob_row.addLayout(pan_col)
+            zone_knob_row.addStretch()
+            page_layout.addLayout(zone_knob_row)
+
+            self._zone_loudness.append(loud_knob)
+            self._zone_pan.append(pan_knob)
+            self._zone_loudness_labels.append(loud_val_label)
+            self._zone_pan_labels.append(pan_val_label)
 
             page.setLayout(page_layout)
             self._zone_stack.addWidget(page)
@@ -205,7 +212,7 @@ class ProgramEditorWindow(QMainWindow):
                     keygroup_index=self.keygroup_list.currentRow(),
                 )
             )
-            loudness.editingFinished.connect(
+            loud_knob.sliderReleased.connect(
                 lambda z=zone_idx, f=vloud: self._write_knob_value(
                     f,
                     "keygroup",
@@ -213,7 +220,7 @@ class ProgramEditorWindow(QMainWindow):
                     keygroup_index=self.keygroup_list.currentRow(),
                 )
             )
-            pan.editingFinished.connect(
+            pan_knob.sliderReleased.connect(
                 lambda z=zone_idx, f=vpano: self._write_knob_value(
                     f,
                     "keygroup",
@@ -415,6 +422,14 @@ class ProgramEditorWindow(QMainWindow):
         if current is None:
             return
         program_index = self.program_list.currentRow()
+
+        # disconnect previous loader to avoid stale signals firing
+        if hasattr(self, "_keygroup_loader"):
+            try:
+                self._keygroup_loader.keygroups_loaded.disconnect()
+            except RuntimeError:
+                pass
+
         self._keygroup_loader = KeygroupLoader(self._bridge, program_index)
         self._keygroup_loader.keygroups_loaded.connect(self._on_keygroups_loaded)
         self._keygroup_loader.load_failed.connect(self._on_load_failed)
@@ -453,6 +468,12 @@ class ProgramEditorWindow(QMainWindow):
         self.detail_stack.setCurrentIndex(1)
         program_index = self.program_list.currentRow()
         keygroup_index = self.keygroup_list.currentRow()
+
+        if hasattr(self, "_detail_loader"):
+            try:
+                self._detail_loader.detail_loaded.disconnect()
+            except RuntimeError:
+                pass  # already disconencted
 
         self._detail_loader = KeygroupDetailLoader(
             self._bridge, program_index, keygroup_index
@@ -618,15 +639,19 @@ class ProgramEditorWindow(QMainWindow):
             for widget, field in [
                 (self._zone_vel_lo[z], lovel),
                 (self._zone_vel_hi[z], hivel),
-                (self._zone_loudness[z], vloud),
-                (self._zone_pan[z], vpano),
             ]:
                 widget.blockSignals(True)
                 widget.setValue(values.get(field, 0))
                 widget.blockSignals(False)
 
-            self._zone_tune[z].blockSignals(True)
-            self._zone_tune[z].setValue(
-                self._tune_offset_to_semitones(values.get(vtuno, 0))
-            )
-            self._zone_tune[z].blockSignals(False)
+            loud_val = values.get(vloud, 0)
+            self._zone_loudness[z].blockSignals(True)
+            self._zone_loudness[z].setValue(loud_val)
+            self._zone_loudness_labels[z].setText(str(loud_val))
+            self._zone_loudness[z].blockSignals(False)
+
+            pan_val = values.get(vpano, 0)
+            self._zone_pan[z].blockSignals(True)
+            self._zone_pan[z].setValue(pan_val)
+            self._zone_pan_labels[z].setText(str(pan_val))
+            self._zone_pan[z].blockSignals(False)
