@@ -675,6 +675,7 @@ if __name__ == "__main__":
     # program_editor_bridge.connect() instead.
     from PySide6.QtWidgets import QApplication
     from s3ked.demo import DemoBridge
+    from ui import theme
 
     class _StandaloneHost:
         # ProgramEditorWindow.closeEvent() calls main_window.show() to bring
@@ -683,6 +684,7 @@ if __name__ == "__main__":
             QApplication.instance().quit()
 
     app = QApplication(sys.argv)
+    theme.apply_to_app(app)
     window = ProgramEditorWindow(_StandaloneHost(), bridge=DemoBridge())
     window.show()
     sys.exit(app.exec())

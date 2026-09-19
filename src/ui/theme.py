@@ -154,3 +154,30 @@ def render_stylesheet(palette):
             f"style.qss.template references ${{{e.args[0]}}}, which isn't in this "
             f"palette - add it to both DARK_PALETTE and LIGHT_PALETTE in ui/theme.py"
         ) from e
+
+
+def apply_to_app(app):
+    """Sets the Fusion style and this app's stylesheet, live-matched to the
+    OS color scheme. Shared by every entry point (main.py, and any window
+    launched standalone for dev work) so they always look the same.
+    """
+    from PySide6.QtCore import Qt
+    from PySide6.QtGui import QGuiApplication
+
+    def palette_for_scheme(scheme):
+        return LIGHT_PALETTE if scheme == Qt.ColorScheme.Light else DARK_PALETTE
+
+    def apply(scheme):
+        try:
+            app.setStyleSheet(render_stylesheet(palette_for_scheme(scheme)))
+        except (OSError, KeyError) as e:
+            print(
+                f"[WARN] Couldn't apply theme ({e}) - continuing with "
+                f"whatever's currently set"
+            )
+
+    app.setStyle("Fusion")
+    style_hints = QGuiApplication.styleHints()
+    apply(style_hints.colorScheme())
+    # live switch if user changes their system theme while app is running
+    style_hints.colorSchemeChanged.connect(apply)
