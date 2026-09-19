@@ -161,7 +161,7 @@ QDialog {
     background-color: ${bg_dialog};
 }
 
-QComboBox, QSpinBox {
+QComboBox, QSpinBox, QDoubleSpinBox {
     background-color: ${bg_input};
     border: 1px solid ${border};
     border-radius: 3px;
@@ -169,7 +169,7 @@ QComboBox, QSpinBox {
     color: ${text_bright};
 }
 
-QComboBox:hover, QSpinBox:hover {
+QComboBox:hover, QSpinBox:hover, QDoubleSpinBox:hover {
     border-color: ${border_hover};
 }
 
@@ -207,20 +207,21 @@ QComboBox::down-arrow:disabled {
   image: url(${down_arrow_icon_disabled})
 }
 
-QSpinBox::up-button, QSpinBox::down-button {
+QSpinBox::up-button, QSpinBox::down-button,
+QDoubleSpinBox::up-button, QDoubleSpinBox::down-button {
   subcontrol-origin: border;
   width: 16px;
   border: none;
   background: transparent;
 }
 
-QSpinBox::up-arrow {
+QSpinBox::up-arrow, QDoubleSpinBox::up-arrow {
   image: url(${up_arrow_icon});
   width: 8px;
   height: 8px;
 }
 
-QSpinBox::down-arrow {
+QSpinBox::down-arrow, QDoubleSpinBox::down-arrow {
   image: url(${down_arrow_icon});
   width: 8px;
   height: 8px;
