@@ -545,6 +545,8 @@ class ProgramEditorWindow(QMainWindow):
         column.addWidget(knob, alignment=Qt.AlignmentFlag.AlignHCenter)
         column.addWidget(value_label)
 
+        knob.valueChanged.connect(lambda v: value_label.setText(str(v)))
+
         return column, value_label
 
     def _build_labeled_column(self, label_text, widget):
