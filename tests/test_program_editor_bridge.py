@@ -102,6 +102,41 @@ def test_worker_emits_programs_load_failed_on_error():
     assert failed == ["port closed"]
 
 
+def test_worker_reports_busy_true_then_false_around_one_job():
+    worker = BridgeWorker(_ListBridge(items=["Bass stab"]))
+    busy_states = []
+    worker.busy_changed.connect(busy_states.append)
+
+    worker.submit_program_list()
+    # busy_changed(True) fires from submit_*() itself, synchronously, before
+    # process_pending() ever runs a job - a real caller (the GUI thread)
+    # needs to see "busy" the instant it asks for something, not once the
+    # worker thread gets around to picking the job up
+    assert busy_states == [True]
+
+    worker.process_pending()
+
+    assert busy_states == [True, False]
+
+
+def test_worker_reports_one_continuous_busy_span_across_several_queued_jobs():
+    # Refresh submits several jobs at once (program list, multi parts,
+    # keygroups) - this should read as one busy period, not flicker
+    # True/False/True/False between each one
+    worker = BridgeWorker(_ListBridge(items=["Bass stab"]))
+    busy_states = []
+    worker.busy_changed.connect(busy_states.append)
+
+    worker.submit_program_list()
+    worker.submit_sample_list()
+    worker.submit_program_list()
+    assert busy_states == [True]  # still just the one rising edge
+
+    worker.process_pending()
+
+    assert busy_states == [True, False]
+
+
 def test_worker_emits_samples_loaded_on_success():
     worker = BridgeWorker(_ListBridge(items=["SQUARE", "SAWTOOTH"]))
     loaded = []

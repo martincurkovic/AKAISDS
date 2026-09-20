@@ -183,6 +183,88 @@ def test_first_program_is_preselected_with_its_keygroups_shown(editor):
     assert _keygroup_row_text(editor, 0) == "Keygroup 1: C0 - C3"
 
 
+# isHidden(), not isVisible() - the editor fixture never calls show() on
+# the window (see its own comment), and isVisible() is unconditionally
+# false for any widget whose top-level window was never shown. isHidden()
+# tracks the widget's own explicit setVisible() state regardless.
+
+
+def test_progress_bar_stays_hidden_across_the_fixtures_fast_loads(editor, qapp):
+    # the editor fixture already drove program list + sample list + first
+    # keygroup load to completion - FakeBridge answers near-instantly, well
+    # under the 200ms hold-off, so the indeterminate bar should never have
+    # actually become visible for any of it
+    assert editor._loading_progress.isHidden()
+
+
+def test_busy_changed_true_arms_the_show_timer_without_showing_the_bar_yet(editor):
+    editor._on_worker_busy_changed(True)
+
+    assert editor._busy_show_timer.isActive()
+    assert editor._loading_progress.isHidden()
+
+
+def test_show_timer_firing_while_still_busy_shows_the_bar(editor):
+    editor._on_worker_busy_changed(True)
+    editor._busy_show_timer.timeout.emit()  # simulates the real 200ms elapsing
+
+    assert not editor._loading_progress.isHidden()
+
+
+def test_busy_changed_false_does_not_hide_immediately(editor):
+    # hiding is debounced through _busy_hide_timer (see the comment where
+    # these two timers are built) - a bare busy_changed(False) only arms
+    # that timer, it doesn't hide on the spot
+    editor._on_worker_busy_changed(True)
+    editor._busy_show_timer.timeout.emit()
+    assert not editor._loading_progress.isHidden()
+
+    editor._on_worker_busy_changed(False)
+
+    assert editor._busy_hide_timer.isActive()
+    assert not editor._loading_progress.isHidden()  # still shown until confirmed
+
+
+def test_hide_timer_firing_confirms_idle_and_hides_the_bar(editor):
+    editor._on_worker_busy_changed(True)
+    editor._busy_show_timer.timeout.emit()
+    editor._on_worker_busy_changed(False)
+
+    editor._busy_hide_timer.timeout.emit()  # simulates the grace period elapsing
+
+    assert editor._loading_progress.isHidden()
+    assert not editor._busy_show_timer.isActive()
+
+
+def test_a_new_busy_true_during_the_hide_grace_period_cancels_the_hide(editor):
+    # this is what collapses a burst of back-to-back jobs (e.g. Refresh)
+    # into one continuous visible span rather than flickering - see the
+    # comment on _busy_hide_timer
+    editor._on_worker_busy_changed(True)
+    editor._busy_show_timer.timeout.emit()
+    editor._on_worker_busy_changed(False)  # arms the hide timer
+    editor._on_worker_busy_changed(True)  # a new job lands before it fires
+
+    assert not editor._busy_hide_timer.isActive()
+    assert not editor._loading_progress.isHidden()  # never actually hid
+
+
+def test_refreshing_from_hardware_reports_one_continuous_busy_span(editor, qapp):
+    # regression check for the real worry with this feature: on a fast
+    # bridge (fake or demo), the worker thread can race ahead and briefly
+    # drain the queue to empty *between* two of Refresh's back-to-back
+    # submit_*() calls (program list, multi parts, keygroups), which is
+    # exactly what _on_worker_busy_changed's hide-timer debounce exists to
+    # absorb (see test_a_new_busy_true_during_the_hide_grace_period_cancels_the_hide
+    # for that mechanism in isolation) - this just checks the real call
+    # path reaches a clean hidden state rather than exercising the race
+    # itself, which isn't reliably reproducible from a test
+    editor._refresh_from_hardware()
+    editor._worker.wait_until_idle()
+    _pump_until(qapp, lambda: editor._loading_progress.isHidden())
+    assert editor._loading_progress.isHidden()
+
+
 def test_program_name_field_loads_from_the_selected_list_item(editor):
     # program_list's item text already IS the current PRNAME (it comes
     # straight from FakeBridge.program_list()) - no separate hardware
