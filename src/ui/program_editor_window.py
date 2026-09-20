@@ -35,6 +35,60 @@ from ui.keygroup_range_bar import KeygroupRangeBar, keygroup_color
 from core.midi_notes import midi_note_to_name
 from core.program_editor_bridge import BridgeWorker, MULTI_PART_COUNT
 
+# (label, tooltip) per ZPLAY value, in raw-byte order (0-4) - labels are the
+# abbreviated forms the front panel itself uses; tooltips spell out what
+# each actually does on playback. Module-level (not just __init__-local)
+# since both the zone-building loop and _update_zone_panels need it.
+_LOOP_TYPE_OPTIONS = [
+    (
+        "As sample",
+        "Uses whichever loop points and loop type are already stored "
+        "on the sample itself, rather than overriding them for this zone.",
+    ),
+    (
+        "Loop in release",
+        "Loops continuously while the note is held, then finishes the "
+        "current loop pass before moving into the amp envelope's "
+        "release stage - avoids cutting off mid-loop on note-off.",
+    ),
+    (
+        "Loop til release",
+        "Loops continuously until note-off, then jumps straight into "
+        "the release stage from wherever the loop currently is.",
+    ),
+    (
+        "No loops",
+        "Ignores the sample's loop points and plays straight through "
+        "once, gated by the amp envelope as usual.",
+    ),
+    (
+        "Play to sample end",
+        "Ignores note-off and always plays through to the physical "
+        "end of the sample, regardless of when the key is released.",
+    ),
+]
+
+# (label, tooltip) per PORTYPE value - s3k.params transcribes this field as
+# "PORTAMENTO TYPE" with no decoded values={} map (unlike most other
+# program enum fields), so 0="Rate"/1="Time" is inferred from this whole
+# table's own "0 is the default/off state" convention, not from a measured
+# or documented mapping. Module-level for the same reason as
+# _LOOP_TYPE_OPTIONS above - both __init__ and the load path need it.
+_PORTAMENTO_TYPE_OPTIONS = [
+    (
+        "Rate",
+        "The pitch glide always moves at a fixed speed, so a wider "
+        "interval between notes takes proportionally longer to glide "
+        "through.",
+    ),
+    (
+        "Time",
+        "The pitch glide always takes the same amount of time to "
+        "complete, so a wider interval between notes glides faster to "
+        "still finish in that time.",
+    ),
+]
+
 
 class ProgramEditorWindow(QMainWindow):
     def __init__(self, main_window, bridge):
@@ -142,6 +196,17 @@ class ProgramEditorWindow(QMainWindow):
         self.resonance_knob.setRange(0, 15)
         self.resonance_knob.setDefaultValue(0)  # no resonance
         self.resonance_knob.setFixedSize(80, 80)
+        self.key_filter_track_knob = Knob()
+        # s3k.params declares K_FREQ's range as -30..99 (its own notes cite
+        # a 2026-08-24 hardware sweep finding no clamp at 12 or 24 either),
+        # but that's contradicted by this project's own hardware: confirmed
+        # -24..+24 on real S3000-series hardware in front of the user
+        # (2026-09-20) - going with the direct measurement over the
+        # dependency's, per AGENTS.md (don't edit s3k/s3ked in-place; the
+        # correction belongs here instead)
+        self.key_filter_track_knob.setRange(-24, 24)
+        self.key_filter_track_knob.setDefaultValue(0)  # no key tracking
+        self.key_filter_track_knob.setFixedSize(80, 80)
 
         self.env1_graph = ADSREnvelopeGraph()
         self.env1_graph.setFixedSize(200, 90)
@@ -266,10 +331,14 @@ class ProgramEditorWindow(QMainWindow):
         resonance_column, self.resonance_value_label = self._build_knob_column(
             "Resonance", self.resonance_knob
         )
+        key_filter_track_column, self.key_filter_track_value_label = self._build_knob_column(
+            "Key Filter Track", self.key_filter_track_knob
+        )
 
         knobs_layout = QHBoxLayout()
         knobs_layout.addLayout(cutoff_column)
         knobs_layout.addLayout(resonance_column)
+        knobs_layout.addLayout(key_filter_track_column)
 
         # per-zone control lists — indexed 0-3
         self._zone_combos = []
@@ -278,12 +347,14 @@ class ProgramEditorWindow(QMainWindow):
         self._zone_tune = []
         self._zone_loudness = []
         self._zone_pan = []
+        self._zone_looptype = []
+        self._zone_keytrack = []
 
         _ZONE_FIELDS = [
-            ("SNAME1", "LOVEL1", "HIVEL1", "VTUNO1", "VLOUD1", "VPANO1"),
-            ("SNAME2", "LOVEL2", "HIVEL2", "VTUNO2", "VLOUD2", "VPANO2"),
-            ("SNAME3", "LOVEL3", "HIVEL3", "VTUNO3", "VLOUD3", "VPANO3"),
-            ("SNAME4", "LOVEL4", "HIVEL4", "VTUNO4", "VLOUD4", "VPANO4"),
+            ("SNAME1", "LOVEL1", "HIVEL1", "VTUNO1", "VLOUD1", "VPANO1", "ZPLAY1", "CP1"),
+            ("SNAME2", "LOVEL2", "HIVEL2", "VTUNO2", "VLOUD2", "VPANO2", "ZPLAY2", "CP2"),
+            ("SNAME3", "LOVEL3", "HIVEL3", "VTUNO3", "VLOUD3", "VPANO3", "ZPLAY3", "CP3"),
+            ("SNAME4", "LOVEL4", "HIVEL4", "VTUNO4", "VLOUD4", "VPANO4", "ZPLAY4", "CP4"),
         ]
 
         zone_selector_row = QHBoxLayout()
@@ -295,9 +366,9 @@ class ProgramEditorWindow(QMainWindow):
 
         self._zone_loudness_labels = []
         self._zone_pan_labels = []
-        for zone_idx, (sname, lovel, hivel, vtuno, vloud, vpano) in enumerate(
-            _ZONE_FIELDS
-        ):
+        for zone_idx, (
+            sname, lovel, hivel, vtuno, vloud, vpano, zplay, cp
+        ) in enumerate(_ZONE_FIELDS):
             btn = QPushButton(f"Zone {zone_idx + 1}")
             btn.setCheckable(True)
             btn.setChecked(zone_idx == 0)
@@ -358,6 +429,39 @@ class ProgramEditorWindow(QMainWindow):
             page_layout.addLayout(tune_row)
             self._zone_tune.append(tune)
 
+            # loop type and keyboard tracking row
+            loop_track_row = QHBoxLayout()
+            loop_label = QLabel("Loop type")
+            loop_label.setFixedWidth(70)
+            loop_combo = QComboBox()
+            loop_combo.setFixedWidth(160)
+            for option_idx, (option_label, option_tooltip) in enumerate(
+                _LOOP_TYPE_OPTIONS
+            ):
+                loop_combo.addItem(option_label)
+                loop_combo.setItemData(
+                    option_idx, option_tooltip, Qt.ItemDataRole.ToolTipRole
+                )
+            loop_combo.setToolTip(_LOOP_TYPE_OPTIONS[0][1])
+            loop_combo.currentIndexChanged.connect(
+                lambda i, combo=loop_combo: combo.setToolTip(
+                    _LOOP_TYPE_OPTIONS[i][1]
+                )
+            )
+            keytrack_label = QLabel("Keyboard tracking")
+            keytrack_combo = QComboBox()
+            keytrack_combo.setFixedWidth(110)
+            keytrack_combo.addItems(["Track", "Const Pitch"])
+            loop_track_row.addWidget(loop_label)
+            loop_track_row.addWidget(loop_combo)
+            loop_track_row.addSpacing(12)
+            loop_track_row.addWidget(keytrack_label)
+            loop_track_row.addWidget(keytrack_combo)
+            loop_track_row.addStretch()
+            page_layout.addLayout(loop_track_row)
+            self._zone_looptype.append(loop_combo)
+            self._zone_keytrack.append(keytrack_combo)
+
             # loudness and pan as small knobs — ±50 range maps naturally
             loud_knob = Knob()
             loud_knob.setRange(-50, 50)
@@ -407,6 +511,12 @@ class ProgramEditorWindow(QMainWindow):
             )
             self._wire_knob_write(
                 pan_knob, vpano, "keygroup", keygroup_index_getter=self.keygroup_list.currentRow
+            )
+            self._wire_combo_write(
+                loop_combo, zplay, "keygroup", keygroup_index_getter=self.keygroup_list.currentRow
+            )
+            self._wire_combo_write(
+                keytrack_combo, cp, "keygroup", keygroup_index_getter=self.keygroup_list.currentRow
             )
 
         self._zone_button_group.idClicked.connect(self._zone_stack.setCurrentIndex)
@@ -557,6 +667,92 @@ class ProgramEditorWindow(QMainWindow):
             self.program_tune_spinbox, alignment=Qt.AlignmentFlag.AlignHCenter
         )
 
+        self.bend_up_spinbox = QSpinBox()
+        self.bend_up_spinbox.setRange(0, 24)
+        self.bend_up_spinbox.setSuffix(" st")
+        self.bend_up_spinbox.setFixedWidth(70)
+        bend_up_column = self._build_labeled_spinbox_column(
+            "Bend up", self.bend_up_spinbox
+        )
+
+        self.bend_down_spinbox = QSpinBox()
+        # s3k.params declares B_PTCHD's range as 0-12 (asymmetric with
+        # B_PTCH's 0-24), transcribed from the Akai spec - contradicted by
+        # this project's own hardware: confirmed 0-24, matching bend-up,
+        # on real S3000-series hardware in front of the user (2026-09-20).
+        # Same call as K_FREQ above: trust the direct measurement, don't
+        # edit the dependency (AGENTS.md)
+        self.bend_down_spinbox.setRange(0, 24)
+        self.bend_down_spinbox.setSuffix(" st")
+        self.bend_down_spinbox.setFixedWidth(70)
+        bend_down_column = self._build_labeled_spinbox_column(
+            "Bend down", self.bend_down_spinbox
+        )
+
+        self.portamento_enable_combo = QComboBox()
+        # s3k.params transcribes PORTEN as "PORTAMENTO ON/OFF" with no
+        # decoded values={} map (unlike KXFADE/DESYNC's explicit
+        # 0=OFF/1=ON) - inferred from this table's own convention, which
+        # every other on/off-style program field follows without exception
+        self.portamento_enable_combo.addItems(["Off", "On"])
+        self.portamento_enable_combo.setMaximumWidth(70)
+        portamento_enable_label = QLabel("Portamento")
+        portamento_enable_label.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+        portamento_enable_column = QVBoxLayout()
+        portamento_enable_column.setSpacing(4)
+        portamento_enable_column.addWidget(
+            portamento_enable_label, alignment=Qt.AlignmentFlag.AlignHCenter
+        )
+        portamento_enable_column.addWidget(self.portamento_enable_combo)
+
+        self.portamento_rate_spinbox = QSpinBox()
+        # PORTIME's declared range is the full byte (0-255, s3k.params has
+        # no measurement narrowing it) but every other 2-digit performance
+        # knob on this hardware (LFORAT, FILFRQ, VOSCL, ...) tops out at 99,
+        # so 0-99 is assumed here rather than offering the raw byte
+        self.portamento_rate_spinbox.setRange(0, 99)
+        self.portamento_rate_spinbox.setFixedWidth(70)
+        portamento_rate_column = self._build_labeled_spinbox_column(
+            "Rate", self.portamento_rate_spinbox
+        )
+
+        self.portamento_type_combo = QComboBox()
+        for option_idx, (option_label, option_tooltip) in enumerate(
+            _PORTAMENTO_TYPE_OPTIONS
+        ):
+            self.portamento_type_combo.addItem(option_label)
+            self.portamento_type_combo.setItemData(
+                option_idx, option_tooltip, Qt.ItemDataRole.ToolTipRole
+            )
+        self.portamento_type_combo.setToolTip(_PORTAMENTO_TYPE_OPTIONS[0][1])
+        self.portamento_type_combo.currentIndexChanged.connect(
+            lambda i, combo=self.portamento_type_combo: combo.setToolTip(
+                _PORTAMENTO_TYPE_OPTIONS[i][1]
+            )
+        )
+        self.portamento_type_combo.setMaximumWidth(70)
+        portamento_type_label = QLabel("Type")
+        portamento_type_label.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+        portamento_type_column = QVBoxLayout()
+        portamento_type_column.setSpacing(4)
+        portamento_type_column.addWidget(
+            portamento_type_label, alignment=Qt.AlignmentFlag.AlignHCenter
+        )
+        portamento_type_column.addWidget(self.portamento_type_combo)
+
+        # row 5: pitch bend range up/down
+        program_bend_row = QHBoxLayout()
+        program_bend_row.addLayout(bend_up_column)
+        program_bend_row.addLayout(bend_down_column)
+        program_bend_row.addStretch()
+
+        # row 6: portamento on/off, rate and type
+        program_portamento_row = QHBoxLayout()
+        program_portamento_row.addLayout(portamento_enable_column)
+        program_portamento_row.addLayout(portamento_rate_column)
+        program_portamento_row.addLayout(portamento_type_column)
+        program_portamento_row.addStretch()
+
         # row 1: Pan, LFO rate, LFO depth
         program_knobs_row1 = QHBoxLayout()
         program_knobs_row1.addLayout(pan_column)
@@ -594,6 +790,8 @@ class ProgramEditorWindow(QMainWindow):
         program_page_layout.addLayout(program_knobs_row2)
         program_page_layout.addLayout(program_controls_row)
         program_page_layout.addLayout(program_midi_row)
+        program_page_layout.addLayout(program_bend_row)
+        program_page_layout.addLayout(program_portamento_row)
         program_page_layout.addStretch()
         program_page.setLayout(program_page_layout)
 
@@ -702,6 +900,13 @@ class ProgramEditorWindow(QMainWindow):
             "keygroup",
             keygroup_index_getter=self.keygroup_list.currentRow,
         )
+        self.key_filter_track_knob.setEnabled(True)
+        self._wire_knob_write(
+            self.key_filter_track_knob,
+            "K_FREQ",
+            "keygroup",
+            keygroup_index_getter=self.keygroup_list.currentRow,
+        )
         self.note_lo_spinbox.setEnabled(True)
         self.note_lo_spinbox.valueChanged.connect(self._on_note_range_changed)
         self.note_lo_spinbox.editingFinished.connect(self._commit_note_range)
@@ -723,6 +928,16 @@ class ProgramEditorWindow(QMainWindow):
             "program",
             value_converter=self._semitones_to_tune_offset,
         )
+        self.bend_up_spinbox.setEnabled(True)
+        self._wire_spinbox_write(self.bend_up_spinbox, "B_PTCH", "program")
+        self.bend_down_spinbox.setEnabled(True)
+        self._wire_spinbox_write(self.bend_down_spinbox, "B_PTCHD", "program")
+        self.portamento_enable_combo.setEnabled(True)
+        self._wire_combo_write(self.portamento_enable_combo, "PORTEN", "program")
+        self.portamento_rate_spinbox.setEnabled(True)
+        self._wire_spinbox_write(self.portamento_rate_spinbox, "PORTIME", "program")
+        self.portamento_type_combo.setEnabled(True)
+        self._wire_combo_write(self.portamento_type_combo, "PORTYPE", "program")
         for knob in (
             self.attack1_knob,
             self.decay1_knob,
@@ -926,6 +1141,24 @@ class ProgramEditorWindow(QMainWindow):
             self._tune_offset_to_semitones(program_values["PTUNO"])
         )
         self.program_tune_spinbox.blockSignals(False)
+        self.bend_up_spinbox.blockSignals(True)
+        self.bend_up_spinbox.setValue(program_values["B_PTCH"])
+        self.bend_up_spinbox.blockSignals(False)
+        self.bend_down_spinbox.blockSignals(True)
+        self.bend_down_spinbox.setValue(program_values["B_PTCHD"])
+        self.bend_down_spinbox.blockSignals(False)
+        self.portamento_enable_combo.blockSignals(True)
+        self.portamento_enable_combo.setCurrentIndex(program_values["PORTEN"])
+        self.portamento_enable_combo.blockSignals(False)
+        self.portamento_rate_spinbox.blockSignals(True)
+        self.portamento_rate_spinbox.setValue(program_values["PORTIME"])
+        self.portamento_rate_spinbox.blockSignals(False)
+        self.portamento_type_combo.blockSignals(True)
+        self.portamento_type_combo.setCurrentIndex(program_values["PORTYPE"])
+        self.portamento_type_combo.blockSignals(False)
+        self.portamento_type_combo.setToolTip(
+            _PORTAMENTO_TYPE_OPTIONS[self.portamento_type_combo.currentIndex()][1]
+        )
 
         # only ever set by _refresh_from_hardware() - restores whatever the
         # user was looking at before the refresh (a plain program selection
@@ -990,6 +1223,10 @@ class ProgramEditorWindow(QMainWindow):
         self.resonance_knob.setValue(values["FILQ"])
         self.resonance_knob.blockSignals(False)
         self.resonance_value_label.setText(str(values["FILQ"]))
+        self.key_filter_track_knob.blockSignals(True)
+        self.key_filter_track_knob.setValue(values["K_FREQ"])
+        self.key_filter_track_knob.blockSignals(False)
+        self.key_filter_track_value_label.setText(str(values["K_FREQ"]))
         self.attack1_knob.blockSignals(True)
         self.attack1_knob.setValue(values["ATTAK1"])
         self.attack1_knob.blockSignals(False)
@@ -1076,6 +1313,20 @@ class ProgramEditorWindow(QMainWindow):
         knob.valueChanged.connect(lambda v: value_label.setText(str(v)))
 
         return column, value_label
+
+    def _build_labeled_spinbox_column(self, label_text, spinbox):
+        # same "label above, centered" shape as the Tune/MIDI channel/etc
+        # columns already on the Program tab, for a plain spinbox rather
+        # than a knob or combo
+        name_label = QLabel(label_text)
+        name_label.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+
+        column = QVBoxLayout()
+        column.setSpacing(4)
+        column.addWidget(name_label, alignment=Qt.AlignmentFlag.AlignHCenter)
+        column.addWidget(spinbox, alignment=Qt.AlignmentFlag.AlignHCenter)
+
+        return column
 
     def _build_multi_part_knob(self, minimum, maximum, *, default):
         # compact knob + numeric readout for a Multis-tab row - unlike
@@ -1376,6 +1627,18 @@ class ProgramEditorWindow(QMainWindow):
         )
         spinbox.editingFinished.connect(lambda: self._flush_write(param_name))
 
+    def _wire_combo_write(self, combo, param_name, region, *, keygroup_index_getter=None):
+        # combo index doubles as the raw byte value for every field this is
+        # used on (ZPLAY/CP, same "index is the value" convention as
+        # lfo_shape_combo/note_priority_combo) - no itemData lookup needed.
+        # No flush wiring: a discrete selection change, unlike a dragged
+        # knob or a typed spinbox value, never needs one - it always waits
+        # out the ordinary debounce window, same as the program-level combos
+        getter = keygroup_index_getter or (lambda: 0)
+        combo.currentIndexChanged.connect(
+            lambda i: self._schedule_write(param_name, region, i, keygroup_index=getter())
+        )
+
     def _write_knob_value(
         self, param_name, region, value, *, keygroup_index=0, index=None, writer_key=None
     ):
@@ -1496,12 +1759,14 @@ class ProgramEditorWindow(QMainWindow):
 
     def _update_zone_panels(self, values):
         zone_field_map = [
-            ("SNAME1", "LOVEL1", "HIVEL1", "VTUNO1", "VLOUD1", "VPANO1"),
-            ("SNAME2", "LOVEL2", "HIVEL2", "VTUNO2", "VLOUD2", "VPANO2"),
-            ("SNAME3", "LOVEL3", "HIVEL3", "VTUNO3", "VLOUD3", "VPANO3"),
-            ("SNAME4", "LOVEL4", "HIVEL4", "VTUNO4", "VLOUD4", "VPANO4"),
+            ("SNAME1", "LOVEL1", "HIVEL1", "VTUNO1", "VLOUD1", "VPANO1", "ZPLAY1", "CP1"),
+            ("SNAME2", "LOVEL2", "HIVEL2", "VTUNO2", "VLOUD2", "VPANO2", "ZPLAY2", "CP2"),
+            ("SNAME3", "LOVEL3", "HIVEL3", "VTUNO3", "VLOUD3", "VPANO3", "ZPLAY3", "CP3"),
+            ("SNAME4", "LOVEL4", "HIVEL4", "VTUNO4", "VLOUD4", "VPANO4", "ZPLAY4", "CP4"),
         ]
-        for z, (sname, lovel, hivel, vtuno, vloud, vpano) in enumerate(zone_field_map):
+        for z, (
+            sname, lovel, hivel, vtuno, vloud, vpano, zplay, cp
+        ) in enumerate(zone_field_map):
             combo = self._zone_combos[z]
             name = values.get(sname, "").strip()
             idx = combo.findText(name)
@@ -1517,6 +1782,15 @@ class ProgramEditorWindow(QMainWindow):
                 widget.setValue(values.get(field, 0))
                 widget.blockSignals(False)
 
+            # previously missing entirely - this zone's Tune spinbox kept
+            # whatever value it last showed across keygroup switches instead
+            # of reflecting hardware, so editing it could silently push a
+            # stale value from a different keygroup back to VTUNO
+            tune_widget = self._zone_tune[z]
+            tune_widget.blockSignals(True)
+            tune_widget.setValue(self._tune_offset_to_semitones(values.get(vtuno, 0)))
+            tune_widget.blockSignals(False)
+
             loud_val = values.get(vloud, 0)
             self._zone_loudness[z].blockSignals(True)
             self._zone_loudness[z].setValue(loud_val)
@@ -1528,6 +1802,17 @@ class ProgramEditorWindow(QMainWindow):
             self._zone_pan[z].setValue(pan_val)
             self._zone_pan_labels[z].setText(str(pan_val))
             self._zone_pan[z].blockSignals(False)
+
+            loop_combo = self._zone_looptype[z]
+            loop_combo.blockSignals(True)
+            loop_combo.setCurrentIndex(values.get(zplay, 0))
+            loop_combo.blockSignals(False)
+            loop_combo.setToolTip(_LOOP_TYPE_OPTIONS[loop_combo.currentIndex()][1])
+
+            keytrack_combo = self._zone_keytrack[z]
+            keytrack_combo.blockSignals(True)
+            keytrack_combo.setCurrentIndex(values.get(cp, 0))
+            keytrack_combo.blockSignals(False)
 
 
 if __name__ == "__main__":

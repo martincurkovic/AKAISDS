@@ -115,6 +115,7 @@ _KEYGROUP_DETAIL_FIELDS = [
     "HINOTE",
     "FILFRQ",
     "FILQ",
+    "K_FREQ",
     "ATTAK1",
     "DECAY1",
     "SUSTN1",
@@ -133,24 +134,49 @@ _KEYGROUP_DETAIL_FIELDS = [
     "VTUNO1",
     "VLOUD1",
     "VPANO1",
+    "ZPLAY1",
+    "CP1",
     "SNAME2",
     "LOVEL2",
     "HIVEL2",
     "VTUNO2",
     "VLOUD2",
     "VPANO2",
+    "ZPLAY2",
+    "CP2",
     "SNAME3",
     "LOVEL3",
     "HIVEL3",
     "VTUNO3",
     "VLOUD3",
     "VPANO3",
+    "ZPLAY3",
+    "CP3",
     "SNAME4",
     "LOVEL4",
     "HIVEL4",
     "VTUNO4",
     "VLOUD4",
     "VPANO4",
+    "ZPLAY4",
+    "CP4",
+]
+
+_PROGRAM_LEVEL_FIELDS = [
+    "PANPOS",
+    "LFORAT",
+    "LFODEP",
+    "LFODEL",
+    "LFO1WAVE",
+    "POLYPH",
+    "PMCHAN",
+    "PTUNO",
+    "PRIORT",
+    "B_PTCH",
+    "B_PTCHD",
+    "PORTEN",
+    "PORTIME",
+    "PORTYPE",
 ]
 
 
@@ -328,34 +354,12 @@ class BridgeWorker(QThread):
     def _handle_keygroups(self, program_index):
         keygroup_ranges = []
         try:
+            # was one hand-spelled get_parameter call per field until this
+            # grew past a dozen entries - _PROGRAM_LEVEL_FIELDS follows the
+            # same list+loop shape _KEYGROUP_DETAIL_FIELDS already uses below
             program_values = {
-                "PANPOS": self._bridge.get_parameter(
-                    p.lookup("PANPOS", "program"), program_index
-                ),
-                "LFORAT": self._bridge.get_parameter(
-                    p.lookup("LFORAT", "program"), program_index
-                ),
-                "LFODEP": self._bridge.get_parameter(
-                    p.lookup("LFODEP", "program"), program_index
-                ),
-                "LFODEL": self._bridge.get_parameter(
-                    p.lookup("LFODEL", "program"), program_index
-                ),
-                "LFO1WAVE": self._bridge.get_parameter(
-                    p.lookup("LFO1WAVE", "program"), program_index
-                ),
-                "POLYPH": self._bridge.get_parameter(
-                    p.lookup("POLYPH", "program"), program_index
-                ),
-                "PMCHAN": self._bridge.get_parameter(
-                    p.lookup("PMCHAN", "program"), program_index
-                ),
-                "PTUNO": self._bridge.get_parameter(
-                    p.lookup("PTUNO", "program"), program_index
-                ),
-                "PRIORT": self._bridge.get_parameter(
-                    p.lookup("PRIORT", "program"), program_index
-                ),
+                field: self._bridge.get_parameter(p.lookup(field, "program"), program_index)
+                for field in _PROGRAM_LEVEL_FIELDS
             }
             # read the real keygroup count off the program header rather than
             # probing until an out-of-range read fails: the real bridge signals
