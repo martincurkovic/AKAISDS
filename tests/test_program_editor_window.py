@@ -139,7 +139,7 @@ def _keygroup_row_text(editor, row):
 def test_first_program_is_preselected_with_its_keygroups_shown(editor):
     assert editor.program_list.currentItem().text() == "Bass stab"
     assert editor.keygroup_list.count() == 2
-    assert _keygroup_row_text(editor, 0) == "Keygroup 1: C1 - C4"
+    assert _keygroup_row_text(editor, 0) == "Keygroup 1: C0 - C3"
 
 
 def test_refresh_picks_up_a_program_created_on_the_hardware(editor, qapp):
@@ -167,7 +167,7 @@ def test_switching_program_replaces_keygroup_list_without_crashing(editor, qapp)
     _wait_for_keygroup_load(editor, qapp, expected_count=1)  # program 1 has 1
 
     assert editor.keygroup_list.count() == 1
-    assert _keygroup_row_text(editor, 0) == "Keygroup 1: C1 - C7"
+    assert _keygroup_row_text(editor, 0) == "Keygroup 1: C0 - C6"
 
 
 def test_selecting_a_keygroup_shows_the_keygroup_panel_with_real_values(editor, qapp):
