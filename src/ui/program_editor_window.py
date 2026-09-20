@@ -1021,7 +1021,8 @@ class ProgramEditorWindow(QMainWindow):
             # hardware read completes
 
             channel_combo = QComboBox()
-            channel_combo.addItem("OMNI", 255)
+            # no OMNI option - the hardware has no such setting for a
+            # multi part's MIDI channel, only 1-16
             for channel in range(16):
                 channel_combo.addItem(str(channel + 1), channel)
             channel_combo.setFixedWidth(90)
@@ -1067,13 +1068,9 @@ class ProgramEditorWindow(QMainWindow):
         program_index = combo_index - 1
         program_name = self._multi_program_combos[part_index].currentText()
         channel = self._multi_channel_combos[part_index].currentData()
-        # OMNI isn't a real wire value a Program Change can target - the
-        # part still listens on every channel while OMNI, so any channel
-        # reaches it; 0 is as good a choice as any
-        send_channel = channel if channel != 255 else 0
 
         self._worker.submit_program_change(
-            part_index, program_index, program_name, send_channel
+            part_index, program_index, program_name, channel
         )
 
     def _add_keygroup_row(self, index, lo, hi):
