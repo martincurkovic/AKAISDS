@@ -29,6 +29,7 @@ class FakeBridge:
         self.multipart_channels = list(range(MULTI_PART_COUNT))
         self.multipart_levels = [60 + i for i in range(MULTI_PART_COUNT)]
         self.multipart_pans = [i - 8 for i in range(MULTI_PART_COUNT)]
+        self.multi_name = "DEMO MULTI"
         self.set_parameter_calls = []
 
     def sample_list(self):
@@ -49,6 +50,9 @@ class FakeBridge:
 
     def set_parameter(self, param, program_index, value, *, keygroup=0):
         self.set_parameter_calls.append((param.name, program_index, value, keygroup))
+        if param.region == "multi" and param.name == "MULTINAME":
+            self.multi_name = value
+            return
         # PMCHAN/PANPOS exist in both the "program" and "multipart" regions
         # (see program_editor_window.py's midi_channel_combo/pan_knob vs.
         # this multipart bookkeeping) - keyed on region too so a program-level
@@ -63,6 +67,8 @@ class FakeBridge:
             self.multipart_pans[program_index] = value
 
     def get_parameter(self, param, program_index, keygroup=0, **kwargs):
+        if param.region == "multi" and param.name == "MULTINAME":
+            return self.multi_name
         if param.name == "PANPOS":
             return self._pan[program_index]
         if param.name == "PRLOUD":
@@ -597,6 +603,36 @@ def test_multi_parts_loaded_populates_combos_from_hardware(editor, qapp):
     assert editor._multi_pan_knobs[1].value() == -7
     assert editor._multi_program_combos[1].currentText() == "EPiano warm"
     assert editor._multi_channel_combos[1].currentData() == 1
+
+
+def test_multi_name_loads_from_hardware(editor, qapp):
+    _wait_for_multi_parts_load(editor, qapp)
+
+    assert editor.multi_name_edit.text() == "DEMO MULTI"
+
+
+def test_typing_a_multi_name_uppercases_live(editor, qapp):
+    _wait_for_multi_parts_load(editor, qapp)
+
+    editor._on_multi_name_typed("my multi")
+
+    assert editor.multi_name_edit.text() == "MY MULTI"
+
+
+def test_committing_a_multi_name_writes_multiname_with_unused_index(editor, qapp):
+    # MULTINAME's item index is unused/reserved (only one resident multi) -
+    # index=0 here is a placeholder, not a real per-multi target
+    _wait_for_multi_parts_load(editor, qapp)
+    bridge = editor._bridge
+
+    editor.multi_name_edit.setText("NEW MULTI  ")  # trailing spaces typable
+    editor._commit_multi_name()
+    editor._worker.wait_until_idle()
+    _pump_until(qapp, lambda: bridge.set_parameter_calls)
+
+    assert bridge.set_parameter_calls[-1] == ("MULTINAME", 0, "NEW MULTI", 0)
+    assert editor.multi_name_edit.text() == "NEW MULTI"
+    assert bridge.multi_name == "NEW MULTI"
 
 
 def test_selecting_a_multi_part_program_targets_the_right_program_index(editor, qapp):

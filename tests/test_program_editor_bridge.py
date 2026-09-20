@@ -415,11 +415,12 @@ def test_worker_writes_are_never_coalesced():
 
 
 class _MultiPartsFakeBridge:
-    def __init__(self, parts=None, error=None):
+    def __init__(self, parts=None, error=None, multi_name="DEMO MULTI"):
         # parts: list of (name, channel, level, pan) tuples, one per part,
         # in order
         self._parts = parts
         self._error = error
+        self._multi_name = multi_name
 
     def get_header(self, region, index, **kwargs):
         if self._error:
@@ -427,6 +428,12 @@ class _MultiPartsFakeBridge:
         assert region == "multipart"
         name, channel, level, pan = self._parts[index]
         return {"PRNAME": name, "PMCHAN": channel, "STEREO": level, "PANPOS": pan}
+
+    def get_parameter(self, param, _index, **kwargs):
+        if self._error:
+            raise self._error
+        assert (param.region, param.name) == ("multi", "MULTINAME")
+        return self._multi_name
 
 
 def test_worker_reads_all_sixteen_parts_in_order():
@@ -454,6 +461,20 @@ def test_worker_strips_padded_program_names():
     worker.process_pending()
 
     assert loaded[0][0] == ("BASS ROUND", 0, 99, 0)
+
+
+def test_worker_emits_multi_name_loaded_alongside_parts():
+    parts = [(f"Program {i}", i, 99, 0) for i in range(MULTI_PART_COUNT)]
+    worker = BridgeWorker(
+        _MultiPartsFakeBridge(parts=parts, multi_name="MY MULTI   ")  # padded
+    )
+    names = []
+    worker.multi_name_loaded.connect(names.append)
+
+    worker.submit_multi_parts()
+    worker.process_pending()
+
+    assert names == ["MY MULTI"]  # .strip()'d, same as PRNAME above
 
 
 def test_worker_emits_multi_parts_load_failed_on_error():
