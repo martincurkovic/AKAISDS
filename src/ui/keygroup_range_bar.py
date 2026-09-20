@@ -8,6 +8,14 @@ _SEGMENT_GAP = 2  # px of surface-color gap separating touching segments
 _CORNER_RADIUS = 3
 
 
+def keygroup_color(index):
+    # shared with the keygroup list rows (program_editor_window.py) so a
+    # keygroup's swatch always matches its segment on the bar
+    palette = theme.current_palette()
+    colors = [palette[f"keygroup_color_{n}"] for n in range(1, 9)]
+    return QColor(colors[index % len(colors)])
+
+
 class KeygroupRangeBar(QWidget):
     # Horizontal strip showing where each keygroup's note range sits across
     # the full keyboard, one colored segment per keygroup in order - mirrors
@@ -26,11 +34,6 @@ class KeygroupRangeBar(QWidget):
     def set_ranges(self, ranges):
         self._ranges = list(ranges)
         self.update()
-
-    def _color_for_index(self, index):
-        palette = theme.current_palette()
-        colors = [palette[f"keygroup_color_{n}"] for n in range(1, 9)]
-        return QColor(colors[index % len(colors)])
 
     def paintEvent(self, event):
         painter = QPainter(self)
@@ -64,4 +67,4 @@ class KeygroupRangeBar(QWidget):
                 max(0.0, (x_end - x_start) - _SEGMENT_GAP),
                 rect.height(),
             )
-            painter.fillRect(seg_rect, self._color_for_index(index))
+            painter.fillRect(seg_rect, keygroup_color(index))

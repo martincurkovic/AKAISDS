@@ -11,6 +11,7 @@ from PySide6.QtGui import Qt
 from PySide6.QtWidgets import (
     QHBoxLayout,
     QListWidget,
+    QListWidgetItem,
     QMainWindow,
     QLabel,
     QPushButton,
@@ -26,7 +27,7 @@ from PySide6.QtWidgets import (
 from ui.knob import Knob
 from ui.note_spinbox import NoteSpinBox
 from ui.envelope_graph import ADSREnvelopeGraph, Envelope2Graph
-from ui.keygroup_range_bar import KeygroupRangeBar
+from ui.keygroup_range_bar import KeygroupRangeBar, keygroup_color
 from core.midi_notes import midi_note_to_name
 from core.program_editor_bridge import (
     KeygroupLoader,
@@ -499,12 +500,8 @@ class ProgramEditorWindow(QMainWindow):
         # ignore result for program the user has already clicked away from
         if program_index != self.program_list.currentRow():
             return
-        self.keygroup_list.addItems(
-            [
-                f"Keygroup {i + 1}: {midi_note_to_name(lo)} - {midi_note_to_name(hi)}"
-                for i, (lo, hi) in enumerate(keygroup_ranges)
-            ]
-        )
+        for i, (lo, hi) in enumerate(keygroup_ranges):
+            self._add_keygroup_row(i, lo, hi)
         self._keygroup_ranges = [list(r) for r in keygroup_ranges]
         self.keygroup_range_bar.set_ranges(self._keygroup_ranges)
         self.pan_knob.setValue(program_values["PANPOS"])
@@ -635,6 +632,35 @@ class ProgramEditorWindow(QMainWindow):
 
         return column
 
+    def _add_keygroup_row(self, index, lo, hi):
+        # colored swatch + range text, same row-widget approach as the
+        # dashboard's queue/hardware panels - keeps each row's identity tied
+        # to its keygroup_range_bar segment (same color, same order) rather
+        # than color alone
+        item = QListWidgetItem(self.keygroup_list)
+
+        row_widget = QWidget()
+        row_widget.setStyleSheet("background: transparent;")
+        row_layout = QHBoxLayout(row_widget)
+        row_layout.setContentsMargins(8, 6, 8, 6)
+        row_layout.setSpacing(8)
+
+        swatch = QLabel()
+        swatch.setFixedSize(10, 10)
+        swatch.setStyleSheet(
+            f"background-color: {keygroup_color(index).name()}; border-radius: 2px;"
+        )
+        row_layout.addWidget(swatch)
+
+        label = QLabel(
+            f"Keygroup {index + 1}: {midi_note_to_name(lo)} - {midi_note_to_name(hi)}"
+        )
+        label.setObjectName("keygroupRangeLabel")
+        row_layout.addWidget(label, stretch=1)
+
+        item.setSizeHint(row_widget.sizeHint())
+        self.keygroup_list.setItemWidget(item, row_widget)
+
     def _tune_offset_to_semitones(self, raw_value):
         return round(raw_value / 2.56) / 100
 
@@ -687,7 +713,10 @@ class ProgramEditorWindow(QMainWindow):
         index = self.keygroup_list.currentRow()
         lo = self.note_lo_spinbox.value()
         hi = self.note_hi_spinbox.value()
-        item.setText(f"Keygroup {index + 1}: {midi_note_to_name(lo)} - {midi_note_to_name(hi)}")
+        row_widget = self.keygroup_list.itemWidget(item)
+        row_widget.findChild(QLabel, "keygroupRangeLabel").setText(
+            f"Keygroup {index + 1}: {midi_note_to_name(lo)} - {midi_note_to_name(hi)}"
+        )
         self._keygroup_ranges[index] = [lo, hi]
         self.keygroup_range_bar.set_ranges(self._keygroup_ranges)
 
