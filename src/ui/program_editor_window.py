@@ -29,6 +29,7 @@ from PySide6.QtWidgets import (
 )
 from ui.knob import Knob
 from ui.note_spinbox import NoteSpinBox
+from ui.qt_helpers import FullWidthTabBar
 from ui.envelope_graph import ADSREnvelopeGraph, Envelope2Graph
 from ui.keygroup_range_bar import KeygroupRangeBar, keygroup_color
 from core.midi_notes import midi_note_to_name
@@ -441,17 +442,22 @@ class ProgramEditorWindow(QMainWindow):
             "LFO delay", self.lfo_delay_knob
         )
 
-        self.polyph_spinbox = QSpinBox()
-        self.polyph_spinbox.setRange(1, 32)
-        self.polyph_spinbox.setEnabled(True)
-        self._wire_spinbox_write(self.polyph_spinbox, "POLYPH", "program")
+        self.polyph_combo = QComboBox()
+        for voices in range(1, 33):  # 1-32 voices - the sampler's full range
+            self.polyph_combo.addItem(str(voices), voices)
+        self.polyph_combo.setEnabled(True)
+        self.polyph_combo.currentIndexChanged.connect(
+            lambda i: self._schedule_write(
+                "POLYPH", "program", self.polyph_combo.itemData(i)
+            )
+        )
         polyph_label = QLabel("Polyphony")
         polyph_label.setAlignment(Qt.AlignmentFlag.AlignHCenter)
 
         polyph_column = QVBoxLayout()
         polyph_column.setSpacing(4)
         polyph_column.addWidget(polyph_label, alignment=Qt.AlignmentFlag.AlignHCenter)
-        polyph_column.addWidget(self.polyph_spinbox)
+        polyph_column.addWidget(self.polyph_combo)
 
         # row 1: Pan, LFO rate, LFO depth
         program_knobs_row1 = QHBoxLayout()
@@ -467,7 +473,7 @@ class ProgramEditorWindow(QMainWindow):
 
         # row 3: LFO shape and Polyphony side by side, constrained width
         self.lfo_shape_combo.setMaximumWidth(180)
-        self.polyph_spinbox.setMaximumWidth(80)
+        self.polyph_combo.setMaximumWidth(80)
         program_controls_row = QHBoxLayout()
         program_controls_row.addLayout(lfo_shape_column)
         program_controls_row.addLayout(polyph_column)
@@ -506,6 +512,9 @@ class ProgramEditorWindow(QMainWindow):
         multis_tab_page = self._build_multis_tab()
 
         self.main_tabs = QTabWidget()
+        # same full-width tab bar as the MIDI Settings dialog - must be
+        # installed before any tabs are added, or they'd be dropped
+        self.main_tabs.setTabBar(FullWidthTabBar(self.main_tabs))
         self.main_tabs.addTab(multis_tab_page, "Multis")
         self.main_tabs.addTab(programs_tab_page, "Programs")
 
@@ -757,9 +766,11 @@ class ProgramEditorWindow(QMainWindow):
         self.lfo_shape_combo.blockSignals(True)
         self.lfo_shape_combo.setCurrentIndex(program_values["LFO1WAVE"])
         self.lfo_shape_combo.blockSignals(False)
-        self.polyph_spinbox.blockSignals(True)
-        self.polyph_spinbox.setValue(program_values["POLYPH"])
-        self.polyph_spinbox.blockSignals(False)
+        self.polyph_combo.blockSignals(True)
+        self.polyph_combo.setCurrentIndex(
+            self.polyph_combo.findData(program_values["POLYPH"])
+        )
+        self.polyph_combo.blockSignals(False)
 
         # only ever set by _refresh_from_hardware() - restores whatever the
         # user was looking at before the refresh (a plain program selection
