@@ -650,24 +650,57 @@ class ProgramEditorWindow(QMainWindow):
             knob.setEnabled(True)
 
     def _on_programs_loaded(self, programs):
+        # also reached on every Refresh (see _refresh_from_hardware), not
+        # just the initial load - is_refresh distinguishes the two so a
+        # program created/renamed/deleted on the hardware since the editor
+        # opened actually shows up rather than only appearing after the
+        # window is closed and reopened
+        previous_program = (
+            self.program_list.currentItem().text()
+            if self.program_list.currentItem()
+            else None
+        )
+        is_refresh = self.program_list.count() > 0
+
+        self.program_list.blockSignals(True)
+        self.program_list.clear()
         self.program_list.addItems(programs)
+        self.program_list.blockSignals(False)
+
         self._worker.submit_sample_list()
 
         # a part can only be assigned a program that actually exists -
-        # populate all 16 combos with the same name list now that it's in.
-        # Blank first item (same convention as the zone sample combo) is
-        # also the default - deliberately not preselecting a real program
-        # here, since these combos stay disabled for now (see their
-        # tooltip) and there is no working "no program assigned" state to
-        # reflect yet either
+        # repopulate all 16 combos with the current name list. Blank first
+        # item (same convention as the zone sample combo) is the default;
+        # on a refresh, each part's existing selection is kept if that
+        # program still exists under the same name
         for combo in self._multi_program_combos:
+            previous_selection = combo.currentText()
             combo.blockSignals(True)
             combo.clear()
             combo.addItem("-")
             combo.addItems(programs)
-            combo.setCurrentIndex(0)
+            match = combo.findText(previous_selection) if is_refresh else -1
+            combo.setCurrentIndex(match if match >= 0 else 0)
             combo.blockSignals(False)
-        self._refresh_multi_parts()
+
+        if is_refresh:
+            # restore whichever program was selected before the refresh
+            # (falling back to the first one if it was renamed/deleted)
+            # rather than resetting to the top of the list every time
+            match = (
+                self.program_list.findItems(previous_program, Qt.MatchFlag.MatchExactly)
+                if previous_program is not None
+                else []
+            )
+            self.program_list.setCurrentItem(match[0] if match else self.program_list.item(0))
+        else:
+            # first load only - _on_samples_loaded selects row 0 once
+            # samples finish loading, which is what actually starts the
+            # first keygroup load; refresh reloads reach _refresh_multi_parts
+            # separately, from _refresh_from_hardware, so its "Multi parts
+            # refreshed" confirmation flag isn't clobbered by this handler
+            self._refresh_multi_parts()
 
     def _on_program_load_failed(self, error_message):
         self.status_bar.showMessage(f"Couldn't load programs: {error_message}")
@@ -677,12 +710,22 @@ class ProgramEditorWindow(QMainWindow):
         self._worker.submit_multi_parts()
 
     def _on_multi_parts_loaded(self, parts):
-        # the read itself still works and stays wired up (Refresh still
-        # calls this), but its result is deliberately unused for now: the
-        # Multis tab's combos are disabled with fixed defaults (blank
-        # program, channel == part number) rather than reflecting hardware
-        # state, since editing them doesn't work reliably yet - see
-        # program_combo's tooltip in _build_multis_tab()
+        # blockSignals during every one of these hardware-loaded setting
+        # calls - currentIndexChanged is wired to write the value straight
+        # back to hardware (see _on_multi_part_program_changed/
+        # _on_multi_part_channel_changed), and an unblocked call here would
+        # schedule a write that just echoes the just-loaded value back
+        for part_index, (program_name, channel) in enumerate(parts):
+            program_combo = self._multi_program_combos[part_index]
+            program_combo.blockSignals(True)
+            match = program_combo.findText(program_name) if program_name else -1
+            program_combo.setCurrentIndex(match if match >= 0 else 0)
+            program_combo.blockSignals(False)
+
+            channel_combo = self._multi_channel_combos[part_index]
+            channel_combo.blockSignals(True)
+            channel_combo.setCurrentIndex(channel_combo.findData(channel))
+            channel_combo.blockSignals(False)
 
         if self._multi_refresh_in_progress:
             self._multi_refresh_in_progress = False
@@ -699,7 +742,11 @@ class ProgramEditorWindow(QMainWindow):
         # window showing stale values. Restores whatever the user was
         # looking at (which keygroup, which zone tab, program vs keygroup
         # page) rather than resetting the view. Also always refreshes the
-        # Multis tab's 16 parts, independent of program selection.
+        # program list itself (a program created/renamed/deleted on the
+        # hardware since the editor opened used to only show up after
+        # closing and reopening the window) and the Multis tab's 16 parts,
+        # independent of program selection.
+        self._worker.submit_program_list()
         self._refresh_multi_parts(show_confirmation=True)
 
         program_index = self.program_list.currentRow()
@@ -968,26 +1015,19 @@ class ProgramEditorWindow(QMainWindow):
             part_label.setFixedWidth(60)
 
             program_combo = QComboBox()
-            # disabled for now - real-hardware testing surfaced errors
-            # editing multis, so this is display-only until that's sorted
-            # out. Populated once the program list loads (a part can only
-            # be assigned a program that actually exists on the sampler).
-            program_combo.setEnabled(False)
-            program_combo.setToolTip(
-                "Program assignment isn't working reliably against real "
-                "hardware yet - re-enabled once that's sorted out"
-            )
+            # populated once the program list loads (a part can only be
+            # assigned a program that actually exists on the sampler);
+            # real value comes from _on_multi_parts_loaded once the
+            # hardware read completes
 
             channel_combo = QComboBox()
             channel_combo.addItem("OMNI", 255)
             for channel in range(16):
                 channel_combo.addItem(str(channel + 1), channel)
             channel_combo.setFixedWidth(90)
-            # part N defaults to channel N until real per-part MIDI channel
-            # editing is re-enabled (see program_combo's tooltip above)
+            # part N defaults to channel N until the hardware read in
+            # _on_multi_parts_loaded overwrites it with the real value
             channel_combo.setCurrentIndex(channel_combo.findData(part_index))
-            channel_combo.setEnabled(False)
-            channel_combo.setToolTip(program_combo.toolTip())
 
             row.addWidget(part_label)
             row.addWidget(program_combo, stretch=1)
@@ -1019,9 +1059,12 @@ class ProgramEditorWindow(QMainWindow):
             debounce_key=f"multipart_channel_{part_index}",
         )
 
-    def _on_multi_part_program_changed(self, part_index, program_index):
-        if program_index < 0:
-            return  # combo cleared/reset, not a real user selection
+    def _on_multi_part_program_changed(self, part_index, combo_index):
+        if combo_index <= 0:
+            return  # blank "-" placeholder selected/reset, not a real program
+        # combo index 0 is the blank placeholder (see _build_multis_tab),
+        # so the actual program_list position is one less than combo_index
+        program_index = combo_index - 1
         program_name = self._multi_program_combos[part_index].currentText()
         channel = self._multi_channel_combos[part_index].currentData()
         # OMNI isn't a real wire value a Program Change can target - the

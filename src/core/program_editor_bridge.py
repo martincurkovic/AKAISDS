@@ -211,6 +211,18 @@ class BridgeWorker(QThread):
         self._queue = deque()
         self._busy = False
         self._stopped = False
+        # PRGNUM (a program's own MIDI program number, independent of its
+        # position in the program list) is what a Program Change actually
+        # addresses - and it is NOT guaranteed unique: freshly created or
+        # independently-loaded programs commonly all read 0, in which case
+        # every part assigned any of them plays whichever one the hardware
+        # happens to associate with that number, regardless of which was
+        # picked. renumber_programs() (see s3k.bridge.S3kBridge) gives every
+        # resident program a distinct number in list order and needs no
+        # follow-up BTSORT for that - see its own docstring. Invalidated
+        # whenever the program list reloads, since a newly created/loaded
+        # program may not carry a number distinct from the rest.
+        self._programs_renumbered = False
 
     def _submit(self, job):
         with self._idle:
@@ -299,6 +311,10 @@ class BridgeWorker(QThread):
         except Exception as e:
             self.programs_load_failed.emit(str(e))
             return
+        # the roster may have changed (a program created/renamed/deleted on
+        # the hardware) - PRGNUM uniqueness isn't guaranteed for whatever's
+        # newly resident, so the next program change re-establishes it
+        self._programs_renumbered = False
         self.programs_loaded.emit(programs)
 
     def _handle_sample_list(self):
@@ -403,6 +419,15 @@ class BridgeWorker(QThread):
             self.change_sent.emit(part_index, program_name)
             return
         try:
+            if not self._programs_renumbered:
+                # see the comment on _programs_renumbered in __init__ - this
+                # is what actually fixes "picking the Nth program always
+                # sends the Program Change for the 1st": every program gets
+                # its own distinct number before the first change is sent
+                renumber = getattr(self._bridge, "renumber_programs", None)
+                if renumber is not None:
+                    renumber()
+                self._programs_renumbered = True
             program_number = self._bridge.get_parameter(
                 p.lookup("PRGNUM", "program"), program_index
             )
