@@ -6,6 +6,44 @@ SUSTAIN_HOLD_FRACTION = 0.15  # sustain is a LEVEL, not a duration - this
 # reserves a fixed-width segment to show it
 
 
+def _adsr_points(attack, decay, sustain, release, w, h):
+    # attack/decay/release are 0-99 "speed" values with no confirmed
+    # real-world millisecond mapping - this shows relative SHAPE only,
+    # not calibrated timing. Returns plain (x, y) tuples, in draw order,
+    # rather than QPointF - kept independent of Qt so it can be unit
+    # tested without a QApplication.
+    time_total = attack + decay + release
+    if time_total == 0:
+        time_total = 1
+
+    attack_frac = (attack / time_total) * (1 - SUSTAIN_HOLD_FRACTION)
+    decay_frac = (decay / time_total) * (1 - SUSTAIN_HOLD_FRACTION)
+    release_frac = (release / time_total) * (1 - SUSTAIN_HOLD_FRACTION)
+    sustain_height_frac = sustain / 99
+
+    x0, y0 = 0, h
+    x1, y1 = attack_frac * w, 0
+    x2, y2 = x1 + decay_frac * w, h - (sustain_height_frac * h)
+    x3, y3 = x2 + SUSTAIN_HOLD_FRACTION * w, y2
+    x4, y4 = x3 + release_frac * w, h
+
+    return [(x0, y0), (x1, y1), (x2, y2), (x3, y3), (x4, y4)]
+
+
+def _env2_points(stages, w, h):
+    # stages: [(rate, level), ...] in order - see Envelope2Graph's own
+    # comment for why this can't reuse _adsr_points. Returns plain (x, y)
+    # tuples, same reasoning as _adsr_points above.
+    total_rate = sum(rate for rate, _level in stages) or 1
+    points = [(0, h)]  # starts at silence
+    x = 0
+    for rate, level in stages:
+        x += (rate / total_rate) * w
+        y = h - (level / 99) * h
+        points.append((x, y))
+    return points
+
+
 class ADSREnvelopeGraph(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -26,35 +64,13 @@ class ADSREnvelopeGraph(QWidget):
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         w, h = self.width(), self.height()
 
-        # attack/decay/release are 0-99 "speed" values with no confirmed
-        # real-world millisecond mapping - this shows relative SHAPE only,
-        # not calibrated timing
-        time_total = self._attack + self._decay + self._release
-        if time_total == 0:
-            time_total = 1
-
-        attack_frac = (self._attack / time_total) * (1 - SUSTAIN_HOLD_FRACTION)
-        decay_frac = (self._decay / time_total) * (1 - SUSTAIN_HOLD_FRACTION)
-        release_frac = (self._release / time_total) * (1 - SUSTAIN_HOLD_FRACTION)
-        sustain_height_frac = self._sustain / 99
-
-        x0, y0 = 0, h
-        x1, y1 = attack_frac * w, 0
-        x2, y2 = x1 + decay_frac * w, h - (sustain_height_frac * h)
-        x3, y3 = x2 + SUSTAIN_HOLD_FRACTION * w, y2
-        x4, y4 = x3 + release_frac * w, h
-
-        points = [
-            QPointF(x0, y0),
-            QPointF(x1, y1),
-            QPointF(x2, y2),
-            QPointF(x3, y3),
-            QPointF(x4, y4),
-        ]
+        points = _adsr_points(
+            self._attack, self._decay, self._sustain, self._release, w, h
+        )
         pen = QPen(QColor("#3aa88a"))
         pen.setWidth(2)
         painter.setPen(pen)
-        painter.drawPolyline(QPolygonF(points))
+        painter.drawPolyline(QPolygonF([QPointF(x, y) for x, y in points]))
 
 
 class Envelope2Graph(QWidget):
@@ -81,15 +97,8 @@ class Envelope2Graph(QWidget):
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         w, h = self.width(), self.height()
 
-        total_rate = sum(r for r, l in self._stages) or 1
-        points = [QPointF(0, h)]  # starts at silence
-        x = 0
-        for rate, level in self._stages:
-            x += (rate / total_rate) * w
-            y = h - (level / 99) * h
-            points.append(QPointF(x, y))
-
+        points = _env2_points(self._stages, w, h)
         pen = QPen(QColor("#d97757"))
         pen.setWidth(2)
         painter.setPen(pen)
-        painter.drawPolyline(QPolygonF(points))
+        painter.drawPolyline(QPolygonF([QPointF(x, y) for x, y in points]))
