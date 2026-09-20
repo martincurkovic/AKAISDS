@@ -16,7 +16,8 @@ def _note_name_to_midi(text):
         return None
     letter, sharp, octave = match.groups()
     semitone = _NOTE_TO_SEMITONE[letter.upper()] + (1 if sharp else 0)
-    return semitone + (int(octave) + 1) * 12
+    # inverse of midi_notes.midi_note_to_name's octave offset - keep in sync
+    return semitone + (int(octave) + 2) * 12
 
 
 class NoteSpinBox(QSpinBox):
