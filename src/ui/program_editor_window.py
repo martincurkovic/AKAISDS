@@ -491,6 +491,72 @@ class ProgramEditorWindow(QMainWindow):
         polyph_column.addWidget(polyph_label, alignment=Qt.AlignmentFlag.AlignHCenter)
         polyph_column.addWidget(self.polyph_combo)
 
+        self.note_priority_combo = QComboBox()
+        # index doubles as the raw PRIORT byte (0=low, 1=norm, 2=high,
+        # 3=hold) - same "combo index is the value" convention as
+        # lfo_shape_combo/LFO1WAVE above, no itemData needed
+        self.note_priority_combo.addItems(["Low", "Normal", "High", "Hold"])
+        self.note_priority_combo.setEnabled(True)
+        self.note_priority_combo.currentIndexChanged.connect(
+            lambda i: self._schedule_write("PRIORT", "program", i)
+        )
+        note_priority_label = QLabel("Note priority")
+        note_priority_label.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+
+        note_priority_column = QVBoxLayout()
+        note_priority_column.setSpacing(4)
+        note_priority_column.addWidget(
+            note_priority_label, alignment=Qt.AlignmentFlag.AlignHCenter
+        )
+        note_priority_column.addWidget(self.note_priority_combo)
+
+        self.midi_channel_combo = QComboBox()
+        for channel in range(16):  # stored 0-15, panel shows channel 1-16
+            self.midi_channel_combo.addItem(str(channel + 1), channel)
+        # unlike the Multis tab's per-part PMCHAN (see _build_multis_tab -
+        # that one is deliberately Omni-less because hardware measurement
+        # showed values above 15 just clamp to Ch16 there), the program's
+        # own PMCHAN has no such measured contradiction - s3k.params documents
+        # 255 as a real OMNI sentinel for this region, so it's offered here
+        self.midi_channel_combo.addItem("Omni", 255)
+        self.midi_channel_combo.setEnabled(True)
+        self.midi_channel_combo.currentIndexChanged.connect(
+            lambda i: self._schedule_write(
+                "PMCHAN", "program", self.midi_channel_combo.itemData(i)
+            )
+        )
+        midi_channel_label = QLabel("MIDI channel")
+        midi_channel_label.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+
+        midi_channel_column = QVBoxLayout()
+        midi_channel_column.setSpacing(4)
+        midi_channel_column.addWidget(
+            midi_channel_label, alignment=Qt.AlignmentFlag.AlignHCenter
+        )
+        midi_channel_column.addWidget(self.midi_channel_combo)
+
+        # same encoding as the keygroup zone's Tune spinbox (see VTUNO
+        # above): raw units are 1/256 semitone, 2.56 raw units per cent -
+        # _semitones_to_tune_offset/_tune_offset_to_semitones do the
+        # conversion for both
+        self.program_tune_spinbox = QDoubleSpinBox()
+        self.program_tune_spinbox.setRange(-50.0, 50.0)
+        self.program_tune_spinbox.setSingleStep(0.01)
+        self.program_tune_spinbox.setDecimals(2)
+        self.program_tune_spinbox.setSuffix(" st")
+        self.program_tune_spinbox.setFixedWidth(90)
+        program_tune_label = QLabel("Tune")
+        program_tune_label.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+
+        program_tune_column = QVBoxLayout()
+        program_tune_column.setSpacing(4)
+        program_tune_column.addWidget(
+            program_tune_label, alignment=Qt.AlignmentFlag.AlignHCenter
+        )
+        program_tune_column.addWidget(
+            self.program_tune_spinbox, alignment=Qt.AlignmentFlag.AlignHCenter
+        )
+
         # row 1: Pan, LFO rate, LFO depth
         program_knobs_row1 = QHBoxLayout()
         program_knobs_row1.addLayout(pan_column)
@@ -503,13 +569,23 @@ class ProgramEditorWindow(QMainWindow):
         program_knobs_row2.addLayout(lfo_delay_column)
         program_knobs_row2.addStretch()
 
-        # row 3: LFO shape and Polyphony side by side, constrained width
+        # row 3: LFO shape, Polyphony and Note priority side by side,
+        # constrained width
         self.lfo_shape_combo.setMaximumWidth(180)
         self.polyph_combo.setMaximumWidth(80)
+        self.note_priority_combo.setMaximumWidth(90)
         program_controls_row = QHBoxLayout()
         program_controls_row.addLayout(lfo_shape_column)
         program_controls_row.addLayout(polyph_column)
+        program_controls_row.addLayout(note_priority_column)
         program_controls_row.addStretch()
+
+        # row 4: MIDI channel and Tune side by side, constrained width
+        self.midi_channel_combo.setMaximumWidth(80)
+        program_midi_row = QHBoxLayout()
+        program_midi_row.addLayout(midi_channel_column)
+        program_midi_row.addLayout(program_tune_column)
+        program_midi_row.addStretch()
 
         program_page = QWidget()
         program_page_layout = QVBoxLayout()
@@ -517,6 +593,7 @@ class ProgramEditorWindow(QMainWindow):
         program_page_layout.addLayout(program_knobs_row1)
         program_page_layout.addLayout(program_knobs_row2)
         program_page_layout.addLayout(program_controls_row)
+        program_page_layout.addLayout(program_midi_row)
         program_page_layout.addStretch()
         program_page.setLayout(program_page_layout)
 
@@ -639,6 +716,13 @@ class ProgramEditorWindow(QMainWindow):
         self._wire_knob_write(self.lfo_depth_knob, "LFODEP", "program")
         self.lfo_delay_knob.setEnabled(True)
         self._wire_knob_write(self.lfo_delay_knob, "LFODEL", "program")
+        self.program_tune_spinbox.setEnabled(True)
+        self._wire_spinbox_write(
+            self.program_tune_spinbox,
+            "PTUNO",
+            "program",
+            value_converter=self._semitones_to_tune_offset,
+        )
         for knob in (
             self.attack1_knob,
             self.decay1_knob,
@@ -817,6 +901,19 @@ class ProgramEditorWindow(QMainWindow):
             self.polyph_combo.findData(program_values["POLYPH"])
         )
         self.polyph_combo.blockSignals(False)
+        self.note_priority_combo.blockSignals(True)
+        self.note_priority_combo.setCurrentIndex(program_values["PRIORT"])
+        self.note_priority_combo.blockSignals(False)
+        self.midi_channel_combo.blockSignals(True)
+        self.midi_channel_combo.setCurrentIndex(
+            self.midi_channel_combo.findData(program_values["PMCHAN"])
+        )
+        self.midi_channel_combo.blockSignals(False)
+        self.program_tune_spinbox.blockSignals(True)
+        self.program_tune_spinbox.setValue(
+            self._tune_offset_to_semitones(program_values["PTUNO"])
+        )
+        self.program_tune_spinbox.blockSignals(False)
 
         # only ever set by _refresh_from_hardware() - restores whatever the
         # user was looking at before the refresh (a plain program selection

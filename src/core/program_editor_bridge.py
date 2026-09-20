@@ -347,6 +347,15 @@ class BridgeWorker(QThread):
                 "POLYPH": self._bridge.get_parameter(
                     p.lookup("POLYPH", "program"), program_index
                 ),
+                "PMCHAN": self._bridge.get_parameter(
+                    p.lookup("PMCHAN", "program"), program_index
+                ),
+                "PTUNO": self._bridge.get_parameter(
+                    p.lookup("PTUNO", "program"), program_index
+                ),
+                "PRIORT": self._bridge.get_parameter(
+                    p.lookup("PRIORT", "program"), program_index
+                ),
             }
             # read the real keygroup count off the program header rather than
             # probing until an out-of-range read fails: the real bridge signals
