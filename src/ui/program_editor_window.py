@@ -281,18 +281,25 @@ class ProgramEditorWindow(QMainWindow):
         self.env2_graph = Envelope2Graph()
         self.env2_graph.setFixedSize(200, 90)
 
-        # ENV1 - a standard ADSR: one knob per stage, in a single row
+        # ENV1 - a standard ADSR: one knob per stage, in a single row.
+        # Defaults are the Akai factory-preset values (double-click a knob
+        # to reset to these), not the range midpoint Knob.defaultValue()
+        # would otherwise fall back to.
         self.attack1_knob = Knob()
         self.attack1_knob.setRange(0, 99)
+        self.attack1_knob.setDefaultValue(25)
         self.attack1_knob.setFixedSize(40, 40)
         self.decay1_knob = Knob()
         self.decay1_knob.setRange(0, 99)
+        self.decay1_knob.setDefaultValue(50)
         self.decay1_knob.setFixedSize(40, 40)
         self.sustain1_knob = Knob()
         self.sustain1_knob.setRange(0, 99)
+        self.sustain1_knob.setDefaultValue(99)
         self.sustain1_knob.setFixedSize(40, 40)
         self.release1_knob = Knob()
         self.release1_knob.setRange(0, 99)
+        self.release1_knob.setDefaultValue(45)
         self.release1_knob.setFixedSize(40, 40)
 
         attack1_col, self.attack1_value_label = self._build_knob_column(
@@ -339,12 +346,18 @@ class ProgramEditorWindow(QMainWindow):
         env2_rate_row.setSpacing(6)
         env2_level_row = QHBoxLayout()
         env2_level_row.setSpacing(6)
+        # Akai factory-preset values, one per stage (double-click a knob to
+        # reset to these) - same reasoning as ENV1's defaults above
+        _ENV2_RATE_DEFAULTS = [0, 50, 50, 45]
+        _ENV2_LEVEL_DEFAULTS = [99, 99, 99, 0]
         for i, (rate_knob, level_knob) in enumerate(
             zip(self._env2_rate_knobs, self._env2_level_knobs), start=1
         ):
             rate_knob.setRange(0, 99)
+            rate_knob.setDefaultValue(_ENV2_RATE_DEFAULTS[i - 1])
             rate_knob.setFixedSize(32, 32)
             level_knob.setRange(0, 99)
+            level_knob.setDefaultValue(_ENV2_LEVEL_DEFAULTS[i - 1])
             level_knob.setFixedSize(32, 32)
             rate_col, rate_value_label = self._build_knob_column(f"R{i}", rate_knob)
             level_col, level_value_label = self._build_knob_column(f"L{i}", level_knob)
