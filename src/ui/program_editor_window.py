@@ -24,6 +24,7 @@ from PySide6.QtWidgets import (
     QDoubleSpinBox,
     QButtonGroup,
     QSpinBox,
+    QStatusBar,
 )
 from ui.knob import Knob
 from ui.note_spinbox import NoteSpinBox
@@ -84,8 +85,6 @@ class ProgramEditorWindow(QMainWindow):
         keygroups_column.addWidget(self.keygroup_list)
         keygroups_container = QWidget()
         keygroups_container.setLayout(keygroups_column)
-
-        self.detail_label = QLabel("Select a keygroup")
 
         self.note_lo_spinbox = NoteSpinBox()
         self.note_hi_spinbox = NoteSpinBox()
@@ -388,7 +387,6 @@ class ProgramEditorWindow(QMainWindow):
         detail_container_layout.setSpacing(10)
         detail_container_layout.addLayout(note_range_row)
         detail_container_layout.addLayout(knobs_layout)
-        detail_container_layout.addWidget(self.detail_label)
         detail_container_layout.addLayout(envelopes_layout)
         detail_container_layout.addWidget(zone_card)
         detail_container_layout.addStretch()
@@ -518,6 +516,15 @@ class ProgramEditorWindow(QMainWindow):
         hardware_menu = self.menuBar().addMenu("&Hardware")
         hardware_menu.addAction(refresh_action)
 
+        # same idea as the dashboard's status bar (dashboard.py), but that's
+        # a plain QWidget so it builds its own QStatusBar into its layout -
+        # this window is a QMainWindow, which docks one below the central
+        # widget (bottom row included) natively, full width, for free
+        self.status_bar = QStatusBar()
+        self.status_bar.setSizeGripEnabled(False)
+        self.status_bar.showMessage("Select a keygroup")
+        self.setStatusBar(self.status_bar)
+
         self.program_list.currentItemChanged.connect(self._on_program_selected)
         self.program_list.itemClicked.connect(
             lambda item: self.detail_stack.setCurrentIndex(0)
@@ -575,12 +582,12 @@ class ProgramEditorWindow(QMainWindow):
         self._sample_loader = SampleListLoader(self._bridge)
         self._sample_loader.samples_loaded.connect(self._on_samples_loaded)
         self._sample_loader.load_failed.connect(
-            lambda e: self.detail_label.setText(f"Couldn't load samples: {e}")
+            lambda e: self.status_bar.showMessage(f"Couldn't load samples: {e}")
         )
         self._sample_loader.start()
 
     def _on_program_load_failed(self, error_message):
-        self.detail_label.setText(f"Couldn't load programs: {error_message}")
+        self.status_bar.showMessage(f"Couldn't load programs: {error_message}")
 
     def _refresh_from_hardware(self):
         # re-fetches the current program's keygroup list/ranges and
@@ -593,7 +600,7 @@ class ProgramEditorWindow(QMainWindow):
         if program_index < 0:
             return  # nothing loaded yet to refresh
 
-        self.detail_label.setText("Refreshing from hardware…")
+        self.status_bar.showMessage("Refreshing from hardware…")
         self._refresh_in_progress = True
         self._pending_restore_state = {
             "keygroup_index": self.keygroup_list.currentRow(),
@@ -616,7 +623,7 @@ class ProgramEditorWindow(QMainWindow):
         self.keygroup_list.clear()
         self._keygroup_ranges = []
         self.keygroup_range_bar.set_ranges([])
-        self.detail_label.setText("Select a keygroup")
+        self.status_bar.showMessage("Select a keygroup")
         self.detail_stack.setCurrentIndex(0)
         if current is None:
             return
@@ -693,14 +700,14 @@ class ProgramEditorWindow(QMainWindow):
 
         if self._refresh_in_progress:
             self._refresh_in_progress = False
-            self.detail_label.setText("Refreshed from hardware")
+            self.status_bar.showMessage("Refreshed from hardware")
 
     def _on_load_failed(self, program_index, error_message):
         self._refresh_in_progress = False
         self._pending_restore_state = None
         if program_index != self.program_list.currentRow():
             return
-        self.detail_label.setText(f"Couldn't load keygroups: {error_message}")
+        self.status_bar.showMessage(f"Couldn't load keygroups: {error_message}")
 
     def _on_keygroup_selected(self, current, previous):
         if current is None:
@@ -805,7 +812,7 @@ class ProgramEditorWindow(QMainWindow):
             program_index == self.program_list.currentRow()
             and keygroup_index == self.keygroup_list.currentRow()
         ):
-            self.detail_label.setText(f"Couldn't load detail: {error_message}")
+            self.status_bar.showMessage(f"Couldn't load detail: {error_message}")
 
     def closeEvent(self, event):
         # runs regardless of how the window closes (close button, command + w, etc)
@@ -962,10 +969,10 @@ class ProgramEditorWindow(QMainWindow):
             keygroup_index=keygroup_index,
         )
         writer.write_succeeded.connect(
-            lambda v: self.detail_label.setText(f"{param_name} → {v}")
+            lambda v: self.status_bar.showMessage(f"{param_name} → {v}")
         )
         writer.write_failed.connect(
-            lambda e: self.detail_label.setText(f"Write failed ({param_name}): {e}")
+            lambda e: self.status_bar.showMessage(f"Write failed ({param_name}): {e}")
         )
         # store writer per-param so it can't be garbage collected before the thread finishes
         self._active_writers[param_name] = writer
