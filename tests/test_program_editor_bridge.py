@@ -9,7 +9,9 @@ from core import program_editor_bridge
 from core.program_editor_bridge import (
     KeygroupDetailLoader,
     KeygroupLoader,
+    MultiPartsLoader,
     ParameterWriter,
+    ProgramChangeSender,
     ProgramListLoader,
     SampleListLoader,
 )
@@ -295,3 +297,173 @@ def test_parameter_writer_emits_write_failed_on_error():
 
     assert succeeded == []
     assert failed == ["out of range"]
+
+
+# --- MultiPartsLoader ----------------------------------------------------------
+
+
+class _MultiPartsFakeBridge:
+    def __init__(self, parts=None, error=None):
+        # parts: list of (name, channel) tuples, one per part, in order
+        self._parts = parts
+        self._error = error
+
+    def get_header(self, region, index, **kwargs):
+        if self._error:
+            raise self._error
+        assert region == "multipart"
+        name, channel = self._parts[index]
+        return {"PRNAME": name, "PMCHAN": channel}
+
+
+def test_multi_parts_loader_reads_all_sixteen_parts_in_order():
+    parts = [(f"Program {i}", i) for i in range(MultiPartsLoader.PART_COUNT)]
+    loader = MultiPartsLoader(_MultiPartsFakeBridge(parts=parts))
+    loaded = []
+    loader.parts_loaded.connect(loaded.append)
+
+    loader.run()
+
+    assert loaded == [parts]
+
+
+def test_multi_parts_loader_strips_padded_program_names():
+    # PRNAME is a fixed-width, space-padded text field on real hardware
+    parts = [("BASS ROUND   ", 0)] + [
+        ("X", i) for i in range(1, MultiPartsLoader.PART_COUNT)
+    ]
+    loader = MultiPartsLoader(_MultiPartsFakeBridge(parts=parts))
+    loaded = []
+    loader.parts_loaded.connect(loaded.append)
+
+    loader.run()
+
+    assert loaded[0][0] == ("BASS ROUND", 0)
+
+
+def test_multi_parts_loader_emits_load_failed_on_error():
+    loader = MultiPartsLoader(_MultiPartsFakeBridge(error=RuntimeError("no reply")))
+    failed = []
+    loader.load_failed.connect(failed.append)
+
+    loader.run()
+
+    assert failed == ["no reply"]
+
+
+# --- ProgramChangeSender --------------------------------------------------------
+
+
+class _NoOutBridge:
+    """Stands in for DemoBridge: no live MIDI connection to send anything on."""
+
+
+class _RecordingOut:
+    def __init__(self, error=None):
+        self.sent = []
+        self._error = error
+
+    def send_message(self, message):
+        if self._error:
+            raise self._error
+        self.sent.append(message)
+
+
+class _RealBridgeForProgramChange:
+    def __init__(self, prgnum, *, out_error=None, prgnum_error=None):
+        self.out = _RecordingOut(error=out_error)
+        self._prgnum = prgnum
+        self._prgnum_error = prgnum_error
+
+    def get_parameter(self, param, program_index, **kwargs):
+        if self._prgnum_error:
+            raise self._prgnum_error
+        assert param.name == "PRGNUM"
+        return self._prgnum
+
+
+def test_program_change_sender_noops_without_a_live_midi_connection():
+    # DemoBridge has no .out - nothing to send this on, but that's not a
+    # failure: the UI should still show it as "sent" in demo mode
+    bridge = _NoOutBridge()
+    sender = ProgramChangeSender(
+        bridge, part_index=2, program_index=0, program_name="Bass stab", channel=3
+    )
+    sent, failed = [], []
+    sender.change_sent.connect(lambda *a: sent.append(a))
+    sender.send_failed.connect(lambda *a: failed.append(a))
+
+    sender.run()
+
+    assert sent == [(2, "Bass stab")]
+    assert failed == []
+
+
+def test_program_change_sender_sends_the_programs_own_midi_program_number():
+    bridge = _RealBridgeForProgramChange(prgnum=42)
+    sender = ProgramChangeSender(
+        bridge, part_index=5, program_index=1, program_name="EPiano warm", channel=3
+    )
+    sent = []
+    sender.change_sent.connect(lambda *a: sent.append(a))
+
+    sender.run()
+
+    assert bridge.out.sent == [[0xC0 | 3, 42]]
+    assert sent == [(5, "EPiano warm")]
+
+
+def test_program_change_sender_uses_the_programs_own_number_not_its_list_index():
+    # PRGNUM is independently assignable per program - never assume it
+    # equals the program's position in the program list (program_index)
+    bridge = _RealBridgeForProgramChange(prgnum=99)
+    sender = ProgramChangeSender(
+        bridge, part_index=0, program_index=3, program_name="Whatever", channel=0
+    )
+
+    sender.run()
+
+    assert bridge.out.sent == [[0xC0, 99]]
+
+
+def test_program_change_sender_emits_send_failed_when_prgnum_cant_be_read():
+    bridge = _RealBridgeForProgramChange(
+        prgnum=0, prgnum_error=RuntimeError("device timed out")
+    )
+    sender = ProgramChangeSender(
+        bridge, part_index=4, program_index=0, program_name="X", channel=0
+    )
+    failed = []
+    sender.send_failed.connect(lambda *a: failed.append(a))
+
+    sender.run()
+
+    assert failed == [(4, "device timed out")]
+
+
+def test_program_change_sender_emits_send_failed_when_the_message_cant_be_sent():
+    bridge = _RealBridgeForProgramChange(prgnum=1, out_error=RuntimeError("port closed"))
+    sender = ProgramChangeSender(
+        bridge, part_index=6, program_index=0, program_name="X", channel=0
+    )
+    failed = []
+    sender.send_failed.connect(lambda *a: failed.append(a))
+
+    sender.run()
+
+    assert failed == [(6, "port closed")]
+
+
+def test_program_change_sender_masks_channel_and_program_to_valid_midi_ranges():
+    # a stray value outside 0-15/0-127 must never corrupt the MIDI byte
+    # stream - mask rather than trust the caller
+    bridge = _RealBridgeForProgramChange(prgnum=200)  # out of the 0-127 range
+    sender = ProgramChangeSender(
+        bridge, part_index=0, program_index=0, program_name="X", channel=20  # out of 0-15
+    )
+
+    sender.run()
+
+    status_byte, program_byte = bridge.out.sent[0]
+    assert status_byte == 0xC4  # 0xC0 | (20 & 0x0F)
+    assert program_byte == 72  # 200 & 0x7F
