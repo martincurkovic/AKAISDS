@@ -385,16 +385,14 @@ class ProgramEditorWindow(QMainWindow):
         env2_controls_column.addLayout(env2_rate_row)
         env2_controls_column.addLayout(env2_level_row)
 
-        env1_column = self._build_labeled_column(
-            "ENV1", self.env1_graph, extra_layout=env1_controls_row
-        )
-        env2_column = self._build_labeled_column(
-            "ENV2", self.env2_graph, extra_layout=env2_controls_column
-        )
-
-        envelopes_layout = QHBoxLayout()
-        envelopes_layout.addLayout(env1_column)
-        envelopes_layout.addLayout(env2_column)
+        env1_graph_row = QHBoxLayout()
+        env1_graph_row.addStretch()
+        env1_graph_row.addWidget(self.env1_graph)
+        env1_graph_row.addStretch()
+        env2_graph_row = QHBoxLayout()
+        env2_graph_row.addStretch()
+        env2_graph_row.addWidget(self.env2_graph)
+        env2_graph_row.addStretch()
 
         cutoff_column, self.cutoff_value_label = self._build_knob_column(
             "Cutoff", self.cutoff_knob
@@ -662,22 +660,42 @@ class ProgramEditorWindow(QMainWindow):
         zone_card.setLayout(zone_section)
 
         # same grouping principle as the Program tab: Range on its own,
-        # every filter control together, both envelope generators together,
-        # then the existing per-zone card
+        # every filter control together, then the existing per-zone card.
+        # ENV1 and ENV2 get their own cards rather than sharing one - they're
+        # independently meaningful generators (a genuine ADSR vs. ENV2's
+        # 4-stage rate/level shape, see Envelope2Graph's own comment), and a
+        # shared "Envelopes" title read as one thing when it's really two.
         range_section = self._build_section_card("Range", note_range_row)
         filter_section = self._build_section_card("Filter", knobs_layout)
-        envelopes_section = self._build_section_card("Envelopes", envelopes_layout)
+        env1_section = self._build_section_card(
+            "Envelope 1", env1_graph_row, env1_controls_row
+        )
+        env2_section = self._build_section_card(
+            "Envelope 2", env2_graph_row, env2_controls_column
+        )
 
         # Range is a single short row and Filter is comparable in height -
-        # side by side halves the vertical space these two cost together
+        # side by side halves the vertical space these two cost together.
+        # Same idea for the two envelope cards, which were side by side
+        # already as one card's two halves - now just two cards instead.
         range_filter_row = QHBoxLayout()
+        # 1:1, not the 2-for-Filter split this briefly had - measured
+        # sizeHints say Filter's own content (273px: 3 knobs) is actually
+        # narrower than Range's (299px: label + two note spinboxes), so the
+        # 2x weight was giving Filter more than its share and stretching it
+        # wider than Range needed to be. Matches every other paired row on
+        # this page (Volume/Pan/Velocity+LFO, Pitch+Voice&MIDI), which were
+        # never anything but 1:1.
         range_filter_row.addWidget(range_section, stretch=1)
-        range_filter_row.addWidget(filter_section, stretch=2)
+        range_filter_row.addWidget(filter_section, stretch=1)
+        envelopes_row = QHBoxLayout()
+        envelopes_row.addWidget(env1_section, stretch=1)
+        envelopes_row.addWidget(env2_section, stretch=1)
 
         detail_container_layout = QVBoxLayout()
         detail_container_layout.setSpacing(12)
         detail_container_layout.addLayout(range_filter_row)
-        detail_container_layout.addWidget(envelopes_section)
+        detail_container_layout.addLayout(envelopes_row)
         detail_container_layout.addWidget(zone_card)
         detail_container_layout.addStretch()
         detail_container = QWidget()
@@ -1603,6 +1621,15 @@ class ProgramEditorWindow(QMainWindow):
         section_layout.addWidget(header)
         for row in row_layouts:
             section_layout.addLayout(row)
+        # without this, a card whose content is shorter than the row it's
+        # paired with (Range next to Filter; Envelope 1 next to Envelope 2)
+        # gets its leftover height split BEFORE the header too, not just
+        # after the content - QBoxLayout distributes surplus space evenly
+        # across every gap when nothing claims a stretch, which reads as
+        # the whole card being vertically centered rather than top-aligned
+        # like its taller neighbor. This claims all of it at the bottom
+        # instead.
+        section_layout.addStretch()
 
         card = QWidget()
         card.setObjectName("sectionCard")
@@ -1643,21 +1670,6 @@ class ProgramEditorWindow(QMainWindow):
         row.addWidget(value_label)
 
         return knob, value_label, widget
-
-    def _build_labeled_column(self, label_text, widget, extra_layout=None):
-        name_label = QLabel(label_text)
-        name_label.setAlignment(Qt.AlignmentFlag.AlignHCenter)
-        name_label.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
-
-        column = QVBoxLayout()
-        column.setSpacing(4)
-        column.addWidget(name_label, alignment=Qt.AlignmentFlag.AlignHCenter)
-        column.addWidget(widget, alignment=Qt.AlignmentFlag.AlignHCenter)
-        if extra_layout is not None:
-            column.addLayout(extra_layout)
-        column.addStretch()
-
-        return column
 
     def _build_multis_tab(self):
         # the sampler holds exactly one resident multi - no list to choose

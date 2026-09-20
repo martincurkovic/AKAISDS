@@ -1,9 +1,32 @@
 from PySide6.QtWidgets import QWidget
 from PySide6.QtGui import QPainter, QPen, QColor, QPolygonF
-from PySide6.QtCore import QPointF
+from PySide6.QtCore import Qt, QPointF, QRectF
+
+from ui import theme
 
 SUSTAIN_HOLD_FRACTION = 0.15  # sustain is a LEVEL, not a duration - this
 # reserves a fixed-width segment to show it
+
+_BORDER_RADIUS = 4  # matches QWidget#sectionCard/#zoneCard's own radius
+
+
+def _draw_border(painter, w, h):
+    # the envelope curve is drawn edge-to-edge (0,0 to w,h) with nothing
+    # else in the widget, so at rest - or at an extreme (attack=0,
+    # sustain=99, ...) - it was often just a bare line with no visible
+    # boundary at all, making the graph's actual extent a guess. A plain
+    # rect, not a fancier frame, since this is a size reference for the
+    # curve above it, not a card of its own.
+    pen = QPen(QColor(theme.current_palette()["border"]))
+    pen.setWidth(1)
+    painter.setPen(pen)
+    painter.setBrush(Qt.BrushStyle.NoBrush)
+    # inset by half the pen width - drawn exactly on the edge, a 1px line
+    # is split across the boundary by anti-aliasing and half of it is
+    # clipped away, reading as thinner on the right/bottom than the top/left
+    painter.drawRoundedRect(
+        QRectF(0.5, 0.5, w - 1, h - 1), _BORDER_RADIUS, _BORDER_RADIUS
+    )
 
 
 def _adsr_points(attack, decay, sustain, release, w, h):
@@ -64,6 +87,8 @@ class ADSREnvelopeGraph(QWidget):
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         w, h = self.width(), self.height()
 
+        _draw_border(painter, w, h)
+
         points = _adsr_points(
             self._attack, self._decay, self._sustain, self._release, w, h
         )
@@ -96,6 +121,8 @@ class Envelope2Graph(QWidget):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         w, h = self.width(), self.height()
+
+        _draw_border(painter, w, h)
 
         points = _env2_points(self._stages, w, h)
         pen = QPen(QColor("#d97757"))
