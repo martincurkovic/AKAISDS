@@ -5,10 +5,13 @@
 
 import s3k.params as p
 
+import pytest
+
 from core import program_editor_bridge
 from core.program_editor_bridge import (
     KeygroupDetailLoader,
     KeygroupLoader,
+    LoggingBridge,
     MultiPartsLoader,
     ParameterWriter,
     ProgramChangeSender,
@@ -18,6 +21,10 @@ from core.program_editor_bridge import (
 
 
 # --- connect() ---------------------------------------------------------------
+# connect() always wraps whatever bridge it builds in LoggingBridge (see
+# core/debug_log.py's docstring for why) - these check the underlying
+# bridge it wrapped, since that's what "returns a demo bridge"/"opens the
+# saved port" actually mean now.
 
 
 def test_connect_returns_demo_bridge_when_env_var_set(monkeypatch):
@@ -27,7 +34,8 @@ def test_connect_returns_demo_bridge_when_env_var_set(monkeypatch):
 
     bridge = program_editor_bridge.connect()
 
-    assert isinstance(bridge, DemoBridge)
+    assert isinstance(bridge, LoggingBridge)
+    assert isinstance(bridge._bridge, DemoBridge)
 
 
 def test_connect_opens_saved_output_port_when_not_demo(monkeypatch):
@@ -48,7 +56,9 @@ def test_connect_opens_saved_output_port_when_not_demo(monkeypatch):
 
     bridge = program_editor_bridge.connect()
 
-    assert bridge is sentinel
+    assert isinstance(bridge, LoggingBridge)
+    assert bridge._bridge is sentinel
+    assert calls == ["Some Output"]
     assert calls == ["Some Output"]
 
 
@@ -467,3 +477,95 @@ def test_program_change_sender_masks_channel_and_program_to_valid_midi_ranges():
     status_byte, program_byte = bridge.out.sent[0]
     assert status_byte == 0xC4  # 0xC0 | (20 & 0x0F)
     assert program_byte == 72  # 200 & 0x7F
+
+
+# --- LoggingBridge ---------------------------------------------------------
+
+
+class _FakeLogger:
+    def __init__(self):
+        self.debug_calls = []
+        self.error_calls = []
+
+    def debug(self, message):
+        self.debug_calls.append(message)
+
+    def error(self, message, exc_info=False):
+        self.error_calls.append((message, exc_info))
+
+
+class _EchoBridge:
+    def get_parameter(self, name, index):
+        return f"{name}:{index}"
+
+
+def test_logging_bridge_delegates_and_returns_the_real_result():
+    bridge = LoggingBridge(_EchoBridge(), _FakeLogger())
+
+    assert bridge.get_parameter("FILFRQ", 3) == "FILFRQ:3"
+
+
+def test_logging_bridge_logs_start_and_end_on_success():
+    logger = _FakeLogger()
+    bridge = LoggingBridge(_EchoBridge(), logger)
+
+    bridge.get_parameter("FILFRQ", 3)
+
+    assert any("START get_parameter" in m for m in logger.debug_calls)
+    assert any(
+        "END get_parameter" in m and "FILFRQ:3" in m for m in logger.debug_calls
+    )
+    assert logger.error_calls == []
+
+
+class _FailingBridge:
+    def set_parameter(self, *args, **kwargs):
+        raise RuntimeError("port closed")
+
+
+def test_logging_bridge_logs_with_traceback_and_reraises_on_failure():
+    # the exception must reach the caller unchanged (loaders/writers still
+    # need it for their own load_failed/write_failed signals) and the log
+    # entry must carry the full traceback (exc_info=True), not just str(e)
+    logger = _FakeLogger()
+    bridge = LoggingBridge(_FailingBridge(), logger)
+
+    with pytest.raises(RuntimeError, match="port closed"):
+        bridge.set_parameter("PANPOS", 0, 10)
+
+    assert len(logger.error_calls) == 1
+    message, exc_info = logger.error_calls[0]
+    assert "FAILED set_parameter" in message
+    assert exc_info is True
+
+
+class _OutBridge:
+    def __init__(self, out):
+        self.out = out
+
+
+def test_logging_bridge_wraps_out_and_logs_send_message():
+    # ProgramChangeSender talks to bridge.out directly (bypassing
+    # get_parameter/set_parameter) - it needs the same logging coverage,
+    # since a raw MIDI send races against the exact same connection
+    logger = _FakeLogger()
+    real_out = _RecordingOut()  # the ProgramChangeSender fake, above
+    bridge = LoggingBridge(_OutBridge(real_out), logger)
+
+    bridge.out.send_message([0xC0, 5])
+
+    assert real_out.sent == [[0xC0, 5]]
+    assert any("START out.send_message" in m for m in logger.debug_calls)
+
+
+class _NoOutBridge:
+    pass
+
+
+def test_logging_bridge_out_access_resolves_to_none_when_wrapped_bridge_has_none():
+    # ProgramChangeSender relies on getattr(bridge, "out", None) resolving
+    # to None for DemoBridge (which has no .out at all) - the wrapper must
+    # not turn that missing attribute into something else
+    bridge = LoggingBridge(_NoOutBridge(), _FakeLogger())
+
+    assert getattr(bridge, "out", None) is None

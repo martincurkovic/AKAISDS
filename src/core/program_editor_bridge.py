@@ -1,9 +1,94 @@
 import os
+import threading
+import time
 
-from core import app_config
+from core import app_config, debug_log
 from s3k.bridge import S3kBridge
 from PySide6.QtCore import QThread, Signal
 import s3k.params as p
+
+
+class _LoggingOut:
+    # wraps S3kBridge.out (used directly by ProgramChangeSender, bypassing
+    # get_parameter/set_parameter) with the same START/END/failure logging
+    # as LoggingBridge below, so a raw MIDI send shows up in the same
+    # timeline as everything else on the connection
+    def __init__(self, out, logger):
+        self._out = out
+        self._logger = logger
+
+    def __getattr__(self, name):
+        return getattr(self._out, name)
+
+    def send_message(self, message):
+        thread_name = threading.current_thread().name
+        call_desc = f"out.send_message({message!r})"
+        self._logger.debug(f"[{thread_name}] START {call_desc}")
+        start = time.monotonic()
+        try:
+            result = self._out.send_message(message)
+        except Exception:
+            elapsed_ms = (time.monotonic() - start) * 1000
+            self._logger.error(
+                f"[{thread_name}] FAILED {call_desc} after {elapsed_ms:.1f}ms",
+                exc_info=True,
+            )
+            raise
+        elapsed_ms = (time.monotonic() - start) * 1000
+        self._logger.debug(f"[{thread_name}] END {call_desc} ({elapsed_ms:.1f}ms)")
+        return result
+
+
+class LoggingBridge:
+    # transparent wrapper around a bridge (S3kBridge or DemoBridge) that
+    # logs every call this module's loaders/writers make - see
+    # core/debug_log.py for why (S3kBridge is documented as unsafe for
+    # concurrent calls, and this module doesn't serialise them today)
+    _WRAPPED_METHODS = ("get_parameter", "set_parameter", "get_header",
+                        "program_list", "sample_list")
+
+    def __init__(self, bridge, logger=None):
+        self._bridge = bridge
+        self._logger = logger or debug_log.get_logger()
+
+    def __getattr__(self, name):
+        value = getattr(self._bridge, name)
+        if name == "out":
+            return _LoggingOut(value, self._logger)
+        return value
+
+    def _call(self, method_name, *args, **kwargs):
+        thread_name = threading.current_thread().name
+        call_desc = f"{method_name}(args={args!r}, kwargs={kwargs!r})"
+        self._logger.debug(f"[{thread_name}] START {call_desc}")
+        start = time.monotonic()
+        try:
+            result = getattr(self._bridge, method_name)(*args, **kwargs)
+        except Exception:
+            elapsed_ms = (time.monotonic() - start) * 1000
+            self._logger.error(
+                f"[{thread_name}] FAILED {call_desc} after {elapsed_ms:.1f}ms",
+                exc_info=True,
+            )
+            raise
+        elapsed_ms = (time.monotonic() - start) * 1000
+        self._logger.debug(
+            f"[{thread_name}] END {call_desc} -> {result!r} ({elapsed_ms:.1f}ms)"
+        )
+        return result
+
+
+def _make_wrapped_method(method_name):
+    def method(self, *args, **kwargs):
+        return self._call(method_name, *args, **kwargs)
+
+    method.__name__ = method_name
+    return method
+
+
+for _name in LoggingBridge._WRAPPED_METHODS:
+    setattr(LoggingBridge, _name, _make_wrapped_method(_name))
+del _name
 
 
 def connect():
@@ -13,9 +98,11 @@ def connect():
     if os.environ.get("AKAISDS_DEMO_SAMPLER"):
         from s3ked.demo import DemoBridge
 
-        return DemoBridge()
-    _input_name, output_name = app_config.get_saved_ports()
-    return S3kBridge.standard(output_name)  # type: ignore
+        bridge = DemoBridge()
+    else:
+        _input_name, output_name = app_config.get_saved_ports()
+        bridge = S3kBridge.standard(output_name)  # type: ignore
+    return LoggingBridge(bridge)
 
 
 class ProgramListLoader(QThread):
