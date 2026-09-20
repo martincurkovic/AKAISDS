@@ -139,12 +139,14 @@ reading the whole file.
 
 The Program and Keygroup tabs are built from `_build_section_card(title,
 *row_layouts)` (groups related rows into one titled, bordered card - Volume/
-Pan/Velocity, LFO, Pitch, etc.) and `_build_scroll_area(page)` (wraps a whole
-tab's cards so the window doesn't have to be tall enough to show every card
-unscrolled). If you add another control, put it in the most relevant
-existing card rather than a new bare row - and if you add a whole new card,
-know that this file's `setMinimumSize(...)` was tuned by hand against the
-actual measured layout, not a round number:
+Pan/Velocity, LFO, Pitch, Filter, Envelope 1, Envelope 2, etc. - ENV1/ENV2
+used to share one "Envelopes" card and were later split into two, so don't
+assume the card list here is exhaustive or stable) and `_build_scroll_area(page)`
+(wraps a whole tab's cards so the window doesn't have to be tall enough to
+show every card unscrolled). If you add another control, put it in the most
+relevant existing card rather than a new bare row - and if you add a whole
+new card, know that this file's `setMinimumSize(...)` was tuned by hand
+against the actual measured layout, not a round number:
 
 - **Height** doesn't need to fit everything anymore - past the minimum, a
   tab scrolls instead of its cards compressing into each other and visibly
@@ -158,6 +160,22 @@ actual measured layout, not a round number:
   wrapping - found by growing the window until `scroll_area.horizontalScrollBar().maximum()`
   hit zero for both tabs. If you widen a card or add another side-by-side
   pair, re-check this the same way rather than guessing a new minimum.
+- **Stretch ratios between paired cards should be measured, not guessed.**
+  Range+Filter briefly shipped as a 1:2 split on the assumption that Filter
+  (3 knobs) needs more width than Range (a label + two spinboxes) - wrong:
+  `card.sizeHint()` showed Filter's own content is actually *narrower*
+  (273px vs Range's 299px), so the 2x weight just stretched it wider than
+  it needed to be, visibly out of line with Range right above it. Every
+  paired row on this page is 1:1 now. Before giving one card more stretch
+  than its partner, check `sizeHint()` on both rather than eyeballing which
+  one "looks like" it needs more room.
+- `_build_section_card`'s layout ends with `addStretch()` - without it, a
+  card whose content is shorter than the row it's paired with gets its
+  slack space split *before the header too*, not just below the content
+  (`QBoxLayout` spreads unclaimed space across every gap when nothing
+  claims a stretch), which reads as the card being vertically centered
+  instead of top-aligned like its neighbor. If a future card looks
+  vertically centered instead of top-aligned, this is almost certainly why.
 
 `BridgeWorker.busy_changed` (a `Signal(bool)`) drives the indeterminate
 progress bar next to the Refresh button - `True` from the moment any job is
@@ -183,6 +201,33 @@ Widget visibility assertions in tests here use `.isHidden()`, not
 `.isVisible()` is unconditionally `False` for any widget whose top-level
 window was never shown, regardless of what `setVisible()` was called with.
 `.isHidden()` tracks the widget's own explicit shown/hidden state instead.
+
+## Envelope graphs (`ui/envelope_graph.py`): each stage's width must be independent
+
+`_adsr_points()` (ENV1) and `_env2_points()` (ENV2) used to give each stage
+(Attack/Decay/Release; R1-R4) an on-screen width *proportional to its share
+of the live total* - `attack_frac = attack / (attack+decay+release)`, and
+the ENV2 equivalent normalized against `sum(rate for rate, _ in stages)`.
+That's a real bug, not just a style choice: it means turning ONE knob
+visibly resizes the OTHER stages' segments too, even though their own
+values never changed - a user caught this by comparing two screenshots
+where only Decay differed and Attack's ramp had visibly changed shape. No
+synth's ADSR display works that way; each stage's footprint should depend
+only on its own value.
+
+Fixed by giving each stage a **fixed** width budget instead of a shared,
+value-dependent one - `(1 - SUSTAIN_HOLD_FRACTION) / 3` per ADSR stage,
+`w / 4` per ENV2 stage - scaled only by `own_value / 99` within that fixed
+budget. The trade-off: the envelope no longer necessarily traces the full
+widget width (it only reaches the right edge when every stage is
+individually maxed at 99) - that's correct, not a regression; empty space
+after a short envelope is normal in every reference synth's display too.
+If you touch this code, **do not re-normalize one stage's width against
+the others' current values** to "simplify" it or make it trace the full
+width again - that's reintroducing the exact bug above. See
+`test_adsr_stage_width_is_a_fixed_share_not_a_relative_one` and
+`test_env2_stage_width_is_a_fixed_share_not_a_relative_one` in
+`tests/test_envelope_graph.py`, which exist specifically to catch this.
 
 ## PRGNUM and Program Change (Multis tab)
 
