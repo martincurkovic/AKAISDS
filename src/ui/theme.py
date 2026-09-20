@@ -181,17 +181,37 @@ def render_stylesheet(palette):
         ) from e
 
 
-def current_palette():
-    """Returns DARK_PALETTE or LIGHT_PALETTE, matching the OS color scheme
-    right now. For custom-painted widgets (QPainter, not QSS) that need a
-    themed color - e.g. ui/keygroup_range_bar.py - so they stay in sync with
-    the same palettes the stylesheet is rendered from.
-    """
+_active_palette = None  # set by apply_to_app() - see current_palette() below
+
+
+def _palette_for_scheme(scheme):
     from PySide6.QtCore import Qt
+
+    return LIGHT_PALETTE if scheme == Qt.ColorScheme.Light else DARK_PALETTE
+
+
+def current_palette():
+    """Returns whichever palette (DARK_PALETTE/LIGHT_PALETTE) the app is
+    ACTUALLY styled with right now, for custom-painted widgets (QPainter,
+    not QSS) that need a themed color - e.g. ui/keygroup_range_bar.py - so
+    they can never disagree with the stylesheet.
+
+    Deliberately doesn't re-derive this from the OS color scheme on every
+    call - apply_to_app() records the palette it actually rendered into
+    _active_palette, and this just echoes that back. Two independent "ask
+    the OS what scheme we're in" queries (one for the stylesheet, one for
+    each custom-painted widget) can disagree - wrong Qt/platform version,
+    a stylesheet applied by hand for a preview/test, a live scheme change
+    caught mid-flight - so there is exactly one place that decides, and
+    everything else just reads its answer.
+    """
+    if _active_palette is not None:
+        return _active_palette
+    # apply_to_app() hasn't run (e.g. a widget previewed standalone without
+    # going through it) - fall back to asking the OS directly
     from PySide6.QtGui import QGuiApplication
 
-    scheme = QGuiApplication.styleHints().colorScheme()
-    return LIGHT_PALETTE if scheme == Qt.ColorScheme.Light else DARK_PALETTE
+    return _palette_for_scheme(QGuiApplication.styleHints().colorScheme())
 
 
 def apply_to_app(app):
@@ -201,9 +221,11 @@ def apply_to_app(app):
     """
     from PySide6.QtGui import QGuiApplication
 
-    def apply(_scheme):
+    def apply(scheme):
+        global _active_palette
+        _active_palette = _palette_for_scheme(scheme)
         try:
-            app.setStyleSheet(render_stylesheet(current_palette()))
+            app.setStyleSheet(render_stylesheet(_active_palette))
         except (OSError, KeyError) as e:
             print(
                 f"[WARN] Couldn't apply theme ({e}) - continuing with "

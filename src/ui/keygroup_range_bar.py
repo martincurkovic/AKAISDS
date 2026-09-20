@@ -4,7 +4,6 @@ from PySide6.QtCore import Qt, QRectF, QPointF
 from ui import theme
 
 _NOTE_COUNT = 128  # MIDI notes 0-127 - the full addressable keyboard range
-_SEGMENT_GAP = 2  # px of surface-color gap separating touching segments/runs
 _CORNER_RADIUS = 3
 _HATCH_SPACING = 6  # px between diagonal overlap-hatch lines
 _HATCH_WIDTH = 2  # px stroke width of each hatch line
@@ -51,8 +50,11 @@ class KeygroupRangeBar(QWidget):
 
         track_path = QPainterPath()
         track_path.addRoundedRect(rect, _CORNER_RADIUS, _CORNER_RADIUS)
-        painter.fillPath(track_path, QColor(palette["bg_input"]))
-        painter.setPen(QColor(palette["border"]))
+        # same "empty track" convention as QProgressBar - reads as neutral/
+        # unassigned rather than an editable field (bg_input) or a panel
+        # surface (bg_panel)
+        painter.fillPath(track_path, QColor(palette["bg_disabled"]))
+        painter.setPen(QColor(palette["border_progress"]))
         painter.drawPath(track_path)
 
         if not self._ranges:
@@ -74,19 +76,17 @@ class KeygroupRangeBar(QWidget):
 
         # sweep-line: split the bar at every span boundary, then paint each
         # resulting run once, according to which keygroup(s) are active
-        # across it (one -> flat fill, two+ -> overlap hatch)
+        # across it (one -> flat fill, two+ -> overlap hatch). Adjacent,
+        # non-overlapping keygroups are flush against each other - a hard
+        # color transition, no gap - since a shared boundary note belongs to
+        # exactly one of them, not a no-man's-land between them.
         boundaries = sorted({round(x, 3) for s in spans for x in (s[0], s[1])})
         for left_x, right_x in zip(boundaries, boundaries[1:]):
             mid_x = (left_x + right_x) / 2
             active = [idx for (x0, x1, idx) in spans if x0 <= mid_x < x1]
             if not active:
                 continue
-            run_rect = QRectF(
-                left_x + _SEGMENT_GAP / 2,
-                rect.top(),
-                max(0.0, (right_x - left_x) - _SEGMENT_GAP),
-                rect.height(),
-            )
+            run_rect = QRectF(left_x, rect.top(), right_x - left_x, rect.height())
             if len(active) == 1:
                 painter.fillRect(run_rect, keygroup_color(active[0]))
             else:
