@@ -34,8 +34,16 @@ class FullWidthTabBar(QTabBar):
     def tabSizeHint(self, index):
         size = super().tabSizeHint(index)
         parent = self.parentWidget()
-        if parent is not None and self.count() > 0:
-            size.setWidth(parent.width() // self.count())
+        count = self.count()
+        if parent is not None and count > 0:
+            # plain floor division drops up to (count - 1) px total, which
+            # very visibly falls short of the content pane's width for most
+            # window sizes - handing the leftover pixels to the last few
+            # tabs keeps the bar's total width exactly matching parent.width()
+            total = parent.width()
+            base, remainder = divmod(total, count)
+            width = base + (1 if index >= count - remainder else 0)
+            size.setWidth(width)
         return size
 
 

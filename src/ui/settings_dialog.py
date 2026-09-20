@@ -34,7 +34,7 @@ class MidiSettingsDialog(QDialog):
 
         outer_layout = QVBoxLayout(self)
         self.setMinimumHeight(300)
-        self.setMinimumWidth(502)
+        self.setMinimumWidth(500)
 
         tabs = QTabWidget()
         tabs.setTabBar(FullWidthTabBar(tabs))
