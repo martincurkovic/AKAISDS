@@ -190,7 +190,7 @@ class BridgeWorker(QThread):
     detail_loaded = Signal(int, int, dict)  # program_index, keygroup_index, values
     detail_load_failed = Signal(int, int, str)
 
-    parts_loaded = Signal(list)  # [(program_name, channel), ...] per part
+    parts_loaded = Signal(list)  # [(program_name, channel, level, pan), ...] per part
     parts_load_failed = Signal(str)
 
     change_sent = Signal(int, str)  # part_index, program_name (for the status bar)
@@ -401,7 +401,15 @@ class BridgeWorker(QThread):
         try:
             for part_index in range(MULTI_PART_COUNT):
                 header = self._bridge.get_header("multipart", part_index)
-                parts.append((header["PRNAME"].strip(), header["PMCHAN"]))
+                # STEREO is this field's name in the spec, but the panel
+                # itself labels it "Lev" (s3k.params notes, §134) - level is
+                # what's shown/written here, never "stereo"
+                parts.append((
+                    header["PRNAME"].strip(),
+                    header["PMCHAN"],
+                    header["STEREO"],
+                    header["PANPOS"],
+                ))
         except Exception as e:
             self.parts_load_failed.emit(str(e))
             return

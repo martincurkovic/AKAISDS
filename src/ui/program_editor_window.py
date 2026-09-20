@@ -799,7 +799,7 @@ class ProgramEditorWindow(QMainWindow):
         # back to hardware (see _on_multi_part_program_changed/
         # _on_multi_part_channel_changed), and an unblocked call here would
         # schedule a write that just echoes the just-loaded value back
-        for part_index, (program_name, channel) in enumerate(parts):
+        for part_index, (program_name, channel, level, pan) in enumerate(parts):
             program_combo = self._multi_program_combos[part_index]
             program_combo.blockSignals(True)
             match = program_combo.findText(program_name) if program_name else -1
@@ -810,6 +810,18 @@ class ProgramEditorWindow(QMainWindow):
             channel_combo.blockSignals(True)
             channel_combo.setCurrentIndex(channel_combo.findData(channel))
             channel_combo.blockSignals(False)
+
+            level_knob = self._multi_level_knobs[part_index]
+            level_knob.blockSignals(True)
+            level_knob.setValue(level)
+            level_knob.blockSignals(False)
+            self._multi_level_value_labels[part_index].setText(str(level))
+
+            pan_knob = self._multi_pan_knobs[part_index]
+            pan_knob.blockSignals(True)
+            pan_knob.setValue(pan)
+            pan_knob.blockSignals(False)
+            self._multi_pan_value_labels[part_index].setText(str(pan))
 
         if self._multi_refresh_in_progress:
             self._multi_refresh_in_progress = False
@@ -1065,6 +1077,29 @@ class ProgramEditorWindow(QMainWindow):
 
         return column, value_label
 
+    def _build_multi_part_knob(self, minimum, maximum, *, default):
+        # compact knob + numeric readout for a Multis-tab row - unlike
+        # _build_knob_column's vertical (label above, knob, value below)
+        # layout meant for a standalone page, this stays a single row so 16
+        # of these can sit one per part without blowing out row height
+        knob = Knob()
+        knob.setRange(minimum, maximum)
+        knob.setDefaultValue(default)
+        knob.setFixedSize(28, 28)
+        knob.setEnabled(True)
+
+        value_label = QLabel(str(default))
+        value_label.setFixedWidth(28)
+
+        widget = QWidget()
+        row = QHBoxLayout(widget)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(4)
+        row.addWidget(knob)
+        row.addWidget(value_label)
+
+        return knob, value_label, widget
+
     def _build_labeled_column(self, label_text, widget, extra_layout=None):
         name_label = QLabel(label_text)
         name_label.setAlignment(Qt.AlignmentFlag.AlignHCenter)
@@ -1083,9 +1118,13 @@ class ProgramEditorWindow(QMainWindow):
     def _build_multis_tab(self):
         # the sampler holds exactly one resident multi - no list to choose
         # between, just its fixed 16 parts, each with an independent
-        # program assignment and MIDI channel
+        # program assignment, MIDI channel, level and pan
         self._multi_program_combos = []
         self._multi_channel_combos = []
+        self._multi_level_knobs = []
+        self._multi_pan_knobs = []
+        self._multi_level_value_labels = []
+        self._multi_pan_value_labels = []
 
         page = QWidget()
         layout = QVBoxLayout(page)
@@ -1099,9 +1138,17 @@ class ProgramEditorWindow(QMainWindow):
         program_header = QLabel("<b>Program</b>")
         channel_header = QLabel("<b>Channel</b>")
         channel_header.setFixedWidth(90)
+        # matches the STEREO field's panel label ("Lev"), not the s3k.params
+        # name - see the notes on _handle_multi_parts in program_editor_bridge.py
+        level_header = QLabel("<b>Level</b>")
+        level_header.setFixedWidth(60)
+        pan_header = QLabel("<b>Pan</b>")
+        pan_header.setFixedWidth(60)
         header_row.addWidget(part_header)
         header_row.addWidget(program_header, stretch=1)
         header_row.addWidget(channel_header)
+        header_row.addWidget(level_header)
+        header_row.addWidget(pan_header)
         layout.addLayout(header_row)
 
         for part_index in range(MULTI_PART_COUNT):
@@ -1127,13 +1174,26 @@ class ProgramEditorWindow(QMainWindow):
             # _on_multi_parts_loaded overwrites it with the real value
             channel_combo.setCurrentIndex(channel_combo.findData(part_index))
 
+            level_knob, level_value_label, level_widget = self._build_multi_part_knob(
+                0, 99, default=99
+            )
+            pan_knob, pan_value_label, pan_widget = self._build_multi_part_knob(
+                -50, 50, default=0
+            )
+
             row.addWidget(part_label)
             row.addWidget(program_combo, stretch=1)
             row.addWidget(channel_combo)
+            row.addWidget(level_widget)
+            row.addWidget(pan_widget)
             layout.addLayout(row)
 
             self._multi_program_combos.append(program_combo)
             self._multi_channel_combos.append(channel_combo)
+            self._multi_level_knobs.append(level_knob)
+            self._multi_pan_knobs.append(pan_knob)
+            self._multi_level_value_labels.append(level_value_label)
+            self._multi_pan_value_labels.append(pan_value_label)
 
             program_combo.currentIndexChanged.connect(
                 lambda program_index, z=part_index: self._on_multi_part_program_changed(
@@ -1142,6 +1202,36 @@ class ProgramEditorWindow(QMainWindow):
             )
             channel_combo.currentIndexChanged.connect(
                 lambda _, z=part_index: self._on_multi_part_channel_changed(z)
+            )
+            level_knob.valueChanged.connect(
+                lambda v, lbl=level_value_label: lbl.setText(str(v))
+            )
+            level_knob.valueChanged.connect(
+                lambda v, z=part_index: self._schedule_write(
+                    "STEREO",
+                    "multipart",
+                    v,
+                    index=z,
+                    debounce_key=f"multipart_level_{z}",
+                )
+            )
+            level_knob.sliderReleased.connect(
+                lambda z=part_index: self._flush_write(f"multipart_level_{z}")
+            )
+            pan_knob.valueChanged.connect(
+                lambda v, lbl=pan_value_label: lbl.setText(str(v))
+            )
+            pan_knob.valueChanged.connect(
+                lambda v, z=part_index: self._schedule_write(
+                    "PANPOS",
+                    "multipart",
+                    v,
+                    index=z,
+                    debounce_key=f"multipart_pan_{z}",
+                )
+            )
+            pan_knob.sliderReleased.connect(
+                lambda z=part_index: self._flush_write(f"multipart_pan_{z}")
             )
 
         layout.addStretch()
