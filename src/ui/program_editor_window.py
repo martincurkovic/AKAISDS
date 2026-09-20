@@ -2044,6 +2044,23 @@ class ProgramEditorWindow(QMainWindow):
         item = self.program_list.currentItem()
         if item is not None:
             item.setText(self.program_name_edit.text())
+        self._update_multi_program_combo_names(
+            self.program_list.currentRow(), self.program_name_edit.text()
+        )
+
+    def _update_multi_program_combo_names(self, program_index, name):
+        # a part's combo shows the assigned program's NAME as its current
+        # text, not just an index - a rename left these showing the old
+        # name until the next full Refresh, even though the Programs list
+        # (and the hardware) had already moved on. combo index is always
+        # program_index + 1 (index 0 is the blank "-" placeholder - see
+        # _on_programs_loaded/_build_multis_tab), so this can go straight
+        # to the right item rather than searching every combo for the old
+        # name, which would misfire if two programs ever shared one
+        if program_index < 0:
+            return
+        for combo in self._multi_program_combos:
+            combo.setItemText(program_index + 1, name)
 
     def _commit_program_name(self):
         # commits once, on Enter/focus-loss - see the comment where this is
@@ -2061,6 +2078,7 @@ class ProgramEditorWindow(QMainWindow):
         item = self.program_list.currentItem()
         if item is not None:
             item.setText(name)
+        self._update_multi_program_combo_names(program_index, name)
         self._write_knob_value("PRNAME", "program", name, keygroup_index=0)
 
     def _on_samples_loaded(self, samples):
