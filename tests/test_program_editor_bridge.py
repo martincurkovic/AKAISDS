@@ -163,6 +163,11 @@ class _KeygroupFakeBridge:
             "PMCHAN",
             "PTUNO",
             "PRIORT",
+            "B_PTCH",
+            "B_PTCHD",
+            "PORTEN",
+            "PORTIME",
+            "PORTYPE",
         ):
             return 0
         if param.name in ("LONOTE", "HINOTE"):
@@ -212,6 +217,11 @@ def test_worker_reports_program_level_values():
         "PMCHAN": 9,
         "PTUNO": 256,
         "PRIORT": 2,
+        "B_PTCH": 5,
+        "B_PTCHD": 3,
+        "PORTEN": 1,
+        "PORTIME": 40,
+        "PORTYPE": 1,
     }
     bridge = _KeygroupFakeBridge(group_count=0, program_values=values)
     worker = BridgeWorker(bridge)

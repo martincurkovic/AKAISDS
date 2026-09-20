@@ -8,8 +8,9 @@ import time
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication, QLabel, QWidget
-from ui.program_editor_window import ProgramEditorWindow
+from ui.program_editor_window import ProgramEditorWindow, _LOOP_TYPE_OPTIONS
 from core.program_editor_bridge import MULTI_PART_COUNT
 
 
@@ -76,6 +77,20 @@ class FakeBridge:
             return 0
         if param.name in ("SNAME1", "SNAME2", "SNAME3", "SNAME4"):
             return "SQUARE"  # a real sample name that matches _samples below
+        if param.name in ("ZPLAY1", "ZPLAY2", "ZPLAY3", "ZPLAY4"):
+            return int(param.name[-1]) - 1  # distinct per zone: 0, 1, 2, 3
+        if param.name in ("CP1", "CP2", "CP3", "CP4"):
+            return int(param.name[-1]) % 2  # alternates TRACK/CONST by zone
+        if param.name == "B_PTCH":
+            return 7
+        if param.name == "B_PTCHD":
+            return 4
+        if param.name == "PORTEN":
+            return 1  # On
+        if param.name == "PORTIME":
+            return 55
+        if param.name == "PORTYPE":
+            return 1  # Time
         keygroups = self._keygroups[program_index]
         if param.name == "GROUPS":
             return len(keygroups)
@@ -91,6 +106,8 @@ class FakeBridge:
             return 72
         if param.name == "FILQ":
             return 8
+        if param.name == "K_FREQ":
+            return -5
         return 30
 
 
@@ -208,6 +225,84 @@ def test_changing_program_tune_writes_ptuno_in_raw_units(editor, qapp):
     assert bridge.set_parameter_calls[-1] == ("PTUNO", 0, -512, 0)
 
 
+def test_program_tab_loads_bend_and_portamento_from_hardware(editor):
+    # FakeBridge.get_parameter: B_PTCH=7, B_PTCHD=4, PORTEN=1 (On),
+    # PORTIME=55, PORTYPE=1 (Time)
+    assert editor.bend_up_spinbox.value() == 7
+    assert editor.bend_down_spinbox.value() == 4
+    assert editor.portamento_enable_combo.currentText() == "On"
+    assert editor.portamento_rate_spinbox.value() == 55
+    assert editor.portamento_type_combo.currentText() == "Time"
+
+
+def test_changing_bend_up_and_down_writes_separately(editor, qapp):
+    # B_PTCH (up, 0-24) and B_PTCHD (down, 0-12) are different fields with
+    # different hardware-declared ranges - not one control mirrored twice
+    bridge = editor._bridge
+
+    editor.bend_up_spinbox.setValue(12)
+    editor._flush_write("B_PTCH")
+    editor.bend_down_spinbox.setValue(9)
+    editor._flush_write("B_PTCHD")
+    editor._worker.wait_until_idle()
+    _pump_until(qapp, lambda: len(bridge.set_parameter_calls) >= 2)
+
+    assert bridge.set_parameter_calls[-2] == ("B_PTCH", 0, 12, 0)
+    assert bridge.set_parameter_calls[-1] == ("B_PTCHD", 0, 9, 0)
+
+
+def test_changing_portamento_controls_writes_porten_portime_portype(editor, qapp):
+    bridge = editor._bridge
+
+    editor.portamento_enable_combo.setCurrentIndex(0)  # Off (loaded as On)
+    editor._flush_write("PORTEN")
+    editor._worker.wait_until_idle()
+    _pump_until(qapp, lambda: bridge.set_parameter_calls)
+    assert bridge.set_parameter_calls[-1] == ("PORTEN", 0, 0, 0)
+
+    editor.portamento_rate_spinbox.setValue(20)
+    editor._flush_write("PORTIME")
+    editor._worker.wait_until_idle()
+    _pump_until(qapp, lambda: bridge.set_parameter_calls[-1][0] == "PORTIME")
+    assert bridge.set_parameter_calls[-1] == ("PORTIME", 0, 20, 0)
+
+    editor.portamento_type_combo.setCurrentIndex(0)  # Rate (loaded as Time)
+    editor._flush_write("PORTYPE")
+    editor._worker.wait_until_idle()
+    _pump_until(qapp, lambda: bridge.set_parameter_calls[-1][0] == "PORTYPE")
+    assert bridge.set_parameter_calls[-1] == ("PORTYPE", 0, 0, 0)
+
+
+def test_portamento_type_combo_has_a_tooltip_per_option(editor):
+    from ui.program_editor_window import _PORTAMENTO_TYPE_OPTIONS
+
+    combo = editor.portamento_type_combo
+    assert combo.count() == len(_PORTAMENTO_TYPE_OPTIONS)
+    for i, (label, tooltip) in enumerate(_PORTAMENTO_TYPE_OPTIONS):
+        assert combo.itemText(i) == label
+        assert combo.itemData(i, Qt.ItemDataRole.ToolTipRole) == tooltip
+
+    combo.setCurrentIndex(0)
+    assert combo.toolTip() == _PORTAMENTO_TYPE_OPTIONS[0][1]
+
+
+def test_keygroup_panel_loads_and_writes_key_filter_tracking(editor, qapp):
+    editor.keygroup_list.setCurrentRow(1)
+    editor._worker.wait_until_idle()
+    _pump_until(qapp, lambda: editor.cutoff_knob.value() == 72)
+
+    # FakeBridge.get_parameter reports K_FREQ=-5
+    assert editor.key_filter_track_knob.value() == -5
+
+    bridge = editor._bridge
+    editor.key_filter_track_knob.setValue(20)  # within the confirmed -24..24
+    editor._flush_write("K_FREQ")
+    editor._worker.wait_until_idle()
+    _pump_until(qapp, lambda: bridge.set_parameter_calls)
+
+    assert bridge.set_parameter_calls[-1] == ("K_FREQ", 0, 20, 1)
+
+
 def test_refresh_picks_up_a_program_created_on_the_hardware(editor, qapp):
     # regression test for a real bug: Refresh re-loaded the current
     # program's keygroups but never re-fetched the program list itself, so
@@ -248,6 +343,53 @@ def test_selecting_a_keygroup_shows_the_keygroup_panel_with_real_values(editor, 
     assert editor.resonance_knob.value() == 8
     assert editor.note_lo_spinbox.value() == 61
     assert editor.note_hi_spinbox.value() == 96
+
+
+def test_zone_panels_load_loop_type_keytrack_and_tune_from_hardware(editor, qapp):
+    editor.keygroup_list.setCurrentRow(1)
+    editor._worker.wait_until_idle()
+    _pump_until(qapp, lambda: editor.cutoff_knob.value() == 72)
+
+    # FakeBridge.get_parameter: ZPLAY{n} -> n-1, CP{n} -> n%2, and VTUNO
+    # isn't given an explicit branch so it falls to the generic 30, which
+    # is +0.12 semitones (round(30/2.56)/100, see _tune_offset_to_semitones)
+    assert [c.currentIndex() for c in editor._zone_looptype] == [0, 1, 2, 3]
+    assert [c.currentIndex() for c in editor._zone_keytrack] == [1, 0, 1, 0]
+    for tune_spinbox in editor._zone_tune:
+        assert tune_spinbox.value() == pytest.approx(0.12)
+
+
+def test_loop_type_combo_has_a_tooltip_per_option(editor):
+    loop_combo = editor._zone_looptype[0]
+    assert loop_combo.count() == len(_LOOP_TYPE_OPTIONS)
+    for i, (label, tooltip) in enumerate(_LOOP_TYPE_OPTIONS):
+        assert loop_combo.itemText(i) == label
+        assert loop_combo.itemData(i, Qt.ItemDataRole.ToolTipRole) == tooltip
+
+    # the closed combo box's own tooltip (shown without opening the popup)
+    # tracks whichever option is currently selected
+    loop_combo.setCurrentIndex(2)
+    assert loop_combo.toolTip() == _LOOP_TYPE_OPTIONS[2][1]
+
+
+def test_changing_zone_loop_type_and_keytrack_writes_zplay_and_cp(editor, qapp):
+    editor.keygroup_list.setCurrentRow(1)
+    editor._worker.wait_until_idle()
+    _pump_until(qapp, lambda: editor.cutoff_knob.value() == 72)
+    bridge = editor._bridge
+
+    # zone 1 loads as ZPLAY1=0 (As sample), CP1=1 (Const Pitch) - see
+    # FakeBridge.get_parameter - so these are real changes, not no-ops
+    editor._zone_looptype[0].setCurrentIndex(4)  # Play to sample end
+    editor._zone_keytrack[0].setCurrentIndex(0)  # Track
+
+    editor._flush_write("ZPLAY1")
+    editor._flush_write("CP1")
+    editor._worker.wait_until_idle()
+    _pump_until(qapp, lambda: len(bridge.set_parameter_calls) >= 2)
+
+    assert bridge.set_parameter_calls[-2] == ("ZPLAY1", 0, 4, 1)
+    assert bridge.set_parameter_calls[-1] == ("CP1", 0, 0, 1)
 
 
 def _wait_for_multi_parts_load(editor, qapp):
