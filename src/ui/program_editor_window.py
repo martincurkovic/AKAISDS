@@ -26,6 +26,7 @@ from PySide6.QtWidgets import (
     QSpinBox,
     QStatusBar,
     QTabWidget,
+    QScrollArea,
 )
 from ui.knob import Knob
 from ui.note_spinbox import NoteSpinBox
@@ -95,20 +96,21 @@ class ProgramEditorWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle("AKAISDS - Program Editor")
         # the old 800x500 predates the envelope controls - height in
-        # particular is now well past what fits there. Grouping both the
-        # Program tab (Volume/Pan/Velocity, LFO, Pitch, Voice & MIDI,
-        # Portamento) and the Keygroup tab (Range, Filter, Envelopes, Zone)
-        # into titled section cards pushed the window's own measured
-        # minimum (centralWidget().minimumSizeHint()) up - below that, Qt
-        # compresses the layout past its size hint down to minimumSize, and
-        # past THAT it starts letting cards overlap rather than erroring.
-        # Shrinking the big knobs 80px->64px (Cutoff/Resonance/Key Filter
-        # Track, Pan/Loud/Velocity, LFO rate/depth/delay) brought the
-        # measured minimum down to 892x1012 - only ~16px, since on the
-        # taller (Keygroup) tab those knobs are a single row in the Filter
-        # card; the Envelopes and Zone cards are the real height, not the
-        # knobs. 950x1070 gives real breathing room over that minimum.
-        self.setMinimumSize(950, 900)
+        # particular is now well past what fits there. Both detail_stack
+        # pages (Program, Keygroup) are grouped into titled section cards
+        # (see _build_section_card) with related cards paired side by side
+        # where they fit (e.g. Range+Filter, Volume/Pan/Velocity+LFO) rather
+        # than stacked one per row, and each page is wrapped in a
+        # QScrollArea (see _build_scroll_area) - so unlike the two prior
+        # approaches here (800, then 950x1080, then 950x1070), the window's
+        # height no longer needs to fit every card unscrolled: past this
+        # minimum it scrolls instead of compressing cards into overlapping
+        # each other the way a bare layout would. The width floor is real,
+        # though - below ~1020 the paired cards themselves don't fit
+        # side by side and force an unwanted HORIZONTAL scrollbar (measured
+        # by growing the window until both tabs' QScrollArea stopped
+        # reporting a horizontal range).
+        self.setMinimumSize(1040, 900)
         self._sample_list = []
         self._keygroup_ranges = []  # [lo, hi] per keygroup - mirrors keygroup_range_bar
         self._pending_restore_state = None  # set only by _refresh_from_hardware()
@@ -611,10 +613,15 @@ class ProgramEditorWindow(QMainWindow):
         filter_section = self._build_section_card("Filter", knobs_layout)
         envelopes_section = self._build_section_card("Envelopes", envelopes_layout)
 
+        # Range is a single short row and Filter is comparable in height -
+        # side by side halves the vertical space these two cost together
+        range_filter_row = QHBoxLayout()
+        range_filter_row.addWidget(range_section, stretch=1)
+        range_filter_row.addWidget(filter_section, stretch=2)
+
         detail_container_layout = QVBoxLayout()
         detail_container_layout.setSpacing(12)
-        detail_container_layout.addWidget(range_section)
-        detail_container_layout.addWidget(filter_section)
+        detail_container_layout.addLayout(range_filter_row)
         detail_container_layout.addWidget(envelopes_section)
         detail_container_layout.addWidget(zone_card)
         detail_container_layout.addStretch()
@@ -887,20 +894,31 @@ class ProgramEditorWindow(QMainWindow):
         portamento_row.addStretch()
         portamento_section = self._build_section_card("Portamento", portamento_row)
 
+        # two cards per row rather than one long stacked column - halves
+        # the page's height for the same content. Paired by rough content
+        # shape: the two knob-heavy cards together, then the two
+        # single-row combo/spinbox cards together; Portamento is the odd
+        # one out and gets a row to itself
+        program_row1 = QHBoxLayout()
+        program_row1.addWidget(volume_section, stretch=1)
+        program_row1.addWidget(lfo_section, stretch=1)
+
+        program_row2 = QHBoxLayout()
+        program_row2.addWidget(pitch_section, stretch=1)
+        program_row2.addWidget(voice_section, stretch=1)
+
         program_page = QWidget()
         program_page_layout = QVBoxLayout()
         program_page_layout.setSpacing(12)
-        program_page_layout.addWidget(volume_section)
-        program_page_layout.addWidget(lfo_section)
-        program_page_layout.addWidget(pitch_section)
-        program_page_layout.addWidget(voice_section)
+        program_page_layout.addLayout(program_row1)
+        program_page_layout.addLayout(program_row2)
         program_page_layout.addWidget(portamento_section)
         program_page_layout.addStretch()
         program_page.setLayout(program_page_layout)
 
         self.detail_stack = QStackedWidget()
-        self.detail_stack.addWidget(program_page)
-        self.detail_stack.addWidget(detail_container)
+        self.detail_stack.addWidget(self._build_scroll_area(program_page))
+        self.detail_stack.addWidget(self._build_scroll_area(detail_container))
 
         close_button = QPushButton("Close")
         close_button.clicked.connect(self.close)
@@ -1466,6 +1484,18 @@ class ProgramEditorWindow(QMainWindow):
         card.setObjectName("sectionCard")
         card.setLayout(section_layout)
         return card
+
+    def _build_scroll_area(self, page):
+        # both detail_stack pages (Program, Keygroup) are wrapped in one of
+        # these rather than added directly - lets the window's minimum
+        # height stay comfortable without needing to grow every time a
+        # section card is added, at the cost of a scrollbar on a short
+        # window instead of everything always fitting unscrolled
+        scroll_area = QScrollArea()
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setFrameShape(QScrollArea.Shape.NoFrame)
+        scroll_area.setWidget(page)
+        return scroll_area
 
     def _build_multi_part_knob(self, minimum, maximum, *, default):
         # compact knob + numeric readout for a Multis-tab row - unlike
