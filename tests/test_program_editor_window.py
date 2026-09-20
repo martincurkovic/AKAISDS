@@ -183,6 +183,57 @@ def test_first_program_is_preselected_with_its_keygroups_shown(editor):
     assert _keygroup_row_text(editor, 0) == "Keygroup 1: C0 - C3"
 
 
+def test_program_name_field_loads_from_the_selected_list_item(editor):
+    # program_list's item text already IS the current PRNAME (it comes
+    # straight from FakeBridge.program_list()) - no separate hardware
+    # round-trip needed to populate this field
+    assert editor.program_name_edit.text() == "Bass stab"
+
+    editor.program_list.setCurrentRow(1)
+
+    assert editor.program_name_edit.text() == "EPiano warm"
+
+
+def test_typing_a_program_name_uppercases_live_and_updates_the_list(editor):
+    # _on_program_name_typed is wired to textEdited, which only fires from
+    # real keystrokes - called directly here, same as this suite calls
+    # other signal handlers directly elsewhere (e.g. _on_note_range_changed)
+    editor._on_program_name_typed("bass hit")
+
+    assert editor.program_name_edit.text() == "BASS HIT"
+    # keeps the Programs list in step while typing, before any write -
+    # same idea as the keygroup list's range label during note editing
+    assert editor.program_list.currentItem().text() == "BASS HIT"
+
+
+def test_committing_a_program_name_writes_prname_and_trims_trailing_spaces(
+    editor, qapp
+):
+    bridge = editor._bridge
+
+    editor.program_name_edit.setText("PAD  ")  # trailing spaces are typable
+    editor._commit_program_name()
+    editor._worker.wait_until_idle()
+    _pump_until(qapp, lambda: bridge.set_parameter_calls)
+
+    assert bridge.set_parameter_calls[-1] == ("PRNAME", 0, "PAD", 0)
+    assert editor.program_name_edit.text() == "PAD"
+    assert editor.program_list.currentItem().text() == "PAD"
+
+
+def test_program_name_input_rejects_characters_outside_the_akai_charset(editor):
+    # AKAI_CHARSET (s3k.messages) is "0-9, space, A-Z, #+-." - lowercase
+    # is accepted at the validator level (case-insensitive, since
+    # _on_program_name_typed uppercases separately) but punctuation like
+    # "!" isn't in the device's character set at all and must be refused
+    validator = editor.program_name_edit.validator()
+    from PySide6.QtGui import QValidator
+
+    assert validator.validate("bass", 4)[0] == QValidator.State.Acceptable
+    assert validator.validate("BASS-1", 6)[0] == QValidator.State.Acceptable
+    assert validator.validate("BASS!", 5)[0] != QValidator.State.Acceptable
+
+
 def test_program_tab_loads_loud_and_velocity_from_hardware(editor):
     # FakeBridge.get_parameter reports PRLOUD=65, V_LOUD=-15
     assert editor.loud_knob.value() == 65
