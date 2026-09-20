@@ -99,12 +99,16 @@ class ProgramEditorWindow(QMainWindow):
         # Program tab (Volume/Pan/Velocity, LFO, Pitch, Voice & MIDI,
         # Portamento) and the Keygroup tab (Range, Filter, Envelopes, Zone)
         # into titled section cards pushed the window's own measured
-        # minimum (centralWidget().minimumSizeHint()) to 892x1028 - below
-        # that, Qt compresses the layout past its size hint down to
-        # minimumSize, and past THAT it starts letting cards overlap rather
-        # than erroring. 950x1080 gives real breathing room over the
-        # measured minimum.
-        self.setMinimumSize(950, 1080)
+        # minimum (centralWidget().minimumSizeHint()) up - below that, Qt
+        # compresses the layout past its size hint down to minimumSize, and
+        # past THAT it starts letting cards overlap rather than erroring.
+        # Shrinking the big knobs 80px->64px (Cutoff/Resonance/Key Filter
+        # Track, Pan/Loud/Velocity, LFO rate/depth/delay) brought the
+        # measured minimum down to 892x1012 - only ~16px, since on the
+        # taller (Keygroup) tab those knobs are a single row in the Filter
+        # card; the Envelopes and Zone cards are the real height, not the
+        # knobs. 950x1070 gives real breathing room over that minimum.
+        self.setMinimumSize(950, 900)
         self._sample_list = []
         self._keygroup_ranges = []  # [lo, hi] per keygroup - mirrors keygroup_range_bar
         self._pending_restore_state = None  # set only by _refresh_from_hardware()
@@ -198,11 +202,11 @@ class ProgramEditorWindow(QMainWindow):
         self.cutoff_knob = Knob()
         self.cutoff_knob.setRange(0, 99)
         self.cutoff_knob.setDefaultValue(99)  # fully open - no filtering
-        self.cutoff_knob.setFixedSize(80, 80)
+        self.cutoff_knob.setFixedSize(64, 64)
         self.resonance_knob = Knob()
         self.resonance_knob.setRange(0, 15)
         self.resonance_knob.setDefaultValue(0)  # no resonance
-        self.resonance_knob.setFixedSize(80, 80)
+        self.resonance_knob.setFixedSize(64, 64)
         self.key_filter_track_knob = Knob()
         # s3k.params declares K_FREQ's range as -30..99 (its own notes cite
         # a 2026-08-24 hardware sweep finding no clamp at 12 or 24 either),
@@ -213,7 +217,7 @@ class ProgramEditorWindow(QMainWindow):
         # correction belongs here instead)
         self.key_filter_track_knob.setRange(-24, 24)
         self.key_filter_track_knob.setDefaultValue(0)  # no key tracking
-        self.key_filter_track_knob.setFixedSize(80, 80)
+        self.key_filter_track_knob.setFixedSize(64, 64)
 
         self.env1_graph = ADSREnvelopeGraph()
         self.env1_graph.setFixedSize(200, 90)
@@ -262,7 +266,10 @@ class ProgramEditorWindow(QMainWindow):
         ):
             knob.valueChanged.connect(self._on_env1_knob_changed)
             self._wire_knob_write(
-                knob, field, "keygroup", keygroup_index_getter=self.keygroup_list.currentRow
+                knob,
+                field,
+                "keygroup",
+                keygroup_index_getter=self.keygroup_list.currentRow,
             )
 
         # ENV2 - a 4-stage rate/level generator: rate knobs on top, that
@@ -338,8 +345,8 @@ class ProgramEditorWindow(QMainWindow):
         resonance_column, self.resonance_value_label = self._build_knob_column(
             "Resonance", self.resonance_knob
         )
-        key_filter_track_column, self.key_filter_track_value_label = self._build_knob_column(
-            "Key Filter Track", self.key_filter_track_knob
+        key_filter_track_column, self.key_filter_track_value_label = (
+            self._build_knob_column("Key Filter Track", self.key_filter_track_knob)
         )
 
         knobs_layout = QHBoxLayout()
@@ -358,10 +365,46 @@ class ProgramEditorWindow(QMainWindow):
         self._zone_keytrack = []
 
         _ZONE_FIELDS = [
-            ("SNAME1", "LOVEL1", "HIVEL1", "VTUNO1", "VLOUD1", "VPANO1", "ZPLAY1", "CP1"),
-            ("SNAME2", "LOVEL2", "HIVEL2", "VTUNO2", "VLOUD2", "VPANO2", "ZPLAY2", "CP2"),
-            ("SNAME3", "LOVEL3", "HIVEL3", "VTUNO3", "VLOUD3", "VPANO3", "ZPLAY3", "CP3"),
-            ("SNAME4", "LOVEL4", "HIVEL4", "VTUNO4", "VLOUD4", "VPANO4", "ZPLAY4", "CP4"),
+            (
+                "SNAME1",
+                "LOVEL1",
+                "HIVEL1",
+                "VTUNO1",
+                "VLOUD1",
+                "VPANO1",
+                "ZPLAY1",
+                "CP1",
+            ),
+            (
+                "SNAME2",
+                "LOVEL2",
+                "HIVEL2",
+                "VTUNO2",
+                "VLOUD2",
+                "VPANO2",
+                "ZPLAY2",
+                "CP2",
+            ),
+            (
+                "SNAME3",
+                "LOVEL3",
+                "HIVEL3",
+                "VTUNO3",
+                "VLOUD3",
+                "VPANO3",
+                "ZPLAY3",
+                "CP3",
+            ),
+            (
+                "SNAME4",
+                "LOVEL4",
+                "HIVEL4",
+                "VTUNO4",
+                "VLOUD4",
+                "VPANO4",
+                "ZPLAY4",
+                "CP4",
+            ),
         ]
 
         zone_selector_row = QHBoxLayout()
@@ -374,7 +417,14 @@ class ProgramEditorWindow(QMainWindow):
         self._zone_loudness_labels = []
         self._zone_pan_labels = []
         for zone_idx, (
-            sname, lovel, hivel, vtuno, vloud, vpano, zplay, cp
+            sname,
+            lovel,
+            hivel,
+            vtuno,
+            vloud,
+            vpano,
+            zplay,
+            cp,
         ) in enumerate(_ZONE_FIELDS):
             btn = QPushButton(f"Zone {zone_idx + 1}")
             btn.setCheckable(True)
@@ -451,9 +501,7 @@ class ProgramEditorWindow(QMainWindow):
                 )
             loop_combo.setToolTip(_LOOP_TYPE_OPTIONS[0][1])
             loop_combo.currentIndexChanged.connect(
-                lambda i, combo=loop_combo: combo.setToolTip(
-                    _LOOP_TYPE_OPTIONS[i][1]
-                )
+                lambda i, combo=loop_combo: combo.setToolTip(_LOOP_TYPE_OPTIONS[i][1])
             )
             keytrack_label = QLabel("Keytrack")
             keytrack_label.setFixedWidth(60)
@@ -499,10 +547,16 @@ class ProgramEditorWindow(QMainWindow):
 
             # wire write signals for this zone's controls
             self._wire_spinbox_write(
-                vel_lo, lovel, "keygroup", keygroup_index_getter=self.keygroup_list.currentRow
+                vel_lo,
+                lovel,
+                "keygroup",
+                keygroup_index_getter=self.keygroup_list.currentRow,
             )
             self._wire_spinbox_write(
-                vel_hi, hivel, "keygroup", keygroup_index_getter=self.keygroup_list.currentRow
+                vel_hi,
+                hivel,
+                "keygroup",
+                keygroup_index_getter=self.keygroup_list.currentRow,
             )
             self._wire_spinbox_write(
                 tune,
@@ -518,13 +572,22 @@ class ProgramEditorWindow(QMainWindow):
                 keygroup_index_getter=self.keygroup_list.currentRow,
             )
             self._wire_knob_write(
-                pan_knob, vpano, "keygroup", keygroup_index_getter=self.keygroup_list.currentRow
+                pan_knob,
+                vpano,
+                "keygroup",
+                keygroup_index_getter=self.keygroup_list.currentRow,
             )
             self._wire_combo_write(
-                loop_combo, zplay, "keygroup", keygroup_index_getter=self.keygroup_list.currentRow
+                loop_combo,
+                zplay,
+                "keygroup",
+                keygroup_index_getter=self.keygroup_list.currentRow,
             )
             self._wire_combo_write(
-                keytrack_combo, cp, "keygroup", keygroup_index_getter=self.keygroup_list.currentRow
+                keytrack_combo,
+                cp,
+                "keygroup",
+                keygroup_index_getter=self.keygroup_list.currentRow,
             )
 
         self._zone_button_group.idClicked.connect(self._zone_stack.setCurrentIndex)
@@ -560,19 +623,21 @@ class ProgramEditorWindow(QMainWindow):
 
         self.pan_knob = Knob()
         self.pan_knob.setRange(-50, 50)
-        self.pan_knob.setFixedSize(80, 80)
+        self.pan_knob.setFixedSize(64, 64)
         pan_column, self.pan_value_label = self._build_knob_column("Pan", self.pan_knob)
 
         self.loud_knob = Knob()
         self.loud_knob.setRange(0, 99)
         self.loud_knob.setDefaultValue(80)
-        self.loud_knob.setFixedSize(80, 80)
-        loud_column, self.loud_value_label = self._build_knob_column("Loud", self.loud_knob)
+        self.loud_knob.setFixedSize(64, 64)
+        loud_column, self.loud_value_label = self._build_knob_column(
+            "Loud", self.loud_knob
+        )
 
         self.velocity_knob = Knob()
         self.velocity_knob.setRange(-50, 50)
         self.velocity_knob.setDefaultValue(20)
-        self.velocity_knob.setFixedSize(80, 80)
+        self.velocity_knob.setFixedSize(64, 64)
         velocity_column, self.velocity_value_label = self._build_knob_column(
             "Velocity", self.velocity_knob
         )
@@ -580,15 +645,15 @@ class ProgramEditorWindow(QMainWindow):
         self.lfo_rate_knob = Knob()
         self.lfo_rate_knob.setRange(0, 99)
         self.lfo_rate_knob.setDefaultValue(0)  # no modulation without depth anyway
-        self.lfo_rate_knob.setFixedSize(80, 80)
+        self.lfo_rate_knob.setFixedSize(64, 64)
         self.lfo_depth_knob = Knob()
         self.lfo_depth_knob.setRange(0, 99)
         self.lfo_depth_knob.setDefaultValue(0)  # no modulation
-        self.lfo_depth_knob.setFixedSize(80, 80)
+        self.lfo_depth_knob.setFixedSize(64, 64)
         self.lfo_delay_knob = Knob()
         self.lfo_delay_knob.setRange(0, 99)
         self.lfo_delay_knob.setDefaultValue(0)  # no delay before the LFO starts
-        self.lfo_delay_knob.setFixedSize(80, 80)
+        self.lfo_delay_knob.setFixedSize(64, 64)
 
         self.lfo_shape_combo = QComboBox()
         self.lfo_shape_combo.addItems(["Triangle", "Sawtooth", "Square", "Random"])
@@ -784,9 +849,7 @@ class ProgramEditorWindow(QMainWindow):
         volume_row.addLayout(loud_column)
         volume_row.addLayout(velocity_column)
         volume_row.addStretch()
-        volume_section = self._build_section_card(
-            "Volume, Pan && Velocity", volume_row
-        )
+        volume_section = self._build_section_card("Volume, Pan && Velocity", volume_row)
 
         # LFO - every LFO1 control (shape, rate, depth, delay) in one place
         lfo_knobs_row = QHBoxLayout()
@@ -797,9 +860,7 @@ class ProgramEditorWindow(QMainWindow):
         lfo_shape_row = QHBoxLayout()
         lfo_shape_row.addLayout(lfo_shape_column)
         lfo_shape_row.addStretch()
-        lfo_section = self._build_section_card(
-            "LFO", lfo_knobs_row, lfo_shape_row
-        )
+        lfo_section = self._build_section_card("LFO", lfo_knobs_row, lfo_shape_row)
 
         # Pitch - tuning offset and pitch-bend range, up and down
         pitch_row = QHBoxLayout()
@@ -824,9 +885,7 @@ class ProgramEditorWindow(QMainWindow):
         portamento_row.addLayout(portamento_rate_column)
         portamento_row.addLayout(portamento_type_column)
         portamento_row.addStretch()
-        portamento_section = self._build_section_card(
-            "Portamento", portamento_row
-        )
+        portamento_section = self._build_section_card("Portamento", portamento_row)
 
         program_page = QWidget()
         program_page_layout = QVBoxLayout()
@@ -1040,7 +1099,9 @@ class ProgramEditorWindow(QMainWindow):
                 if previous_program is not None
                 else []
             )
-            self.program_list.setCurrentItem(match[0] if match else self.program_list.item(0))
+            self.program_list.setCurrentItem(
+                match[0] if match else self.program_list.item(0)
+            )
         else:
             # first load only - _on_samples_loaded selects row 0 once
             # samples finish loading, which is what actually starts the
@@ -1631,7 +1692,14 @@ class ProgramEditorWindow(QMainWindow):
     _WRITE_DEBOUNCE_MS = 500
 
     def _schedule_write(
-        self, param_name, region, value, *, keygroup_index=0, index=None, debounce_key=None
+        self,
+        param_name,
+        region,
+        value,
+        *,
+        keygroup_index=0,
+        index=None,
+        debounce_key=None,
     ):
         # call on every CONTINUOUS change signal (valueChanged,
         # currentIndexChanged) - covers inputs like mouse-wheel scrolling
@@ -1689,12 +1757,20 @@ class ProgramEditorWindow(QMainWindow):
     def _wire_knob_write(self, knob, param_name, region, *, keygroup_index_getter=None):
         getter = keygroup_index_getter or (lambda: 0)
         knob.valueChanged.connect(
-            lambda v: self._schedule_write(param_name, region, v, keygroup_index=getter())
+            lambda v: self._schedule_write(
+                param_name, region, v, keygroup_index=getter()
+            )
         )
         knob.sliderReleased.connect(lambda: self._flush_write(param_name))
 
     def _wire_spinbox_write(
-        self, spinbox, param_name, region, *, keygroup_index_getter=None, value_converter=None
+        self,
+        spinbox,
+        param_name,
+        region,
+        *,
+        keygroup_index_getter=None,
+        value_converter=None,
     ):
         getter = keygroup_index_getter or (lambda: 0)
         converter = value_converter or (lambda v: v)
@@ -1705,7 +1781,9 @@ class ProgramEditorWindow(QMainWindow):
         )
         spinbox.editingFinished.connect(lambda: self._flush_write(param_name))
 
-    def _wire_combo_write(self, combo, param_name, region, *, keygroup_index_getter=None):
+    def _wire_combo_write(
+        self, combo, param_name, region, *, keygroup_index_getter=None
+    ):
         # combo index doubles as the raw byte value for every field this is
         # used on (ZPLAY/CP, same "index is the value" convention as
         # lfo_shape_combo/note_priority_combo) - no itemData lookup needed.
@@ -1714,11 +1792,20 @@ class ProgramEditorWindow(QMainWindow):
         # out the ordinary debounce window, same as the program-level combos
         getter = keygroup_index_getter or (lambda: 0)
         combo.currentIndexChanged.connect(
-            lambda i: self._schedule_write(param_name, region, i, keygroup_index=getter())
+            lambda i: self._schedule_write(
+                param_name, region, i, keygroup_index=getter()
+            )
         )
 
     def _write_knob_value(
-        self, param_name, region, value, *, keygroup_index=0, index=None, writer_key=None
+        self,
+        param_name,
+        region,
+        value,
+        *,
+        keygroup_index=0,
+        index=None,
+        writer_key=None,
     ):
         # index overrides the usual "whichever program is selected in the
         # Programs tab" target - needed for multipart writes, where the
@@ -1746,9 +1833,7 @@ class ProgramEditorWindow(QMainWindow):
     def _on_env2_knob_changed(self):
         # same live-redraw idea as ENV1, for all 4 rate/level stage pairs
         stage_values = []
-        for rate_knob, level_knob in zip(
-            self._env2_rate_knobs, self._env2_level_knobs
-        ):
+        for rate_knob, level_knob in zip(self._env2_rate_knobs, self._env2_level_knobs):
             stage_values.append(rate_knob.value())
             stage_values.append(level_knob.value())
         self.env2_graph.set_values(*stage_values)
@@ -1789,12 +1874,8 @@ class ProgramEditorWindow(QMainWindow):
         # scheduling both here every time either one changes is what keeps
         # a pushed value from being left stale on the sampler
         keygroup_index = index
-        self._schedule_write(
-            "LONOTE", "keygroup", lo, keygroup_index=keygroup_index
-        )
-        self._schedule_write(
-            "HINOTE", "keygroup", hi, keygroup_index=keygroup_index
-        )
+        self._schedule_write("LONOTE", "keygroup", lo, keygroup_index=keygroup_index)
+        self._schedule_write("HINOTE", "keygroup", hi, keygroup_index=keygroup_index)
 
     def _commit_note_range(self):
         # flushes both bounds immediately instead of waiting out the
@@ -1837,14 +1918,50 @@ class ProgramEditorWindow(QMainWindow):
 
     def _update_zone_panels(self, values):
         zone_field_map = [
-            ("SNAME1", "LOVEL1", "HIVEL1", "VTUNO1", "VLOUD1", "VPANO1", "ZPLAY1", "CP1"),
-            ("SNAME2", "LOVEL2", "HIVEL2", "VTUNO2", "VLOUD2", "VPANO2", "ZPLAY2", "CP2"),
-            ("SNAME3", "LOVEL3", "HIVEL3", "VTUNO3", "VLOUD3", "VPANO3", "ZPLAY3", "CP3"),
-            ("SNAME4", "LOVEL4", "HIVEL4", "VTUNO4", "VLOUD4", "VPANO4", "ZPLAY4", "CP4"),
+            (
+                "SNAME1",
+                "LOVEL1",
+                "HIVEL1",
+                "VTUNO1",
+                "VLOUD1",
+                "VPANO1",
+                "ZPLAY1",
+                "CP1",
+            ),
+            (
+                "SNAME2",
+                "LOVEL2",
+                "HIVEL2",
+                "VTUNO2",
+                "VLOUD2",
+                "VPANO2",
+                "ZPLAY2",
+                "CP2",
+            ),
+            (
+                "SNAME3",
+                "LOVEL3",
+                "HIVEL3",
+                "VTUNO3",
+                "VLOUD3",
+                "VPANO3",
+                "ZPLAY3",
+                "CP3",
+            ),
+            (
+                "SNAME4",
+                "LOVEL4",
+                "HIVEL4",
+                "VTUNO4",
+                "VLOUD4",
+                "VPANO4",
+                "ZPLAY4",
+                "CP4",
+            ),
         ]
-        for z, (
-            sname, lovel, hivel, vtuno, vloud, vpano, zplay, cp
-        ) in enumerate(zone_field_map):
+        for z, (sname, lovel, hivel, vtuno, vloud, vpano, zplay, cp) in enumerate(
+            zone_field_map
+        ):
             combo = self._zone_combos[z]
             name = values.get(sname, "").strip()
             idx = combo.findText(name)
