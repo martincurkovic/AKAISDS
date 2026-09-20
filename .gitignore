@@ -40,3 +40,4 @@ src/ui/_version.py
 /src/AKAISDS.bin
 /dmg-staging
 scratch_*.py
+/errors
