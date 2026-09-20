@@ -15,7 +15,7 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import Qt
 from core import app_config, midi_identity
-from ui.qt_helpers import widen_popup_to_fit_items
+from ui.qt_helpers import FullWidthTabBar, widen_popup_to_fit_items
 import time
 import mido
 
@@ -34,9 +34,10 @@ class MidiSettingsDialog(QDialog):
 
         outer_layout = QVBoxLayout(self)
         self.setMinimumHeight(300)
-        self.setMinimumWidth(430)
+        self.setMinimumWidth(502)
 
         tabs = QTabWidget()
+        tabs.setTabBar(FullWidthTabBar(tabs))
         outer_layout.addWidget(tabs)
 
         # TAB 1 - MIDI SETTINGS ------------------------------

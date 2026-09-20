@@ -227,7 +227,13 @@ QSpinBox::down-arrow, QDoubleSpinBox::down-arrow {
   height: 8px;
 }
 
-/* ------------------TABS (MIDI SETTINGS dialog) ---------------------------*/ 
+/* ------------------TABS (MIDI SETTINGS dialog) ---------------------------*/
+/* The tab row reads as a single bordered strip - flush against the content
+   pane below it, no gaps between tabs - with the whole strip's outer
+   corners rounded to match the app's usual 4px radius (bottom corners stay
+   square since that edge meets the pane). The selected tab uses the app's
+   "selected" tint (bg_selected, also used for selected list rows) so it
+   visibly pops instead of blending into whatever sits behind it. */
 QTabWidget::pane {
   border: 1px solid ${border};
   border-radius: 4px;
@@ -238,28 +244,37 @@ QTabWidget::pane {
 QTabBar::tab {
     background-color: ${bg_button};
     border: 1px solid ${border};
+    border-left: none;
     border-bottom: none;
+    padding: 7px 16px;
+    color: ${text_statusbar};
+}
+
+QTabBar::tab:first {
+    border-left: 1px solid ${border};
+    border-top-left-radius: 4px;
+}
+
+QTabBar::tab:last {
+    border-top-right-radius: 4px;
+}
+
+QTabBar::tab:only-one {
+    border-left: 1px solid ${border};
     border-top-left-radius: 4px;
     border-top-right-radius: 4px;
-    padding: 6px 14px;
-    color: ${text};
-    margin-right: 2px;
 }
 
 QTabBar::tab:hover {
     background-color: ${bg_button_hover};
     border-color: ${border_hover};
+    color: ${text};
 }
 
 QTabBar::tab:selected {
-    background-color: ${bg_dialog};
+    background-color: ${bg_selected};
+    border-color: ${border_hover};
     color: ${text_bright};
-    border-color: ${accent};
-    border-bottom: 1px solid ${bg_dialog};
-}
-
-QTabBar::tab:!selected {
-    margin-top: 2px;
 }
 
 /* ---------- Scrollbars ---------- */
