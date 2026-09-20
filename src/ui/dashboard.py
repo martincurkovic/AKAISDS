@@ -240,7 +240,12 @@ class TransferDashboard(QWidget):
         self.progress_bar_overall.setValue(0)
         self.progress_bar_overall.setVisible(False)
 
-        # STATUS FEEDBACK BAR
+        # STATUS FEEDBACK BAR - not added to master_layout: TransferDashboard
+        # is just this window's central widget, so this is handed up to the
+        # real QMainWindow (ApplicationWindow, in main_window.py) to mount
+        # via setStatusBar() instead - the same native, pinned-to-the-bottom
+        # docking used for the program editor's status bar, rather than
+        # being one more widget stacked at the end of a plain layout
         self.status_bar = QStatusBar()
         self.status_bar.setSizeGripEnabled(False)
         self.status_bar.showMessage("Ready")
@@ -256,7 +261,6 @@ class TransferDashboard(QWidget):
         master_layout.addLayout(action_layout)
         master_layout.addWidget(self.progress_bar_current_smpl)
         master_layout.addWidget(self.progress_bar_overall)
-        master_layout.addWidget(self.status_bar)
 
         # reflect whatever device type was ALREADY restored before the dashboard was constructed
         self._update_device_type_ui()

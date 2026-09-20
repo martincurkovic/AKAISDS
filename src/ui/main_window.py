@@ -32,6 +32,10 @@ class ApplicationWindow(QMainWindow):
 
         # mount layout into core central display panel area
         self.setCentralWidget(self.dashboard_view)
+        # dashboard builds the QStatusBar (it owns the status messages
+        # throughout its own methods) but mounts it here, natively, same as
+        # the program editor's own status bar
+        self.setStatusBar(self.dashboard_view.status_bar)
 
         # Settings menu action
         file_menu = self.menuBar().addMenu("File")
