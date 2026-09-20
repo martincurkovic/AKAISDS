@@ -231,6 +231,16 @@ class BridgeWorker(QThread):
     write_succeeded = Signal(str, str, object)
     write_failed = Signal(str, str, str)
 
+    # True the moment any job is queued while nothing else is pending, False
+    # the moment the queue drains back to empty - one continuous span across
+    # a whole burst of jobs (e.g. Refresh submits several at once) rather
+    # than toggling between each one. Real hardware reads take real time
+    # (~2s for a keygroup/detail fetch over 31250 baud SysEx, per the user);
+    # this is what lets the UI show that something is happening without
+    # guessing how long it'll take - see ProgramEditorWindow's indeterminate
+    # progress bar.
+    busy_changed = Signal(bool)
+
     def __init__(self, bridge):
         super().__init__()
         self._bridge = bridge
@@ -254,11 +264,14 @@ class BridgeWorker(QThread):
 
     def _submit(self, job):
         with self._idle:
+            was_idle = not self._queue and not self._busy
             kind = job[0]
             if kind in self._COALESCE_KINDS:
                 self._queue = deque(j for j in self._queue if j[0] != kind)
             self._queue.append(job)
             self._idle.notify_all()
+        if was_idle:
+            self.busy_changed.emit(True)
 
     def submit_program_list(self):
         self._submit(("program_list",))
@@ -316,18 +329,30 @@ class BridgeWorker(QThread):
             self._dispatch(job)
             with self._idle:
                 self._busy = False
+                now_idle = not self._queue
                 self._idle.notify_all()
+            if now_idle:
+                self.busy_changed.emit(False)
 
     def process_pending(self):
         # synchronously drains whatever is currently queued without
         # blocking - lets tests exercise job handling without a real
-        # background thread (this is never called from run() itself)
+        # background thread (this is never called from run() itself).
+        # Mirrors run()'s own busy_changed(False)/_busy bookkeeping so a
+        # test can exercise that signal without spinning up a real thread.
         while True:
             with self._idle:
                 if not self._queue:
                     return
                 job = self._queue.popleft()
+                self._busy = True
             self._dispatch(job)
+            with self._idle:
+                self._busy = False
+                now_idle = not self._queue
+                self._idle.notify_all()
+            if now_idle:
+                self.busy_changed.emit(False)
 
     def _dispatch(self, job):
         kind = job[0]

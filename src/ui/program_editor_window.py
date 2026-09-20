@@ -28,6 +28,7 @@ from PySide6.QtWidgets import (
     QStatusBar,
     QTabWidget,
     QScrollArea,
+    QProgressBar,
 )
 from s3k.messages import AKAI_CHARSET, NAME_LENGTH
 from ui.knob import Knob
@@ -137,7 +138,49 @@ class ProgramEditorWindow(QMainWindow):
         # docstring for why (S3kBridge isn't safe for concurrent calls, and
         # a one-shot QThread per UI action used to crash real hardware runs
         # by leaving more than one of those in flight at once)
+
+        # indeterminate - a real hardware read has no predictable duration
+        # to show progress against (a keygroup/detail fetch over 31250 baud
+        # SysEx runs a couple of seconds; see BridgeWorker.busy_changed).
+        # Built here, but only placed into the bottom row (next to the
+        # Refresh button) much further down - the two timers below only
+        # need it to exist by the time they can actually fire, which is
+        # never before __init__ finishes.
+        self._loading_progress = QProgressBar()
+        self._loading_progress.setRange(0, 0)
+        self._loading_progress.setFixedWidth(120)
+        self._loading_progress.setTextVisible(False)
+        self._loading_progress.setVisible(False)
+        # _on_worker_busy_changed below debounces BridgeWorker.busy_changed
+        # through these two one-shot timers rather than showing/hiding on
+        # the raw signal directly, for two reasons that both showed up as
+        # real test failures before this existed:
+        #   - _show: a fast op (the demo bridge; a single field write on
+        #     real hardware) would otherwise flash the bar for one frame
+        #   - _hide: a burst of several jobs submitted back to back (e.g.
+        #     Refresh: program list, multi parts, keygroups) can have the
+        #     worker thread race ahead and briefly drain the queue to empty
+        #     *between* two GUI-thread submit_*() calls, which reads as
+        #     busy_changed(False) immediately followed by another True -
+        #     without this, that shows as a visible flicker instead of one
+        #     continuous span. Real hardware is slow enough this race
+        #     realistically never fires (the GUI thread submits a whole
+        #     batch in far under a millisecond; the worker is still busy
+        #     with the first job when the rest land) - it's mainly the
+        #     demo/fake bridges' near-instant responses that expose it.
+        self._busy_show_timer = QTimer(self)
+        self._busy_show_timer.setSingleShot(True)
+        self._busy_show_timer.setInterval(200)
+        self._busy_show_timer.timeout.connect(
+            lambda: self._loading_progress.setVisible(True)
+        )
+        self._busy_hide_timer = QTimer(self)
+        self._busy_hide_timer.setSingleShot(True)
+        self._busy_hide_timer.setInterval(150)
+        self._busy_hide_timer.timeout.connect(self._confirm_worker_idle)
+
         self._worker = BridgeWorker(self._bridge)
+        self._worker.busy_changed.connect(self._on_worker_busy_changed)
         self._worker.programs_loaded.connect(self._on_programs_loaded)
         self._worker.programs_load_failed.connect(self._on_program_load_failed)
         self._worker.samples_loaded.connect(self._on_samples_loaded)
@@ -989,6 +1032,9 @@ class ProgramEditorWindow(QMainWindow):
 
         bottom_row = QHBoxLayout()
         bottom_row.addWidget(refresh_button)
+        # ties the loading indicator to the action that most often triggers
+        # a hardware sync, rather than tucking it into the status bar
+        bottom_row.addWidget(self._loading_progress)
         bottom_row.addStretch()
         bottom_row.addWidget(close_button)
 
@@ -1168,6 +1214,29 @@ class ProgramEditorWindow(QMainWindow):
 
     def _on_program_load_failed(self, error_message):
         self.status_bar.showMessage(f"Couldn't load programs: {error_message}")
+
+    def _on_worker_busy_changed(self, busy):
+        if busy:
+            # a pending hide from a moment-ago False is cancelled outright -
+            # this is what collapses a burst of back-to-back jobs into one
+            # continuous visible span instead of flickering between them
+            self._busy_hide_timer.stop()
+            # isHidden(), not isVisible() - isVisible() is false for any
+            # widget whose top-level window hasn't been shown yet
+            # (unshown in tests; briefly true during real startup too),
+            # which would restart this timer's countdown on every job in
+            # a burst instead of only the first
+            if not self._busy_show_timer.isActive() and self._loading_progress.isHidden():
+                self._busy_show_timer.start()
+        else:
+            # not hidden immediately - _confirm_worker_idle only actually
+            # hides once this fires without a new busy_changed(True)
+            # cancelling it first (see the comment on these two timers above)
+            self._busy_hide_timer.start()
+
+    def _confirm_worker_idle(self):
+        self._busy_show_timer.stop()
+        self._loading_progress.setVisible(False)
 
     def _refresh_multi_parts(self, *, show_confirmation=False):
         self._multi_refresh_in_progress = show_confirmation
