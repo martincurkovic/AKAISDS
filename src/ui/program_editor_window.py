@@ -7,7 +7,7 @@ if __name__ == "__main__":
     # fail with "No module named 'ui'"
     sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from PySide6.QtGui import Qt
+from PySide6.QtGui import Qt, QAction
 from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import (
     QHBoxLayout,
@@ -50,6 +50,8 @@ class ProgramEditorWindow(QMainWindow):
         self._active_writers = {}
         self._sample_list = []
         self._keygroup_ranges = []  # [lo, hi] per keygroup - mirrors keygroup_range_bar
+        self._pending_restore_state = None  # set only by _refresh_from_hardware()
+        self._refresh_in_progress = False
 
         self._main_window = main_window
         self._bridge = bridge
@@ -485,18 +487,36 @@ class ProgramEditorWindow(QMainWindow):
         close_button = QPushButton("Close")
         close_button.clicked.connect(self.close)
 
+        refresh_button = QPushButton("⟳ Refresh")
+        refresh_button.setToolTip(
+            "Reload the current program/keygroup from the hardware (⌘R) - "
+            "use this if you've changed something on the sampler's own front panel"
+        )
+        refresh_button.clicked.connect(self._refresh_from_hardware)
+
         content_layout = QHBoxLayout()
         content_layout.addWidget(programs_container)
         content_layout.addWidget(keygroups_container)
         content_layout.addWidget(self.detail_stack, stretch=1)
 
+        bottom_row = QHBoxLayout()
+        bottom_row.addWidget(refresh_button)
+        bottom_row.addStretch()
+        bottom_row.addWidget(close_button)
+
         main_layout = QVBoxLayout()
         main_layout.addLayout(content_layout)
-        main_layout.addWidget(close_button)
+        main_layout.addLayout(bottom_row)
 
         container = QWidget()
         container.setLayout(main_layout)
         self.setCentralWidget(container)
+
+        refresh_action = QAction("Refresh from Hardware", self)
+        refresh_action.setShortcut("Ctrl+R")  # shows as ⌘R on macOS
+        refresh_action.triggered.connect(self._refresh_from_hardware)
+        hardware_menu = self.menuBar().addMenu("&Hardware")
+        hardware_menu.addAction(refresh_action)
 
         self.program_list.currentItemChanged.connect(self._on_program_selected)
         self.program_list.itemClicked.connect(
@@ -562,6 +582,36 @@ class ProgramEditorWindow(QMainWindow):
     def _on_program_load_failed(self, error_message):
         self.detail_label.setText(f"Couldn't load programs: {error_message}")
 
+    def _refresh_from_hardware(self):
+        # re-fetches the current program's keygroup list/ranges and
+        # program-level knobs (Pan/LFO/Polyphony) from the sampler, so
+        # changes made on the hardware's own front panel don't leave this
+        # window showing stale values. Restores whatever the user was
+        # looking at (which keygroup, which zone tab, program vs keygroup
+        # page) rather than resetting the view.
+        program_index = self.program_list.currentRow()
+        if program_index < 0:
+            return  # nothing loaded yet to refresh
+
+        self.detail_label.setText("Refreshing from hardware…")
+        self._refresh_in_progress = True
+        self._pending_restore_state = {
+            "keygroup_index": self.keygroup_list.currentRow(),
+            "stack_index": self.detail_stack.currentIndex(),
+            "zone_index": self._zone_button_group.checkedId(),
+        }
+
+        if hasattr(self, "_keygroup_loader"):
+            try:
+                self._keygroup_loader.keygroups_loaded.disconnect()
+            except RuntimeError:
+                pass
+
+        self._keygroup_loader = KeygroupLoader(self._bridge, program_index)
+        self._keygroup_loader.keygroups_loaded.connect(self._on_keygroups_loaded)
+        self._keygroup_loader.load_failed.connect(self._on_load_failed)
+        self._keygroup_loader.start()
+
     def _on_program_selected(self, current, previous):
         self.keygroup_list.clear()
         self._keygroup_ranges = []
@@ -588,17 +638,36 @@ class ProgramEditorWindow(QMainWindow):
         # ignore result for program the user has already clicked away from
         if program_index != self.program_list.currentRow():
             return
+        # idempotent even though _on_program_selected already clears this -
+        # _refresh_from_hardware() reaches this same handler without going
+        # through _on_program_selected first
+        self.keygroup_list.clear()
         for i, (lo, hi) in enumerate(keygroup_ranges):
             self._add_keygroup_row(i, lo, hi)
         self._keygroup_ranges = [list(r) for r in keygroup_ranges]
         self.keygroup_range_bar.set_ranges(self._keygroup_ranges)
+        # blockSignals during every one of these loaded-from-hardware
+        # setValue() calls - valueChanged now also schedules a debounced
+        # write (see _wire_knob_write), so an unblocked setValue() here
+        # would schedule a write that just echoes the value straight back
+        # to the hardware a moment later. The value label and graph/other
+        # side effects are set explicitly right here instead of relying on
+        # the (now blocked) valueChanged connections.
+        self.pan_knob.blockSignals(True)
         self.pan_knob.setValue(program_values["PANPOS"])
+        self.pan_knob.blockSignals(False)
         self.pan_value_label.setText(str(program_values["PANPOS"]))
+        self.lfo_rate_knob.blockSignals(True)
         self.lfo_rate_knob.setValue(program_values["LFORAT"])
+        self.lfo_rate_knob.blockSignals(False)
         self.lfo_rate_value_label.setText(str(program_values["LFORAT"]))
+        self.lfo_depth_knob.blockSignals(True)
         self.lfo_depth_knob.setValue(program_values["LFODEP"])
+        self.lfo_depth_knob.blockSignals(False)
         self.lfo_depth_value_label.setText(str(program_values["LFODEP"]))
+        self.lfo_delay_knob.blockSignals(True)
         self.lfo_delay_knob.setValue(program_values["LFODEL"])
+        self.lfo_delay_knob.blockSignals(False)
         self.lfo_delay_value_label.setText(str(program_values["LFODEL"]))
         self.lfo_shape_combo.blockSignals(True)
         self.lfo_shape_combo.setCurrentIndex(program_values["LFO1WAVE"])
@@ -607,7 +676,28 @@ class ProgramEditorWindow(QMainWindow):
         self.polyph_spinbox.setValue(program_values["POLYPH"])
         self.polyph_spinbox.blockSignals(False)
 
+        # only ever set by _refresh_from_hardware() - restores whatever the
+        # user was looking at before the refresh (a plain program selection
+        # never sets this, so this is a no-op on the normal load path)
+        restore = self._pending_restore_state
+        self._pending_restore_state = None
+        if restore is not None:
+            keygroup_index = restore["keygroup_index"]
+            if 0 <= keygroup_index < self.keygroup_list.count():
+                self.keygroup_list.setCurrentRow(keygroup_index)
+                self.detail_stack.setCurrentIndex(restore["stack_index"])
+                zone_index = restore["zone_index"]
+                if zone_index >= 0:
+                    self._zone_button_group.button(zone_index).setChecked(True)
+                    self._zone_stack.setCurrentIndex(zone_index)
+
+        if self._refresh_in_progress:
+            self._refresh_in_progress = False
+            self.detail_label.setText("Refreshed from hardware")
+
     def _on_load_failed(self, program_index, error_message):
+        self._refresh_in_progress = False
+        self._pending_restore_state = None
         if program_index != self.program_list.currentRow():
             return
         self.detail_label.setText(f"Couldn't load keygroups: {error_message}")
@@ -646,17 +736,36 @@ class ProgramEditorWindow(QMainWindow):
         self.note_hi_spinbox.blockSignals(True)
         self.note_hi_spinbox.setValue(values["HINOTE"])
         self.note_hi_spinbox.blockSignals(False)
+        # blockSignals during every loaded-from-hardware setValue() call -
+        # valueChanged now also schedules a debounced write (see
+        # _wire_knob_write), so leaving these unblocked would schedule a
+        # write that echoes the just-loaded value straight back to the
+        # hardware. Value labels and the envelope graphs are updated
+        # explicitly right here instead of relying on the (blocked)
+        # valueChanged connections that normally do it.
+        self.cutoff_knob.blockSignals(True)
         self.cutoff_knob.setValue(values["FILFRQ"])
+        self.cutoff_knob.blockSignals(False)
         self.cutoff_value_label.setText(str(values["FILFRQ"]))
+        self.resonance_knob.blockSignals(True)
         self.resonance_knob.setValue(values["FILQ"])
+        self.resonance_knob.blockSignals(False)
         self.resonance_value_label.setText(str(values["FILQ"]))
+        self.attack1_knob.blockSignals(True)
         self.attack1_knob.setValue(values["ATTAK1"])
+        self.attack1_knob.blockSignals(False)
         self.attack1_value_label.setText(str(values["ATTAK1"]))
+        self.decay1_knob.blockSignals(True)
         self.decay1_knob.setValue(values["DECAY1"])
+        self.decay1_knob.blockSignals(False)
         self.decay1_value_label.setText(str(values["DECAY1"]))
+        self.sustain1_knob.blockSignals(True)
         self.sustain1_knob.setValue(values["SUSTN1"])
+        self.sustain1_knob.blockSignals(False)
         self.sustain1_value_label.setText(str(values["SUSTN1"]))
+        self.release1_knob.blockSignals(True)
         self.release1_knob.setValue(values["RELSE1"])
+        self.release1_knob.blockSignals(False)
         self.release1_value_label.setText(str(values["RELSE1"]))
         self.env1_graph.set_values(
             values["ATTAK1"], values["DECAY1"], values["SUSTN1"], values["RELSE1"]
@@ -671,9 +780,13 @@ class ProgramEditorWindow(QMainWindow):
         for i, ((rate_field, level_field), rate_knob, level_knob) in enumerate(
             zip(env2_field_pairs, self._env2_rate_knobs, self._env2_level_knobs)
         ):
+            rate_knob.blockSignals(True)
             rate_knob.setValue(values[rate_field])
+            rate_knob.blockSignals(False)
             self._env2_rate_value_labels[i].setText(str(values[rate_field]))
+            level_knob.blockSignals(True)
             level_knob.setValue(values[level_field])
+            level_knob.blockSignals(False)
             self._env2_level_value_labels[i].setText(str(values[level_field]))
         self.env2_graph.set_values(
             values["ATTAK2"],
