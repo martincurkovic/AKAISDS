@@ -45,6 +45,21 @@ DARK_PALETTE = {
     "text_on_accent": "#ffffff",
     "warning": "#d9a94a",
     "critical": "#d9544a",
+    # categorical colors for the keygroup range bar (ui/keygroup_range_bar.py)
+    # not referenced by style.qss.template - these are read directly by
+    # custom-painted widgets that need a fixed, validated series order.
+    # Dataviz-validated 8-slot categorical set (fixed order - never cycle
+    # the ASSIGNMENT, only reuse colors past the 8th series), checked with
+    # scripts/validate_palette.js against this app's bg_panel/bg_input
+    # surfaces in both themes.
+    "keygroup_color_1": "#3987e5",
+    "keygroup_color_2": "#d95926",
+    "keygroup_color_3": "#199e70",
+    "keygroup_color_4": "#c98500",
+    "keygroup_color_5": "#d55181",
+    "keygroup_color_6": "#008300",
+    "keygroup_color_7": "#9085e9",
+    "keygroup_color_8": "#e66767",
 }
 
 LIGHT_PALETTE = {
@@ -78,6 +93,16 @@ LIGHT_PALETTE = {
     "text_on_accent": "#ffffff",
     "warning": "#f57927",
     "critical": "#d54439",
+    # same 8-slot categorical set as DARK_PALETTE, stepped for the light
+    # surface - see the comment there.
+    "keygroup_color_1": "#2a78d6",
+    "keygroup_color_2": "#eb6834",
+    "keygroup_color_3": "#1baf7a",
+    "keygroup_color_4": "#eda100",
+    "keygroup_color_5": "#e87ba4",
+    "keygroup_color_6": "#008300",
+    "keygroup_color_7": "#4a3aa7",
+    "keygroup_color_8": "#e34948",
 }
 
 
@@ -156,20 +181,29 @@ def render_stylesheet(palette):
         ) from e
 
 
+def current_palette():
+    """Returns DARK_PALETTE or LIGHT_PALETTE, matching the OS color scheme
+    right now. For custom-painted widgets (QPainter, not QSS) that need a
+    themed color - e.g. ui/keygroup_range_bar.py - so they stay in sync with
+    the same palettes the stylesheet is rendered from.
+    """
+    from PySide6.QtCore import Qt
+    from PySide6.QtGui import QGuiApplication
+
+    scheme = QGuiApplication.styleHints().colorScheme()
+    return LIGHT_PALETTE if scheme == Qt.ColorScheme.Light else DARK_PALETTE
+
+
 def apply_to_app(app):
     """Sets the Fusion style and this app's stylesheet, live-matched to the
     OS color scheme. Shared by every entry point (main.py, and any window
     launched standalone for dev work) so they always look the same.
     """
-    from PySide6.QtCore import Qt
     from PySide6.QtGui import QGuiApplication
 
-    def palette_for_scheme(scheme):
-        return LIGHT_PALETTE if scheme == Qt.ColorScheme.Light else DARK_PALETTE
-
-    def apply(scheme):
+    def apply(_scheme):
         try:
-            app.setStyleSheet(render_stylesheet(palette_for_scheme(scheme)))
+            app.setStyleSheet(render_stylesheet(current_palette()))
         except (OSError, KeyError) as e:
             print(
                 f"[WARN] Couldn't apply theme ({e}) - continuing with "

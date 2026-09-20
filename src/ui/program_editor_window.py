@@ -26,6 +26,7 @@ from PySide6.QtWidgets import (
 from ui.knob import Knob
 from ui.note_spinbox import NoteSpinBox
 from ui.envelope_graph import ADSREnvelopeGraph, Envelope2Graph
+from ui.keygroup_range_bar import KeygroupRangeBar
 from core.midi_notes import midi_note_to_name
 from core.program_editor_bridge import (
     KeygroupLoader,
@@ -43,6 +44,7 @@ class ProgramEditorWindow(QMainWindow):
         self.setMinimumSize(800, 500)
         self._active_writers = {}
         self._sample_list = []
+        self._keygroup_ranges = []  # [lo, hi] per keygroup - mirrors keygroup_range_bar
 
         self._main_window = main_window
         self._bridge = bridge
@@ -55,6 +57,8 @@ class ProgramEditorWindow(QMainWindow):
         self.keygroup_list = QListWidget()
         self.keygroup_list.setObjectName("keygroupList")
         self.keygroup_list.setFixedWidth(190)  # fits "Keygroup 12: C#1 - D#7"
+
+        self.keygroup_range_bar = KeygroupRangeBar()
 
         # bold header + list, same layout shape as the dashboard's queue/hardware panels
         programs_column = QVBoxLayout()
@@ -69,6 +73,7 @@ class ProgramEditorWindow(QMainWindow):
         keygroups_column.setContentsMargins(0, 0, 0, 0)
         keygroups_column.setSpacing(6)
         keygroups_column.addWidget(QLabel("<b>Keygroups</b>"))
+        keygroups_column.addWidget(self.keygroup_range_bar)
         keygroups_column.addWidget(self.keygroup_list)
         keygroups_container = QWidget()
         keygroups_container.setLayout(keygroups_column)
@@ -470,6 +475,8 @@ class ProgramEditorWindow(QMainWindow):
 
     def _on_program_selected(self, current, previous):
         self.keygroup_list.clear()
+        self._keygroup_ranges = []
+        self.keygroup_range_bar.set_ranges([])
         self.detail_label.setText("Select a keygroup")
         self.detail_stack.setCurrentIndex(0)
         if current is None:
@@ -498,6 +505,8 @@ class ProgramEditorWindow(QMainWindow):
                 for i, (lo, hi) in enumerate(keygroup_ranges)
             ]
         )
+        self._keygroup_ranges = [list(r) for r in keygroup_ranges]
+        self.keygroup_range_bar.set_ranges(self._keygroup_ranges)
         self.pan_knob.setValue(program_values["PANPOS"])
         self.pan_value_label.setText(str(program_values["PANPOS"]))
         self.lfo_rate_knob.setValue(program_values["LFORAT"])
@@ -679,6 +688,8 @@ class ProgramEditorWindow(QMainWindow):
         lo = self.note_lo_spinbox.value()
         hi = self.note_hi_spinbox.value()
         item.setText(f"Keygroup {index + 1}: {midi_note_to_name(lo)} - {midi_note_to_name(hi)}")
+        self._keygroup_ranges[index] = [lo, hi]
+        self.keygroup_range_bar.set_ranges(self._keygroup_ranges)
 
     def _commit_note_range(self):
         # both bounds are written together (not just the one the user
