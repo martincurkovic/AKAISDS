@@ -10,7 +10,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import pytest
 from PySide6.QtWidgets import QApplication, QLabel, QWidget
 from ui.program_editor_window import ProgramEditorWindow
-from core.program_editor_bridge import MultiPartsLoader
+from core.program_editor_bridge import MULTI_PART_COUNT
 
 
 class FakeBridge:
@@ -25,7 +25,7 @@ class FakeBridge:
         self._details = {0: 72, 1: 8, 2: 30, 3: 60, 4: 90}
         # multipart channel per part - distinct values so a test can catch
         # one part's write landing on the wrong part
-        self.multipart_channels = list(range(MultiPartsLoader.PART_COUNT))
+        self.multipart_channels = list(range(MULTI_PART_COUNT))
         self.set_parameter_calls = []
 
     def sample_list(self):
@@ -93,16 +93,21 @@ def _pump_until(qapp, predicate, timeout=2.0):
 
 
 def _wait_for_program_load(editor, qapp):
-    editor._program_loader.wait()
-    # delivers programs_loaded, which starts _sample_loader
-    _pump_until(qapp, lambda: hasattr(editor, "_sample_loader"))
-    editor._sample_loader.wait()
-    # delivers samples_loaded, which selects row 0 and starts _keygroup_loader
-    _pump_until(qapp, lambda: hasattr(editor, "_keygroup_loader"))
+    # the worker is a single persistent background thread now (see
+    # BridgeWorker) rather than a fresh QThread per request, so
+    # wait_until_idle() replaces waiting on a specific loader's own
+    # .wait() - it blocks until every job submitted so far has actually
+    # been processed and its result signal emitted. Delivery of that
+    # (queued, cross-thread) signal to the slot that reacts to it still
+    # needs a pump, same as before.
+    editor._worker.wait_until_idle()  # program list loaded -> submits sample list
+    _pump_until(qapp, lambda: editor.program_list.count() > 0)
+    editor._worker.wait_until_idle()  # sample list loaded -> selects row 0
+    _pump_until(qapp, lambda: editor.program_list.currentRow() == 0)
 
 
 def _wait_for_keygroup_load(editor, qapp, expected_count):
-    editor._keygroup_loader.wait()
+    editor._worker.wait_until_idle()
     _pump_until(qapp, lambda: editor.keygroup_list.count() == expected_count)
 
 
@@ -112,7 +117,14 @@ def editor(qapp):
     editor = ProgramEditorWindow(fake_main_window, bridge=FakeBridge())
     _wait_for_program_load(editor, qapp)
     _wait_for_keygroup_load(editor, qapp, expected_count=2)  # program 0 has 2
-    return editor
+    yield editor
+    # BridgeWorker is a persistent thread that only exits once told to (see
+    # its stop()) - unlike the old per-action QThreads, it's still running
+    # long after every test assertion above is done, so it must be shut
+    # down explicitly or it gets garbage-collected mid-run, which is
+    # exactly the real-hardware crash this class exists to prevent
+    editor._worker.stop()
+    editor._worker.wait()
 
 
 def _keygroup_row_text(editor, row):
@@ -140,7 +152,7 @@ def test_switching_program_replaces_keygroup_list_without_crashing(editor, qapp)
 
 def test_selecting_a_keygroup_shows_the_keygroup_panel_with_real_values(editor, qapp):
     editor.keygroup_list.setCurrentRow(1)
-    editor._detail_loader.wait()
+    editor._worker.wait_until_idle()
     # detail_stack switches synchronously on selection, before detail_loaded
     # is even delivered, so pump until the loader's actual effect lands
     _pump_until(qapp, lambda: editor.cutoff_knob.value() == 72)
@@ -153,10 +165,10 @@ def test_selecting_a_keygroup_shows_the_keygroup_panel_with_real_values(editor, 
 
 
 def _wait_for_multi_parts_load(editor, qapp):
-    editor._multi_parts_loader.wait()
-    # the loader's initial run sets part 0's channel combo from FakeBridge's
-    # multipart_channels[0] == 0 ("1") - a real, if arbitrary, landmark to
-    # pump until, since nothing else about the combos changes on its own
+    editor._worker.wait_until_idle()
+    # part 0's channel combo defaults to channel 0 ("1") regardless of the
+    # load (see _build_multis_tab) - a real, if arbitrary, landmark to pump
+    # until, since nothing else about the combos changes on its own
     _pump_until(qapp, lambda: editor._multi_channel_combos[0].currentData() == 0)
 
 
@@ -184,8 +196,7 @@ def test_changing_two_multi_part_channels_writes_both_independently(editor, qapp
     editor._flush_write("multipart_channel_0")
     editor._flush_write("multipart_channel_1")
 
-    for writer in list(editor._active_writers.values()):
-        writer.wait()
+    editor._worker.wait_until_idle()
     _pump_until(qapp, lambda: len(bridge.set_parameter_calls) >= 2)
 
     pmchan_calls = [c for c in bridge.set_parameter_calls if c[0] == "PMCHAN"]
@@ -209,7 +220,7 @@ def test_multi_part_channel_write_targets_the_part_not_the_selected_program(
         "PMCHAN", "multipart", 11, index=7, debounce_key="multipart_channel_7"
     )
     editor._flush_write("multipart_channel_7")
-    editor._active_writers["multipart_channel_7"].wait()
+    editor._worker.wait_until_idle()
     _pump_until(qapp, lambda: bridge.set_parameter_calls)
 
     assert bridge.set_parameter_calls[-1] == ("PMCHAN", 7, 11, 0)

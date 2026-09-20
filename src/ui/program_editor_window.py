@@ -33,15 +33,7 @@ from ui.qt_helpers import FullWidthTabBar
 from ui.envelope_graph import ADSREnvelopeGraph, Envelope2Graph
 from ui.keygroup_range_bar import KeygroupRangeBar, keygroup_color
 from core.midi_notes import midi_note_to_name
-from core.program_editor_bridge import (
-    KeygroupLoader,
-    ParameterWriter,
-    ProgramListLoader,
-    KeygroupDetailLoader,
-    SampleListLoader,
-    MultiPartsLoader,
-    ProgramChangeSender,
-)
+from core.program_editor_bridge import BridgeWorker, MULTI_PART_COUNT
 
 
 class ProgramEditorWindow(QMainWindow):
@@ -52,7 +44,6 @@ class ProgramEditorWindow(QMainWindow):
         # particular is now well past what fits there. 850x800 gives some
         # breathing room over the layout's own measured minimum (810x781)
         self.setMinimumSize(850, 800)
-        self._active_writers = {}
         self._sample_list = []
         self._keygroup_ranges = []  # [lo, hi] per keygroup - mirrors keygroup_range_bar
         self._pending_restore_state = None  # set only by _refresh_from_hardware()
@@ -61,6 +52,47 @@ class ProgramEditorWindow(QMainWindow):
 
         self._main_window = main_window
         self._bridge = bridge
+
+        # a single persistent worker thread owns every call to the bridge
+        # for this window's whole lifetime, taking requests off a queue and
+        # running them strictly one at a time - see BridgeWorker's own
+        # docstring for why (S3kBridge isn't safe for concurrent calls, and
+        # a one-shot QThread per UI action used to crash real hardware runs
+        # by leaving more than one of those in flight at once)
+        self._worker = BridgeWorker(self._bridge)
+        self._worker.programs_loaded.connect(self._on_programs_loaded)
+        self._worker.programs_load_failed.connect(self._on_program_load_failed)
+        self._worker.samples_loaded.connect(self._on_samples_loaded)
+        self._worker.samples_load_failed.connect(
+            lambda e: self.status_bar.showMessage(f"Couldn't load samples: {e}")
+        )
+        self._worker.keygroups_loaded.connect(self._on_keygroups_loaded)
+        self._worker.keygroups_load_failed.connect(self._on_load_failed)
+        self._worker.detail_loaded.connect(self._on_detail_loaded)
+        self._worker.detail_load_failed.connect(self._on_detail_load_failed)
+        self._worker.parts_loaded.connect(self._on_multi_parts_loaded)
+        self._worker.parts_load_failed.connect(self._on_multi_load_failed)
+        self._worker.change_sent.connect(
+            lambda part_index, name: self.status_bar.showMessage(
+                f"Part {part_index + 1}: sent Program Change for '{name}'"
+            )
+        )
+        self._worker.change_send_failed.connect(
+            lambda part_index, e: self.status_bar.showMessage(
+                f"Part {part_index + 1}: couldn't send Program Change: {e}"
+            )
+        )
+        self._worker.write_succeeded.connect(
+            lambda _key, param_name, v: self.status_bar.showMessage(
+                f"{param_name} → {v}"
+            )
+        )
+        self._worker.write_failed.connect(
+            lambda _key, param_name, e: self.status_bar.showMessage(
+                f"Write failed ({param_name}): {e}"
+            )
+        )
+        self._worker.start()
 
         # placeholder - real program, keygroup panels come later
         self.program_list = QListWidget()
@@ -576,10 +608,7 @@ class ProgramEditorWindow(QMainWindow):
         self.keygroup_list.itemClicked.connect(
             lambda item: self.detail_stack.setCurrentIndex(1)
         )
-        self._program_loader = ProgramListLoader(self._bridge)
-        self._program_loader.programs_loaded.connect(self._on_programs_loaded)
-        self._program_loader.load_failed.connect(self._on_program_load_failed)
-        self._program_loader.start()
+        self._worker.submit_program_list()
 
         # enable knobs and wire their (debounced) writes
         self.cutoff_knob.setEnabled(True)
@@ -622,12 +651,7 @@ class ProgramEditorWindow(QMainWindow):
 
     def _on_programs_loaded(self, programs):
         self.program_list.addItems(programs)
-        self._sample_loader = SampleListLoader(self._bridge)
-        self._sample_loader.samples_loaded.connect(self._on_samples_loaded)
-        self._sample_loader.load_failed.connect(
-            lambda e: self.status_bar.showMessage(f"Couldn't load samples: {e}")
-        )
-        self._sample_loader.start()
+        self._worker.submit_sample_list()
 
         # a part can only be assigned a program that actually exists -
         # populate all 16 combos with the same name list now that it's in.
@@ -650,15 +674,7 @@ class ProgramEditorWindow(QMainWindow):
 
     def _refresh_multi_parts(self, *, show_confirmation=False):
         self._multi_refresh_in_progress = show_confirmation
-        if hasattr(self, "_multi_parts_loader"):
-            try:
-                self._multi_parts_loader.parts_loaded.disconnect()
-            except RuntimeError:
-                pass
-        self._multi_parts_loader = MultiPartsLoader(self._bridge)
-        self._multi_parts_loader.parts_loaded.connect(self._on_multi_parts_loaded)
-        self._multi_parts_loader.load_failed.connect(self._on_multi_load_failed)
-        self._multi_parts_loader.start()
+        self._worker.submit_multi_parts()
 
     def _on_multi_parts_loaded(self, parts):
         # the read itself still works and stays wired up (Refresh still
@@ -698,16 +714,7 @@ class ProgramEditorWindow(QMainWindow):
             "zone_index": self._zone_button_group.checkedId(),
         }
 
-        if hasattr(self, "_keygroup_loader"):
-            try:
-                self._keygroup_loader.keygroups_loaded.disconnect()
-            except RuntimeError:
-                pass
-
-        self._keygroup_loader = KeygroupLoader(self._bridge, program_index)
-        self._keygroup_loader.keygroups_loaded.connect(self._on_keygroups_loaded)
-        self._keygroup_loader.load_failed.connect(self._on_load_failed)
-        self._keygroup_loader.start()
+        self._worker.submit_keygroups(program_index)
 
     def _on_program_selected(self, current, previous):
         self.keygroup_list.clear()
@@ -718,18 +725,7 @@ class ProgramEditorWindow(QMainWindow):
         if current is None:
             return
         program_index = self.program_list.currentRow()
-
-        # disconnect previous loader to avoid stale signals firing
-        if hasattr(self, "_keygroup_loader"):
-            try:
-                self._keygroup_loader.keygroups_loaded.disconnect()
-            except RuntimeError:
-                pass
-
-        self._keygroup_loader = KeygroupLoader(self._bridge, program_index)
-        self._keygroup_loader.keygroups_loaded.connect(self._on_keygroups_loaded)
-        self._keygroup_loader.load_failed.connect(self._on_load_failed)
-        self._keygroup_loader.start()
+        self._worker.submit_keygroups(program_index)
 
     def _on_keygroups_loaded(self, program_index, keygroup_ranges, program_values):
         # ignore result for program the user has already clicked away from
@@ -809,19 +805,7 @@ class ProgramEditorWindow(QMainWindow):
         self.detail_stack.setCurrentIndex(1)
         program_index = self.program_list.currentRow()
         keygroup_index = self.keygroup_list.currentRow()
-
-        if hasattr(self, "_detail_loader"):
-            try:
-                self._detail_loader.detail_loaded.disconnect()
-            except RuntimeError:
-                pass  # already disconencted
-
-        self._detail_loader = KeygroupDetailLoader(
-            self._bridge, program_index, keygroup_index
-        )
-        self._detail_loader.detail_loaded.connect(self._on_detail_loaded)
-        self._detail_loader.load_failed.connect(self._on_detail_load_failed)
-        self._detail_loader.start()
+        self._worker.submit_detail(program_index, keygroup_index)
 
     def _on_detail_loaded(self, program_index, keygroup_index, values):
         if (
@@ -907,17 +891,13 @@ class ProgramEditorWindow(QMainWindow):
             self.status_bar.showMessage(f"Couldn't load detail: {error_message}")
 
     def closeEvent(self, event):
-        # runs regardless of how the window closes (close button, command + w, etc)
-        loaders = [
-            self._program_loader,
-            getattr(self, "_keygroup_loader", None),
-            getattr(self, "_detail_loader", None),
-            getattr(self, "_sample_loader", None),
-        ] + list(self._active_writers.values())
-
-        for loader in loaders:
-            if loader is not None and loader.isRunning():
-                loader.wait()
+        # runs regardless of how the window closes (close button, command + w,
+        # etc) - stop() lets anything already queued (in particular, pending
+        # writes) drain before the worker thread actually exits, then wait()
+        # blocks until it does, so its QThread object is never destroyed
+        # while still running
+        self._worker.stop()
+        self._worker.wait()
 
         self._main_window.show()
         event.accept()
@@ -980,7 +960,7 @@ class ProgramEditorWindow(QMainWindow):
         header_row.addWidget(channel_header)
         layout.addLayout(header_row)
 
-        for part_index in range(MultiPartsLoader.PART_COUNT):
+        for part_index in range(MULTI_PART_COUNT):
             row = QHBoxLayout()
             row.setSpacing(10)
 
@@ -1049,21 +1029,9 @@ class ProgramEditorWindow(QMainWindow):
         # reaches it; 0 is as good a choice as any
         send_channel = channel if channel != 255 else 0
 
-        sender = ProgramChangeSender(
-            self._bridge, part_index, program_index, program_name, send_channel
+        self._worker.submit_program_change(
+            part_index, program_index, program_name, send_channel
         )
-        sender.change_sent.connect(
-            lambda z, name: self.status_bar.showMessage(
-                f"Part {z + 1}: sent Program Change for '{name}'"
-            )
-        )
-        sender.send_failed.connect(
-            lambda z, e: self.status_bar.showMessage(
-                f"Part {z + 1}: couldn't send Program Change: {e}"
-            )
-        )
-        self._active_writers[f"multipart_program_{part_index}"] = sender
-        sender.start()
 
     def _add_keygroup_row(self, index, lo, hi):
         # colored swatch + range text, same row-widget approach as the
@@ -1189,27 +1157,13 @@ class ProgramEditorWindow(QMainWindow):
         # thing being addressed is a part number (0-15), unrelated to
         # program_list's own selection
         program_index = self.program_list.currentRow() if index is None else index
-        # writer_key overrides _active_writers' storage key (also
-        # param_name by default) for the same reason _schedule_write takes
-        # debounce_key - see its comment
+        # writer_key identifies this write in the worker's write_succeeded/
+        # write_failed signals (also param_name by default) for the same
+        # reason _schedule_write takes debounce_key - see its comment
         key = writer_key if writer_key is not None else param_name
-        writer = ParameterWriter(
-            self._bridge,
-            param_name,
-            region,
-            program_index,
-            value,
-            keygroup_index=keygroup_index,
+        self._worker.submit_write(
+            key, param_name, region, program_index, value, keygroup_index
         )
-        writer.write_succeeded.connect(
-            lambda v: self.status_bar.showMessage(f"{param_name} → {v}")
-        )
-        writer.write_failed.connect(
-            lambda e: self.status_bar.showMessage(f"Write failed ({param_name}): {e}")
-        )
-        # store writer per-key so it can't be garbage collected before the thread finishes
-        self._active_writers[key] = writer
-        writer.start()
 
     def _on_env1_knob_changed(self):
         # redraws the graph immediately as any ADSR knob is dragged - the

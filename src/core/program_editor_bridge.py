@@ -1,11 +1,16 @@
 import os
 import threading
 import time
+from collections import deque
 
 from core import app_config, debug_log
 from s3k.bridge import S3kBridge
 from PySide6.QtCore import QThread, Signal
 import s3k.params as p
+
+# the sampler holds exactly one resident multi (no list of multis to choose
+# between) with a fixed 16 "multipart" slots
+MULTI_PART_COUNT = 16
 
 
 class _LoggingOut:
@@ -105,75 +110,226 @@ def connect():
     return LoggingBridge(bridge)
 
 
-class ProgramListLoader(QThread):
+_KEYGROUP_DETAIL_FIELDS = [
+    "LONOTE",
+    "HINOTE",
+    "FILFRQ",
+    "FILQ",
+    "ATTAK1",
+    "DECAY1",
+    "SUSTN1",
+    "RELSE1",
+    "ATTAK2",
+    "DECAY2",
+    "SUSTN2",
+    "RELSE2",
+    "ENV2R2",
+    "ENV2L1",
+    "ENV2L2",
+    "ENV2L4",
+    "SNAME1",
+    "LOVEL1",
+    "HIVEL1",
+    "VTUNO1",
+    "VLOUD1",
+    "VPANO1",
+    "SNAME2",
+    "LOVEL2",
+    "HIVEL2",
+    "VTUNO2",
+    "VLOUD2",
+    "VPANO2",
+    "SNAME3",
+    "LOVEL3",
+    "HIVEL3",
+    "VTUNO3",
+    "VLOUD3",
+    "VPANO3",
+    "SNAME4",
+    "LOVEL4",
+    "HIVEL4",
+    "VTUNO4",
+    "VLOUD4",
+    "VPANO4",
+]
+
+
+class BridgeWorker(QThread):
+    # S3kBridge documents itself as unsafe for concurrent calls, and a real
+    # crash (Qt aborting via QThread::~QThread() when a stale loader's
+    # thread was still mid-call) confirmed this app was hitting exactly
+    # that: every UI action used to spin up its own one-shot QThread against
+    # the same connection, with nothing stopping two of them from being
+    # in flight at once and interleaving SysEx frames on the wire.
+    #
+    # This replaces every one of those (ProgramListLoader, SampleListLoader,
+    # KeygroupLoader, KeygroupDetailLoader, MultiPartsLoader,
+    # ProgramChangeSender, ParameterWriter) with one persistent thread that
+    # owns the bridge for the editor's whole lifetime, taking requests off a
+    # queue and running them strictly one at a time - so only ever one call
+    # is in flight on the wire, and there is exactly one QThread object to
+    # ever worry about outliving.
+    #
+    # For the "give me the current state of X" kinds (see _COALESCE_KINDS),
+    # a newly submitted request drops any not-yet-started one of the same
+    # kind still sitting in the queue - clicking through five keygroups
+    # fast should end up showing the fifth, not sit through four stale
+    # reads first. Writes and Program Changes are never coalesced: every
+    # one of those must reach the hardware.
+    _COALESCE_KINDS = {"keygroups", "detail", "multi_parts"}
+
     programs_loaded = Signal(list)
-    load_failed = Signal(str)
+    programs_load_failed = Signal(str)
+
+    samples_loaded = Signal(list)
+    samples_load_failed = Signal(str)
+
+    keygroups_loaded = Signal(int, list, dict)  # program_index, ranges, program_values
+    keygroups_load_failed = Signal(int, str)
+
+    detail_loaded = Signal(int, int, dict)  # program_index, keygroup_index, values
+    detail_load_failed = Signal(int, int, str)
+
+    parts_loaded = Signal(list)  # [(program_name, channel), ...] per part
+    parts_load_failed = Signal(str)
+
+    change_sent = Signal(int, str)  # part_index, program_name (for the status bar)
+    change_send_failed = Signal(int, str)
+
+    # writer_key, param_name, new_value / error - writer_key is whatever
+    # _active_writers used to be keyed by (param_name, or a per-part key for
+    # the Multis tab's shared PMCHAN field); param_name is separate so the
+    # status bar can still show the real field name either way
+    write_succeeded = Signal(str, str, object)
+    write_failed = Signal(str, str, str)
 
     def __init__(self, bridge):
         super().__init__()
         self._bridge = bridge
+        self._lock = threading.Lock()
+        self._idle = threading.Condition(self._lock)
+        self._queue = deque()
+        self._busy = False
+        self._stopped = False
+
+    def _submit(self, job):
+        with self._idle:
+            kind = job[0]
+            if kind in self._COALESCE_KINDS:
+                self._queue = deque(j for j in self._queue if j[0] != kind)
+            self._queue.append(job)
+            self._idle.notify_all()
+
+    def submit_program_list(self):
+        self._submit(("program_list",))
+
+    def submit_sample_list(self):
+        self._submit(("sample_list",))
+
+    def submit_keygroups(self, program_index):
+        self._submit(("keygroups", program_index))
+
+    def submit_detail(self, program_index, keygroup_index):
+        self._submit(("detail", program_index, keygroup_index))
+
+    def submit_multi_parts(self):
+        self._submit(("multi_parts",))
+
+    def submit_program_change(self, part_index, program_index, program_name, channel):
+        self._submit(("program_change", part_index, program_index, program_name, channel))
+
+    def submit_write(
+        self, writer_key, param_name, region, program_index, value, keygroup_index
+    ):
+        self._submit(
+            ("write", writer_key, param_name, region, program_index, value, keygroup_index)
+        )
+
+    def stop(self):
+        # lets whatever is already queued (in particular, pending writes)
+        # drain before the thread actually exits - see run()
+        with self._idle:
+            self._stopped = True
+            self._idle.notify_all()
+
+    def wait_until_idle(self, timeout=None):
+        # blocks the CALLING thread (never call this from the worker thread
+        # itself) until every job submitted so far has been processed and
+        # its result signal emitted. Not for the GUI thread during normal
+        # operation - it would freeze the UI for as long as the hardware
+        # call takes - but exactly the synchronization tests need in place
+        # of the old per-loader .wait().
+        with self._idle:
+            return self._idle.wait_for(
+                lambda: not self._queue and not self._busy, timeout
+            )
 
     def run(self):
+        while True:
+            with self._idle:
+                while not self._queue and not self._stopped:
+                    self._idle.wait()
+                if not self._queue and self._stopped:
+                    return
+                job = self._queue.popleft()
+                self._busy = True
+            self._dispatch(job)
+            with self._idle:
+                self._busy = False
+                self._idle.notify_all()
+
+    def process_pending(self):
+        # synchronously drains whatever is currently queued without
+        # blocking - lets tests exercise job handling without a real
+        # background thread (this is never called from run() itself)
+        while True:
+            with self._idle:
+                if not self._queue:
+                    return
+                job = self._queue.popleft()
+            self._dispatch(job)
+
+    def _dispatch(self, job):
+        kind = job[0]
+        getattr(self, f"_handle_{kind}")(*job[1:])
+
+    def _handle_program_list(self):
         try:
             programs = self._bridge.program_list()
         except Exception as e:
-            self.load_failed.emit(str(e))
+            self.programs_load_failed.emit(str(e))
             return
         self.programs_loaded.emit(programs)
 
-
-class SampleListLoader(QThread):
-    # fetches the full list of sample names currently resident in the
-    # sampler's memory - global, not per-program or per-keygroup, so
-    # this runs once when the editor opens rather than on every selection
-    samples_loaded = Signal(list)
-    load_failed = Signal(str)
-
-    def __init__(self, bridge):
-        super().__init__()
-        self._bridge = bridge
-
-    def run(self):
+    def _handle_sample_list(self):
         try:
             samples = self._bridge.sample_list()
         except Exception as e:
-            self.load_failed.emit(str(e))
+            self.samples_load_failed.emit(str(e))
             return
         self.samples_loaded.emit(samples)
 
-
-class KeygroupLoader(QThread):
-    # program_index, [(lo_note, hi_note), ...] per keygroup, program_values
-    keygroups_loaded = Signal(int, list, dict)
-    load_failed = Signal(int, str)
-
-    def __init__(self, bridge, program_index):
-        super().__init__()
-        self._bridge = bridge
-        self._program_index = program_index
-
-    def run(self):
-        # runs on background thread
+    def _handle_keygroups(self, program_index):
         keygroup_ranges = []
         try:
             program_values = {
                 "PANPOS": self._bridge.get_parameter(
-                    p.lookup("PANPOS", "program"), self._program_index
+                    p.lookup("PANPOS", "program"), program_index
                 ),
                 "LFORAT": self._bridge.get_parameter(
-                    p.lookup("LFORAT", "program"), self._program_index
+                    p.lookup("LFORAT", "program"), program_index
                 ),
                 "LFODEP": self._bridge.get_parameter(
-                    p.lookup("LFODEP", "program"), self._program_index
+                    p.lookup("LFODEP", "program"), program_index
                 ),
                 "LFODEL": self._bridge.get_parameter(
-                    p.lookup("LFODEL", "program"), self._program_index
+                    p.lookup("LFODEL", "program"), program_index
                 ),
                 "LFO1WAVE": self._bridge.get_parameter(
-                    p.lookup("LFO1WAVE", "program"), self._program_index
+                    p.lookup("LFO1WAVE", "program"), program_index
                 ),
                 "POLYPH": self._bridge.get_parameter(
-                    p.lookup("POLYPH", "program"), self._program_index
+                    p.lookup("POLYPH", "program"), program_index
                 ),
             }
             # read the real keygroup count off the program header rather than
@@ -182,190 +338,89 @@ class KeygroupLoader(QThread):
             # DemoError, so probing silently dropped every keygroup when
             # running against the demo sampler
             group_count = self._bridge.get_parameter(
-                p.lookup("GROUPS", "program"), self._program_index
+                p.lookup("GROUPS", "program"), program_index
             )
             for keygroup_index in range(group_count):
                 lo = self._bridge.get_parameter(
                     p.lookup("LONOTE", "keygroup"),
-                    self._program_index,
+                    program_index,
                     keygroup=keygroup_index,
                 )
                 hi = self._bridge.get_parameter(
                     p.lookup("HINOTE", "keygroup"),
-                    self._program_index,
+                    program_index,
                     keygroup=keygroup_index,
                 )
                 keygroup_ranges.append((lo, hi))
         except Exception as e:
-            self.load_failed.emit(self._program_index, str(e))
+            self.keygroups_load_failed.emit(program_index, str(e))
             return
-        self.keygroups_loaded.emit(self._program_index, keygroup_ranges, program_values)
+        self.keygroups_loaded.emit(program_index, keygroup_ranges, program_values)
 
-
-class KeygroupDetailLoader(QThread):
-    detail_loaded = Signal(int, int, dict)  # program_index, keygroup_index, values
-    load_failed = Signal(int, int, str)
-
-    _FIELDS = [
-        "LONOTE",
-        "HINOTE",
-        "FILFRQ",
-        "FILQ",
-        "ATTAK1",
-        "DECAY1",
-        "SUSTN1",
-        "RELSE1",
-        "ATTAK2",
-        "DECAY2",
-        "SUSTN2",
-        "RELSE2",
-        "ENV2R2",
-        "ENV2L1",
-        "ENV2L2",
-        "ENV2L4",
-        "SNAME1",
-        "LOVEL1",
-        "HIVEL1",
-        "VTUNO1",
-        "VLOUD1",
-        "VPANO1",
-        "SNAME2",
-        "LOVEL2",
-        "HIVEL2",
-        "VTUNO2",
-        "VLOUD2",
-        "VPANO2",
-        "SNAME3",
-        "LOVEL3",
-        "HIVEL3",
-        "VTUNO3",
-        "VLOUD3",
-        "VPANO3",
-        "SNAME4",
-        "LOVEL4",
-        "HIVEL4",
-        "VTUNO4",
-        "VLOUD4",
-        "VPANO4",
-    ]
-
-    def __init__(self, bridge, program_index, keygroup_index):
-        super().__init__()
-        self._bridge = bridge
-        self._program_index = program_index
-        self._keygroup_index = keygroup_index
-
-    def run(self):
+    def _handle_detail(self, program_index, keygroup_index):
         values = {}
         try:
-            for field in self._FIELDS:
+            for field in _KEYGROUP_DETAIL_FIELDS:
                 values[field] = self._bridge.get_parameter(
                     p.lookup(field, "keygroup"),
-                    self._program_index,
-                    keygroup=self._keygroup_index,
+                    program_index,
+                    keygroup=keygroup_index,
                 )
         except Exception as e:
-            self.load_failed.emit(self._program_index, self._keygroup_index, str(e))
+            self.detail_load_failed.emit(program_index, keygroup_index, str(e))
             return
-        self.detail_loaded.emit(self._program_index, self._keygroup_index, values)
+        self.detail_loaded.emit(program_index, keygroup_index, values)
 
-
-class MultiPartsLoader(QThread):
-    # the sampler holds exactly one resident multi (no list of multis to
-    # choose between) with a fixed 16 "multipart" slots - (program_name,
-    # channel) per part, in part order
-    PART_COUNT = 16
-
-    parts_loaded = Signal(list)
-    load_failed = Signal(str)
-
-    def __init__(self, bridge):
-        super().__init__()
-        self._bridge = bridge
-
-    def run(self):
+    def _handle_multi_parts(self):
         parts = []
         try:
-            for part_index in range(self.PART_COUNT):
+            for part_index in range(MULTI_PART_COUNT):
                 header = self._bridge.get_header("multipart", part_index)
                 parts.append((header["PRNAME"].strip(), header["PMCHAN"]))
         except Exception as e:
-            self.load_failed.emit(str(e))
+            self.parts_load_failed.emit(str(e))
             return
         self.parts_loaded.emit(parts)
 
-
-class ProgramChangeSender(QThread):
-    # Assigning a program to a multi part has no working SysEx write in the
-    # s3k protocol: PRNAME (multipart region) is read-only, and per hardware
-    # measurements documented in s3k itself, writing it anyway has no effect
-    # on what actually plays. The mechanism the hardware actually needs is a
-    # MIDI Program Change on the part's own channel, using THAT PROGRAM's
-    # own assignable MIDI program number (PRGNUM, program region) - which
-    # is independent of the program's position in the program list, so it's
-    # read fresh here rather than assumed to match program_index.
-    #
-    # Reuses the bridge's own already-open MIDI connection (S3kBridge.out)
-    # rather than opening a second one. Fire-and-forget: Program Change has
-    # no reply in the MIDI spec, so there is nothing to read back to
-    # confirm the sampler actually received or acted on it.
-    change_sent = Signal(int, str)  # part_index, program_name (for the status bar)
-    send_failed = Signal(int, str)  # part_index, error
-
-    def __init__(self, bridge, part_index, program_index, program_name, channel):
-        super().__init__()
-        self._bridge = bridge
-        self._part_index = part_index
-        self._program_index = program_index
-        self._program_name = program_name
-        self._channel = channel
-
-    def run(self):
+    def _handle_program_change(self, part_index, program_index, program_name, channel):
+        # Assigning a program to a multi part has no working SysEx write in
+        # the s3k protocol: PRNAME (multipart region) is read-only, and per
+        # hardware measurements documented in s3k itself, writing it anyway
+        # has no effect on what actually plays. The mechanism the hardware
+        # actually needs is a MIDI Program Change on the part's own
+        # channel, using THAT PROGRAM's own assignable MIDI program number
+        # (PRGNUM, program region) - independent of the program's position
+        # in the program list, so it's read fresh here rather than assumed
+        # to match program_index.
+        #
+        # Reuses the bridge's own already-open MIDI connection (out)
+        # rather than opening a second one. Fire-and-forget: Program Change
+        # has no reply in the MIDI spec, so there is nothing to read back
+        # to confirm the sampler actually received or acted on it.
         out = getattr(self._bridge, "out", None)
         if out is None:
             # demo bridge has no live MIDI connection to send this on
-            self.change_sent.emit(self._part_index, self._program_name)
+            self.change_sent.emit(part_index, program_name)
             return
         try:
             program_number = self._bridge.get_parameter(
-                p.lookup("PRGNUM", "program"), self._program_index
+                p.lookup("PRGNUM", "program"), program_index
             )
-            out.send_message(
-                [0xC0 | (self._channel & 0x0F), program_number & 0x7F]
-            )
+            out.send_message([0xC0 | (channel & 0x0F), program_number & 0x7F])
         except Exception as e:
-            self.send_failed.emit(self._part_index, str(e))
+            self.change_send_failed.emit(part_index, str(e))
             return
-        self.change_sent.emit(self._part_index, self._program_name)
+        self.change_sent.emit(part_index, program_name)
 
-
-class ParameterWriter(QThread):
-    write_succeeded = Signal(
-        object
-    )  # new_value = int for numeric params, str for text params
-    write_failed = Signal(str)
-
-    def __init__(
-        self, bridge, param_name, region, program_index, new_value, *, keygroup_index=0
+    def _handle_write(
+        self, writer_key, param_name, region, program_index, value, keygroup_index
     ):
-        super().__init__()
-        self._bridge = bridge
-        self._param_name = param_name
-        self._region = region
-        self._program_index = program_index
-        self._keygroup_index = keygroup_index
-        self._new_value = new_value
-
-    def run(self):
         try:
-            param = p.lookup(self._param_name, self._region)
+            param = p.lookup(param_name, region)
             self._bridge.set_parameter(
-                param,
-                self._program_index,
-                self._new_value,
-                keygroup=self._keygroup_index,
+                param, program_index, value, keygroup=keygroup_index
             )
         except Exception as e:
-            self.write_failed.emit(str(e))
+            self.write_failed.emit(writer_key, param_name, str(e))
             return
-        self.write_succeeded.emit(self._new_value)
+        self.write_succeeded.emit(writer_key, param_name, value)
