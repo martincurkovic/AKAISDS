@@ -513,6 +513,83 @@ def test_worker_masks_channel_and_program_to_valid_midi_ranges():
     assert program_byte == 72  # 200 & 0x7F
 
 
+class _RenumberingBridge(_RealBridgeForProgramChange):
+    # stands in for the real S3kBridge/DemoBridge, both of which expose
+    # renumber_programs() - see BridgeWorker._programs_renumbered
+    def __init__(self, *, program_list=None, **kwargs):
+        super().__init__(**kwargs)
+        self.renumber_calls = 0
+        self._program_list = program_list or []
+
+    def renumber_programs(self):
+        self.renumber_calls += 1
+
+    def program_list(self):
+        return self._program_list
+
+
+def test_worker_renumbers_programs_once_before_the_first_program_change():
+    # regression test for a real bug: multiple programs sharing PRGNUM 0
+    # (the common case for freshly created/independently loaded programs)
+    # made every part assignment send a Program Change for whichever
+    # program the hardware associates with 0, regardless of which one was
+    # actually picked - renumber_programs() gives each one a distinct
+    # number first, so the right one is addressed
+    bridge = _RenumberingBridge(prgnum=99)
+    worker = BridgeWorker(bridge)
+
+    worker.submit_program_change(0, 1, "Program B", 0)
+    worker.process_pending()
+
+    assert bridge.renumber_calls == 1
+    assert bridge.out.sent == [[0xC0, 99]]
+
+
+def test_worker_does_not_renumber_again_for_a_second_program_change():
+    # renumbering rewrites every resident program's PRGNUM - repeating it
+    # on every single part assignment would be needless SysEx traffic once
+    # the roster is already known to be numbered distinctly
+    bridge = _RenumberingBridge(prgnum=99)
+    worker = BridgeWorker(bridge)
+
+    worker.submit_program_change(0, 0, "A", 0)
+    worker.submit_program_change(1, 1, "B", 0)
+    worker.process_pending()
+
+    assert bridge.renumber_calls == 1
+
+
+def test_worker_renumbers_again_after_the_program_list_reloads():
+    # a program created/loaded on the hardware since the last renumber may
+    # not carry a number distinct from the rest - reloading the program
+    # list (e.g. via Refresh) must make the next program change renumber
+    # again rather than trusting a now-stale assumption
+    bridge = _RenumberingBridge(prgnum=99, program_list=["A", "B"])
+    worker = BridgeWorker(bridge)
+
+    worker.submit_program_change(0, 0, "A", 0)
+    worker.process_pending()
+    worker.submit_program_list()
+    worker.process_pending()
+    worker.submit_program_change(0, 1, "B", 0)
+    worker.process_pending()
+
+    assert bridge.renumber_calls == 2
+
+
+def test_worker_program_change_tolerates_a_bridge_without_renumber_programs():
+    # DemoBridge and S3kBridge both implement renumber_programs(), but a
+    # bridge that doesn't (e.g. a minimal test double) must not break the
+    # program change itself
+    bridge = _RealBridgeForProgramChange(prgnum=7)
+    worker = BridgeWorker(bridge)
+
+    worker.submit_program_change(0, 0, "X", 0)
+    worker.process_pending()
+
+    assert bridge.out.sent == [[0xC0, 7]]
+
+
 def test_worker_processes_mixed_jobs_strictly_one_at_a_time_in_order():
     # the whole point of BridgeWorker: no two bridge calls are ever
     # in flight together, regardless of what kinds of requests piled up -

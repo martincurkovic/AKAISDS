@@ -142,6 +142,26 @@ def test_first_program_is_preselected_with_its_keygroups_shown(editor):
     assert _keygroup_row_text(editor, 0) == "Keygroup 1: C1 - C4"
 
 
+def test_refresh_picks_up_a_program_created_on_the_hardware(editor, qapp):
+    # regression test for a real bug: Refresh re-loaded the current
+    # program's keygroups but never re-fetched the program list itself, so
+    # a program created on the hardware after the editor opened only ever
+    # showed up after closing and reopening the window
+    bridge = editor._bridge
+    bridge._programs.append("New Program")
+
+    editor._refresh_from_hardware()
+    editor._worker.wait_until_idle()
+    _pump_until(qapp, lambda: editor.program_list.count() == 3)
+
+    assert [
+        editor.program_list.item(i).text() for i in range(editor.program_list.count())
+    ] == ["Bass stab", "EPiano warm", "New Program"]
+    # the previously-selected program stays selected across the refresh,
+    # rather than resetting to the top of the list
+    assert editor.program_list.currentItem().text() == "Bass stab"
+
+
 def test_switching_program_replaces_keygroup_list_without_crashing(editor, qapp):
     editor.program_list.setCurrentRow(1)
     _wait_for_keygroup_load(editor, qapp, expected_count=1)  # program 1 has 1
@@ -166,10 +186,38 @@ def test_selecting_a_keygroup_shows_the_keygroup_panel_with_real_values(editor, 
 
 def _wait_for_multi_parts_load(editor, qapp):
     editor._worker.wait_until_idle()
-    # part 0's channel combo defaults to channel 0 ("1") regardless of the
-    # load (see _build_multis_tab) - a real, if arbitrary, landmark to pump
-    # until, since nothing else about the combos changes on its own
-    _pump_until(qapp, lambda: editor._multi_channel_combos[0].currentData() == 0)
+    # part 0's channel combo already defaults to channel 0 before any load
+    # (see _build_multis_tab), so it can't tell "loaded" from "not loaded
+    # yet" - the program combo can: it starts on the blank "-" placeholder
+    # and only shows a real program once _on_multi_parts_loaded runs
+    _pump_until(qapp, lambda: editor._multi_program_combos[0].currentText() != "-")
+
+
+def test_multi_parts_loaded_populates_combos_from_hardware(editor, qapp):
+    _wait_for_multi_parts_load(editor, qapp)
+
+    # FakeBridge's get_header cycles ["Bass stab", "EPiano warm"] by part
+    # index and reports multipart_channels[index] == index
+    assert editor._multi_program_combos[0].currentText() == "Bass stab"
+    assert editor._multi_channel_combos[0].currentData() == 0
+    assert editor._multi_program_combos[1].currentText() == "EPiano warm"
+    assert editor._multi_channel_combos[1].currentData() == 1
+
+
+def test_selecting_a_multi_part_program_targets_the_right_program_index(editor, qapp):
+    # regression test for an off-by-one: the program combo has a blank "-"
+    # placeholder at index 0 (see _build_multis_tab), so its currentIndex
+    # is always one more than the program's actual position in
+    # program_list. A part assigned "Bass stab" (program_list index 0)
+    # must send a Program Change for program_index 0, not 1.
+    _wait_for_multi_parts_load(editor, qapp)
+    sent = []
+    editor._worker.submit_program_change = lambda *a: sent.append(a)
+
+    program_combo = editor._multi_program_combos[0]
+    program_combo.setCurrentIndex(program_combo.findText("EPiano warm"))
+
+    assert sent == [(0, 1, "EPiano warm", 0)]
 
 
 def test_changing_two_multi_part_channels_writes_both_independently(editor, qapp):
