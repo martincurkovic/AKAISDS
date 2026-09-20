@@ -153,7 +153,17 @@ class _KeygroupFakeBridge:
             return self._group_count
         if param.name in self._program_values:
             return self._program_values[param.name]
-        if param.name in ("PANPOS", "LFORAT", "LFODEP", "LFODEL", "LFO1WAVE", "POLYPH"):
+        if param.name in (
+            "PANPOS",
+            "LFORAT",
+            "LFODEP",
+            "LFODEL",
+            "LFO1WAVE",
+            "POLYPH",
+            "PMCHAN",
+            "PTUNO",
+            "PRIORT",
+        ):
             return 0
         if param.name in ("LONOTE", "HINOTE"):
             if not 0 <= keygroup < self._group_count:
@@ -199,6 +209,9 @@ def test_worker_reports_program_level_values():
         "LFODEL": 3,
         "LFO1WAVE": 4,
         "POLYPH": 16,
+        "PMCHAN": 9,
+        "PTUNO": 256,
+        "PRIORT": 2,
     }
     bridge = _KeygroupFakeBridge(group_count=0, program_values=values)
     worker = BridgeWorker(bridge)

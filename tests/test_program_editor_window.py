@@ -52,6 +52,12 @@ class FakeBridge:
             return self._pan[program_index]
         if param.name == "POLYPH":
             return 8
+        if param.name == "PMCHAN":
+            return 3
+        if param.name == "PTUNO":
+            return 256  # +1.00 semitone, see _tune_offset_to_semitones
+        if param.name == "PRIORT":
+            return 2  # high
         if param.name in ("LFORAT", "LFODEP", "LFODEL", "LFO1WAVE"):
             return 0
         if param.name in ("SNAME1", "SNAME2", "SNAME3", "SNAME4"):
@@ -140,6 +146,52 @@ def test_first_program_is_preselected_with_its_keygroups_shown(editor):
     assert editor.program_list.currentItem().text() == "Bass stab"
     assert editor.keygroup_list.count() == 2
     assert _keygroup_row_text(editor, 0) == "Keygroup 1: C0 - C3"
+
+
+def test_program_tab_loads_channel_tune_and_priority_from_hardware(editor):
+    # FakeBridge.get_parameter reports PMCHAN=3 (channel 4), PTUNO=256
+    # (+1.00 semitone, see _tune_offset_to_semitones), PRIORT=2 (High)
+    assert editor.midi_channel_combo.currentData() == 3
+    assert editor.midi_channel_combo.currentText() == "4"
+    assert editor.program_tune_spinbox.value() == pytest.approx(1.0)
+    assert editor.note_priority_combo.currentText() == "High"
+
+
+def test_changing_midi_channel_writes_pmchan(editor, qapp):
+    bridge = editor._bridge
+
+    editor.midi_channel_combo.setCurrentIndex(
+        editor.midi_channel_combo.findData(255)  # Omni
+    )
+    editor._flush_write("PMCHAN")
+    editor._worker.wait_until_idle()
+    _pump_until(qapp, lambda: bridge.set_parameter_calls)
+
+    assert bridge.set_parameter_calls[-1] == ("PMCHAN", 0, 255, 0)
+
+
+def test_changing_note_priority_writes_priort(editor, qapp):
+    bridge = editor._bridge
+
+    editor.note_priority_combo.setCurrentIndex(3)  # Hold
+
+    editor._worker.wait_until_idle()
+    _pump_until(qapp, lambda: bridge.set_parameter_calls)
+
+    assert bridge.set_parameter_calls[-1] == ("PRIORT", 0, 3, 0)
+
+
+def test_changing_program_tune_writes_ptuno_in_raw_units(editor, qapp):
+    # same raw encoding as the keygroup zone's Tune spinbox - 2.56 raw
+    # units per cent, so -2.00 semitones is raw -512
+    bridge = editor._bridge
+
+    editor.program_tune_spinbox.setValue(-2.0)
+    editor._flush_write("PTUNO")
+    editor._worker.wait_until_idle()
+    _pump_until(qapp, lambda: bridge.set_parameter_calls)
+
+    assert bridge.set_parameter_calls[-1] == ("PTUNO", 0, -512, 0)
 
 
 def test_refresh_picks_up_a_program_created_on_the_hardware(editor, qapp):
