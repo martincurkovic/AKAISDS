@@ -221,6 +221,13 @@ class BridgeWorker(QThread):
     parts_loaded = Signal(list)  # [(program_name, channel, level, pan), ...] per part
     parts_load_failed = Signal(str)
 
+    # the multi file header's own name (MULTINAME, region "multi") - read
+    # alongside the 16 parts in the same submit_multi_parts() job since
+    # there's only ever one resident multi to fetch it for; a failure here
+    # folds into parts_load_failed rather than getting its own, since both
+    # come out of the same try/except in _handle_multi_parts
+    multi_name_loaded = Signal(str)
+
     change_sent = Signal(int, str)  # part_index, program_name (for the status bar)
     change_send_failed = Signal(int, str)
 
@@ -430,6 +437,9 @@ class BridgeWorker(QThread):
     def _handle_multi_parts(self):
         parts = []
         try:
+            multi_name = self._bridge.get_parameter(
+                p.lookup("MULTINAME", "multi"), 0
+            ).strip()
             for part_index in range(MULTI_PART_COUNT):
                 header = self._bridge.get_header("multipart", part_index)
                 # STEREO is this field's name in the spec, but the panel
@@ -444,6 +454,7 @@ class BridgeWorker(QThread):
         except Exception as e:
             self.parts_load_failed.emit(str(e))
             return
+        self.multi_name_loaded.emit(multi_name)
         self.parts_loaded.emit(parts)
 
     def _handle_program_change(self, part_index, program_index, program_name, channel):

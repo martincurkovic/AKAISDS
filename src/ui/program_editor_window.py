@@ -193,6 +193,7 @@ class ProgramEditorWindow(QMainWindow):
         self._worker.detail_load_failed.connect(self._on_detail_load_failed)
         self._worker.parts_loaded.connect(self._on_multi_parts_loaded)
         self._worker.parts_load_failed.connect(self._on_multi_load_failed)
+        self._worker.multi_name_loaded.connect(self._on_multi_name_loaded)
         self._worker.change_sent.connect(
             lambda part_index, name: self.status_bar.showMessage(
                 f"Part {part_index + 1}: sent Program Change for '{name}'"
@@ -682,16 +683,7 @@ class ProgramEditorWindow(QMainWindow):
         detail_container = QWidget()
         detail_container.setLayout(detail_container_layout)
 
-        self.program_name_edit = QLineEdit()
-        self.program_name_edit.setMaxLength(NAME_LENGTH)
-        self.program_name_edit.setFixedWidth(140)
-        name_pattern = QRegularExpression(_NAME_INPUT_PATTERN)
-        name_pattern.setPatternOptions(
-            QRegularExpression.PatternOption.CaseInsensitiveOption
-        )
-        self.program_name_edit.setValidator(
-            QRegularExpressionValidator(name_pattern, self.program_name_edit)
-        )
+        self.program_name_edit = self._build_akai_name_edit()
         # forced uppercase as-you-type, same as encode_name would do anyway
         # (it uppercases before encoding) - showing the user what will
         # actually be stored beats a display that quietly disagrees with it
@@ -1576,6 +1568,25 @@ class ProgramEditorWindow(QMainWindow):
 
         return column
 
+    def _build_akai_name_edit(self):
+        # shared construction for any field stored in the device's own
+        # character set (s3k.messages.AKAI_CHARSET/NAME_LENGTH) - program
+        # names and the multi's own name both use this. Case-insensitive so
+        # lowercase isn't blocked outright; the caller's own textEdited
+        # handler is what actually forces it uppercase as you type (see
+        # _on_program_name_typed/_on_multi_name_typed) - this only stops
+        # characters outside the device's 41-entry table from being typed
+        # at all, and caps length at NAME_LENGTH.
+        edit = QLineEdit()
+        edit.setMaxLength(NAME_LENGTH)
+        edit.setFixedWidth(140)
+        name_pattern = QRegularExpression(_NAME_INPUT_PATTERN)
+        name_pattern.setPatternOptions(
+            QRegularExpression.PatternOption.CaseInsensitiveOption
+        )
+        edit.setValidator(QRegularExpressionValidator(name_pattern, edit))
+        return edit
+
     def _build_section_card(self, title, *row_layouts):
         # groups related rows (e.g. every LFO control, or Volume/Pan/
         # Velocity together on the Program tab; Filter or Envelopes on the
@@ -1663,6 +1674,20 @@ class ProgramEditorWindow(QMainWindow):
         layout = QVBoxLayout(page)
         layout.setContentsMargins(14, 14, 14, 14)
         layout.setSpacing(6)
+
+        self.multi_name_edit = self._build_akai_name_edit()
+        self.multi_name_edit.textEdited.connect(self._on_multi_name_typed)
+        # same "commit once, on Enter/focus-loss" reasoning as
+        # program_name_edit - see the comment where that one is wired
+        self.multi_name_edit.editingFinished.connect(self._commit_multi_name)
+        name_row = QHBoxLayout()
+        name_row.setSpacing(10)
+        name_label = QLabel("<b>Multi Name</b>")
+        name_row.addWidget(name_label)
+        name_row.addWidget(self.multi_name_edit)
+        name_row.addStretch()
+        layout.addLayout(name_row)
+        layout.addSpacing(6)
 
         header_row = QHBoxLayout()
         header_row.setSpacing(10)
@@ -2080,6 +2105,31 @@ class ProgramEditorWindow(QMainWindow):
             item.setText(name)
         self._update_multi_program_combo_names(program_index, name)
         self._write_knob_value("PRNAME", "program", name, keygroup_index=0)
+
+    def _on_multi_name_typed(self, text):
+        # same live-uppercase reasoning as _on_program_name_typed - no list
+        # to keep in step here, since there's only ever one resident multi
+        cursor = self.multi_name_edit.cursorPosition()
+        self.multi_name_edit.blockSignals(True)
+        self.multi_name_edit.setText(text.upper())
+        self.multi_name_edit.setCursorPosition(cursor)
+        self.multi_name_edit.blockSignals(False)
+
+    def _commit_multi_name(self):
+        # commits once, on Enter/focus-loss - same reasoning as
+        # _commit_program_name. MULTINAME's item index is unused/reserved
+        # (s3k.params: "Selector 0 of RMULTIDATA/MULTIDATA; the item index
+        # is unused (reserved) for this section" - there's only ever one
+        # resident multi), so index=0 here is a placeholder, not a real
+        # target the way program_index is for PRNAME.
+        name = self.multi_name_edit.text().rstrip()
+        self.multi_name_edit.setText(name)
+        self._write_knob_value("MULTINAME", "multi", name, index=0)
+
+    def _on_multi_name_loaded(self, name):
+        self.multi_name_edit.blockSignals(True)
+        self.multi_name_edit.setText(name)
+        self.multi_name_edit.blockSignals(False)
 
     def _on_samples_loaded(self, samples):
         self._sample_list = samples
