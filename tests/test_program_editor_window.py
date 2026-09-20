@@ -303,6 +303,31 @@ def test_committing_a_program_name_writes_prname_and_trims_trailing_spaces(
     assert editor.program_list.currentItem().text() == "PAD"
 
 
+def test_renaming_a_program_updates_every_multi_part_combo(editor):
+    # regression test for a real bug: renaming updated the Programs list
+    # but every one of the 16 Multis-tab part combos kept showing the old
+    # name until the next full Refresh, even though they're populated from
+    # the very same program list and the hardware had already moved on.
+    # _multi_program_combos are populated in _on_programs_loaded regardless
+    # of whether any part is actually assigned to program 0, so this
+    # doesn't need a multi-parts load first - just the item text itself.
+    editor.program_name_edit.setText("PAD")
+    editor._commit_program_name()
+
+    # program_list index 0 -> combo index 1 (index 0 is the blank "-"
+    # placeholder - see _build_multis_tab)
+    for combo in editor._multi_program_combos:
+        assert combo.itemText(1) == "PAD"
+        assert combo.itemText(2) == "EPiano warm"  # program 1 untouched
+
+
+def test_typing_a_program_name_also_updates_multi_part_combos_live(editor):
+    editor._on_program_name_typed("bass hit")
+
+    for combo in editor._multi_program_combos:
+        assert combo.itemText(1) == "BASS HIT"
+
+
 def test_program_name_input_rejects_characters_outside_the_akai_charset(editor):
     # AKAI_CHARSET (s3k.messages) is "0-9, space, A-Z, #+-." - lowercase
     # is accepted at the validator level (case-insensitive, since
