@@ -7,14 +7,15 @@ if __name__ == "__main__":
     # fail with "No module named 'ui'"
     sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from PySide6.QtGui import Qt, QAction
-from PySide6.QtCore import QTimer
+from PySide6.QtGui import Qt, QAction, QRegularExpressionValidator
+from PySide6.QtCore import QTimer, QRegularExpression
 from PySide6.QtWidgets import (
     QHBoxLayout,
     QListWidget,
     QListWidgetItem,
     QMainWindow,
     QLabel,
+    QLineEdit,
     QPushButton,
     QSizePolicy,
     QVBoxLayout,
@@ -28,6 +29,7 @@ from PySide6.QtWidgets import (
     QTabWidget,
     QScrollArea,
 )
+from s3k.messages import AKAI_CHARSET, NAME_LENGTH
 from ui.knob import Knob
 from ui.note_spinbox import NoteSpinBox
 from ui.qt_helpers import FullWidthTabBar
@@ -89,6 +91,15 @@ _PORTAMENTO_TYPE_OPTIONS = [
         "still finish in that time.",
     ),
 ]
+
+# Program names are NOT ASCII (s3k.messages.AKAI_CHARSET's own docstring:
+# "names are not ASCII"): a name byte is an index into a 41-entry table -
+# digits, space, A-Z, and "#+-." - and encode_name refuses anything outside
+# it rather than mangling it. Built from AKAI_CHARSET/NAME_LENGTH directly
+# rather than a hand-copied "0-9A-Z #+-." literal here, so this can never
+# silently drift from what the dependency actually accepts. The hyphen is
+# escaped since it's a range operator inside a [...] class otherwise.
+_NAME_INPUT_PATTERN = "[" + AKAI_CHARSET.replace("-", "\\-") + "]{0," + str(NAME_LENGTH) + "}"
 
 
 class ProgramEditorWindow(QMainWindow):
@@ -628,6 +639,32 @@ class ProgramEditorWindow(QMainWindow):
         detail_container = QWidget()
         detail_container.setLayout(detail_container_layout)
 
+        self.program_name_edit = QLineEdit()
+        self.program_name_edit.setMaxLength(NAME_LENGTH)
+        self.program_name_edit.setFixedWidth(140)
+        name_pattern = QRegularExpression(_NAME_INPUT_PATTERN)
+        name_pattern.setPatternOptions(
+            QRegularExpression.PatternOption.CaseInsensitiveOption
+        )
+        self.program_name_edit.setValidator(
+            QRegularExpressionValidator(name_pattern, self.program_name_edit)
+        )
+        # forced uppercase as-you-type, same as encode_name would do anyway
+        # (it uppercases before encoding) - showing the user what will
+        # actually be stored beats a display that quietly disagrees with it
+        self.program_name_edit.textEdited.connect(self._on_program_name_typed)
+        # deliberately NOT wired through _schedule_write's continuous
+        # debounce like every other program field - that pattern sends a
+        # write per keystroke's worth of change once the timer lands, which
+        # for a name means firing off a string of half-typed names over
+        # SysEx. A name commits once, on editingFinished (Enter or focus
+        # loss), like note_lo_spinbox/note_hi_spinbox's _commit_note_range.
+        self.program_name_edit.editingFinished.connect(self._commit_program_name)
+        name_row = QHBoxLayout()
+        name_row.addWidget(self.program_name_edit)
+        name_row.addStretch()
+        name_section = self._build_section_card("Program Name", name_row)
+
         self.pan_knob = Knob()
         self.pan_knob.setRange(-50, 50)
         self.pan_knob.setFixedSize(64, 64)
@@ -910,6 +947,7 @@ class ProgramEditorWindow(QMainWindow):
         program_page = QWidget()
         program_page_layout = QVBoxLayout()
         program_page_layout.setSpacing(12)
+        program_page_layout.addWidget(name_section)
         program_page_layout.addLayout(program_row1)
         program_page_layout.addLayout(program_row2)
         program_page_layout.addWidget(portamento_section)
@@ -1208,7 +1246,13 @@ class ProgramEditorWindow(QMainWindow):
         self.status_bar.showMessage("Select a keygroup")
         self.detail_stack.setCurrentIndex(0)
         if current is None:
+            self.program_name_edit.clear()
             return
+        # program_list's own item text already IS the current PRNAME - it
+        # comes straight from program_list() on the bridge - so this needs
+        # no separate hardware round-trip the way every other program field
+        # does via program_values in _on_keygroups_loaded below
+        self.program_name_edit.setText(current.text())
         program_index = self.program_list.currentRow()
         self._worker.submit_keygroups(program_index)
 
@@ -1913,6 +1957,42 @@ class ProgramEditorWindow(QMainWindow):
         # "done editing" signal, same as sliderReleased for knobs
         self._flush_write("LONOTE")
         self._flush_write("HINOTE")
+
+    def _on_program_name_typed(self, text):
+        # uppercase-as-you-type: encode_name would uppercase it anyway on
+        # write (s3k's AKAI_CHARSET has no lowercase letters at all), so
+        # showing it uppercase immediately is what's actually going to be
+        # stored, not a display that disagrees with the write it triggers
+        cursor = self.program_name_edit.cursorPosition()
+        self.program_name_edit.blockSignals(True)
+        self.program_name_edit.setText(text.upper())
+        self.program_name_edit.setCursorPosition(cursor)
+        self.program_name_edit.blockSignals(False)
+
+        # keeps the Programs list in step while the user types, same as
+        # _on_note_range_changed does for the keygroup list's own label -
+        # PRNAME itself only commits on _commit_program_name below
+        item = self.program_list.currentItem()
+        if item is not None:
+            item.setText(self.program_name_edit.text())
+
+    def _commit_program_name(self):
+        # commits once, on Enter/focus-loss - see the comment where this is
+        # wired for why this doesn't go through _schedule_write's per-
+        # keystroke debounce like every other program field
+        program_index = self.program_list.currentRow()
+        if program_index < 0:
+            return
+        # trailing spaces are typable (space is a valid AKAI_CHARSET
+        # character) but decode_name strips them on every future read, so
+        # stripping here keeps what's shown matching what a reload would
+        # show rather than differing only until the next refresh
+        name = self.program_name_edit.text().rstrip()
+        self.program_name_edit.setText(name)
+        item = self.program_list.currentItem()
+        if item is not None:
+            item.setText(name)
+        self._write_knob_value("PRNAME", "program", name, keygroup_index=0)
 
     def _on_samples_loaded(self, samples):
         self._sample_list = samples
