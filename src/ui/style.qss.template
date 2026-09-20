@@ -100,6 +100,16 @@ QListWidget::item:selected {
     background-color: ${bg_selected};
 }
 
+/* Program editor's Programs/Keygroups lists (plain text rows, no per-row
+   buttons) - scoped by objectName rather than widening QListWidget::item
+   generally, since the dashboard's queue/hardware rows already get their
+   own comfortable height from the custom row widget's own margins and
+   don't need (or want) extra item padding stacked on top. */
+QListWidget#programList::item,
+QListWidget#keygroupList::item {
+    padding: 6px 8px;
+}
+
 /* placeholder text shown when file transfer queue is empty */ 
 #emptyQueueLabel {
   color: ${text_disabled};

@@ -49,10 +49,29 @@ class ProgramEditorWindow(QMainWindow):
 
         # placeholder - real program, keygroup panels come later
         self.program_list = QListWidget()
+        self.program_list.setObjectName("programList")
         self.program_list.setFixedWidth(160)
 
         self.keygroup_list = QListWidget()
+        self.keygroup_list.setObjectName("keygroupList")
         self.keygroup_list.setFixedWidth(190)  # fits "Keygroup 12: C#1 - D#7"
+
+        # bold header + list, same layout shape as the dashboard's queue/hardware panels
+        programs_column = QVBoxLayout()
+        programs_column.setContentsMargins(0, 0, 0, 0)
+        programs_column.setSpacing(6)
+        programs_column.addWidget(QLabel("<b>Programs</b>"))
+        programs_column.addWidget(self.program_list)
+        programs_container = QWidget()
+        programs_container.setLayout(programs_column)
+
+        keygroups_column = QVBoxLayout()
+        keygroups_column.setContentsMargins(0, 0, 0, 0)
+        keygroups_column.setSpacing(6)
+        keygroups_column.addWidget(QLabel("<b>Keygroups</b>"))
+        keygroups_column.addWidget(self.keygroup_list)
+        keygroups_container = QWidget()
+        keygroups_container.setLayout(keygroups_column)
 
         self.detail_label = QLabel("Select a keygroup")
 
@@ -364,8 +383,8 @@ class ProgramEditorWindow(QMainWindow):
         close_button.clicked.connect(self.close)
 
         content_layout = QHBoxLayout()
-        content_layout.addWidget(self.program_list)
-        content_layout.addWidget(self.keygroup_list)
+        content_layout.addWidget(programs_container)
+        content_layout.addWidget(keygroups_container)
         content_layout.addWidget(self.detail_stack, stretch=1)
 
         main_layout = QVBoxLayout()
