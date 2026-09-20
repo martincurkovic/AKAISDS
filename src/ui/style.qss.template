@@ -119,6 +119,21 @@ QWidget#zoneCard {
     border-radius: 4px;
 }
 
+/* Program tab's grouped sections (Volume/Pan/Velocity, LFO, Pitch, ...) -
+   same card treatment as the zone card above, under its own objectName
+   since this isn't zone content */
+QWidget#sectionCard {
+    background-color: ${bg_panel};
+    border: 1px solid ${border};
+    border-radius: 4px;
+}
+
+QLabel#sectionHeader {
+    color: ${text_bright};
+    font-weight: 600;
+    background: transparent;
+}
+
 /* placeholder text shown when file transfer queue is empty */
 #emptyQueueLabel {
   color: ${text_disabled};

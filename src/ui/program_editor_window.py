@@ -95,9 +95,16 @@ class ProgramEditorWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle("AKAISDS - Program Editor")
         # the old 800x500 predates the envelope controls - height in
-        # particular is now well past what fits there. 850x800 gives some
-        # breathing room over the layout's own measured minimum (810x781)
-        self.setMinimumSize(850, 800)
+        # particular is now well past what fits there. Grouping both the
+        # Program tab (Volume/Pan/Velocity, LFO, Pitch, Voice & MIDI,
+        # Portamento) and the Keygroup tab (Range, Filter, Envelopes, Zone)
+        # into titled section cards pushed the window's own measured
+        # minimum (centralWidget().minimumSizeHint()) to 892x1028 - below
+        # that, Qt compresses the layout past its size hint down to
+        # minimumSize, and past THAT it starts letting cards overlap rather
+        # than erroring. 950x1080 gives real breathing room over the
+        # measured minimum.
+        self.setMinimumSize(950, 1080)
         self._sample_list = []
         self._keygroup_ranges = []  # [lo, hi] per keygroup - mirrors keygroup_range_bar
         self._pending_restore_state = None  # set only by _refresh_from_hardware()
@@ -448,7 +455,8 @@ class ProgramEditorWindow(QMainWindow):
                     _LOOP_TYPE_OPTIONS[i][1]
                 )
             )
-            keytrack_label = QLabel("Keyboard tracking")
+            keytrack_label = QLabel("Keytrack")
+            keytrack_label.setFixedWidth(60)
             keytrack_combo = QComboBox()
             keytrack_combo.setFixedWidth(110)
             keytrack_combo.addItems(["Track", "Const Pitch"])
@@ -521,20 +529,30 @@ class ProgramEditorWindow(QMainWindow):
 
         self._zone_button_group.idClicked.connect(self._zone_stack.setCurrentIndex)
 
+        zone_header = QLabel("Zone")
+        zone_header.setObjectName("sectionHeader")
         zone_section = QVBoxLayout()
-        zone_section.setContentsMargins(10, 10, 10, 10)
-        zone_section.setSpacing(4)
+        zone_section.setContentsMargins(12, 10, 12, 12)
+        zone_section.setSpacing(10)
+        zone_section.addWidget(zone_header)
         zone_section.addLayout(zone_selector_row)
         zone_section.addWidget(self._zone_stack)
         zone_card = QWidget()
         zone_card.setObjectName("zoneCard")
         zone_card.setLayout(zone_section)
 
+        # same grouping principle as the Program tab: Range on its own,
+        # every filter control together, both envelope generators together,
+        # then the existing per-zone card
+        range_section = self._build_section_card("Range", note_range_row)
+        filter_section = self._build_section_card("Filter", knobs_layout)
+        envelopes_section = self._build_section_card("Envelopes", envelopes_layout)
+
         detail_container_layout = QVBoxLayout()
-        detail_container_layout.setSpacing(10)
-        detail_container_layout.addLayout(note_range_row)
-        detail_container_layout.addLayout(knobs_layout)
-        detail_container_layout.addLayout(envelopes_layout)
+        detail_container_layout.setSpacing(12)
+        detail_container_layout.addWidget(range_section)
+        detail_container_layout.addWidget(filter_section)
+        detail_container_layout.addWidget(envelopes_section)
         detail_container_layout.addWidget(zone_card)
         detail_container_layout.addStretch()
         detail_container = QWidget()
@@ -544,6 +562,20 @@ class ProgramEditorWindow(QMainWindow):
         self.pan_knob.setRange(-50, 50)
         self.pan_knob.setFixedSize(80, 80)
         pan_column, self.pan_value_label = self._build_knob_column("Pan", self.pan_knob)
+
+        self.loud_knob = Knob()
+        self.loud_knob.setRange(0, 99)
+        self.loud_knob.setDefaultValue(80)
+        self.loud_knob.setFixedSize(80, 80)
+        loud_column, self.loud_value_label = self._build_knob_column("Loud", self.loud_knob)
+
+        self.velocity_knob = Knob()
+        self.velocity_knob.setRange(-50, 50)
+        self.velocity_knob.setDefaultValue(20)
+        self.velocity_knob.setFixedSize(80, 80)
+        velocity_column, self.velocity_value_label = self._build_knob_column(
+            "Velocity", self.velocity_knob
+        )
 
         self.lfo_rate_knob = Knob()
         self.lfo_rate_knob.setRange(0, 99)
@@ -740,58 +772,70 @@ class ProgramEditorWindow(QMainWindow):
         )
         portamento_type_column.addWidget(self.portamento_type_combo)
 
-        # row 5: pitch bend range up/down
-        program_bend_row = QHBoxLayout()
-        program_bend_row.addLayout(bend_up_column)
-        program_bend_row.addLayout(bend_down_column)
-        program_bend_row.addStretch()
-
-        # row 6: portamento on/off, rate and type
-        program_portamento_row = QHBoxLayout()
-        program_portamento_row.addLayout(portamento_enable_column)
-        program_portamento_row.addLayout(portamento_rate_column)
-        program_portamento_row.addLayout(portamento_type_column)
-        program_portamento_row.addStretch()
-
-        # row 1: Pan, LFO rate, LFO depth
-        program_knobs_row1 = QHBoxLayout()
-        program_knobs_row1.addLayout(pan_column)
-        program_knobs_row1.addLayout(lfo_rate_column)
-        program_knobs_row1.addLayout(lfo_depth_column)
-        program_knobs_row1.addStretch()
-
-        # row 2: LFO delay (only one knob in this row currently)
-        program_knobs_row2 = QHBoxLayout()
-        program_knobs_row2.addLayout(lfo_delay_column)
-        program_knobs_row2.addStretch()
-
-        # row 3: LFO shape, Polyphony and Note priority side by side,
-        # constrained width
+        # constrained widths for the combo-only rows below
         self.lfo_shape_combo.setMaximumWidth(180)
         self.polyph_combo.setMaximumWidth(80)
         self.note_priority_combo.setMaximumWidth(90)
-        program_controls_row = QHBoxLayout()
-        program_controls_row.addLayout(lfo_shape_column)
-        program_controls_row.addLayout(polyph_column)
-        program_controls_row.addLayout(note_priority_column)
-        program_controls_row.addStretch()
-
-        # row 4: MIDI channel and Tune side by side, constrained width
         self.midi_channel_combo.setMaximumWidth(80)
-        program_midi_row = QHBoxLayout()
-        program_midi_row.addLayout(midi_channel_column)
-        program_midi_row.addLayout(program_tune_column)
-        program_midi_row.addStretch()
+
+        # Volume, Pan & Velocity - level and stereo-field controls together
+        volume_row = QHBoxLayout()
+        volume_row.addLayout(pan_column)
+        volume_row.addLayout(loud_column)
+        volume_row.addLayout(velocity_column)
+        volume_row.addStretch()
+        volume_section = self._build_section_card(
+            "Volume, Pan && Velocity", volume_row
+        )
+
+        # LFO - every LFO1 control (shape, rate, depth, delay) in one place
+        lfo_knobs_row = QHBoxLayout()
+        lfo_knobs_row.addLayout(lfo_rate_column)
+        lfo_knobs_row.addLayout(lfo_depth_column)
+        lfo_knobs_row.addLayout(lfo_delay_column)
+        lfo_knobs_row.addStretch()
+        lfo_shape_row = QHBoxLayout()
+        lfo_shape_row.addLayout(lfo_shape_column)
+        lfo_shape_row.addStretch()
+        lfo_section = self._build_section_card(
+            "LFO", lfo_knobs_row, lfo_shape_row
+        )
+
+        # Pitch - tuning offset and pitch-bend range, up and down
+        pitch_row = QHBoxLayout()
+        pitch_row.addLayout(program_tune_column)
+        pitch_row.addLayout(bend_up_column)
+        pitch_row.addLayout(bend_down_column)
+        pitch_row.addStretch()
+        pitch_section = self._build_section_card("Pitch", pitch_row)
+
+        # Voice & MIDI - how the program responds to incoming MIDI and
+        # allocates/steals voices
+        voice_row = QHBoxLayout()
+        voice_row.addLayout(midi_channel_column)
+        voice_row.addLayout(polyph_column)
+        voice_row.addLayout(note_priority_column)
+        voice_row.addStretch()
+        voice_section = self._build_section_card("Voice && MIDI", voice_row)
+
+        # Portamento
+        portamento_row = QHBoxLayout()
+        portamento_row.addLayout(portamento_enable_column)
+        portamento_row.addLayout(portamento_rate_column)
+        portamento_row.addLayout(portamento_type_column)
+        portamento_row.addStretch()
+        portamento_section = self._build_section_card(
+            "Portamento", portamento_row
+        )
 
         program_page = QWidget()
         program_page_layout = QVBoxLayout()
         program_page_layout.setSpacing(12)
-        program_page_layout.addLayout(program_knobs_row1)
-        program_page_layout.addLayout(program_knobs_row2)
-        program_page_layout.addLayout(program_controls_row)
-        program_page_layout.addLayout(program_midi_row)
-        program_page_layout.addLayout(program_bend_row)
-        program_page_layout.addLayout(program_portamento_row)
+        program_page_layout.addWidget(volume_section)
+        program_page_layout.addWidget(lfo_section)
+        program_page_layout.addWidget(pitch_section)
+        program_page_layout.addWidget(voice_section)
+        program_page_layout.addWidget(portamento_section)
         program_page_layout.addStretch()
         program_page.setLayout(program_page_layout)
 
@@ -915,6 +959,10 @@ class ProgramEditorWindow(QMainWindow):
         self.note_hi_spinbox.editingFinished.connect(self._commit_note_range)
         self.pan_knob.setEnabled(True)
         self._wire_knob_write(self.pan_knob, "PANPOS", "program")
+        self.loud_knob.setEnabled(True)
+        self._wire_knob_write(self.loud_knob, "PRLOUD", "program")
+        self.velocity_knob.setEnabled(True)
+        self._wire_knob_write(self.velocity_knob, "V_LOUD", "program")
         self.lfo_rate_knob.setEnabled(True)
         self._wire_knob_write(self.lfo_rate_knob, "LFORAT", "program")
         self.lfo_depth_knob.setEnabled(True)
@@ -1108,6 +1156,14 @@ class ProgramEditorWindow(QMainWindow):
         self.pan_knob.setValue(program_values["PANPOS"])
         self.pan_knob.blockSignals(False)
         self.pan_value_label.setText(str(program_values["PANPOS"]))
+        self.loud_knob.blockSignals(True)
+        self.loud_knob.setValue(program_values["PRLOUD"])
+        self.loud_knob.blockSignals(False)
+        self.loud_value_label.setText(str(program_values["PRLOUD"]))
+        self.velocity_knob.blockSignals(True)
+        self.velocity_knob.setValue(program_values["V_LOUD"])
+        self.velocity_knob.blockSignals(False)
+        self.velocity_value_label.setText(str(program_values["V_LOUD"]))
         self.lfo_rate_knob.blockSignals(True)
         self.lfo_rate_knob.setValue(program_values["LFORAT"])
         self.lfo_rate_knob.blockSignals(False)
@@ -1327,6 +1383,28 @@ class ProgramEditorWindow(QMainWindow):
         column.addWidget(spinbox, alignment=Qt.AlignmentFlag.AlignHCenter)
 
         return column
+
+    def _build_section_card(self, title, *row_layouts):
+        # groups related rows (e.g. every LFO control, or Volume/Pan/
+        # Velocity together on the Program tab; Filter or Envelopes on the
+        # Keygroup tab) into one visually distinct card - same surface/
+        # border look as the keygroup zone card (see QWidget#zoneCard in
+        # style.qss.template), just under a different objectName since this
+        # isn't zone-selector content
+        header = QLabel(title)
+        header.setObjectName("sectionHeader")
+
+        section_layout = QVBoxLayout()
+        section_layout.setContentsMargins(12, 10, 12, 12)
+        section_layout.setSpacing(10)
+        section_layout.addWidget(header)
+        for row in row_layouts:
+            section_layout.addLayout(row)
+
+        card = QWidget()
+        card.setObjectName("sectionCard")
+        card.setLayout(section_layout)
+        return card
 
     def _build_multi_part_knob(self, minimum, maximum, *, default):
         # compact knob + numeric readout for a Multis-tab row - unlike

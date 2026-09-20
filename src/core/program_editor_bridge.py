@@ -164,6 +164,8 @@ _KEYGROUP_DETAIL_FIELDS = [
 
 _PROGRAM_LEVEL_FIELDS = [
     "PANPOS",
+    "PRLOUD",
+    "V_LOUD",
     "LFORAT",
     "LFODEP",
     "LFODEL",
