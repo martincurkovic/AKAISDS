@@ -65,6 +65,10 @@ class FakeBridge:
     def get_parameter(self, param, program_index, keygroup=0, **kwargs):
         if param.name == "PANPOS":
             return self._pan[program_index]
+        if param.name == "PRLOUD":
+            return 65
+        if param.name == "V_LOUD":
+            return -15
         if param.name == "POLYPH":
             return 8
         if param.name == "PMCHAN":
@@ -177,6 +181,26 @@ def test_first_program_is_preselected_with_its_keygroups_shown(editor):
     assert editor.program_list.currentItem().text() == "Bass stab"
     assert editor.keygroup_list.count() == 2
     assert _keygroup_row_text(editor, 0) == "Keygroup 1: C0 - C3"
+
+
+def test_program_tab_loads_loud_and_velocity_from_hardware(editor):
+    # FakeBridge.get_parameter reports PRLOUD=65, V_LOUD=-15
+    assert editor.loud_knob.value() == 65
+    assert editor.velocity_knob.value() == -15
+
+
+def test_changing_loud_and_velocity_writes_prloud_and_v_loud(editor, qapp):
+    bridge = editor._bridge
+
+    editor.loud_knob.setValue(50)
+    editor.velocity_knob.setValue(-30)
+    editor._flush_write("PRLOUD")
+    editor._flush_write("V_LOUD")
+    editor._worker.wait_until_idle()
+    _pump_until(qapp, lambda: len(bridge.set_parameter_calls) >= 2)
+
+    assert bridge.set_parameter_calls[-2] == ("PRLOUD", 0, 50, 0)
+    assert bridge.set_parameter_calls[-1] == ("V_LOUD", 0, -30, 0)
 
 
 def test_program_tab_loads_channel_tune_and_priority_from_hardware(editor):
