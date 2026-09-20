@@ -8,6 +8,7 @@ if __name__ == "__main__":
     sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from PySide6.QtGui import Qt
+from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import (
     QHBoxLayout,
     QListWidget,
@@ -42,7 +43,10 @@ class ProgramEditorWindow(QMainWindow):
     def __init__(self, main_window, bridge):
         super().__init__()
         self.setWindowTitle("AKAISDS - Program Editor")
-        self.setMinimumSize(800, 500)
+        # the old 800x500 predates the envelope controls - height in
+        # particular is now well past what fits there. 850x800 gives some
+        # breathing room over the layout's own measured minimum (810x781)
+        self.setMinimumSize(850, 800)
         self._active_writers = {}
         self._sample_list = []
         self._keygroup_ranges = []  # [lo, hi] per keygroup - mirrors keygroup_range_bar
@@ -147,13 +151,8 @@ class ProgramEditorWindow(QMainWindow):
             (self.release1_knob, "RELSE1"),
         ):
             knob.valueChanged.connect(self._on_env1_knob_changed)
-            knob.sliderReleased.connect(
-                lambda f=field, k=knob: self._write_knob_value(
-                    f,
-                    "keygroup",
-                    k.value(),
-                    keygroup_index=self.keygroup_list.currentRow(),
-                )
+            self._wire_knob_write(
+                knob, field, "keygroup", keygroup_index_getter=self.keygroup_list.currentRow
             )
 
         # ENV2 - a 4-stage rate/level generator: rate knobs on top, that
@@ -194,21 +193,17 @@ class ProgramEditorWindow(QMainWindow):
             _ENV2_FIELDS,
             ["ENV2L1", "ENV2L2", "SUSTN2", "ENV2L4"],
         ):
-            rate_knob.sliderReleased.connect(
-                lambda f=rate_field, k=rate_knob: self._write_knob_value(
-                    f,
-                    "keygroup",
-                    k.value(),
-                    keygroup_index=self.keygroup_list.currentRow(),
-                )
+            self._wire_knob_write(
+                rate_knob,
+                rate_field,
+                "keygroup",
+                keygroup_index_getter=self.keygroup_list.currentRow,
             )
-            level_knob.sliderReleased.connect(
-                lambda f=level_field, k=level_knob: self._write_knob_value(
-                    f,
-                    "keygroup",
-                    k.value(),
-                    keygroup_index=self.keygroup_list.currentRow(),
-                )
+            self._wire_knob_write(
+                level_knob,
+                level_field,
+                "keygroup",
+                keygroup_index_getter=self.keygroup_list.currentRow,
             )
 
         env2_controls_column = QVBoxLayout()
@@ -353,45 +348,27 @@ class ProgramEditorWindow(QMainWindow):
             self._zone_stack.addWidget(page)
 
             # wire write signals for this zone's controls
-            vel_lo.editingFinished.connect(
-                lambda z=zone_idx, f=lovel: self._write_knob_value(
-                    f,
-                    "keygroup",
-                    self._zone_vel_lo[z].value(),
-                    keygroup_index=self.keygroup_list.currentRow(),
-                )
+            self._wire_spinbox_write(
+                vel_lo, lovel, "keygroup", keygroup_index_getter=self.keygroup_list.currentRow
             )
-            vel_hi.editingFinished.connect(
-                lambda z=zone_idx, f=hivel: self._write_knob_value(
-                    f,
-                    "keygroup",
-                    self._zone_vel_hi[z].value(),
-                    keygroup_index=self.keygroup_list.currentRow(),
-                )
+            self._wire_spinbox_write(
+                vel_hi, hivel, "keygroup", keygroup_index_getter=self.keygroup_list.currentRow
             )
-            tune.editingFinished.connect(
-                lambda z=zone_idx, f=vtuno: self._write_knob_value(
-                    f,
-                    "keygroup",
-                    self._semitones_to_tune_offset(self._zone_tune[z].value()),
-                    keygroup_index=self.keygroup_list.currentRow(),
-                )
+            self._wire_spinbox_write(
+                tune,
+                vtuno,
+                "keygroup",
+                keygroup_index_getter=self.keygroup_list.currentRow,
+                value_converter=self._semitones_to_tune_offset,
             )
-            loud_knob.sliderReleased.connect(
-                lambda z=zone_idx, f=vloud: self._write_knob_value(
-                    f,
-                    "keygroup",
-                    self._zone_loudness[z].value(),
-                    keygroup_index=self.keygroup_list.currentRow(),
-                )
+            self._wire_knob_write(
+                loud_knob,
+                vloud,
+                "keygroup",
+                keygroup_index_getter=self.keygroup_list.currentRow,
             )
-            pan_knob.sliderReleased.connect(
-                lambda z=zone_idx, f=vpano: self._write_knob_value(
-                    f,
-                    "keygroup",
-                    self._zone_pan[z].value(),
-                    keygroup_index=self.keygroup_list.currentRow(),
-                )
+            self._wire_knob_write(
+                pan_knob, vpano, "keygroup", keygroup_index_getter=self.keygroup_list.currentRow
             )
 
         self._zone_button_group.idClicked.connect(self._zone_stack.setCurrentIndex)
@@ -438,7 +415,7 @@ class ProgramEditorWindow(QMainWindow):
         self.lfo_shape_combo.addItems(["Triangle", "Sawtooth", "Square", "Random"])
         self.lfo_shape_combo.setEnabled(True)
         self.lfo_shape_combo.currentIndexChanged.connect(
-            lambda i: self._write_knob_value("LFO1WAVE", "program", i)
+            lambda i: self._schedule_write("LFO1WAVE", "program", i)
         )
 
         lfo_shape_label = QLabel("LFO shape")
@@ -463,7 +440,7 @@ class ProgramEditorWindow(QMainWindow):
         self.polyph_spinbox = QSpinBox()
         self.polyph_spinbox.setRange(1, 32)
         self.polyph_spinbox.setEnabled(True)
-        self.polyph_spinbox.editingFinished.connect(self._on_polyph_changed)
+        self._wire_spinbox_write(self.polyph_spinbox, "POLYPH", "program")
         polyph_label = QLabel("Polyphony")
         polyph_label.setAlignment(Qt.AlignmentFlag.AlignHCenter)
 
@@ -534,24 +511,20 @@ class ProgramEditorWindow(QMainWindow):
         self._program_loader.load_failed.connect(self._on_program_load_failed)
         self._program_loader.start()
 
-        # enable knobs and wire sliderReleased
+        # enable knobs and wire their (debounced) writes
         self.cutoff_knob.setEnabled(True)
-        self.cutoff_knob.sliderReleased.connect(
-            lambda: self._write_knob_value(
-                "FILFRQ",
-                "keygroup",
-                self.cutoff_knob.value(),
-                keygroup_index=self.keygroup_list.currentRow(),
-            )
+        self._wire_knob_write(
+            self.cutoff_knob,
+            "FILFRQ",
+            "keygroup",
+            keygroup_index_getter=self.keygroup_list.currentRow,
         )
         self.resonance_knob.setEnabled(True)
-        self.resonance_knob.sliderReleased.connect(
-            lambda: self._write_knob_value(
-                "FILQ",
-                "keygroup",
-                self.resonance_knob.value(),
-                keygroup_index=self.keygroup_list.currentRow(),
-            )
+        self._wire_knob_write(
+            self.resonance_knob,
+            "FILQ",
+            "keygroup",
+            keygroup_index_getter=self.keygroup_list.currentRow,
         )
         self.note_lo_spinbox.setEnabled(True)
         self.note_lo_spinbox.valueChanged.connect(self._on_note_range_changed)
@@ -560,27 +533,13 @@ class ProgramEditorWindow(QMainWindow):
         self.note_hi_spinbox.valueChanged.connect(self._on_note_range_changed)
         self.note_hi_spinbox.editingFinished.connect(self._commit_note_range)
         self.pan_knob.setEnabled(True)
-        self.pan_knob.sliderReleased.connect(
-            lambda: self._write_knob_value("PANPOS", "program", self.pan_knob.value())
-        )
+        self._wire_knob_write(self.pan_knob, "PANPOS", "program")
         self.lfo_rate_knob.setEnabled(True)
-        self.lfo_rate_knob.sliderReleased.connect(
-            lambda: self._write_knob_value(
-                "LFORAT", "program", self.lfo_rate_knob.value()
-            )
-        )
+        self._wire_knob_write(self.lfo_rate_knob, "LFORAT", "program")
         self.lfo_depth_knob.setEnabled(True)
-        self.lfo_depth_knob.sliderReleased.connect(
-            lambda: self._write_knob_value(
-                "LFODEP", "program", self.lfo_depth_knob.value()
-            )
-        )
+        self._wire_knob_write(self.lfo_depth_knob, "LFODEP", "program")
         self.lfo_delay_knob.setEnabled(True)
-        self.lfo_delay_knob.sliderReleased.connect(
-            lambda: self._write_knob_value(
-                "LFODEL", "program", self.lfo_delay_knob.value()
-            )
-        )
+        self._wire_knob_write(self.lfo_delay_knob, "LFODEL", "program")
         for knob in (
             self.attack1_knob,
             self.decay1_knob,
@@ -820,6 +779,65 @@ class ProgramEditorWindow(QMainWindow):
     def _semitones_to_tune_offset(self, semitones):
         return round(semitones * 100 * 2.56)
 
+    # old sampler hardware can't keep up with a write per wheel-notch or
+    # per drag-frame - a value is only actually sent once it's held still
+    # for this long, unless a "the user is clearly done" signal
+    # (sliderReleased/editingFinished) flushes it early
+    _WRITE_DEBOUNCE_MS = 500
+
+    def _schedule_write(self, param_name, region, value, *, keygroup_index=0):
+        # call on every CONTINUOUS change signal (valueChanged,
+        # currentIndexChanged) - covers inputs like mouse-wheel scrolling
+        # that change the value but never fire editingFinished/
+        # sliderReleased, which used to leave the write pending forever
+        if not hasattr(self, "_pending_writes"):
+            self._pending_writes = {}
+            self._write_timers = {}
+
+        self._pending_writes[param_name] = (region, value, keygroup_index)
+
+        timer = self._write_timers.get(param_name)
+        if timer is None:
+            timer = QTimer(self)
+            timer.setSingleShot(True)
+            timer.timeout.connect(lambda p=param_name: self._flush_write(p))
+            self._write_timers[param_name] = timer
+        timer.start(self._WRITE_DEBOUNCE_MS)
+
+    def _flush_write(self, param_name):
+        # sends a pending debounced value immediately and cancels its timer
+        # - wired to sliderReleased/editingFinished so a deliberate
+        # drag-then-release or type-then-Enter stays instant rather than
+        # also waiting out the debounce window. A no-op if nothing is
+        # pending (e.g. a click that didn't actually change the value).
+        timer = getattr(self, "_write_timers", {}).get(param_name)
+        if timer is not None:
+            timer.stop()
+        pending = getattr(self, "_pending_writes", {}).pop(param_name, None)
+        if pending is None:
+            return
+        region, value, keygroup_index = pending
+        self._write_knob_value(param_name, region, value, keygroup_index=keygroup_index)
+
+    def _wire_knob_write(self, knob, param_name, region, *, keygroup_index_getter=None):
+        getter = keygroup_index_getter or (lambda: 0)
+        knob.valueChanged.connect(
+            lambda v: self._schedule_write(param_name, region, v, keygroup_index=getter())
+        )
+        knob.sliderReleased.connect(lambda: self._flush_write(param_name))
+
+    def _wire_spinbox_write(
+        self, spinbox, param_name, region, *, keygroup_index_getter=None, value_converter=None
+    ):
+        getter = keygroup_index_getter or (lambda: 0)
+        converter = value_converter or (lambda v: v)
+        spinbox.valueChanged.connect(
+            lambda v: self._schedule_write(
+                param_name, region, converter(v), keygroup_index=getter()
+            )
+        )
+        spinbox.editingFinished.connect(lambda: self._flush_write(param_name))
+
     def _write_knob_value(self, param_name, region, value, *, keygroup_index=0):
         program_index = self.program_list.currentRow()
         writer = ParameterWriter(
@@ -839,9 +857,6 @@ class ProgramEditorWindow(QMainWindow):
         # store writer per-param so it can't be garbage collected before the thread finishes
         self._active_writers[param_name] = writer
         writer.start()
-
-    def _on_polyph_changed(self):
-        self._write_knob_value("POLYPH", "program", self.polyph_spinbox.value())
 
     def _on_env1_knob_changed(self):
         # redraws the graph immediately as any ADSR knob is dragged - the
@@ -893,19 +908,25 @@ class ProgramEditorWindow(QMainWindow):
         self._keygroup_ranges[index] = [lo, hi]
         self.keygroup_range_bar.set_ranges(self._keygroup_ranges)
 
+        # both bounds scheduled together (not just the one the user
+        # touched) - the pushed spinbox's own valueChanged is blocked
+        # during the clamp above, so it never schedules a write of its own;
+        # scheduling both here every time either one changes is what keeps
+        # a pushed value from being left stale on the sampler
+        keygroup_index = index
+        self._schedule_write(
+            "LONOTE", "keygroup", lo, keygroup_index=keygroup_index
+        )
+        self._schedule_write(
+            "HINOTE", "keygroup", hi, keygroup_index=keygroup_index
+        )
+
     def _commit_note_range(self):
-        # both bounds are written together (not just the one the user
-        # touched), so a pushed value that this round's push-clamp changed
-        # programmatically never gets left stale on the sampler
-        keygroup_index = self.keygroup_list.currentRow()
-        self._write_knob_value(
-            "LONOTE", "keygroup", self.note_lo_spinbox.value(),
-            keygroup_index=keygroup_index,
-        )
-        self._write_knob_value(
-            "HINOTE", "keygroup", self.note_hi_spinbox.value(),
-            keygroup_index=keygroup_index,
-        )
+        # flushes both bounds immediately instead of waiting out the
+        # debounce window - pressing Enter or clicking away is a clear
+        # "done editing" signal, same as sliderReleased for knobs
+        self._flush_write("LONOTE")
+        self._flush_write("HINOTE")
 
     def _on_samples_loaded(self, samples):
         self._sample_list = samples
@@ -932,7 +953,7 @@ class ProgramEditorWindow(QMainWindow):
     def _on_zone_sample_changed(self, field, zone_idx):
         text = self._zone_combos[zone_idx].currentText()
         sample_name = "" if text == "-" else text
-        self._write_knob_value(
+        self._schedule_write(
             field,
             "keygroup",
             sample_name,
