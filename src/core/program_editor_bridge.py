@@ -183,6 +183,75 @@ class KeygroupDetailLoader(QThread):
         self.detail_loaded.emit(self._program_index, self._keygroup_index, values)
 
 
+class MultiPartsLoader(QThread):
+    # the sampler holds exactly one resident multi (no list of multis to
+    # choose between) with a fixed 16 "multipart" slots - (program_name,
+    # channel) per part, in part order
+    PART_COUNT = 16
+
+    parts_loaded = Signal(list)
+    load_failed = Signal(str)
+
+    def __init__(self, bridge):
+        super().__init__()
+        self._bridge = bridge
+
+    def run(self):
+        parts = []
+        try:
+            for part_index in range(self.PART_COUNT):
+                header = self._bridge.get_header("multipart", part_index)
+                parts.append((header["PRNAME"].strip(), header["PMCHAN"]))
+        except Exception as e:
+            self.load_failed.emit(str(e))
+            return
+        self.parts_loaded.emit(parts)
+
+
+class ProgramChangeSender(QThread):
+    # Assigning a program to a multi part has no working SysEx write in the
+    # s3k protocol: PRNAME (multipart region) is read-only, and per hardware
+    # measurements documented in s3k itself, writing it anyway has no effect
+    # on what actually plays. The mechanism the hardware actually needs is a
+    # MIDI Program Change on the part's own channel, using THAT PROGRAM's
+    # own assignable MIDI program number (PRGNUM, program region) - which
+    # is independent of the program's position in the program list, so it's
+    # read fresh here rather than assumed to match program_index.
+    #
+    # Reuses the bridge's own already-open MIDI connection (S3kBridge.out)
+    # rather than opening a second one. Fire-and-forget: Program Change has
+    # no reply in the MIDI spec, so there is nothing to read back to
+    # confirm the sampler actually received or acted on it.
+    change_sent = Signal(int, str)  # part_index, program_name (for the status bar)
+    send_failed = Signal(int, str)  # part_index, error
+
+    def __init__(self, bridge, part_index, program_index, program_name, channel):
+        super().__init__()
+        self._bridge = bridge
+        self._part_index = part_index
+        self._program_index = program_index
+        self._program_name = program_name
+        self._channel = channel
+
+    def run(self):
+        out = getattr(self._bridge, "out", None)
+        if out is None:
+            # demo bridge has no live MIDI connection to send this on
+            self.change_sent.emit(self._part_index, self._program_name)
+            return
+        try:
+            program_number = self._bridge.get_parameter(
+                p.lookup("PRGNUM", "program"), self._program_index
+            )
+            out.send_message(
+                [0xC0 | (self._channel & 0x0F), program_number & 0x7F]
+            )
+        except Exception as e:
+            self.send_failed.emit(self._part_index, str(e))
+            return
+        self.change_sent.emit(self._part_index, self._program_name)
+
+
 class ParameterWriter(QThread):
     write_succeeded = Signal(
         object

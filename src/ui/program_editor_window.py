@@ -25,6 +25,7 @@ from PySide6.QtWidgets import (
     QButtonGroup,
     QSpinBox,
     QStatusBar,
+    QTabWidget,
 )
 from ui.knob import Knob
 from ui.note_spinbox import NoteSpinBox
@@ -37,6 +38,8 @@ from core.program_editor_bridge import (
     ProgramListLoader,
     KeygroupDetailLoader,
     SampleListLoader,
+    MultiPartsLoader,
+    ProgramChangeSender,
 )
 
 
@@ -53,6 +56,7 @@ class ProgramEditorWindow(QMainWindow):
         self._keygroup_ranges = []  # [lo, hi] per keygroup - mirrors keygroup_range_bar
         self._pending_restore_state = None  # set only by _refresh_from_hardware()
         self._refresh_in_progress = False
+        self._multi_refresh_in_progress = False
 
         self._main_window = main_window
         self._bridge = bridge
@@ -496,6 +500,14 @@ class ProgramEditorWindow(QMainWindow):
         content_layout.addWidget(programs_container)
         content_layout.addWidget(keygroups_container)
         content_layout.addWidget(self.detail_stack, stretch=1)
+        programs_tab_page = QWidget()
+        programs_tab_page.setLayout(content_layout)
+
+        multis_tab_page = self._build_multis_tab()
+
+        self.main_tabs = QTabWidget()
+        self.main_tabs.addTab(multis_tab_page, "Multis")
+        self.main_tabs.addTab(programs_tab_page, "Programs")
 
         bottom_row = QHBoxLayout()
         bottom_row.addWidget(refresh_button)
@@ -503,7 +515,7 @@ class ProgramEditorWindow(QMainWindow):
         bottom_row.addWidget(close_button)
 
         main_layout = QVBoxLayout()
-        main_layout.addLayout(content_layout)
+        main_layout.addWidget(self.main_tabs)
         main_layout.addLayout(bottom_row)
 
         container = QWidget()
@@ -605,8 +617,52 @@ class ProgramEditorWindow(QMainWindow):
         )
         self._sample_loader.start()
 
+        # a part can only be assigned a program that actually exists -
+        # populate all 16 combos with the same name list now that it's in
+        for combo in self._multi_program_combos:
+            combo.blockSignals(True)
+            combo.clear()
+            combo.addItems(programs)
+            combo.setEnabled(True)
+            combo.blockSignals(False)
+        self._refresh_multi_parts()
+
     def _on_program_load_failed(self, error_message):
         self.status_bar.showMessage(f"Couldn't load programs: {error_message}")
+
+    def _refresh_multi_parts(self, *, show_confirmation=False):
+        self._multi_refresh_in_progress = show_confirmation
+        if hasattr(self, "_multi_parts_loader"):
+            try:
+                self._multi_parts_loader.parts_loaded.disconnect()
+            except RuntimeError:
+                pass
+        self._multi_parts_loader = MultiPartsLoader(self._bridge)
+        self._multi_parts_loader.parts_loaded.connect(self._on_multi_parts_loaded)
+        self._multi_parts_loader.load_failed.connect(self._on_multi_load_failed)
+        self._multi_parts_loader.start()
+
+    def _on_multi_parts_loaded(self, parts):
+        for part_index, (program_name, channel) in enumerate(parts):
+            program_combo = self._multi_program_combos[part_index]
+            channel_combo = self._multi_channel_combos[part_index]
+
+            program_combo.blockSignals(True)
+            program_combo.setCurrentIndex(program_combo.findText(program_name))
+            program_combo.blockSignals(False)
+
+            channel_combo.blockSignals(True)
+            channel_index = channel_combo.findData(channel)
+            channel_combo.setCurrentIndex(channel_index if channel_index >= 0 else 0)
+            channel_combo.blockSignals(False)
+
+        if self._multi_refresh_in_progress:
+            self._multi_refresh_in_progress = False
+            self.status_bar.showMessage("Multi parts refreshed from hardware")
+
+    def _on_multi_load_failed(self, error_message):
+        self._multi_refresh_in_progress = False
+        self.status_bar.showMessage(f"Couldn't load multi: {error_message}")
 
     def _refresh_from_hardware(self):
         # re-fetches the current program's keygroup list/ranges and
@@ -614,10 +670,13 @@ class ProgramEditorWindow(QMainWindow):
         # changes made on the hardware's own front panel don't leave this
         # window showing stale values. Restores whatever the user was
         # looking at (which keygroup, which zone tab, program vs keygroup
-        # page) rather than resetting the view.
+        # page) rather than resetting the view. Also always refreshes the
+        # Multis tab's 16 parts, independent of program selection.
+        self._refresh_multi_parts(show_confirmation=True)
+
         program_index = self.program_list.currentRow()
         if program_index < 0:
-            return  # nothing loaded yet to refresh
+            return  # no program selected yet - nothing else to refresh
 
         self.status_bar.showMessage("Refreshing from hardware…")
         self._refresh_in_progress = True
@@ -883,6 +942,104 @@ class ProgramEditorWindow(QMainWindow):
 
         return column
 
+    def _build_multis_tab(self):
+        # the sampler holds exactly one resident multi - no list to choose
+        # between, just its fixed 16 parts, each with an independent
+        # program assignment and MIDI channel
+        self._multi_program_combos = []
+        self._multi_channel_combos = []
+
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(14, 14, 14, 14)
+        layout.setSpacing(6)
+
+        header_row = QHBoxLayout()
+        header_row.setSpacing(10)
+        part_header = QLabel("<b>Part</b>")
+        part_header.setFixedWidth(60)
+        program_header = QLabel("<b>Program</b>")
+        channel_header = QLabel("<b>Channel</b>")
+        channel_header.setFixedWidth(90)
+        header_row.addWidget(part_header)
+        header_row.addWidget(program_header, stretch=1)
+        header_row.addWidget(channel_header)
+        layout.addLayout(header_row)
+
+        for part_index in range(MultiPartsLoader.PART_COUNT):
+            row = QHBoxLayout()
+            row.setSpacing(10)
+
+            part_label = QLabel(f"Part {part_index + 1}")
+            part_label.setFixedWidth(60)
+
+            program_combo = QComboBox()
+            # populated once the program list loads - a part can only be
+            # assigned a program that actually exists on the sampler
+            program_combo.setEnabled(False)
+
+            channel_combo = QComboBox()
+            channel_combo.addItem("OMNI", 255)
+            for channel in range(16):
+                channel_combo.addItem(str(channel + 1), channel)
+            channel_combo.setFixedWidth(90)
+
+            row.addWidget(part_label)
+            row.addWidget(program_combo, stretch=1)
+            row.addWidget(channel_combo)
+            layout.addLayout(row)
+
+            self._multi_program_combos.append(program_combo)
+            self._multi_channel_combos.append(channel_combo)
+
+            program_combo.currentIndexChanged.connect(
+                lambda program_index, z=part_index: self._on_multi_part_program_changed(
+                    z, program_index
+                )
+            )
+            channel_combo.currentIndexChanged.connect(
+                lambda _, z=part_index: self._on_multi_part_channel_changed(z)
+            )
+
+        layout.addStretch()
+        return page
+
+    def _on_multi_part_channel_changed(self, part_index):
+        channel = self._multi_channel_combos[part_index].currentData()
+        self._schedule_write(
+            "PMCHAN",
+            "multipart",
+            channel,
+            index=part_index,
+            debounce_key=f"multipart_channel_{part_index}",
+        )
+
+    def _on_multi_part_program_changed(self, part_index, program_index):
+        if program_index < 0:
+            return  # combo cleared/reset, not a real user selection
+        program_name = self._multi_program_combos[part_index].currentText()
+        channel = self._multi_channel_combos[part_index].currentData()
+        # OMNI isn't a real wire value a Program Change can target - the
+        # part still listens on every channel while OMNI, so any channel
+        # reaches it; 0 is as good a choice as any
+        send_channel = channel if channel != 255 else 0
+
+        sender = ProgramChangeSender(
+            self._bridge, part_index, program_index, program_name, send_channel
+        )
+        sender.change_sent.connect(
+            lambda z, name: self.status_bar.showMessage(
+                f"Part {z + 1}: sent Program Change for '{name}'"
+            )
+        )
+        sender.send_failed.connect(
+            lambda z, e: self.status_bar.showMessage(
+                f"Part {z + 1}: couldn't send Program Change: {e}"
+            )
+        )
+        self._active_writers[f"multipart_program_{part_index}"] = sender
+        sender.start()
+
     def _add_keygroup_row(self, index, lo, hi):
         # colored swatch + range text, same row-widget approach as the
         # dashboard's queue/hardware panels - keeps each row's identity tied
@@ -924,39 +1081,61 @@ class ProgramEditorWindow(QMainWindow):
     # (sliderReleased/editingFinished) flushes it early
     _WRITE_DEBOUNCE_MS = 500
 
-    def _schedule_write(self, param_name, region, value, *, keygroup_index=0):
+    def _schedule_write(
+        self, param_name, region, value, *, keygroup_index=0, index=None, debounce_key=None
+    ):
         # call on every CONTINUOUS change signal (valueChanged,
         # currentIndexChanged) - covers inputs like mouse-wheel scrolling
         # that change the value but never fire editingFinished/
-        # sliderReleased, which used to leave the write pending forever
+        # sliderReleased, which used to leave the write pending forever.
+        #
+        # debounce_key defaults to param_name, which is only safe when at
+        # most one "thing" using that field name can be mid-edit at once
+        # (true for every keygroup-scoped field, since only one keygroup is
+        # ever selected at a time). The Multis tab breaks that assumption -
+        # all 16 parts share the field name PMCHAN, but are all editable
+        # simultaneously - so its callers pass a per-part debounce_key to
+        # keep each part's pending write from clobbering another's.
+        key = debounce_key if debounce_key is not None else param_name
         if not hasattr(self, "_pending_writes"):
             self._pending_writes = {}
             self._write_timers = {}
 
-        self._pending_writes[param_name] = (region, value, keygroup_index)
+        self._pending_writes[key] = (param_name, region, value, keygroup_index, index)
 
-        timer = self._write_timers.get(param_name)
+        timer = self._write_timers.get(key)
         if timer is None:
             timer = QTimer(self)
             timer.setSingleShot(True)
-            timer.timeout.connect(lambda p=param_name: self._flush_write(p))
-            self._write_timers[param_name] = timer
+            timer.timeout.connect(lambda k=key: self._flush_write(k))
+            self._write_timers[key] = timer
         timer.start(self._WRITE_DEBOUNCE_MS)
 
-    def _flush_write(self, param_name):
+    def _flush_write(self, debounce_key):
         # sends a pending debounced value immediately and cancels its timer
         # - wired to sliderReleased/editingFinished so a deliberate
         # drag-then-release or type-then-Enter stays instant rather than
         # also waiting out the debounce window. A no-op if nothing is
         # pending (e.g. a click that didn't actually change the value).
-        timer = getattr(self, "_write_timers", {}).get(param_name)
+        #
+        # NOTE: callers outside this file's own multi-part wiring can keep
+        # passing a bare param_name here exactly as before - debounce_key
+        # defaults to param_name in _schedule_write, so the two agree.
+        timer = getattr(self, "_write_timers", {}).get(debounce_key)
         if timer is not None:
             timer.stop()
-        pending = getattr(self, "_pending_writes", {}).pop(param_name, None)
+        pending = getattr(self, "_pending_writes", {}).pop(debounce_key, None)
         if pending is None:
             return
-        region, value, keygroup_index = pending
-        self._write_knob_value(param_name, region, value, keygroup_index=keygroup_index)
+        param_name, region, value, keygroup_index, index = pending
+        self._write_knob_value(
+            param_name,
+            region,
+            value,
+            keygroup_index=keygroup_index,
+            index=index,
+            writer_key=debounce_key,
+        )
 
     def _wire_knob_write(self, knob, param_name, region, *, keygroup_index_getter=None):
         getter = keygroup_index_getter or (lambda: 0)
@@ -977,8 +1156,18 @@ class ProgramEditorWindow(QMainWindow):
         )
         spinbox.editingFinished.connect(lambda: self._flush_write(param_name))
 
-    def _write_knob_value(self, param_name, region, value, *, keygroup_index=0):
-        program_index = self.program_list.currentRow()
+    def _write_knob_value(
+        self, param_name, region, value, *, keygroup_index=0, index=None, writer_key=None
+    ):
+        # index overrides the usual "whichever program is selected in the
+        # Programs tab" target - needed for multipart writes, where the
+        # thing being addressed is a part number (0-15), unrelated to
+        # program_list's own selection
+        program_index = self.program_list.currentRow() if index is None else index
+        # writer_key overrides _active_writers' storage key (also
+        # param_name by default) for the same reason _schedule_write takes
+        # debounce_key - see its comment
+        key = writer_key if writer_key is not None else param_name
         writer = ParameterWriter(
             self._bridge,
             param_name,
@@ -993,8 +1182,8 @@ class ProgramEditorWindow(QMainWindow):
         writer.write_failed.connect(
             lambda e: self.status_bar.showMessage(f"Write failed ({param_name}): {e}")
         )
-        # store writer per-param so it can't be garbage collected before the thread finishes
-        self._active_writers[param_name] = writer
+        # store writer per-key so it can't be garbage collected before the thread finishes
+        self._active_writers[key] = writer
         writer.start()
 
     def _on_env1_knob_changed(self):
