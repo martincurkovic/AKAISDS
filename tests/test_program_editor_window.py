@@ -23,9 +23,11 @@ class FakeBridge:
             1: [(24, 96)],
         }
         self._details = {0: 72, 1: 8, 2: 30, 3: 60, 4: 90}
-        # multipart channel per part - distinct values so a test can catch
-        # one part's write landing on the wrong part
+        # multipart channel/level/pan per part - distinct values so a test
+        # can catch one part's write landing on the wrong part
         self.multipart_channels = list(range(MULTI_PART_COUNT))
+        self.multipart_levels = [60 + i for i in range(MULTI_PART_COUNT)]
+        self.multipart_pans = [i - 8 for i in range(MULTI_PART_COUNT)]
         self.set_parameter_calls = []
 
     def sample_list(self):
@@ -39,13 +41,25 @@ class FakeBridge:
             return {
                 "PRNAME": self._programs[index % len(self._programs)],
                 "PMCHAN": self.multipart_channels[index],
+                "STEREO": self.multipart_levels[index],
+                "PANPOS": self.multipart_pans[index],
             }
         raise AssertionError(f"unexpected region {region!r}")
 
     def set_parameter(self, param, program_index, value, *, keygroup=0):
         self.set_parameter_calls.append((param.name, program_index, value, keygroup))
+        # PMCHAN/PANPOS exist in both the "program" and "multipart" regions
+        # (see program_editor_window.py's midi_channel_combo/pan_knob vs.
+        # this multipart bookkeeping) - keyed on region too so a program-level
+        # write doesn't misattribute itself to some part's row
+        if param.region != "multipart":
+            return
         if param.name == "PMCHAN":
             self.multipart_channels[program_index] = value
+        if param.name == "STEREO":
+            self.multipart_levels[program_index] = value
+        if param.name == "PANPOS":
+            self.multipart_pans[program_index] = value
 
     def get_parameter(self, param, program_index, keygroup=0, **kwargs):
         if param.name == "PANPOS":
@@ -249,9 +263,14 @@ def test_multi_parts_loaded_populates_combos_from_hardware(editor, qapp):
     _wait_for_multi_parts_load(editor, qapp)
 
     # FakeBridge's get_header cycles ["Bass stab", "EPiano warm"] by part
-    # index and reports multipart_channels[index] == index
+    # index and reports multipart_channels[index] == index, level 60+index,
+    # pan index-8
     assert editor._multi_program_combos[0].currentText() == "Bass stab"
     assert editor._multi_channel_combos[0].currentData() == 0
+    assert editor._multi_level_knobs[0].value() == 60
+    assert editor._multi_pan_knobs[0].value() == -8
+    assert editor._multi_level_knobs[1].value() == 61
+    assert editor._multi_pan_knobs[1].value() == -7
     assert editor._multi_program_combos[1].currentText() == "EPiano warm"
     assert editor._multi_channel_combos[1].currentData() == 1
 
@@ -302,6 +321,48 @@ def test_changing_two_multi_part_channels_writes_both_independently(editor, qapp
     pmchan_calls = [c for c in bridge.set_parameter_calls if c[0] == "PMCHAN"]
     assert ("PMCHAN", 0, 5, 0) in pmchan_calls
     assert ("PMCHAN", 1, 9, 0) in pmchan_calls
+
+
+def test_changing_two_multi_part_levels_writes_both_independently(editor, qapp):
+    # same per-part debounce_key concern as the channel test above - level
+    # knobs share the field name STEREO across all 16 parts
+    _wait_for_multi_parts_load(editor, qapp)
+    bridge = editor._bridge
+
+    editor._multi_level_knobs[0].setValue(40)
+    editor._multi_level_knobs[1].setValue(70)
+
+    editor._flush_write("multipart_level_0")
+    editor._flush_write("multipart_level_1")
+
+    editor._worker.wait_until_idle()
+    _pump_until(qapp, lambda: len(bridge.set_parameter_calls) >= 2)
+
+    stereo_calls = [c for c in bridge.set_parameter_calls if c[0] == "STEREO"]
+    assert ("STEREO", 0, 40, 0) in stereo_calls
+    assert ("STEREO", 1, 70, 0) in stereo_calls
+    assert editor._multi_level_value_labels[0].text() == "40"
+
+
+def test_changing_two_multi_part_pans_writes_both_independently(editor, qapp):
+    # same per-part debounce_key concern - pan knobs share the field name
+    # PANPOS across all 16 parts (and with the program-level Pan knob)
+    _wait_for_multi_parts_load(editor, qapp)
+    bridge = editor._bridge
+
+    editor._multi_pan_knobs[0].setValue(-30)
+    editor._multi_pan_knobs[1].setValue(25)
+
+    editor._flush_write("multipart_pan_0")
+    editor._flush_write("multipart_pan_1")
+
+    editor._worker.wait_until_idle()
+    _pump_until(qapp, lambda: len(bridge.set_parameter_calls) >= 2)
+
+    panpos_calls = [c for c in bridge.set_parameter_calls if c[0] == "PANPOS"]
+    assert ("PANPOS", 0, -30, 0) in panpos_calls
+    assert ("PANPOS", 1, 25, 0) in panpos_calls
+    assert editor._multi_pan_value_labels[0].text() == "-30"
 
 
 def test_multi_part_channel_write_targets_the_part_not_the_selected_program(

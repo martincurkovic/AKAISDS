@@ -367,7 +367,8 @@ def test_worker_writes_are_never_coalesced():
 
 class _MultiPartsFakeBridge:
     def __init__(self, parts=None, error=None):
-        # parts: list of (name, channel) tuples, one per part, in order
+        # parts: list of (name, channel, level, pan) tuples, one per part,
+        # in order
         self._parts = parts
         self._error = error
 
@@ -375,12 +376,12 @@ class _MultiPartsFakeBridge:
         if self._error:
             raise self._error
         assert region == "multipart"
-        name, channel = self._parts[index]
-        return {"PRNAME": name, "PMCHAN": channel}
+        name, channel, level, pan = self._parts[index]
+        return {"PRNAME": name, "PMCHAN": channel, "STEREO": level, "PANPOS": pan}
 
 
 def test_worker_reads_all_sixteen_parts_in_order():
-    parts = [(f"Program {i}", i) for i in range(MULTI_PART_COUNT)]
+    parts = [(f"Program {i}", i, 99, 0) for i in range(MULTI_PART_COUNT)]
     worker = BridgeWorker(_MultiPartsFakeBridge(parts=parts))
     loaded = []
     worker.parts_loaded.connect(loaded.append)
@@ -393,7 +394,9 @@ def test_worker_reads_all_sixteen_parts_in_order():
 
 def test_worker_strips_padded_program_names():
     # PRNAME is a fixed-width, space-padded text field on real hardware
-    parts = [("BASS ROUND   ", 0)] + [("X", i) for i in range(1, MULTI_PART_COUNT)]
+    parts = [("BASS ROUND   ", 0, 99, 0)] + [
+        ("X", i, 99, 0) for i in range(1, MULTI_PART_COUNT)
+    ]
     worker = BridgeWorker(_MultiPartsFakeBridge(parts=parts))
     loaded = []
     worker.parts_loaded.connect(loaded.append)
@@ -401,7 +404,7 @@ def test_worker_strips_padded_program_names():
     worker.submit_multi_parts()
     worker.process_pending()
 
-    assert loaded[0][0] == ("BASS ROUND", 0)
+    assert loaded[0][0] == ("BASS ROUND", 0, 99, 0)
 
 
 def test_worker_emits_multi_parts_load_failed_on_error():
