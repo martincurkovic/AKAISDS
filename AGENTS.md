@@ -51,6 +51,31 @@ to a specific commit; if something there looks wrong, it's either the wrong
 assumption on this project's side, or worth raising upstream, not editing
 in-place.
 
+### Two fields where this project's own hardware beats s3k.params' notes
+
+`s3k.params`'s own measured notes are usually the most trustworthy source in
+the whole stack (see above) - but on two program-level fields, this project's
+user has since measured their own S3000-series unit and gotten a different
+answer, confirmed in front of them, not from a manual:
+
+- **`K_FREQ`** (keygroup filter key-tracking) - `s3k.params` declares
+  `-30..99` (its own notes cite a 2026-08-24 sweep finding no clamp at 12 or
+  24 either, contradicting an older manual's claimed `+/-24`). Measured
+  again on this project's own hardware (2026-09-20): the real range is
+  `-24..+24` after all. `key_filter_track_knob` in `program_editor_window.py`
+  uses `-24..24`, not `s3k.params`'s declared range - this is deliberate, see
+  the comment there.
+- **`B_PTCHD`** (pitch-bend-down range) - `s3k.params` declares `0..12`,
+  asymmetric with `B_PTCH` (bend-up)'s `0..24`. Measured on the same unit,
+  same session: it's actually `0..24`, symmetric with bend-up.
+  `bend_down_spinbox` uses `0..24` for the same reason.
+
+If you're auditing widget ranges against `s3k.params` and find one of these
+two "wrong," it isn't - re-read the comment at the call site before "fixing"
+it back to match the dependency. If you get hardware access and can re-verify
+either one (or find a third), update the comment with the date and what you
+found, the same way these two are documented now.
+
 ## Developing without hardware
 
 Set `AKAISDS_DEMO_SAMPLER=1` before launching, and `program_editor_bridge.connect()`
@@ -110,6 +135,55 @@ guessing. Individual log lines are long (they include the full `repr()` of
 `Parameter` dataclass objects, notes fields included) - grep/tail rather than
 reading the whole file.
 
+## Program Editor UI: section cards, scroll areas, and the busy indicator
+
+The Program and Keygroup tabs are built from `_build_section_card(title,
+*row_layouts)` (groups related rows into one titled, bordered card - Volume/
+Pan/Velocity, LFO, Pitch, etc.) and `_build_scroll_area(page)` (wraps a whole
+tab's cards so the window doesn't have to be tall enough to show every card
+unscrolled). If you add another control, put it in the most relevant
+existing card rather than a new bare row - and if you add a whole new card,
+know that this file's `setMinimumSize(...)` was tuned by hand against the
+actual measured layout, not a round number:
+
+- **Height** doesn't need to fit everything anymore - past the minimum, a
+  tab scrolls instead of its cards compressing into each other and visibly
+  overlapping (this happened during development; `QVBoxLayout` will compress
+  children below their size hint and eventually let them overlap rather than
+  erroring).
+- **Width** is the real constraint now: some cards are deliberately paired
+  side by side in one row (e.g. Range+Filter on the Keygroup tab) to save
+  vertical space. Below a certain width those pairs stop fitting and a
+  `QScrollArea` shows an *unwanted horizontal* scrollbar instead of just
+  wrapping - found by growing the window until `scroll_area.horizontalScrollBar().maximum()`
+  hit zero for both tabs. If you widen a card or add another side-by-side
+  pair, re-check this the same way rather than guessing a new minimum.
+
+`BridgeWorker.busy_changed` (a `Signal(bool)`) drives the indeterminate
+progress bar next to the Refresh button - `True` from the moment any job is
+queued while nothing else is pending, `False` once the queue actually drains
+back to empty, so a burst of several jobs (Refresh submits three at once)
+reads as one span rather than flickering. `ProgramEditorWindow` doesn't show
+or hide the bar on that raw signal directly, though - it debounces through
+two one-shot `QTimer`s (`_busy_show_timer`, `_busy_hide_timer`), because on a
+**fast** bridge (`DemoBridge`, or any test fake) the worker thread can race
+ahead and briefly drain the queue to empty *between* two of Refresh's
+back-to-back `submit_*()` calls, which without the hide-timer's grace period
+showed up as real, reproducible flicker. On real hardware this specific race
+essentially can't happen (submitting a whole batch takes microseconds; the
+worker is still busy with job one when the rest land) - it's the fast/fake
+bridges that expose it, which matters if you're evaluating this without
+hardware in front of you. Don't remove either timer to "simplify" this
+without re-reading the comment on them; a test
+(`test_a_new_busy_true_during_the_hide_grace_period_cancels_the_hide`)
+exercises the exact race that made the hide-timer necessary.
+
+Widget visibility assertions in tests here use `.isHidden()`, not
+`.isVisible()` - the `editor` fixture never calls `.show()` on the window, and
+`.isVisible()` is unconditionally `False` for any widget whose top-level
+window was never shown, regardless of what `setVisible()` was called with.
+`.isHidden()` tracks the widget's own explicit shown/hidden state instead.
+
 ## PRGNUM and Program Change (Multis tab)
 
 There's no working SysEx write to assign a program to a multi part - `PRNAME`
@@ -132,6 +206,17 @@ a program always picks the wrong one" again, check `PRGNUM` collisions first.
 There's also no hardware concept of "no program assigned" for a multi part -
 the blank `"-"` combo entry is a UI-only placeholder and deliberately a no-op
 when selected, not a bug.
+
+**The 16 part combos hold their own copy of every program's name**, populated
+in `_on_programs_loaded` (a full program-list reload) - they don't
+automatically follow changes made elsewhere. Renaming a program
+(`program_name_edit`) used to update the Programs list but leave all 16
+part combos showing the old name until the next full Refresh - a real bug,
+fixed by having `_commit_program_name`/`_on_program_name_typed` call
+`_update_multi_program_combo_names(program_index, name)` explicitly. If you
+add another program-identity field that the Multis tab displays a copy of,
+it'll need the same explicit push - `_on_programs_loaded` alone only catches
+a full reload, not an in-place edit.
 
 ## Note names: S3000XL octave convention, not general MIDI
 
