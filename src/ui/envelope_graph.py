@@ -35,13 +35,20 @@ def _adsr_points(attack, decay, sustain, release, w, h):
     # not calibrated timing. Returns plain (x, y) tuples, in draw order,
     # rather than QPointF - kept independent of Qt so it can be unit
     # tested without a QApplication.
-    time_total = attack + decay + release
-    if time_total == 0:
-        time_total = 1
-
-    attack_frac = (attack / time_total) * (1 - SUSTAIN_HOLD_FRACTION)
-    decay_frac = (decay / time_total) * (1 - SUSTAIN_HOLD_FRACTION)
-    release_frac = (release / time_total) * (1 - SUSTAIN_HOLD_FRACTION)
+    #
+    # Each of the three stages gets its own FIXED width budget - scaled
+    # only by its own value against 99, never against the other two - so
+    # turning one knob never moves a segment whose value didn't change.
+    # This used to normalize against time_total = attack+decay+release,
+    # which meant e.g. dragging Decay up also silently squeezed Attack's
+    # on-screen width even though Attack's own value never moved (a real
+    # regression a user noticed by comparing two screenshots side by side -
+    # not how any synth's ADSR display behaves; each stage's footprint is
+    # independent of its siblings' current values everywhere else).
+    stage_max_frac = (1 - SUSTAIN_HOLD_FRACTION) / 3
+    attack_frac = (attack / 99) * stage_max_frac
+    decay_frac = (decay / 99) * stage_max_frac
+    release_frac = (release / 99) * stage_max_frac
     sustain_height_frac = sustain / 99
 
     x0, y0 = 0, h
@@ -57,11 +64,16 @@ def _env2_points(stages, w, h):
     # stages: [(rate, level), ...] in order - see Envelope2Graph's own
     # comment for why this can't reuse _adsr_points. Returns plain (x, y)
     # tuples, same reasoning as _adsr_points above.
-    total_rate = sum(rate for rate, _level in stages) or 1
+    #
+    # Same fix as _adsr_points: each stage gets a fixed width budget
+    # (w / stage count), scaled only by its own rate against 99 - not
+    # normalized against the other stages' current rates, which used to
+    # mean moving R1 would also silently resize R2/R3/R4's segments.
+    stage_max_width = w / len(stages)
     points = [(0, h)]  # starts at silence
     x = 0
     for rate, level in stages:
-        x += (rate / total_rate) * w
+        x += (rate / 99) * stage_max_width
         y = h - (level / 99) * h
         points.append((x, y))
     return points
