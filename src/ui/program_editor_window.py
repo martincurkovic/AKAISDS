@@ -516,6 +516,25 @@ class ProgramEditorWindow(QMainWindow):
         hardware_menu = self.menuBar().addMenu("&Hardware")
         hardware_menu.addAction(refresh_action)
 
+        # only one of {dashboard, program editor} is ever open at a time -
+        # two simultaneous MIDI connections to the hardware is untested and
+        # may not be safe - mirrors the dashboard's own "&Window" menu
+        # (main_window.py) so the same Ctrl+1/Ctrl+2 shortcuts work no
+        # matter which window currently has focus
+        window_menu = self.menuBar().addMenu("&Window")
+
+        dashboard_action = QAction("Transfer Dashboard", self)
+        dashboard_action.setShortcut("Ctrl+1")
+        # closing (rather than hiding outright) reuses closeEvent()'s
+        # existing "show the main window again" cleanup below
+        dashboard_action.triggered.connect(self.close)
+        window_menu.addAction(dashboard_action)
+
+        editor_action = QAction("Program Editor", self)
+        editor_action.setShortcut("Ctrl+2")
+        editor_action.setEnabled(False)  # this window IS the program editor
+        window_menu.addAction(editor_action)
+
         # same idea as the dashboard's status bar (dashboard.py), but that's
         # a plain QWidget so it builds its own QStatusBar into its layout -
         # this window is a QMainWindow, which docks one below the central

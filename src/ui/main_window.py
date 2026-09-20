@@ -121,6 +121,24 @@ class ApplicationWindow(QMainWindow):
         )
         transfer_menu.addAction(transfer_settings_action)
 
+        # only one of {dashboard, program editor} is ever open at a time -
+        # two simultaneous MIDI connections to the hardware is untested and
+        # may not be safe - so each window's own entry for itself is always
+        # disabled, and opening the other one hides this one (see
+        # ProgramEditorWindow's own "&Window" menu, and its closeEvent,
+        # for the return trip)
+        window_menu = self.menuBar().addMenu("&Window")
+
+        dashboard_action = QAction("Transfer Dashboard", self)
+        dashboard_action.setShortcut("Ctrl+1")
+        dashboard_action.setEnabled(False)  # this window IS the dashboard
+        window_menu.addAction(dashboard_action)
+
+        editor_action = QAction("Program Editor", self)
+        editor_action.setShortcut("Ctrl+2")
+        editor_action.triggered.connect(self.dashboard_view.open_program_editor)
+        window_menu.addAction(editor_action)
+
         self.dashboard_view.register_menu_actions(
             {
                 self.dashboard_view.btn_settings: settings_action,

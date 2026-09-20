@@ -101,7 +101,7 @@ class TransferDashboard(QWidget):
         top_bar.addWidget(self.btn_settings)
 
         self.btn_open_editor = QPushButton("Open Editor")
-        self.btn_open_editor.clicked.connect(self._open_program_editor)
+        self.btn_open_editor.clicked.connect(self.open_program_editor)
         top_bar.addWidget(self.btn_open_editor)
 
         # TWIN PANELS BABYYYY (horizontal layout nesting)
@@ -266,8 +266,10 @@ class TransferDashboard(QWidget):
         self._update_device_type_ui()
         self._update_queue_buttons_state()
 
-    def _open_program_editor(self):
-
+    def open_program_editor(self):
+        # public (no leading underscore) since main_window.py's "Program
+        # Editor" menu action calls this directly, same as its other
+        # menu-wired dashboard methods
         main_window = self.window()
         try:
             bridge = program_editor_bridge.connect()
