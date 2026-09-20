@@ -106,8 +106,122 @@ class ProgramEditorWindow(QMainWindow):
         self.env2_graph = Envelope2Graph()
         self.env2_graph.setFixedSize(200, 90)
 
-        env1_column = self._build_labeled_column("ENV1", self.env1_graph)
-        env2_column = self._build_labeled_column("ENV2", self.env2_graph)
+        # ENV1 - a standard ADSR: one knob per stage, in a single row
+        self.attack1_knob = Knob()
+        self.attack1_knob.setRange(0, 99)
+        self.attack1_knob.setFixedSize(40, 40)
+        self.decay1_knob = Knob()
+        self.decay1_knob.setRange(0, 99)
+        self.decay1_knob.setFixedSize(40, 40)
+        self.sustain1_knob = Knob()
+        self.sustain1_knob.setRange(0, 99)
+        self.sustain1_knob.setFixedSize(40, 40)
+        self.release1_knob = Knob()
+        self.release1_knob.setRange(0, 99)
+        self.release1_knob.setFixedSize(40, 40)
+
+        attack1_col, self.attack1_value_label = self._build_knob_column(
+            "Attack", self.attack1_knob
+        )
+        decay1_col, self.decay1_value_label = self._build_knob_column(
+            "Decay", self.decay1_knob
+        )
+        sustain1_col, self.sustain1_value_label = self._build_knob_column(
+            "Sustain", self.sustain1_knob
+        )
+        release1_col, self.release1_value_label = self._build_knob_column(
+            "Release", self.release1_knob
+        )
+
+        env1_controls_row = QHBoxLayout()
+        env1_controls_row.setSpacing(10)
+        env1_controls_row.addLayout(attack1_col)
+        env1_controls_row.addLayout(decay1_col)
+        env1_controls_row.addLayout(sustain1_col)
+        env1_controls_row.addLayout(release1_col)
+
+        for knob, field in (
+            (self.attack1_knob, "ATTAK1"),
+            (self.decay1_knob, "DECAY1"),
+            (self.sustain1_knob, "SUSTN1"),
+            (self.release1_knob, "RELSE1"),
+        ):
+            knob.valueChanged.connect(self._on_env1_knob_changed)
+            knob.sliderReleased.connect(
+                lambda f=field, k=knob: self._write_knob_value(
+                    f,
+                    "keygroup",
+                    k.value(),
+                    keygroup_index=self.keygroup_list.currentRow(),
+                )
+            )
+
+        # ENV2 - a 4-stage rate/level generator: rate knobs on top, that
+        # stage's level knob below it, stages left-to-right in order
+        self._env2_rate_knobs = [Knob() for _ in range(4)]
+        self._env2_level_knobs = [Knob() for _ in range(4)]
+        self._env2_rate_value_labels = []
+        self._env2_level_value_labels = []
+        env2_rate_row = QHBoxLayout()
+        env2_rate_row.setSpacing(6)
+        env2_level_row = QHBoxLayout()
+        env2_level_row.setSpacing(6)
+        for i, (rate_knob, level_knob) in enumerate(
+            zip(self._env2_rate_knobs, self._env2_level_knobs), start=1
+        ):
+            rate_knob.setRange(0, 99)
+            rate_knob.setFixedSize(32, 32)
+            level_knob.setRange(0, 99)
+            level_knob.setFixedSize(32, 32)
+            rate_col, rate_value_label = self._build_knob_column(f"R{i}", rate_knob)
+            level_col, level_value_label = self._build_knob_column(f"L{i}", level_knob)
+            env2_rate_row.addLayout(rate_col)
+            env2_level_row.addLayout(level_col)
+            self._env2_rate_value_labels.append(rate_value_label)
+            self._env2_level_value_labels.append(level_value_label)
+
+            rate_knob.valueChanged.connect(self._on_env2_knob_changed)
+            level_knob.valueChanged.connect(self._on_env2_knob_changed)
+
+        # ENV2's eight fields aren't a plain rate1..4/level1..4 sequence -
+        # ATTAK2/DECAY2/RELSE2/SUSTN2 keep their ADSR-flavoured names from
+        # ENV1, and ENV2L1/ENV2R2/ENV2L2/ENV2L4 fill in the rest of the same
+        # 4-stage rate/level structure (see s3k/params.py's notes on these).
+        _ENV2_FIELDS = ["ATTAK2", "ENV2R2", "DECAY2", "RELSE2"]
+        for rate_knob, level_knob, rate_field, level_field in zip(
+            self._env2_rate_knobs,
+            self._env2_level_knobs,
+            _ENV2_FIELDS,
+            ["ENV2L1", "ENV2L2", "SUSTN2", "ENV2L4"],
+        ):
+            rate_knob.sliderReleased.connect(
+                lambda f=rate_field, k=rate_knob: self._write_knob_value(
+                    f,
+                    "keygroup",
+                    k.value(),
+                    keygroup_index=self.keygroup_list.currentRow(),
+                )
+            )
+            level_knob.sliderReleased.connect(
+                lambda f=level_field, k=level_knob: self._write_knob_value(
+                    f,
+                    "keygroup",
+                    k.value(),
+                    keygroup_index=self.keygroup_list.currentRow(),
+                )
+            )
+
+        env2_controls_column = QVBoxLayout()
+        env2_controls_column.setSpacing(4)
+        env2_controls_column.addLayout(env2_rate_row)
+        env2_controls_column.addLayout(env2_level_row)
+
+        env1_column = self._build_labeled_column(
+            "ENV1", self.env1_graph, extra_layout=env1_controls_row
+        )
+        env2_column = self._build_labeled_column(
+            "ENV2", self.env2_graph, extra_layout=env2_controls_column
+        )
 
         envelopes_layout = QHBoxLayout()
         envelopes_layout.addLayout(env1_column)
@@ -467,6 +581,15 @@ class ProgramEditorWindow(QMainWindow):
                 "LFODEL", "program", self.lfo_delay_knob.value()
             )
         )
+        for knob in (
+            self.attack1_knob,
+            self.decay1_knob,
+            self.sustain1_knob,
+            self.release1_knob,
+            *self._env2_rate_knobs,
+            *self._env2_level_knobs,
+        ):
+            knob.setEnabled(True)
 
     def _on_programs_loaded(self, programs):
         self.program_list.addItems(programs)
@@ -568,9 +691,31 @@ class ProgramEditorWindow(QMainWindow):
         self.cutoff_value_label.setText(str(values["FILFRQ"]))
         self.resonance_knob.setValue(values["FILQ"])
         self.resonance_value_label.setText(str(values["FILQ"]))
+        self.attack1_knob.setValue(values["ATTAK1"])
+        self.attack1_value_label.setText(str(values["ATTAK1"]))
+        self.decay1_knob.setValue(values["DECAY1"])
+        self.decay1_value_label.setText(str(values["DECAY1"]))
+        self.sustain1_knob.setValue(values["SUSTN1"])
+        self.sustain1_value_label.setText(str(values["SUSTN1"]))
+        self.release1_knob.setValue(values["RELSE1"])
+        self.release1_value_label.setText(str(values["RELSE1"]))
         self.env1_graph.set_values(
             values["ATTAK1"], values["DECAY1"], values["SUSTN1"], values["RELSE1"]
         )
+
+        env2_field_pairs = [
+            ("ATTAK2", "ENV2L1"),
+            ("ENV2R2", "ENV2L2"),
+            ("DECAY2", "SUSTN2"),
+            ("RELSE2", "ENV2L4"),
+        ]
+        for i, ((rate_field, level_field), rate_knob, level_knob) in enumerate(
+            zip(env2_field_pairs, self._env2_rate_knobs, self._env2_level_knobs)
+        ):
+            rate_knob.setValue(values[rate_field])
+            self._env2_rate_value_labels[i].setText(str(values[rate_field]))
+            level_knob.setValue(values[level_field])
+            self._env2_level_value_labels[i].setText(str(values[level_field]))
         self.env2_graph.set_values(
             values["ATTAK2"],
             values["ENV2L1"],
@@ -625,7 +770,7 @@ class ProgramEditorWindow(QMainWindow):
 
         return column, value_label
 
-    def _build_labeled_column(self, label_text, widget):
+    def _build_labeled_column(self, label_text, widget, extra_layout=None):
         name_label = QLabel(label_text)
         name_label.setAlignment(Qt.AlignmentFlag.AlignHCenter)
         name_label.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
@@ -634,6 +779,8 @@ class ProgramEditorWindow(QMainWindow):
         column.setSpacing(4)
         column.addWidget(name_label, alignment=Qt.AlignmentFlag.AlignHCenter)
         column.addWidget(widget, alignment=Qt.AlignmentFlag.AlignHCenter)
+        if extra_layout is not None:
+            column.addLayout(extra_layout)
         column.addStretch()
 
         return column
@@ -695,6 +842,26 @@ class ProgramEditorWindow(QMainWindow):
 
     def _on_polyph_changed(self):
         self._write_knob_value("POLYPH", "program", self.polyph_spinbox.value())
+
+    def _on_env1_knob_changed(self):
+        # redraws the graph immediately as any ADSR knob is dragged - the
+        # actual hardware write is throttled separately, on sliderReleased
+        self.env1_graph.set_values(
+            self.attack1_knob.value(),
+            self.decay1_knob.value(),
+            self.sustain1_knob.value(),
+            self.release1_knob.value(),
+        )
+
+    def _on_env2_knob_changed(self):
+        # same live-redraw idea as ENV1, for all 4 rate/level stage pairs
+        stage_values = []
+        for rate_knob, level_knob in zip(
+            self._env2_rate_knobs, self._env2_level_knobs
+        ):
+            stage_values.append(rate_knob.value())
+            stage_values.append(level_knob.value())
+        self.env2_graph.set_values(*stage_values)
 
     def _on_note_range_changed(self):
         # low can't be raised past high (or high dropped past low) - the
