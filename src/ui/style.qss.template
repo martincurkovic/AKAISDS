@@ -110,7 +110,16 @@ QListWidget#programList::item {
     padding: 6px 8px;
 }
 
-/* placeholder text shown when file transfer queue is empty */ 
+/* Program editor's zone card (Zone 1-4 selector + that zone's controls) -
+   same surface/border pair as the list panels above, so it reads as a
+   distinct card without introducing a new color */
+QWidget#zoneCard {
+    background-color: ${bg_panel};
+    border: 1px solid ${border};
+    border-radius: 4px;
+}
+
+/* placeholder text shown when file transfer queue is empty */
 #emptyQueueLabel {
   color: ${text_disabled};
   font-style: italic;

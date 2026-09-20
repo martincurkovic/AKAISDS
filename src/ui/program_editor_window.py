@@ -144,6 +144,7 @@ class ProgramEditorWindow(QMainWindow):
         self._zone_button_group.setExclusive(True)
 
         self._zone_stack = QStackedWidget()
+        self._zone_stack.setStyleSheet("background: transparent;")
 
         self._zone_loudness_labels = []
         self._zone_pan_labels = []
@@ -157,6 +158,7 @@ class ProgramEditorWindow(QMainWindow):
             zone_selector_row.addWidget(btn)
 
             page = QWidget()
+            page.setStyleSheet("background: transparent;")
             page_layout = QVBoxLayout()
             page_layout.setSpacing(6)
 
@@ -281,9 +283,13 @@ class ProgramEditorWindow(QMainWindow):
         self._zone_button_group.idClicked.connect(self._zone_stack.setCurrentIndex)
 
         zone_section = QVBoxLayout()
+        zone_section.setContentsMargins(10, 10, 10, 10)
         zone_section.setSpacing(4)
         zone_section.addLayout(zone_selector_row)
         zone_section.addWidget(self._zone_stack)
+        zone_card = QWidget()
+        zone_card.setObjectName("zoneCard")
+        zone_card.setLayout(zone_section)
 
         detail_container_layout = QVBoxLayout()
         detail_container_layout.setSpacing(10)
@@ -291,7 +297,7 @@ class ProgramEditorWindow(QMainWindow):
         detail_container_layout.addLayout(knobs_layout)
         detail_container_layout.addWidget(self.detail_label)
         detail_container_layout.addLayout(envelopes_layout)
-        detail_container_layout.addLayout(zone_section)
+        detail_container_layout.addWidget(zone_card)
         detail_container_layout.addStretch()
         detail_container = QWidget()
         detail_container.setLayout(detail_container_layout)
