@@ -517,6 +517,9 @@ class ProgramEditorWindow(QMainWindow):
         self.main_tabs.setTabBar(FullWidthTabBar(self.main_tabs))
         self.main_tabs.addTab(multis_tab_page, "Multis")
         self.main_tabs.addTab(programs_tab_page, "Programs")
+        # Multis stays the first tab, but isn't fully working yet - open on
+        # Programs instead
+        self.main_tabs.setCurrentIndex(1)
 
         bottom_row = QHBoxLayout()
         bottom_row.addWidget(refresh_button)
@@ -627,12 +630,18 @@ class ProgramEditorWindow(QMainWindow):
         self._sample_loader.start()
 
         # a part can only be assigned a program that actually exists -
-        # populate all 16 combos with the same name list now that it's in
+        # populate all 16 combos with the same name list now that it's in.
+        # Blank first item (same convention as the zone sample combo) is
+        # also the default - deliberately not preselecting a real program
+        # here, since these combos stay disabled for now (see their
+        # tooltip) and there is no working "no program assigned" state to
+        # reflect yet either
         for combo in self._multi_program_combos:
             combo.blockSignals(True)
             combo.clear()
+            combo.addItem("-")
             combo.addItems(programs)
-            combo.setEnabled(True)
+            combo.setCurrentIndex(0)
             combo.blockSignals(False)
         self._refresh_multi_parts()
 
@@ -652,18 +661,12 @@ class ProgramEditorWindow(QMainWindow):
         self._multi_parts_loader.start()
 
     def _on_multi_parts_loaded(self, parts):
-        for part_index, (program_name, channel) in enumerate(parts):
-            program_combo = self._multi_program_combos[part_index]
-            channel_combo = self._multi_channel_combos[part_index]
-
-            program_combo.blockSignals(True)
-            program_combo.setCurrentIndex(program_combo.findText(program_name))
-            program_combo.blockSignals(False)
-
-            channel_combo.blockSignals(True)
-            channel_index = channel_combo.findData(channel)
-            channel_combo.setCurrentIndex(channel_index if channel_index >= 0 else 0)
-            channel_combo.blockSignals(False)
+        # the read itself still works and stays wired up (Refresh still
+        # calls this), but its result is deliberately unused for now: the
+        # Multis tab's combos are disabled with fixed defaults (blank
+        # program, channel == part number) rather than reflecting hardware
+        # state, since editing them doesn't work reliably yet - see
+        # program_combo's tooltip in _build_multis_tab()
 
         if self._multi_refresh_in_progress:
             self._multi_refresh_in_progress = False
@@ -985,15 +988,26 @@ class ProgramEditorWindow(QMainWindow):
             part_label.setFixedWidth(60)
 
             program_combo = QComboBox()
-            # populated once the program list loads - a part can only be
-            # assigned a program that actually exists on the sampler
+            # disabled for now - real-hardware testing surfaced errors
+            # editing multis, so this is display-only until that's sorted
+            # out. Populated once the program list loads (a part can only
+            # be assigned a program that actually exists on the sampler).
             program_combo.setEnabled(False)
+            program_combo.setToolTip(
+                "Program assignment isn't working reliably against real "
+                "hardware yet - re-enabled once that's sorted out"
+            )
 
             channel_combo = QComboBox()
             channel_combo.addItem("OMNI", 255)
             for channel in range(16):
                 channel_combo.addItem(str(channel + 1), channel)
             channel_combo.setFixedWidth(90)
+            # part N defaults to channel N until real per-part MIDI channel
+            # editing is re-enabled (see program_combo's tooltip above)
+            channel_combo.setCurrentIndex(channel_combo.findData(part_index))
+            channel_combo.setEnabled(False)
+            channel_combo.setToolTip(program_combo.toolTip())
 
             row.addWidget(part_label)
             row.addWidget(program_combo, stretch=1)
