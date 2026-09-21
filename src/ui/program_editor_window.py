@@ -148,8 +148,11 @@ class ProgramEditorWindow(QMainWindow):
         # on the Program tab below that width; re-measured the same way
         # AGENTS.md describes for every other width tweak on this page -
         # grew the window until scroll_area.horizontalScrollBar().maximum()
-        # hit zero on both tabs, landing on 1080
-        self.setMinimumSize(1080, 800)
+        # hit zero on both tabs. Grew again, 1080 -> 1200, when the
+        # Modulation card's grid moved each slot's amount knob beside its
+        # source combo instead of stacked below it (each slot now needs
+        # combo-width + knob-width side by side, not max(combo, knob)).
+        self.setMinimumSize(1200, 800)
         self._sample_list = []
         self._keygroup_ranges = []  # [lo, hi] per keygroup - mirrors keygroup_range_bar
         self._pending_restore_state = None  # set only by _refresh_from_hardware()
@@ -755,8 +758,16 @@ class ProgramEditorWindow(QMainWindow):
         kg_mod_grid = QGridLayout()
         kg_mod_grid.setHorizontalSpacing(14)
         kg_mod_grid.setVerticalSpacing(10)
-        self._build_mod_matrix_row(
-            kg_mod_grid, 0, "Filter Frequency", kg_filt1_col, kg_filt2_col, kg_filt3_col
+        # max slot count of any row below (Filter Frequency) - see the
+        # Program tab's identical header call above for why
+        kg_header_rows = self._build_mod_matrix_amount_header(kg_mod_grid, 3)
+        self._build_mod_matrix_amount_row(
+            kg_mod_grid,
+            kg_header_rows + 0,
+            "Filter Frequency",
+            kg_filt1_col,
+            kg_filt2_col,
+            kg_filt3_col,
         )
 
         kg_pitch_col, self.mod_pitch_amount_knob, self.mod_pitch_amount_value_label = (
@@ -764,14 +775,18 @@ class ProgramEditorWindow(QMainWindow):
                 "MODVPITCH", "keygroup", keygroup_index_getter=self.keygroup_list.currentRow
             )
         )
-        self._build_mod_matrix_row(kg_mod_grid, 1, "Pitch (assignable)", kg_pitch_col)
+        self._build_mod_matrix_amount_row(
+            kg_mod_grid, kg_header_rows + 1, "Pitch (assignable)", kg_pitch_col
+        )
 
         kg_amp3_col, self.mod_amp3_amount_knob, self.mod_amp3_amount_value_label = (
             self._build_mod_amount_only_column(
                 "MODVAMP3", "keygroup", keygroup_index_getter=self.keygroup_list.currentRow
             )
         )
-        self._build_mod_matrix_row(kg_mod_grid, 2, "Loudness (slot 3)", kg_amp3_col)
+        self._build_mod_matrix_amount_row(
+            kg_mod_grid, kg_header_rows + 2, "Loudness (slot 3)", kg_amp3_col
+        )
 
         # L_PTCH is NOT part of the 3-slot assignable matrix - it's a
         # separate, always-on LFO1-to-pitch route (a fixed vibrato depth),
@@ -780,7 +795,7 @@ class ProgramEditorWindow(QMainWindow):
         # dropdown needed since the source is always LFO1.
         self.lfo1_to_pitch_knob = self._build_mod_amount_knob()
         lfo1_to_pitch_col, self.lfo1_to_pitch_value_label = self._build_knob_column(
-            "Amount", self.lfo1_to_pitch_knob
+            None, self.lfo1_to_pitch_knob, show_label=False
         )
         self._wire_knob_write(
             self.lfo1_to_pitch_knob,
@@ -788,7 +803,9 @@ class ProgramEditorWindow(QMainWindow):
             "keygroup",
             keygroup_index_getter=self.keygroup_list.currentRow,
         )
-        self._build_mod_matrix_row(kg_mod_grid, 3, "Pitch (LFO1)", lfo1_to_pitch_col)
+        self._build_mod_matrix_amount_row(
+            kg_mod_grid, kg_header_rows + 3, "Pitch (LFO1)", lfo1_to_pitch_col
+        )
 
         kg_mod_footnote = QLabel(
             "Sources for these are chosen on the Program tab's Modulation "
@@ -1218,70 +1235,104 @@ class ProgramEditorWindow(QMainWindow):
         mod_grid = QGridLayout()
         mod_grid.setHorizontalSpacing(14)
         mod_grid.setVerticalSpacing(10)
+        # max slot count of any row below (Pan/Loudness/Filter Frequency) -
+        # the header only needs as many "Slot N" columns as the widest row
+        header_rows = self._build_mod_matrix_header(mod_grid, 3)
 
-        pan1_col, self.mod_pan1_combo, self.mod_pan1_knob, self.mod_pan1_value_label = (
+        pan1_combo, pan1_amount, self.mod_pan1_knob, self.mod_pan1_value_label = (
             self._build_mod_slot("MODSPAN1", "program", "MODVPAN1", "program")
         )
-        pan2_col, self.mod_pan2_combo, self.mod_pan2_knob, self.mod_pan2_value_label = (
+        self.mod_pan1_combo = pan1_combo
+        pan2_combo, pan2_amount, self.mod_pan2_knob, self.mod_pan2_value_label = (
             self._build_mod_slot("MODSPAN2", "program", "MODVPAN2", "program")
         )
-        pan3_col, self.mod_pan3_combo, self.mod_pan3_knob, self.mod_pan3_value_label = (
+        self.mod_pan2_combo = pan2_combo
+        pan3_combo, pan3_amount, self.mod_pan3_knob, self.mod_pan3_value_label = (
             self._build_mod_slot("MODSPAN3", "program", "MODVPAN3", "program")
         )
-        self._build_mod_matrix_row(mod_grid, 0, "Pan", pan1_col, pan2_col, pan3_col)
+        self.mod_pan3_combo = pan3_combo
+        self._build_mod_matrix_row(
+            mod_grid,
+            header_rows + 0,
+            "Pan",
+            (pan1_combo, pan1_amount),
+            (pan2_combo, pan2_amount),
+            (pan3_combo, pan3_amount),
+        )
 
-        amp1_col, self.mod_amp1_combo, self.mod_amp1_knob, self.mod_amp1_value_label = (
+        amp1_combo, amp1_amount, self.mod_amp1_knob, self.mod_amp1_value_label = (
             self._build_mod_slot("MODSAMP1", "program", "MODVAMP1", "program")
         )
-        amp2_col, self.mod_amp2_combo, self.mod_amp2_knob, self.mod_amp2_value_label = (
+        self.mod_amp1_combo = amp1_combo
+        amp2_combo, amp2_amount, self.mod_amp2_knob, self.mod_amp2_value_label = (
             self._build_mod_slot("MODSAMP2", "program", "MODVAMP2", "program")
         )
-        amp3_col, self.mod_amp3_combo = self._build_mod_source_only_column(
-            "MODSAMP3", "program"
+        self.mod_amp2_combo = amp2_combo
+        self.mod_amp3_combo = self._build_mod_source_only_column("MODSAMP3", "program")
+        self._build_mod_matrix_row(
+            mod_grid,
+            header_rows + 1,
+            "Loudness",
+            (amp1_combo, amp1_amount),
+            (amp2_combo, amp2_amount),
+            (self.mod_amp3_combo, None),
         )
-        self._build_mod_matrix_row(mod_grid, 1, "Loudness", amp1_col, amp2_col, amp3_col)
 
         (
-            lfo1_rate_col,
-            self.mod_lfo1_rate_combo,
+            lfo1_rate_combo,
+            lfo1_rate_amount,
             self.mod_lfo1_rate_knob,
             self.mod_lfo1_rate_value_label,
         ) = self._build_mod_slot("MODSLFOT", "program", "MODVLFOR", "program")
-        self._build_mod_matrix_row(mod_grid, 2, "LFO1 Rate", lfo1_rate_col)
+        self.mod_lfo1_rate_combo = lfo1_rate_combo
+        self._build_mod_matrix_row(
+            mod_grid, header_rows + 2, "LFO1 Rate", (lfo1_rate_combo, lfo1_rate_amount)
+        )
 
         (
-            lfo1_depth_col,
-            self.mod_lfo1_depth_combo,
+            lfo1_depth_combo,
+            lfo1_depth_amount,
             self.mod_lfo1_depth_knob,
             self.mod_lfo1_depth_value_label,
         ) = self._build_mod_slot("MODSLFOL", "program", "MODVLVOL", "program")
-        self._build_mod_matrix_row(mod_grid, 3, "LFO1 Depth", lfo1_depth_col)
+        self.mod_lfo1_depth_combo = lfo1_depth_combo
+        self._build_mod_matrix_row(
+            mod_grid,
+            header_rows + 3,
+            "LFO1 Depth",
+            (lfo1_depth_combo, lfo1_depth_amount),
+        )
 
         (
-            lfo1_delay_col,
-            self.mod_lfo1_delay_combo,
+            lfo1_delay_combo,
+            lfo1_delay_amount,
             self.mod_lfo1_delay_knob,
             self.mod_lfo1_delay_value_label,
         ) = self._build_mod_slot("MODSLFOD", "program", "MODVLFOD", "program")
-        self._build_mod_matrix_row(mod_grid, 4, "LFO1 Delay", lfo1_delay_col)
-
-        filt1_col, self.mod_filt1_combo = self._build_mod_source_only_column(
-            "MODSFILT1", "program"
-        )
-        filt2_col, self.mod_filt2_combo = self._build_mod_source_only_column(
-            "MODSFILT2", "program"
-        )
-        filt3_col, self.mod_filt3_combo = self._build_mod_source_only_column(
-            "MODSFILT3", "program"
-        )
+        self.mod_lfo1_delay_combo = lfo1_delay_combo
         self._build_mod_matrix_row(
-            mod_grid, 5, "Filter Frequency", filt1_col, filt2_col, filt3_col
+            mod_grid,
+            header_rows + 4,
+            "LFO1 Delay",
+            (lfo1_delay_combo, lfo1_delay_amount),
         )
 
-        pitch_col, self.mod_pitch_combo = self._build_mod_source_only_column(
-            "MODSPITCH", "program"
+        self.mod_filt1_combo = self._build_mod_source_only_column("MODSFILT1", "program")
+        self.mod_filt2_combo = self._build_mod_source_only_column("MODSFILT2", "program")
+        self.mod_filt3_combo = self._build_mod_source_only_column("MODSFILT3", "program")
+        self._build_mod_matrix_row(
+            mod_grid,
+            header_rows + 5,
+            "Filter Frequency",
+            (self.mod_filt1_combo, None),
+            (self.mod_filt2_combo, None),
+            (self.mod_filt3_combo, None),
         )
-        self._build_mod_matrix_row(mod_grid, 6, "Pitch", pitch_col)
+
+        self.mod_pitch_combo = self._build_mod_source_only_column("MODSPITCH", "program")
+        self._build_mod_matrix_row(
+            mod_grid, header_rows + 6, "Pitch", (self.mod_pitch_combo, None)
+        )
 
         mod_footnote = QLabel(
             "Loudness slot 3, Filter Frequency and Pitch amounts are set "
@@ -2007,18 +2058,22 @@ class ProgramEditorWindow(QMainWindow):
     def _check_for_updates_manual(self):
         self._update_runner.start(manual=True)
 
-    def _build_knob_column(self, label_text, knob):
-        name_label = QLabel(label_text)
-        name_label.setAlignment(Qt.AlignmentFlag.AlignHCenter)
-        name_label.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+    def _build_knob_column(self, label_text, knob, *, show_label=True):
+        # show_label=False skips the name label entirely - used by the
+        # Modulation matrix grid below, which shows "Amount" once as a
+        # column header instead of repeating it above every single knob
+        column = QVBoxLayout()
+        column.setSpacing(4)  # fixed gap, in pixels - never stretches
+
+        if show_label:
+            name_label = QLabel(label_text)
+            name_label.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+            name_label.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+            column.addWidget(name_label, alignment=Qt.AlignmentFlag.AlignHCenter)
 
         value_label = QLabel("-")
         value_label.setAlignment(Qt.AlignmentFlag.AlignHCenter)
-        # value_label.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
 
-        column = QVBoxLayout()
-        column.setSpacing(4)  # fixed gap, in pixels - never stretches
-        column.addWidget(name_label, alignment=Qt.AlignmentFlag.AlignHCenter)
         column.addWidget(knob, alignment=Qt.AlignmentFlag.AlignHCenter)
         column.addWidget(value_label)
 
@@ -2044,18 +2099,31 @@ class ProgramEditorWindow(QMainWindow):
     # The assignable modulation matrix (MODS*/MODV* fields - see the
     # Modulation section cards on both the Program and Keygroup tabs) is
     # built from many near-identical (source dropdown, amount knob) pairs,
-    # each explicitly labeled "Source"/"Amount" - with up to 3 side by
-    # side per destination row, unlabeled slots would read as one control
-    # split three ways rather than three independent routings. These
-    # helpers are that repeated unit, kept small and explicit rather than
-    # a single "spec table" builder so each use site below still spells
-    # out its own field names, matching how every other section on this
-    # page is built (_build_knob_column, etc).
+    # up to 3 per destination row. Each card is a real QGridLayout with
+    # fixed columns per slot (2 - Source, Amount - on the Program tab's
+    # card, which shows both halves; 1 - Amount only - on the Keygroup
+    # tab's, which never shows a source), and a "Slot 1/2/3" + "Source"/
+    # "Amount" header at the top instead of repeating those words on every
+    # single control - what used to make 3 independent routings legible
+    # (see the git history for the old per-control-labeled version) is now
+    # the grid's own column alignment plus the slot header, not label text
+    # repeated 20+ times down the card. These helpers are that repeated
+    # unit, kept small and explicit rather than a single "spec table"
+    # builder so each use site below still spells out its own field names,
+    # matching how every other section on this page is built
+    # (_build_knob_column, etc).
 
     def _build_mod_source_combo(self):
         combo = QComboBox()
         combo.addItems(_MOD_SOURCE_LABELS)
-        combo.setMaximumWidth(150)
+        # narrower than a source combo elsewhere on this page (150) - the
+        # matrix grid now puts this beside its amount knob rather than
+        # stacked above it (see this section's own comment), so shaving
+        # width here matters more; Qt elides the two longest labels
+        # ("Modwheel (inverted)"/"External (inverted)") rather than
+        # breaking layout. Re-measured with the rest of this card the same
+        # way this file's "section cards, scroll areas" note describes.
+        combo.setMaximumWidth(130)
         return combo
 
     def _build_mod_amount_knob(self):
@@ -2084,22 +2152,19 @@ class ProgramEditorWindow(QMainWindow):
         *,
         keygroup_index_getter=None,
     ):
-        # a full assignable slot: labeled source dropdown above a labeled
-        # amount knob. source_region/amount_region are separate (not one
-        # shared region) because a handful of destinations split across
-        # the wire: e.g. filter frequency's SOURCE is chosen program-wide
-        # (MODSFILT*) but its AMOUNT is stored per-keygroup (MODVFILT*) -
-        # see the Modulation card comments below for the full list.
+        # a full assignable slot: a source dropdown next to its amount
+        # knob (no per-widget labels - the grid's own header row covers
+        # that, see this section's own comment above). source_region/
+        # amount_region are separate (not one shared region) because a
+        # handful of destinations split across the wire: e.g. filter
+        # frequency's SOURCE is chosen program-wide (MODSFILT*) but its
+        # AMOUNT is stored per-keygroup (MODVFILT*) - see the Modulation
+        # card comments below for the full list.
         combo = self._build_mod_source_combo()
-        source_column = self._build_labeled_combo_column("Source", combo)
-
         knob = self._build_mod_amount_knob()
-        amount_column, value_label = self._build_knob_column("Amount", knob)
-
-        column = QVBoxLayout()
-        column.setSpacing(8)
-        column.addLayout(source_column)
-        column.addLayout(amount_column)
+        amount_column, value_label = self._build_knob_column(
+            None, knob, show_label=False
+        )
 
         self._wire_combo_write(
             combo, source_param, source_region, keygroup_index_getter=keygroup_index_getter
@@ -2110,11 +2175,13 @@ class ProgramEditorWindow(QMainWindow):
             amount_region,
             keygroup_index_getter=keygroup_index_getter,
         )
-        return column, combo, knob, value_label
+        return combo, amount_column, knob, value_label
 
     def _build_labeled_combo_column(self, label_text, combo):
         # same "label above, centered" shape as _build_labeled_spinbox_column,
-        # for a combo instead of a spinbox
+        # for a combo instead of a spinbox - still used outside the
+        # Modulation matrix (e.g. lfo1_sync_combo/lfo2_trig_combo), which
+        # aren't part of a grid with its own header row
         name_label = QLabel(label_text)
         name_label.setAlignment(Qt.AlignmentFlag.AlignHCenter)
         column = QVBoxLayout()
@@ -2126,20 +2193,19 @@ class ProgramEditorWindow(QMainWindow):
     def _build_mod_source_only_column(self, source_param, source_region):
         # used where the matching amount field is per-keygroup (so it's
         # shown on the Keygroup tab's own Modulation card instead) - just
-        # the labeled source dropdown, no amount knob here
+        # the source dropdown, no amount knob here
         combo = self._build_mod_source_combo()
-        column = self._build_labeled_combo_column("Source", combo)
         self._wire_combo_write(combo, source_param, source_region)
-        return column, combo
+        return combo
 
     def _build_mod_amount_only_column(
         self, amount_param, amount_region, *, keygroup_index_getter=None
     ):
-        # the other half of _build_mod_source_only_column - a labeled
-        # amount knob with no source dropdown, for the Keygroup tab's own
-        # Modulation card (the matching source lives on the Program tab)
+        # the other half of _build_mod_source_only_column - an amount knob
+        # with no source dropdown, for the Keygroup tab's own Modulation
+        # card (the matching source lives on the Program tab)
         knob = self._build_mod_amount_knob()
-        column, value_label = self._build_knob_column("Amount", knob)
+        column, value_label = self._build_knob_column(None, knob, show_label=False)
         self._wire_knob_write(
             knob,
             amount_param,
@@ -2148,18 +2214,78 @@ class ProgramEditorWindow(QMainWindow):
         )
         return column, knob, value_label
 
-    def _build_mod_matrix_row(self, grid, row, label_text, *slot_columns):
-        # one destination row of a Modulation card's QGridLayout: a
-        # left-hand label plus up to 3 slot columns (each from one of the
-        # _build_mod_* helpers above) - column count varies per row
-        # (LFO1 Rate/Depth/Delay and Pitch only ever have 1 slot; Pan,
-        # Loudness and Filter Frequency have up to 3), so this just places
-        # whatever it's given rather than assuming exactly 3
+    def _build_mod_matrix_header(self, grid, slot_count):
+        # 2-row header for a Source+Amount card (Program tab): "Slot N"
+        # spans both of that slot's sub-columns, then "Source"/"Amount"
+        # sub-labels underneath - column 0 (the destination label) is left
+        # blank in both header rows. Returns how many grid rows it used,
+        # so the caller knows where its own data rows start.
+        for slot_index in range(slot_count):
+            start_col = 1 + slot_index * 2
+            slot_label = QLabel(f"Slot {slot_index + 1}")
+            slot_label.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+            grid.addWidget(
+                slot_label, 0, start_col, 1, 2, Qt.AlignmentFlag.AlignHCenter
+            )
+            source_header = QLabel("Source")
+            source_header.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+            grid.addWidget(source_header, 1, start_col, Qt.AlignmentFlag.AlignHCenter)
+            amount_header = QLabel("Amount")
+            amount_header.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+            grid.addWidget(
+                amount_header, 1, start_col + 1, Qt.AlignmentFlag.AlignHCenter
+            )
+        return 2
+
+    def _build_mod_matrix_row(self, grid, row, label_text, *slots):
+        # one destination row of the Program tab's Modulation grid: a
+        # left-hand label plus up to 3 (source_widget, amount_layout)
+        # pairs, each placed under its own "Slot N" header column - either
+        # half of a pair may be None (Filter Frequency/Pitch show only a
+        # source here, their amount lives on the Keygroup tab instead; see
+        # the Modulation card comments below for why). Slot count varies
+        # per row (LFO1 Rate/Depth/Delay and Pitch only ever have 1;
+        # Pan/Loudness/Filter Frequency have up to 3) - this just places
+        # whatever it's given, leaving the rest of that row's cells empty.
         label = QLabel(label_text)
         label.setFixedWidth(110)
-        grid.addWidget(label, row, 0, Qt.AlignmentFlag.AlignTop)
-        for col, column in enumerate(slot_columns, start=1):
-            grid.addLayout(column, row, col)
+        grid.addWidget(label, row, 0, Qt.AlignmentFlag.AlignVCenter)
+        for slot_index, (source_widget, amount_layout) in enumerate(slots):
+            start_col = 1 + slot_index * 2
+            if source_widget is not None:
+                grid.addWidget(
+                    source_widget, row, start_col, Qt.AlignmentFlag.AlignVCenter
+                )
+            if amount_layout is not None:
+                grid.addLayout(
+                    amount_layout, row, start_col + 1, Qt.AlignmentFlag.AlignVCenter
+                )
+
+    def _build_mod_matrix_amount_header(self, grid, slot_count):
+        # 1-row header for an Amount-only card (Keygroup tab - it never
+        # shows a source, see the Modulation card comments below): just
+        # "Slot N" per column, one column per slot rather than two. Returns
+        # how many grid rows it used, same contract as the header above.
+        for slot_index in range(slot_count):
+            slot_label = QLabel(f"Slot {slot_index + 1}")
+            slot_label.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+            grid.addWidget(
+                slot_label, 0, 1 + slot_index, Qt.AlignmentFlag.AlignHCenter
+            )
+        return 1
+
+    def _build_mod_matrix_amount_row(self, grid, row, label_text, *amount_layouts):
+        # the Keygroup tab's equivalent of _build_mod_matrix_row - one
+        # amount_layout (or None to leave that slot's cell blank) per
+        # column, under _build_mod_matrix_amount_header's "Slot N" columns
+        label = QLabel(label_text)
+        label.setFixedWidth(110)
+        grid.addWidget(label, row, 0, Qt.AlignmentFlag.AlignVCenter)
+        for slot_index, amount_layout in enumerate(amount_layouts):
+            if amount_layout is not None:
+                grid.addLayout(
+                    amount_layout, row, 1 + slot_index, Qt.AlignmentFlag.AlignVCenter
+                )
 
     def _build_akai_name_edit(self):
         # shared construction for any field stored in the device's own

@@ -336,12 +336,21 @@ stores - don't "fix" it into one card without re-checking each field's
 `region` in `s3k.params` first.
 
 Every slot is built through `_build_mod_slot`/`_build_mod_source_only_column`/
-`_build_mod_amount_only_column` (all in `program_editor_window.py`), each
-combo and knob explicitly labeled "Source"/"Amount" - with up to 3 slots
-side by side per row, unlabeled controls read as one thing split three ways
-rather than three independent routings, which is why these are the one
-place on this page where a combo/knob gets its own label instead of relying
-on the section card title alone. The amount knobs (`_build_mod_amount_knob`)
+`_build_mod_amount_only_column` (all in `program_editor_window.py`), placed
+into a real `QGridLayout` (`mod_grid`/`kg_mod_grid`) with fixed columns per
+slot (2 - Source, Amount - on the Program tab's card; 1 - Amount only - on
+the Keygroup tab's) via `_build_mod_matrix_row`/`_build_mod_matrix_amount_row`.
+Up to 3 slots side by side per row used to mean each individual combo/knob
+carried its own "Source"/"Amount" label (repeated on every control, since
+otherwise 3 side-by-side knobs read as one thing split three ways rather
+than three independent routings) - as of 2026-09-21 that's instead a
+"Slot 1/2/3" + "Source"/"Amount" header built once per card
+(`_build_mod_matrix_header`/`_build_mod_matrix_amount_header`), with the
+amount knob sitting beside its source combo rather than stacked below it.
+The grid's own column alignment now carries the "which control belongs to
+which slot" job the repeated labels used to - don't reintroduce per-control
+"Source"/"Amount" labels without also removing the header, or both will say
+it. The amount knobs (`_build_mod_amount_knob`)
 are also the one place on this page that enables a `Knob` (see `Knob.__init__` -
 it starts disabled) right where it's built rather than in `__init__`'s later
 "enable knobs" block - deliberate, not a missed step, since each one is
