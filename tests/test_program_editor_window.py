@@ -85,6 +85,28 @@ class FakeBridge:
             return 2  # high
         if param.name in ("LFORAT", "LFODEP", "LFODEL", "LFO1WAVE"):
             return 0
+        # LFO2 (hardwired to Pan on this hardware - see
+        # program_editor_window.py's LFO2 card comment) - deliberately
+        # different from LFORAT/LFODEP/LFODEL/LFO1WAVE above so a test can
+        # catch LFO2's fields being wired to LFO1's by mistake
+        if param.name == "PANRAT":
+            return 45
+        if param.name == "PANDEP":
+            return 17
+        if param.name == "PANDEL":
+            return 3
+        if param.name == "LFO2WAVE":
+            return 1  # Sawtooth
+        # modulation matrix - MODSPAN1/MODVPAN1 given real, distinct values
+        # (rather than falling through to the generic "return 30" below)
+        # since MODSPAN1 must be a valid combo index (0-13), and a
+        # catch-all 30 would leave that combo showing no selection at all
+        if param.name == "MODSPAN1":
+            return 5  # velocity
+        if param.name == "MODVPAN1":
+            return -12
+        if param.name == "MODVFILT1":
+            return -8  # keygroup-region amount, see MODSFILT1's own source
         if param.name in ("SNAME1", "SNAME2", "SNAME3", "SNAME4"):
             return "SQUARE"  # a real sample name that matches _samples below
         if param.name in ("ZPLAY1", "ZPLAY2", "ZPLAY3", "ZPLAY4"):
@@ -181,6 +203,18 @@ def _keygroup_row_text(editor, row):
     item = editor.keygroup_list.item(row)
     label = editor.keygroup_list.itemWidget(item).findChild(QLabel, "keygroupRangeLabel")
     return label.text()
+
+
+def test_mod_source_labels_match_s3k_params_minus_env3():
+    # _MOD_SOURCE_LABELS is a hand-written parallel list (see its own
+    # comment for why), not derived from s3k.params.MOD_SOURCES at import
+    # time - this guards against it silently drifting out of sync if the
+    # pinned s3ked/s3k revision ever changes that enum
+    import s3k.params as p
+    from ui.program_editor_window import _MOD_SOURCE_LABELS
+
+    assert len(_MOD_SOURCE_LABELS) == len(p.MOD_SOURCES) - 1  # env3 excluded
+    assert set(p.MOD_SOURCES) - {14} == set(range(len(_MOD_SOURCE_LABELS)))
 
 
 def test_first_program_is_preselected_with_its_keygroups_shown(editor):
@@ -489,6 +523,65 @@ def test_keygroup_panel_loads_and_writes_key_filter_tracking(editor, qapp):
     _pump_until(qapp, lambda: bridge.set_parameter_calls)
 
     assert bridge.set_parameter_calls[-1] == ("K_FREQ", 0, 20, 1)
+
+
+def test_lfo2_panel_loads_and_writes(editor, qapp):
+    # FakeBridge.get_parameter reports PANRAT=45/PANDEP=17/PANDEL=3/
+    # LFO2WAVE=1 - distinct from LFO1's own (all 0), so this also catches
+    # LFO2's fields being accidentally wired to LFO1's
+    assert editor.lfo2_rate_knob.value() == 45
+    assert editor.lfo2_depth_knob.value() == 17
+    assert editor.lfo2_delay_knob.value() == 3
+    assert editor.lfo2_shape_combo.currentIndex() == 1
+
+    bridge = editor._bridge
+    editor.lfo2_rate_knob.setValue(60)
+    editor._flush_write("PANRAT")
+    editor._worker.wait_until_idle()
+    _pump_until(qapp, lambda: bridge.set_parameter_calls)
+
+    assert bridge.set_parameter_calls[-1] == ("PANRAT", 0, 60, 0)
+
+
+def test_modulation_pan_slot_loads_and_writes(editor, qapp):
+    # program-level half of the assignable modulation matrix - source
+    # combo's index doubles as the raw MOD_SOURCES value (see
+    # _MOD_SOURCE_LABELS), same convention as every other combo here
+    assert editor.mod_pan1_combo.currentIndex() == 5  # "Velocity"
+    assert editor.mod_pan1_combo.currentText() == "Velocity"
+    assert editor.mod_pan1_knob.value() == -12
+
+    bridge = editor._bridge
+    editor.mod_pan1_combo.setCurrentIndex(7)  # "LFO1"
+    editor._flush_write("MODSPAN1")
+    editor._worker.wait_until_idle()
+    _pump_until(qapp, lambda: bridge.set_parameter_calls[-1][0] == "MODSPAN1")
+    assert bridge.set_parameter_calls[-1] == ("MODSPAN1", 0, 7, 0)
+
+    editor.mod_pan1_knob.setValue(25)
+    editor._flush_write("MODVPAN1")
+    editor._worker.wait_until_idle()
+    _pump_until(qapp, lambda: bridge.set_parameter_calls[-1][0] == "MODVPAN1")
+    assert bridge.set_parameter_calls[-1] == ("MODVPAN1", 0, 25, 0)
+
+
+def test_keygroup_modulation_filter_amount_loads_and_writes(editor, qapp):
+    # keygroup-level half of the same destination (Filter Frequency): its
+    # SOURCE is chosen program-wide (MODSFILT1, tested above via the Pan
+    # slot's same mechanism) but its AMOUNT is stored per-keygroup - see
+    # the Modulation card comments in program_editor_window.py
+    editor.keygroup_list.setCurrentRow(1)
+    editor._worker.wait_until_idle()
+    _pump_until(qapp, lambda: editor.mod_filt1_amount_knob.value() == -8)
+
+    bridge = editor._bridge
+    editor.mod_filt1_amount_knob.setValue(19)
+    editor._flush_write("MODVFILT1")
+    editor._worker.wait_until_idle()
+    _pump_until(qapp, lambda: bridge.set_parameter_calls[-1][0] == "MODVFILT1")
+
+    # keygroup_index (last element) is 1 - the currently selected keygroup
+    assert bridge.set_parameter_calls[-1] == ("MODVFILT1", 0, 19, 1)
 
 
 def test_refresh_picks_up_a_program_created_on_the_hardware(editor, qapp):
