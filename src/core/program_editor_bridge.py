@@ -116,6 +116,17 @@ _KEYGROUP_DETAIL_FIELDS = [
     "FILFRQ",
     "FILQ",
     "K_FREQ",
+    # modulation matrix, keygroup half - amounts for destinations whose
+    # value is per-keygroup rather than per-program (their sources are
+    # program-level, in _PROGRAM_LEVEL_FIELDS below instead) - see
+    # program_editor_window.py's Modulation card comments for why this
+    # splits across the two regions
+    "MODVFILT1",
+    "MODVFILT2",
+    "MODVFILT3",
+    "MODVPITCH",
+    "MODVAMP3",
+    "L_PTCH",
     "ATTAK1",
     "DECAY1",
     "SUSTN1",
@@ -179,6 +190,40 @@ _PROGRAM_LEVEL_FIELDS = [
     "PORTEN",
     "PORTIME",
     "PORTYPE",
+    # LFO2 - hardwired to Pan on this hardware (PANRAT/PANDEP/PANDEL are
+    # LFO2's own rate/depth/delay despite the field names), plus its own
+    # waveform/retrigger. See program_editor_window.py's LFO2 card comment.
+    "PANRAT",
+    "PANDEP",
+    "PANDEL",
+    "LFO2WAVE",
+    "LFO2TRIG",
+    # modulation matrix, program half - assignable sources for every
+    # destination (shared by every keygroup), plus the amounts that are
+    # also program-level (Pan x3, Loudness slots 1-2, LFO1 Rate/Depth/
+    # Delay x1 each). Filter Frequency/Pitch/Loudness-slot-3's amounts are
+    # keygroup-level instead - see _KEYGROUP_DETAIL_FIELDS above.
+    "MODSPAN1",
+    "MODSPAN2",
+    "MODSPAN3",
+    "MODVPAN1",
+    "MODVPAN2",
+    "MODVPAN3",
+    "MODSAMP1",
+    "MODSAMP2",
+    "MODSAMP3",
+    "MODVAMP1",
+    "MODVAMP2",
+    "MODSLFOT",
+    "MODSLFOL",
+    "MODSLFOD",
+    "MODVLFOR",
+    "MODVLVOL",
+    "MODVLFOD",
+    "MODSFILT1",
+    "MODSFILT2",
+    "MODSFILT3",
+    "MODSPITCH",
 ]
 
 

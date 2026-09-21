@@ -10,6 +10,7 @@ if __name__ == "__main__":
 from PySide6.QtGui import Qt, QAction, QRegularExpressionValidator
 from PySide6.QtCore import QTimer, QRegularExpression
 from PySide6.QtWidgets import (
+    QGridLayout,
     QHBoxLayout,
     QListWidget,
     QListWidgetItem,
@@ -95,6 +96,37 @@ _PORTAMENTO_TYPE_OPTIONS = [
     ),
 ]
 
+# Raw values 0-13 of s3k.params.MOD_SOURCES, in combo-index order - shared
+# by every "assignable source" field in the modulation matrix (MODSPAN*,
+# MODSAMP*, MODSLFO*, MODSFILT*, MODSPITCH). Combo index doubles as the raw
+# byte, same "index is the value" convention as lfo_shape_combo/ZPLAY/CP
+# elsewhere in this file (see _wire_combo_write) - MOD_SOURCES happens to be
+# contiguous 0-13 once value 14 is excluded below, so no itemData lookup is
+# needed here either.
+#
+# Value 14 (env3) is deliberately left out: s3k.params' own hardware notes
+# say Envelope 3 genuinely works on a base machine with no expansion board
+# (it's the SECOND FILTER it can also target that needs the IB304F board,
+# not env3 itself) - but this app has no Envelope 3 editor page yet, so
+# offering it as a source with no way to shape its ADSR would be confusing
+# rather than useful. Revisit once/if an Envelope 3 page exists.
+_MOD_SOURCE_LABELS = [
+    "None",
+    "Modwheel",
+    "Bend",
+    "Pressure",
+    "External",
+    "Velocity",
+    "Key",
+    "LFO1",
+    "LFO2",
+    "Env1",
+    "Env2",
+    "Modwheel (inverted)",
+    "Bend (inverted)",
+    "External (inverted)",
+]
+
 # Program names are NOT ASCII (s3k.messages.AKAI_CHARSET's own docstring:
 # "names are not ASCII"): a name byte is an index into a 41-entry table -
 # digits, space, A-Z, and "#+-." - and encode_name refuses anything outside
@@ -111,7 +143,13 @@ class ProgramEditorWindow(QMainWindow):
     def __init__(self, main_window, bridge):
         super().__init__()
         self.setWindowTitle("AKAISDS - Program Editor")
-        self.setMinimumSize(1040, 800)
+        # was 1040 - the new Modulation card's "Filter Frequency"/"Pan" rows
+        # (up to 3 source+amount slots wide) forced a horizontal scrollbar
+        # on the Program tab below that width; re-measured the same way
+        # AGENTS.md describes for every other width tweak on this page -
+        # grew the window until scroll_area.horizontalScrollBar().maximum()
+        # hit zero on both tabs, landing on 1080
+        self.setMinimumSize(1080, 800)
         self._sample_list = []
         self._keygroup_ranges = []  # [lo, hi] per keygroup - mirrors keygroup_range_bar
         self._pending_restore_state = None  # set only by _refresh_from_hardware()
@@ -686,18 +724,90 @@ class ProgramEditorWindow(QMainWindow):
         # narrower than Range's (299px: label + two note spinboxes), so the
         # 2x weight was giving Filter more than its share and stretching it
         # wider than Range needed to be. Matches every other paired row on
-        # this page (Volume/Pan/Velocity+LFO, Pitch+Voice&MIDI), which were
-        # never anything but 1:1.
+        # the Program tab, which is never anything but 1:1.
         range_filter_row.addWidget(range_section, stretch=1)
         range_filter_row.addWidget(filter_section, stretch=1)
         envelopes_row = QHBoxLayout()
         envelopes_row.addWidget(env1_section, stretch=1)
         envelopes_row.addWidget(env2_section, stretch=1)
 
+        # Modulation (Keygroup tab half) - the other side of the Program
+        # tab's Modulation card: amounts for the destinations whose value
+        # is stored per-keygroup rather than per-program (see that card's
+        # own comment for why). Sources for every row here are chosen on
+        # the Program tab instead - shared by every keygroup in this
+        # program, so there's nothing to pick per-keygroup.
+        kg_filt1_col, self.mod_filt1_amount_knob, self.mod_filt1_amount_value_label = (
+            self._build_mod_amount_only_column(
+                "MODVFILT1", "keygroup", keygroup_index_getter=self.keygroup_list.currentRow
+            )
+        )
+        kg_filt2_col, self.mod_filt2_amount_knob, self.mod_filt2_amount_value_label = (
+            self._build_mod_amount_only_column(
+                "MODVFILT2", "keygroup", keygroup_index_getter=self.keygroup_list.currentRow
+            )
+        )
+        kg_filt3_col, self.mod_filt3_amount_knob, self.mod_filt3_amount_value_label = (
+            self._build_mod_amount_only_column(
+                "MODVFILT3", "keygroup", keygroup_index_getter=self.keygroup_list.currentRow
+            )
+        )
+        kg_mod_grid = QGridLayout()
+        kg_mod_grid.setHorizontalSpacing(14)
+        kg_mod_grid.setVerticalSpacing(10)
+        self._build_mod_matrix_row(
+            kg_mod_grid, 0, "Filter Frequency", kg_filt1_col, kg_filt2_col, kg_filt3_col
+        )
+
+        kg_pitch_col, self.mod_pitch_amount_knob, self.mod_pitch_amount_value_label = (
+            self._build_mod_amount_only_column(
+                "MODVPITCH", "keygroup", keygroup_index_getter=self.keygroup_list.currentRow
+            )
+        )
+        self._build_mod_matrix_row(kg_mod_grid, 1, "Pitch (assignable)", kg_pitch_col)
+
+        kg_amp3_col, self.mod_amp3_amount_knob, self.mod_amp3_amount_value_label = (
+            self._build_mod_amount_only_column(
+                "MODVAMP3", "keygroup", keygroup_index_getter=self.keygroup_list.currentRow
+            )
+        )
+        self._build_mod_matrix_row(kg_mod_grid, 2, "Loudness (slot 3)", kg_amp3_col)
+
+        # L_PTCH is NOT part of the 3-slot assignable matrix - it's a
+        # separate, always-on LFO1-to-pitch route (a fixed vibrato depth),
+        # same idea as the fixed MWLDEP/PRSDEP/VELDEP fields already on the
+        # hardware for LFO1 depth (not yet exposed here either). No source
+        # dropdown needed since the source is always LFO1.
+        self.lfo1_to_pitch_knob = self._build_mod_amount_knob()
+        lfo1_to_pitch_col, self.lfo1_to_pitch_value_label = self._build_knob_column(
+            "Amount", self.lfo1_to_pitch_knob
+        )
+        self._wire_knob_write(
+            self.lfo1_to_pitch_knob,
+            "L_PTCH",
+            "keygroup",
+            keygroup_index_getter=self.keygroup_list.currentRow,
+        )
+        self._build_mod_matrix_row(kg_mod_grid, 3, "Pitch (LFO1)", lfo1_to_pitch_col)
+
+        kg_mod_footnote = QLabel(
+            "Sources for these are chosen on the Program tab's Modulation "
+            "card, shared by every keygroup in this program."
+        )
+        kg_mod_footnote.setWordWrap(True)
+        kg_mod_footnote.setObjectName("modFootnote")
+        kg_mod_footnote_row = QHBoxLayout()
+        kg_mod_footnote_row.addWidget(kg_mod_footnote)
+
+        keygroup_modulation_section = self._build_section_card(
+            "Modulation", kg_mod_grid, kg_mod_footnote_row
+        )
+
         detail_container_layout = QVBoxLayout()
         detail_container_layout.setSpacing(12)
         detail_container_layout.addLayout(range_filter_row)
         detail_container_layout.addLayout(envelopes_row)
+        detail_container_layout.addWidget(keygroup_modulation_section)
         detail_container_layout.addWidget(zone_card)
         detail_container_layout.addStretch()
         detail_container = QWidget()
@@ -778,6 +888,68 @@ class ProgramEditorWindow(QMainWindow):
         )
         lfo_delay_column, self.lfo_delay_value_label = self._build_knob_column(
             "LFO delay", self.lfo_delay_knob
+        )
+
+        # LFO2 - on this hardware LFO2 is hardwired to modulate Pan (an
+        # auto-pan effect): its rate/depth/delay are PANRAT/PANDEP/PANDEL,
+        # stored in the "program.pan" region despite being LFO2's own
+        # controls, not LFO1's pitch-modulation role. It's still a real,
+        # independent oscillator though - LFO2 is one of the 13 sources
+        # offered in the Modulation card below, same as LFO1/env1/env2.
+        self.lfo2_rate_knob = Knob()
+        self.lfo2_rate_knob.setRange(0, 99)
+        self.lfo2_rate_knob.setDefaultValue(0)
+        self.lfo2_rate_knob.setFixedSize(64, 64)
+        self.lfo2_depth_knob = Knob()
+        self.lfo2_depth_knob.setRange(0, 99)
+        self.lfo2_depth_knob.setDefaultValue(0)
+        self.lfo2_depth_knob.setFixedSize(64, 64)
+        self.lfo2_delay_knob = Knob()
+        self.lfo2_delay_knob.setRange(0, 99)
+        self.lfo2_delay_knob.setDefaultValue(0)
+        self.lfo2_delay_knob.setFixedSize(64, 64)
+
+        self.lfo2_shape_combo = QComboBox()
+        # only 3 shapes, not LFO1's 4 - LFO1WAVE's 4th ("Random") value was
+        # measured by reading the pitch track LFO1 itself drives (see its
+        # own notes); LFO2 drives pan instead, which hasn't been measured
+        # the same way, so this offers only what s3k.params' LFO2WAVE desc
+        # actually documents rather than assuming the same hidden 4th shape
+        self.lfo2_shape_combo.addItems(["Triangle", "Sawtooth", "Square"])
+        self.lfo2_shape_combo.currentIndexChanged.connect(
+            lambda i: self._schedule_write("LFO2WAVE", "program", i)
+        )
+
+        lfo2_shape_label = QLabel("LFO2 shape")
+        lfo2_shape_label.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+        lfo2_shape_column = QVBoxLayout()
+        lfo2_shape_column.setSpacing(4)
+        lfo2_shape_column.addWidget(
+            lfo2_shape_label, alignment=Qt.AlignmentFlag.AlignHCenter
+        )
+        lfo2_shape_column.addWidget(self.lfo2_shape_combo)
+
+        # LFO2TRIG's declared range is the full raw byte (0-255) with no
+        # values={} map or measured note narrowing it (unlike LFO1WAVE/
+        # LFO2WAVE's documented shape enums) - exposed as-is rather than
+        # guessing a smaller enum, same reasoning PORTIME's comment gives
+        # for when NOT to assume a narrower range without a documented or
+        # measured basis
+        self.lfo2_trig_spinbox = QSpinBox()
+        self.lfo2_trig_spinbox.setRange(0, 255)
+        self.lfo2_trig_spinbox.setFixedWidth(70)
+        lfo2_trig_column = self._build_labeled_spinbox_column(
+            "LFO2 retrig", self.lfo2_trig_spinbox
+        )
+
+        lfo2_rate_column, self.lfo2_rate_value_label = self._build_knob_column(
+            "LFO2 rate", self.lfo2_rate_knob
+        )
+        lfo2_depth_column, self.lfo2_depth_value_label = self._build_knob_column(
+            "LFO2 depth", self.lfo2_depth_knob
+        )
+        lfo2_delay_column, self.lfo2_delay_value_label = self._build_knob_column(
+            "LFO2 delay", self.lfo2_delay_knob
         )
 
         self.polyph_combo = QComboBox()
@@ -938,6 +1110,7 @@ class ProgramEditorWindow(QMainWindow):
 
         # constrained widths for the combo-only rows below
         self.lfo_shape_combo.setMaximumWidth(180)
+        self.lfo2_shape_combo.setMaximumWidth(180)
         self.polyph_combo.setMaximumWidth(80)
         self.note_priority_combo.setMaximumWidth(90)
         self.midi_channel_combo.setMaximumWidth(80)
@@ -950,7 +1123,10 @@ class ProgramEditorWindow(QMainWindow):
         volume_row.addStretch()
         volume_section = self._build_section_card("Volume, Pan && Velocity", volume_row)
 
-        # LFO - every LFO1 control (shape, rate, depth, delay) in one place
+        # LFO1 - every LFO1 control (shape, rate, depth, delay) in one place.
+        # Titled "LFO1" now (was just "LFO") now that LFO2 has its own card
+        # below - keeping the old bare title once there were two would read
+        # as which one is "the" LFO.
         lfo_knobs_row = QHBoxLayout()
         lfo_knobs_row.addLayout(lfo_rate_column)
         lfo_knobs_row.addLayout(lfo_depth_column)
@@ -959,7 +1135,26 @@ class ProgramEditorWindow(QMainWindow):
         lfo_shape_row = QHBoxLayout()
         lfo_shape_row.addLayout(lfo_shape_column)
         lfo_shape_row.addStretch()
-        lfo_section = self._build_section_card("LFO", lfo_knobs_row, lfo_shape_row)
+        lfo_section = self._build_section_card("LFO1", lfo_knobs_row, lfo_shape_row)
+
+        # LFO2 - same shape as LFO1's card above. Unlike LFO1 (which
+        # primarily drives pitch - see LFO1WAVE's notes), this hardware
+        # wires LFO2's own rate/depth/delay/shape permanently to Pan (an
+        # auto-pan effect) - see the PANRAT/PANDEP/PANDEL comment above.
+        # LFO2 remains selectable as a source anywhere else in the
+        # Modulation card below, same as any other source.
+        lfo2_knobs_row = QHBoxLayout()
+        lfo2_knobs_row.addLayout(lfo2_rate_column)
+        lfo2_knobs_row.addLayout(lfo2_depth_column)
+        lfo2_knobs_row.addLayout(lfo2_delay_column)
+        lfo2_knobs_row.addStretch()
+        lfo2_shape_row = QHBoxLayout()
+        lfo2_shape_row.addLayout(lfo2_shape_column)
+        lfo2_shape_row.addLayout(lfo2_trig_column)
+        lfo2_shape_row.addStretch()
+        lfo2_section = self._build_section_card(
+            "LFO2 (Pan)", lfo2_knobs_row, lfo2_shape_row
+        )
 
         # Pitch - tuning offset and pitch-bend range, up and down
         pitch_row = QHBoxLayout()
@@ -986,18 +1181,118 @@ class ProgramEditorWindow(QMainWindow):
         portamento_row.addStretch()
         portamento_section = self._build_section_card("Portamento", portamento_row)
 
+        # Modulation - the assignable modulation matrix (MODS*/MODV*
+        # fields). Every destination's SOURCE choice is a program-wide
+        # decision (MODSPAN*/MODSAMP*/MODSLFO*/MODSFILT*/MODSPITCH all live
+        # in the "program" region, shared by every keygroup), so this whole
+        # card lives on the Program tab. Amounts follow the source onto
+        # this tab too EXCEPT where the hardware stores the amount
+        # per-keygroup instead (Loudness slot 3, Filter Frequency, Pitch) -
+        # those rows show only the source here; their amount spinboxes are
+        # on the Keygroup tab's own Modulation card instead (see
+        # detail_container_layout below). LFO1's rate/depth/delay each get
+        # exactly one assignable slot (MODSLFOT/L/D), not three, since
+        # that's all the hardware offers per sub-parameter - unlike Pan/
+        # Loudness/Filter Frequency's genuine 3 slots.
+        mod_grid = QGridLayout()
+        mod_grid.setHorizontalSpacing(14)
+        mod_grid.setVerticalSpacing(10)
+
+        pan1_col, self.mod_pan1_combo, self.mod_pan1_knob, self.mod_pan1_value_label = (
+            self._build_mod_slot("MODSPAN1", "program", "MODVPAN1", "program")
+        )
+        pan2_col, self.mod_pan2_combo, self.mod_pan2_knob, self.mod_pan2_value_label = (
+            self._build_mod_slot("MODSPAN2", "program", "MODVPAN2", "program")
+        )
+        pan3_col, self.mod_pan3_combo, self.mod_pan3_knob, self.mod_pan3_value_label = (
+            self._build_mod_slot("MODSPAN3", "program", "MODVPAN3", "program")
+        )
+        self._build_mod_matrix_row(mod_grid, 0, "Pan", pan1_col, pan2_col, pan3_col)
+
+        amp1_col, self.mod_amp1_combo, self.mod_amp1_knob, self.mod_amp1_value_label = (
+            self._build_mod_slot("MODSAMP1", "program", "MODVAMP1", "program")
+        )
+        amp2_col, self.mod_amp2_combo, self.mod_amp2_knob, self.mod_amp2_value_label = (
+            self._build_mod_slot("MODSAMP2", "program", "MODVAMP2", "program")
+        )
+        amp3_col, self.mod_amp3_combo = self._build_mod_source_only_column(
+            "MODSAMP3", "program"
+        )
+        self._build_mod_matrix_row(mod_grid, 1, "Loudness", amp1_col, amp2_col, amp3_col)
+
+        (
+            lfo1_rate_col,
+            self.mod_lfo1_rate_combo,
+            self.mod_lfo1_rate_knob,
+            self.mod_lfo1_rate_value_label,
+        ) = self._build_mod_slot("MODSLFOT", "program", "MODVLFOR", "program")
+        self._build_mod_matrix_row(mod_grid, 2, "LFO1 Rate", lfo1_rate_col)
+
+        (
+            lfo1_depth_col,
+            self.mod_lfo1_depth_combo,
+            self.mod_lfo1_depth_knob,
+            self.mod_lfo1_depth_value_label,
+        ) = self._build_mod_slot("MODSLFOL", "program", "MODVLVOL", "program")
+        self._build_mod_matrix_row(mod_grid, 3, "LFO1 Depth", lfo1_depth_col)
+
+        (
+            lfo1_delay_col,
+            self.mod_lfo1_delay_combo,
+            self.mod_lfo1_delay_knob,
+            self.mod_lfo1_delay_value_label,
+        ) = self._build_mod_slot("MODSLFOD", "program", "MODVLFOD", "program")
+        self._build_mod_matrix_row(mod_grid, 4, "LFO1 Delay", lfo1_delay_col)
+
+        filt1_col, self.mod_filt1_combo = self._build_mod_source_only_column(
+            "MODSFILT1", "program"
+        )
+        filt2_col, self.mod_filt2_combo = self._build_mod_source_only_column(
+            "MODSFILT2", "program"
+        )
+        filt3_col, self.mod_filt3_combo = self._build_mod_source_only_column(
+            "MODSFILT3", "program"
+        )
+        self._build_mod_matrix_row(
+            mod_grid, 5, "Filter Frequency", filt1_col, filt2_col, filt3_col
+        )
+
+        pitch_col, self.mod_pitch_combo = self._build_mod_source_only_column(
+            "MODSPITCH", "program"
+        )
+        self._build_mod_matrix_row(mod_grid, 6, "Pitch", pitch_col)
+
+        mod_footnote = QLabel(
+            "Loudness slot 3, Filter Frequency and Pitch amounts are set "
+            "per keygroup, on the Keygroup tab's own Modulation card."
+        )
+        mod_footnote.setWordWrap(True)
+        mod_footnote.setObjectName("modFootnote")
+        mod_footnote_row = QHBoxLayout()
+        mod_footnote_row.addWidget(mod_footnote)
+
+        modulation_section = self._build_section_card(
+            "Modulation", mod_grid, mod_footnote_row
+        )
+
         # two cards per row rather than one long stacked column - halves
-        # the page's height for the same content. Paired by rough content
-        # shape: the two knob-heavy cards together, then the two
-        # single-row combo/spinbox cards together; Portamento is the odd
-        # one out and gets a row to itself
+        # the page's height for the same content. Paired by content shape:
+        # the two 3-knob cards, the two LFO cards (now that LFO2 has its
+        # own card too), then the two combo/spinbox-only cards - no card
+        # needs to be a leftover "odd one out" now that LFO2 exists.
+        # Modulation is far bigger than any of these and gets a row of
+        # its own, same as Portamento always has.
         program_row1 = QHBoxLayout()
         program_row1.addWidget(volume_section, stretch=1)
-        program_row1.addWidget(lfo_section, stretch=1)
+        program_row1.addWidget(pitch_section, stretch=1)
 
         program_row2 = QHBoxLayout()
-        program_row2.addWidget(pitch_section, stretch=1)
-        program_row2.addWidget(voice_section, stretch=1)
+        program_row2.addWidget(lfo_section, stretch=1)
+        program_row2.addWidget(lfo2_section, stretch=1)
+
+        program_row3 = QHBoxLayout()
+        program_row3.addWidget(voice_section, stretch=1)
+        program_row3.addWidget(portamento_section, stretch=1)
 
         program_page = QWidget()
         program_page_layout = QVBoxLayout()
@@ -1005,7 +1300,8 @@ class ProgramEditorWindow(QMainWindow):
         program_page_layout.addWidget(name_section)
         program_page_layout.addLayout(program_row1)
         program_page_layout.addLayout(program_row2)
-        program_page_layout.addWidget(portamento_section)
+        program_page_layout.addLayout(program_row3)
+        program_page_layout.addWidget(modulation_section)
         program_page_layout.addStretch()
         program_page.setLayout(program_page_layout)
 
@@ -1159,6 +1455,12 @@ class ProgramEditorWindow(QMainWindow):
         self._wire_knob_write(self.lfo_depth_knob, "LFODEP", "program")
         self.lfo_delay_knob.setEnabled(True)
         self._wire_knob_write(self.lfo_delay_knob, "LFODEL", "program")
+        self.lfo2_rate_knob.setEnabled(True)
+        self._wire_knob_write(self.lfo2_rate_knob, "PANRAT", "program")
+        self.lfo2_depth_knob.setEnabled(True)
+        self._wire_knob_write(self.lfo2_depth_knob, "PANDEP", "program")
+        self.lfo2_delay_knob.setEnabled(True)
+        self._wire_knob_write(self.lfo2_delay_knob, "PANDEL", "program")
         self.program_tune_spinbox.setEnabled(True)
         self._wire_spinbox_write(
             self.program_tune_spinbox,
@@ -1403,6 +1705,71 @@ class ProgramEditorWindow(QMainWindow):
         self.lfo_shape_combo.blockSignals(True)
         self.lfo_shape_combo.setCurrentIndex(program_values["LFO1WAVE"])
         self.lfo_shape_combo.blockSignals(False)
+
+        # LFO2 - same shape as LFO1's own load block just above
+        self.lfo2_rate_knob.blockSignals(True)
+        self.lfo2_rate_knob.setValue(program_values["PANRAT"])
+        self.lfo2_rate_knob.blockSignals(False)
+        self.lfo2_rate_value_label.setText(str(program_values["PANRAT"]))
+        self.lfo2_depth_knob.blockSignals(True)
+        self.lfo2_depth_knob.setValue(program_values["PANDEP"])
+        self.lfo2_depth_knob.blockSignals(False)
+        self.lfo2_depth_value_label.setText(str(program_values["PANDEP"]))
+        self.lfo2_delay_knob.blockSignals(True)
+        self.lfo2_delay_knob.setValue(program_values["PANDEL"])
+        self.lfo2_delay_knob.blockSignals(False)
+        self.lfo2_delay_value_label.setText(str(program_values["PANDEL"]))
+        self.lfo2_shape_combo.blockSignals(True)
+        self.lfo2_shape_combo.setCurrentIndex(program_values["LFO2WAVE"])
+        self.lfo2_shape_combo.blockSignals(False)
+        self.lfo2_trig_spinbox.blockSignals(True)
+        self.lfo2_trig_spinbox.setValue(program_values["LFO2TRIG"])
+        self.lfo2_trig_spinbox.blockSignals(False)
+
+        # Modulation matrix (Program tab half) - source combos use "index
+        # is the value" like every other combo on this page, so
+        # setCurrentIndex(raw value) is correct directly (see
+        # _MOD_SOURCE_LABELS); amount spinboxes just take the raw -50..50
+        # value. A loop here rather than spelling out each one by hand,
+        # same call as _on_multi_parts_loaded's per-part loop below - the
+        # repetition across this many near-identical fields is what that
+        # precedent is for.
+        program_mod_combos = [
+            (self.mod_pan1_combo, "MODSPAN1"),
+            (self.mod_pan2_combo, "MODSPAN2"),
+            (self.mod_pan3_combo, "MODSPAN3"),
+            (self.mod_amp1_combo, "MODSAMP1"),
+            (self.mod_amp2_combo, "MODSAMP2"),
+            (self.mod_amp3_combo, "MODSAMP3"),
+            (self.mod_lfo1_rate_combo, "MODSLFOT"),
+            (self.mod_lfo1_depth_combo, "MODSLFOL"),
+            (self.mod_lfo1_delay_combo, "MODSLFOD"),
+            (self.mod_filt1_combo, "MODSFILT1"),
+            (self.mod_filt2_combo, "MODSFILT2"),
+            (self.mod_filt3_combo, "MODSFILT3"),
+            (self.mod_pitch_combo, "MODSPITCH"),
+        ]
+        for combo, field in program_mod_combos:
+            combo.blockSignals(True)
+            combo.setCurrentIndex(program_values[field])
+            combo.blockSignals(False)
+
+        program_mod_knobs = [
+            (self.mod_pan1_knob, self.mod_pan1_value_label, "MODVPAN1"),
+            (self.mod_pan2_knob, self.mod_pan2_value_label, "MODVPAN2"),
+            (self.mod_pan3_knob, self.mod_pan3_value_label, "MODVPAN3"),
+            (self.mod_amp1_knob, self.mod_amp1_value_label, "MODVAMP1"),
+            (self.mod_amp2_knob, self.mod_amp2_value_label, "MODVAMP2"),
+            (self.mod_lfo1_rate_knob, self.mod_lfo1_rate_value_label, "MODVLFOR"),
+            (self.mod_lfo1_depth_knob, self.mod_lfo1_depth_value_label, "MODVLVOL"),
+            (self.mod_lfo1_delay_knob, self.mod_lfo1_delay_value_label, "MODVLFOD"),
+        ]
+        for knob, value_label, field in program_mod_knobs:
+            knob.blockSignals(True)
+            knob.setValue(program_values[field])
+            knob.blockSignals(False)
+            value_label.setText(str(program_values[field]))
+
         self.polyph_combo.blockSignals(True)
         self.polyph_combo.setCurrentIndex(
             self.polyph_combo.findData(program_values["POLYPH"])
@@ -1507,6 +1874,26 @@ class ProgramEditorWindow(QMainWindow):
         self.key_filter_track_knob.setValue(values["K_FREQ"])
         self.key_filter_track_knob.blockSignals(False)
         self.key_filter_track_value_label.setText(str(values["K_FREQ"]))
+
+        # Modulation matrix (Keygroup tab half) - amount-only spinboxes for
+        # the per-keygroup half of the matrix; see the Program tab's own
+        # Modulation card comment for which destinations split this way
+        # and why. Loop for the same reason as _on_keygroups_loaded's own
+        # modulation-loading loop above.
+        keygroup_mod_knobs = [
+            (self.mod_filt1_amount_knob, self.mod_filt1_amount_value_label, "MODVFILT1"),
+            (self.mod_filt2_amount_knob, self.mod_filt2_amount_value_label, "MODVFILT2"),
+            (self.mod_filt3_amount_knob, self.mod_filt3_amount_value_label, "MODVFILT3"),
+            (self.mod_pitch_amount_knob, self.mod_pitch_amount_value_label, "MODVPITCH"),
+            (self.mod_amp3_amount_knob, self.mod_amp3_amount_value_label, "MODVAMP3"),
+            (self.lfo1_to_pitch_knob, self.lfo1_to_pitch_value_label, "L_PTCH"),
+        ]
+        for knob, value_label, field in keygroup_mod_knobs:
+            knob.blockSignals(True)
+            knob.setValue(values[field])
+            knob.blockSignals(False)
+            value_label.setText(str(values[field]))
+
         self.attack1_knob.blockSignals(True)
         self.attack1_knob.setValue(values["ATTAK1"])
         self.attack1_knob.blockSignals(False)
@@ -1621,6 +2008,127 @@ class ProgramEditorWindow(QMainWindow):
         column.addWidget(spinbox, alignment=Qt.AlignmentFlag.AlignHCenter)
 
         return column
+
+    # --- modulation matrix helpers -------------------------------------
+    # The assignable modulation matrix (MODS*/MODV* fields - see the
+    # Modulation section cards on both the Program and Keygroup tabs) is
+    # built from many near-identical (source dropdown, amount knob) pairs,
+    # each explicitly labeled "Source"/"Amount" - with up to 3 side by
+    # side per destination row, unlabeled slots would read as one control
+    # split three ways rather than three independent routings. These
+    # helpers are that repeated unit, kept small and explicit rather than
+    # a single "spec table" builder so each use site below still spells
+    # out its own field names, matching how every other section on this
+    # page is built (_build_knob_column, etc).
+
+    def _build_mod_source_combo(self):
+        combo = QComboBox()
+        combo.addItems(_MOD_SOURCE_LABELS)
+        combo.setMaximumWidth(150)
+        return combo
+
+    def _build_mod_amount_knob(self):
+        # +/-50 like every MODV*/L_PTCH field's declared range, default
+        # 0 (no modulation) same as every other "off by default" knob on
+        # this page. Small (40x40, matching the ENV1/ENV2 stage knobs)
+        # since a single row can hold up to 3 of these side by side.
+        knob = Knob()
+        knob.setRange(-50, 50)
+        knob.setDefaultValue(0)
+        knob.setFixedSize(40, 40)
+        # enabled here rather than in __init__'s later "enable knobs" block
+        # (see Knob.__init__ - it starts disabled) - unlike every other
+        # knob on this page, these are built AND wired together by one
+        # helper call each, so there's nothing later that still needs to
+        # happen before enabling one is safe
+        knob.setEnabled(True)
+        return knob
+
+    def _build_mod_slot(
+        self,
+        source_param,
+        source_region,
+        amount_param,
+        amount_region,
+        *,
+        keygroup_index_getter=None,
+    ):
+        # a full assignable slot: labeled source dropdown above a labeled
+        # amount knob. source_region/amount_region are separate (not one
+        # shared region) because a handful of destinations split across
+        # the wire: e.g. filter frequency's SOURCE is chosen program-wide
+        # (MODSFILT*) but its AMOUNT is stored per-keygroup (MODVFILT*) -
+        # see the Modulation card comments below for the full list.
+        combo = self._build_mod_source_combo()
+        source_column = self._build_labeled_combo_column("Source", combo)
+
+        knob = self._build_mod_amount_knob()
+        amount_column, value_label = self._build_knob_column("Amount", knob)
+
+        column = QVBoxLayout()
+        column.setSpacing(8)
+        column.addLayout(source_column)
+        column.addLayout(amount_column)
+
+        self._wire_combo_write(
+            combo, source_param, source_region, keygroup_index_getter=keygroup_index_getter
+        )
+        self._wire_knob_write(
+            knob,
+            amount_param,
+            amount_region,
+            keygroup_index_getter=keygroup_index_getter,
+        )
+        return column, combo, knob, value_label
+
+    def _build_labeled_combo_column(self, label_text, combo):
+        # same "label above, centered" shape as _build_labeled_spinbox_column,
+        # for a combo instead of a spinbox
+        name_label = QLabel(label_text)
+        name_label.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+        column = QVBoxLayout()
+        column.setSpacing(4)
+        column.addWidget(name_label, alignment=Qt.AlignmentFlag.AlignHCenter)
+        column.addWidget(combo)
+        return column
+
+    def _build_mod_source_only_column(self, source_param, source_region):
+        # used where the matching amount field is per-keygroup (so it's
+        # shown on the Keygroup tab's own Modulation card instead) - just
+        # the labeled source dropdown, no amount knob here
+        combo = self._build_mod_source_combo()
+        column = self._build_labeled_combo_column("Source", combo)
+        self._wire_combo_write(combo, source_param, source_region)
+        return column, combo
+
+    def _build_mod_amount_only_column(
+        self, amount_param, amount_region, *, keygroup_index_getter=None
+    ):
+        # the other half of _build_mod_source_only_column - a labeled
+        # amount knob with no source dropdown, for the Keygroup tab's own
+        # Modulation card (the matching source lives on the Program tab)
+        knob = self._build_mod_amount_knob()
+        column, value_label = self._build_knob_column("Amount", knob)
+        self._wire_knob_write(
+            knob,
+            amount_param,
+            amount_region,
+            keygroup_index_getter=keygroup_index_getter,
+        )
+        return column, knob, value_label
+
+    def _build_mod_matrix_row(self, grid, row, label_text, *slot_columns):
+        # one destination row of a Modulation card's QGridLayout: a
+        # left-hand label plus up to 3 slot columns (each from one of the
+        # _build_mod_* helpers above) - column count varies per row
+        # (LFO1 Rate/Depth/Delay and Pitch only ever have 1 slot; Pan,
+        # Loudness and Filter Frequency have up to 3), so this just places
+        # whatever it's given rather than assuming exactly 3
+        label = QLabel(label_text)
+        label.setFixedWidth(110)
+        grid.addWidget(label, row, 0, Qt.AlignmentFlag.AlignTop)
+        for col, column in enumerate(slot_columns, start=1):
+            grid.addLayout(column, row, col)
 
     def _build_akai_name_edit(self):
         # shared construction for any field stored in the device's own
