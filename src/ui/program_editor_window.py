@@ -353,11 +353,11 @@ class ProgramEditorWindow(QMainWindow):
         self.cutoff_knob = Knob()
         self.cutoff_knob.setRange(0, 99)
         self.cutoff_knob.setDefaultValue(99)  # fully open - no filtering
-        self.cutoff_knob.setFixedSize(64, 64)
+        self.cutoff_knob.setFixedSize(56, 56)
         self.resonance_knob = Knob()
         self.resonance_knob.setRange(0, 15)
         self.resonance_knob.setDefaultValue(0)  # no resonance
-        self.resonance_knob.setFixedSize(64, 64)
+        self.resonance_knob.setFixedSize(56, 56)
         self.key_filter_track_knob = Knob()
         # s3k.params declares K_FREQ's range as -30..99 (its own notes cite
         # a 2026-08-24 hardware sweep finding no clamp at 12 or 24 either),
@@ -368,7 +368,7 @@ class ProgramEditorWindow(QMainWindow):
         # correction belongs here instead)
         self.key_filter_track_knob.setRange(-24, 24)
         self.key_filter_track_knob.setDefaultValue(0)  # no key tracking
-        self.key_filter_track_knob.setFixedSize(64, 64)
+        self.key_filter_track_knob.setFixedSize(56, 56)
 
         self.env1_graph = ADSREnvelopeGraph()
         self.env1_graph.setFixedSize(200, 90)
@@ -948,13 +948,13 @@ class ProgramEditorWindow(QMainWindow):
 
         self.pan_knob = Knob()
         self.pan_knob.setRange(-50, 50)
-        self.pan_knob.setFixedSize(64, 64)
+        self.pan_knob.setFixedSize(56, 56)
         pan_column, self.pan_value_label = self._build_knob_column("Pan", self.pan_knob)
 
         self.loud_knob = Knob()
         self.loud_knob.setRange(0, 99)
         self.loud_knob.setDefaultValue(80)
-        self.loud_knob.setFixedSize(64, 64)
+        self.loud_knob.setFixedSize(56, 56)
         loud_column, self.loud_value_label = self._build_knob_column(
             "Loud", self.loud_knob
         )
@@ -962,7 +962,7 @@ class ProgramEditorWindow(QMainWindow):
         self.velocity_knob = Knob()
         self.velocity_knob.setRange(-50, 50)
         self.velocity_knob.setDefaultValue(20)
-        self.velocity_knob.setFixedSize(64, 64)
+        self.velocity_knob.setFixedSize(56, 56)
         velocity_column, self.velocity_value_label = self._build_knob_column(
             "Velocity", self.velocity_knob
         )
@@ -970,15 +970,15 @@ class ProgramEditorWindow(QMainWindow):
         self.lfo_rate_knob = Knob()
         self.lfo_rate_knob.setRange(0, 99)
         self.lfo_rate_knob.setDefaultValue(0)  # no modulation without depth anyway
-        self.lfo_rate_knob.setFixedSize(64, 64)
+        self.lfo_rate_knob.setFixedSize(56, 56)
         self.lfo_depth_knob = Knob()
         self.lfo_depth_knob.setRange(0, 99)
         self.lfo_depth_knob.setDefaultValue(0)  # no modulation
-        self.lfo_depth_knob.setFixedSize(64, 64)
+        self.lfo_depth_knob.setFixedSize(56, 56)
         self.lfo_delay_knob = Knob()
         self.lfo_delay_knob.setRange(0, 99)
         self.lfo_delay_knob.setDefaultValue(0)  # no delay before the LFO starts
-        self.lfo_delay_knob.setFixedSize(64, 64)
+        self.lfo_delay_knob.setFixedSize(56, 56)
 
         self.lfo_shape_combo = QComboBox()
         self.lfo_shape_combo.addItems(["Triangle", "Sawtooth", "Square", "Random"])
@@ -1033,15 +1033,15 @@ class ProgramEditorWindow(QMainWindow):
         self.lfo2_rate_knob = Knob()
         self.lfo2_rate_knob.setRange(0, 99)
         self.lfo2_rate_knob.setDefaultValue(0)
-        self.lfo2_rate_knob.setFixedSize(64, 64)
+        self.lfo2_rate_knob.setFixedSize(56, 56)
         self.lfo2_depth_knob = Knob()
         self.lfo2_depth_knob.setRange(0, 99)
         self.lfo2_depth_knob.setDefaultValue(0)
-        self.lfo2_depth_knob.setFixedSize(64, 64)
+        self.lfo2_depth_knob.setFixedSize(56, 56)
         self.lfo2_delay_knob = Knob()
         self.lfo2_delay_knob.setRange(0, 99)
         self.lfo2_delay_knob.setDefaultValue(0)
-        self.lfo2_delay_knob.setFixedSize(64, 64)
+        self.lfo2_delay_knob.setFixedSize(56, 56)
 
         self.lfo2_shape_combo = QComboBox()
         # only 3 shapes, not LFO1's 4 - LFO1WAVE's 4th ("Random") value was
