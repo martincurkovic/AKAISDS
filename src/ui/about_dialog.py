@@ -1,7 +1,17 @@
-from PySide6.QtWidgets import QDialog, QDialogButtonBox, QLabel, QVBoxLayout, QLayout
+from PySide6.QtWidgets import (
+    QDialog,
+    QDialogButtonBox,
+    QHBoxLayout,
+    QLabel,
+    QProgressBar,
+    QPushButton,
+    QVBoxLayout,
+    QLayout,
+)
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QFontDatabase
 from ui.ascii_logo import LOGO
+from ui.update_helper import UpdateCheckRunner
 
 try:
     from ui._version import APP_VERSION
@@ -50,8 +60,45 @@ class AboutDialog(QDialog):
         credits_label.setWordWrap(True)
         layout.addWidget(credits_label)
 
+        self._update_runner = UpdateCheckRunner(self)
+
+        check_updates_row = QHBoxLayout()
+        self._check_updates_button = QPushButton("Check for Updates")
+        self._check_updates_button.clicked.connect(self._check_for_updates)
+        check_updates_row.addStretch()
+        check_updates_row.addWidget(self._check_updates_button)
+        check_updates_row.addStretch()
+        layout.addLayout(check_updates_row)
+
+        # indeterminate - a version check has no measurable progress to show,
+        # just "still waiting on the network". Hidden until a check is
+        # actually running so it doesn't just sit there empty otherwise.
+        self._update_progress = QProgressBar()
+        self._update_progress.setRange(0, 0)
+        self._update_progress.setTextVisible(False)
+        self._update_progress.setFixedHeight(6)
+        self._update_progress.setVisible(False)
+        layout.addWidget(self._update_progress)
+
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok)
         buttons.accepted.connect(self.accept)
         layout.addWidget(buttons)
 
         layout.setSizeConstraint(QLayout.SizeConstraint.SetFixedSize)
+
+    def _check_for_updates(self):
+        self._check_updates_button.setEnabled(False)
+        self._update_progress.setVisible(True)
+        self._update_runner.start(manual=True, on_finished=self._on_update_check_finished)
+
+    def _on_update_check_finished(self):
+        self._update_progress.setVisible(False)
+        self._check_updates_button.setEnabled(True)
+
+    def done(self, result):
+        # make sure a check that's still running can't outlive this dialog's
+        # Python object - see UpdateCheckRunner.wait()'s docstring. done()
+        # is the one method every close path (OK button, Escape, the title
+        # bar's close box) funnels through.
+        self._update_runner.wait()
+        super().done(result)

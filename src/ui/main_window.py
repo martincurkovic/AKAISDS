@@ -1,11 +1,17 @@
 from PySide6.QtWidgets import QMainWindow, QFileDialog
+from PySide6.QtCore import QTimer
 import os
+import time
 from PySide6.QtGui import QAction, QKeySequence
 from ui.dashboard import TransferDashboard
 from ui.about_dialog import AboutDialog
+from ui.update_helper import UpdateCheckRunner
 from core.midi_manager import MidiManager
 from core import app_config, sds_encoder
 from controller.sampler_controller import SamplerController
+
+# don't hit the GitHub API on every single launch
+_UPDATE_CHECK_INTERVAL_SECONDS = 24 * 60 * 60
 
 
 class ApplicationWindow(QMainWindow):
@@ -139,6 +145,16 @@ class ApplicationWindow(QMainWindow):
         editor_action.triggered.connect(self.dashboard_view.open_program_editor)
         window_menu.addAction(editor_action)
 
+        # Qt has no MenuRole for "check for updates" (only About/Preferences/
+        # Quit get auto-relocated into the native "AKAISDS" app menu on
+        # macOS - see QAction.MenuRole), so this stays a plain Help menu on
+        # every platform rather than trying to fake native placement
+        help_menu = self.menuBar().addMenu("&Help")
+
+        check_for_updates_action = QAction("Check for Updates...", self)
+        check_for_updates_action.triggered.connect(self._check_for_updates_manual)
+        help_menu.addAction(check_for_updates_action)
+
         self.dashboard_view.register_menu_actions(
             {
                 self.dashboard_view.btn_settings: settings_action,
@@ -156,9 +172,22 @@ class ApplicationWindow(QMainWindow):
             },
         )
 
+        self._update_runner = UpdateCheckRunner(self)
+
+        # delay slightly so this doesn't compete with startup/port restore,
+        # and only fire automatically if it's been a while since the last check
+        if (
+            time.time() - app_config.get_last_update_check()
+            > _UPDATE_CHECK_INTERVAL_SECONDS
+        ):
+            QTimer.singleShot(2000, lambda: self._update_runner.start(manual=False))
+
     def _show_about_dialog(self):
         dialog = AboutDialog(self)
         dialog.exec()
+
+    def _check_for_updates_manual(self):
+        self._update_runner.start(manual=True)
 
     def _open_files_dialog(self):
         paths, _ = QFileDialog.getOpenFileNames(
@@ -193,6 +222,13 @@ class ApplicationWindow(QMainWindow):
         # release midi ports cleanly so mido's backend doesnt hang around like a fart in a doctor's waiting room
         self.midi_manager.close_input()
         self.midi_manager.close_output()
+
+        # if an update check is mid-flight when the app quits, make sure its
+        # background thread has actually stopped before this window (and
+        # the worker with it) can be garbage collected - see
+        # UpdateCheckRunner.wait()'s docstring
+        self._update_runner.wait()
+
         super().closeEvent(event)
 
 

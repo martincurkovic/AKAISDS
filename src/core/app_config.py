@@ -60,3 +60,27 @@ def save_device_type(device_type):
     config = load_config()
     config["device_type"] = device_type
     save_config(config)
+
+
+def get_last_update_check():
+    # unix timestamp of the last successful update check, or 0 if never
+    config = load_config()
+    return config.get("last_update_check", 0)
+
+
+def save_last_update_check(timestamp):
+    config = load_config()
+    config["last_update_check"] = timestamp
+    save_config(config)
+
+
+def get_skipped_update_version():
+    # version string the user chose "skip this version" for, or none
+    config = load_config()
+    return config.get("skipped_update_version")
+
+
+def save_skipped_update_version(version):
+    config = load_config()
+    config["skipped_update_version"] = version
+    save_config(config)

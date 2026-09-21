@@ -36,6 +36,8 @@ from ui.note_spinbox import NoteSpinBox
 from ui.qt_helpers import FullWidthTabBar
 from ui.envelope_graph import ADSREnvelopeGraph, Envelope2Graph
 from ui.keygroup_range_bar import KeygroupRangeBar, keygroup_color
+from ui.about_dialog import AboutDialog
+from ui.update_helper import UpdateCheckRunner
 from core.midi_notes import midi_note_to_name
 from core.program_editor_bridge import BridgeWorker, MULTI_PART_COUNT
 
@@ -100,29 +102,16 @@ _PORTAMENTO_TYPE_OPTIONS = [
 # rather than a hand-copied "0-9A-Z #+-." literal here, so this can never
 # silently drift from what the dependency actually accepts. The hyphen is
 # escaped since it's a range operator inside a [...] class otherwise.
-_NAME_INPUT_PATTERN = "[" + AKAI_CHARSET.replace("-", "\\-") + "]{0," + str(NAME_LENGTH) + "}"
+_NAME_INPUT_PATTERN = (
+    "[" + AKAI_CHARSET.replace("-", "\\-") + "]{0," + str(NAME_LENGTH) + "}"
+)
 
 
 class ProgramEditorWindow(QMainWindow):
     def __init__(self, main_window, bridge):
         super().__init__()
         self.setWindowTitle("AKAISDS - Program Editor")
-        # the old 800x500 predates the envelope controls - height in
-        # particular is now well past what fits there. Both detail_stack
-        # pages (Program, Keygroup) are grouped into titled section cards
-        # (see _build_section_card) with related cards paired side by side
-        # where they fit (e.g. Range+Filter, Volume/Pan/Velocity+LFO) rather
-        # than stacked one per row, and each page is wrapped in a
-        # QScrollArea (see _build_scroll_area) - so unlike the two prior
-        # approaches here (800, then 950x1080, then 950x1070), the window's
-        # height no longer needs to fit every card unscrolled: past this
-        # minimum it scrolls instead of compressing cards into overlapping
-        # each other the way a bare layout would. The width floor is real,
-        # though - below ~1020 the paired cards themselves don't fit
-        # side by side and force an unwanted HORIZONTAL scrollbar (measured
-        # by growing the window until both tabs' QScrollArea stopped
-        # reporting a horizontal range).
-        self.setMinimumSize(1040, 900)
+        self.setMinimumSize(1040, 800)
         self._sample_list = []
         self._keygroup_ranges = []  # [lo, hi] per keygroup - mirrors keygroup_range_bar
         self._pending_restore_state = None  # set only by _refresh_from_hardware()
@@ -1094,6 +1083,23 @@ class ProgramEditorWindow(QMainWindow):
         editor_action.setEnabled(False)  # this window IS the program editor
         window_menu.addAction(editor_action)
 
+        # Qt has no MenuRole for "check for updates" (only About/Preferences/
+        # Quit get auto-relocated into the native app menu on macOS - see
+        # QAction.MenuRole), so this stays a plain Help menu on every
+        # platform, same as main_window.py's own
+        help_menu = self.menuBar().addMenu("&Help")
+
+        about_action = QAction("About AKAISDS...", self)
+        about_action.setMenuRole(QAction.MenuRole.AboutRole)
+        about_action.triggered.connect(self._show_about_dialog)
+        help_menu.addAction(about_action)
+
+        check_for_updates_action = QAction("Check for Updates...", self)
+        check_for_updates_action.triggered.connect(self._check_for_updates_manual)
+        help_menu.addAction(check_for_updates_action)
+
+        self._update_runner = UpdateCheckRunner(self)
+
         # same idea as the dashboard's status bar (dashboard.py), but that's
         # a plain QWidget so it builds its own QStatusBar into its layout -
         # this window is a QMainWindow, which docks one below the central
@@ -1249,7 +1255,10 @@ class ProgramEditorWindow(QMainWindow):
             # (unshown in tests; briefly true during real startup too),
             # which would restart this timer's countdown on every job in
             # a burst instead of only the first
-            if not self._busy_show_timer.isActive() and self._loading_progress.isHidden():
+            if (
+                not self._busy_show_timer.isActive()
+                and self._loading_progress.isHidden()
+            ):
                 self._busy_show_timer.start()
         else:
             # not hidden immediately - _confirm_worker_idle only actually
@@ -1563,8 +1572,22 @@ class ProgramEditorWindow(QMainWindow):
         self._worker.stop()
         self._worker.wait()
 
+        # same reasoning as above, but for an in-flight "Check for
+        # Updates..." request - dashboard.py replaces its editor_window
+        # reference on every open_program_editor() call, so a closed editor
+        # window can become unreferenced (and eligible for GC) well before
+        # a check that was still running on it finishes
+        self._update_runner.wait()
+
         self._main_window.show()
         event.accept()
+
+    def _show_about_dialog(self):
+        dialog = AboutDialog(self)
+        dialog.exec()
+
+    def _check_for_updates_manual(self):
+        self._update_runner.start(manual=True)
 
     def _build_knob_column(self, label_text, knob):
         name_label = QLabel(label_text)
