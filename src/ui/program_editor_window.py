@@ -7,7 +7,14 @@ if __name__ == "__main__":
     # fail with "No module named 'ui'"
     sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from PySide6.QtGui import Qt, QAction, QRegularExpressionValidator, QPainter, QColor
+from PySide6.QtGui import (
+    Qt,
+    QAction,
+    QKeySequence,
+    QRegularExpressionValidator,
+    QPainter,
+    QColor,
+)
 from PySide6.QtCore import QTimer, QRegularExpression
 from PySide6.QtWidgets import (
     QGridLayout,
@@ -17,6 +24,7 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QLabel,
     QLineEdit,
+    QMessageBox,
     QPushButton,
     QSizePolicy,
     QVBoxLayout,
@@ -310,6 +318,14 @@ class ProgramEditorWindow(QMainWindow):
                 f"Write failed ({param_name}): {e}"
             )
         )
+        self._worker.program_deleted.connect(self._on_program_deleted)
+        self._worker.program_delete_failed.connect(
+            lambda _index, e: self.status_bar.showMessage(f"Couldn't delete program: {e}")
+        )
+        self._worker.keygroup_deleted.connect(self._on_keygroup_deleted)
+        self._worker.keygroup_delete_failed.connect(
+            lambda _p, _k, e: self.status_bar.showMessage(f"Couldn't delete keygroup: {e}")
+        )
         self._worker.start()
 
         # placeholder - real program, keygroup panels come later
@@ -320,6 +336,48 @@ class ProgramEditorWindow(QMainWindow):
         self.keygroup_list = QListWidget()
         self.keygroup_list.setObjectName("keygroupList")
         self.keygroup_list.setFixedWidth(190)  # fits "Keygroup 12: C#1 - D#7"
+
+        # DELP/DELK have no device-side confirmation prompt of their own -
+        # s3k.bridge's own docstring on them: "The specification defines no
+        # confirmation step for any of these. Callers must never key-bind
+        # them -- always an explicit arm-then-fire flow." The shortcuts/
+        # context-menu entries below are only ever wired to
+        # _confirm_delete_program/_confirm_delete_keygroup, which show a
+        # QMessageBox and only submit the delete if the user clicks through
+        # it - that dialog IS the arm-then-fire flow, so nothing here ever
+        # deletes directly off a keypress or a menu click.
+        #
+        # One QAction serves both the right-click context menu (via
+        # ActionsContextMenu) and the keyboard shortcut. Key_Delete/
+        # Key_Backspace covers plain "press the delete key" on every
+        # platform (a Mac keyboard's own Delete key sends Key_Backspace,
+        # not Key_Delete); "Ctrl+Backspace" adds an explicit alternate that
+        # Qt maps to Cmd+Backspace on macOS. WidgetShortcut scopes each
+        # action to its own list actually having focus - without it, both
+        # actions would fire together (an "ambiguous shortcut" warning)
+        # whenever the window has focus at all, since they'd otherwise
+        # share the same shortcut at WindowShortcut scope.
+        _delete_shortcuts = [
+            QKeySequence(Qt.Key.Key_Delete),
+            QKeySequence(Qt.Key.Key_Backspace),
+            QKeySequence("Ctrl+Backspace"),
+        ]
+
+        self.program_list.setContextMenuPolicy(Qt.ContextMenuPolicy.ActionsContextMenu)
+        self._delete_program_action = QAction("Delete Program...", self.program_list)
+        self._delete_program_action.setShortcuts(_delete_shortcuts)
+        self._delete_program_action.setShortcutContext(Qt.ShortcutContext.WidgetShortcut)
+        self._delete_program_action.triggered.connect(self._confirm_delete_program)
+        self._delete_program_action.setEnabled(False)
+        self.program_list.addAction(self._delete_program_action)
+
+        self.keygroup_list.setContextMenuPolicy(Qt.ContextMenuPolicy.ActionsContextMenu)
+        self._delete_keygroup_action = QAction("Delete Keygroup...", self.keygroup_list)
+        self._delete_keygroup_action.setShortcuts(_delete_shortcuts)
+        self._delete_keygroup_action.setShortcutContext(Qt.ShortcutContext.WidgetShortcut)
+        self._delete_keygroup_action.triggered.connect(self._confirm_delete_keygroup)
+        self._delete_keygroup_action.setEnabled(False)
+        self.keygroup_list.addAction(self._delete_keygroup_action)
 
         self.keygroup_range_bar = KeygroupRangeBar()
 
@@ -1622,6 +1680,17 @@ class ProgramEditorWindow(QMainWindow):
         self.keygroup_list.itemClicked.connect(
             lambda item: self.detail_stack.setCurrentIndex(1)
         )
+        # keeps the two delete actions' enabled state in lockstep with
+        # selection/roster changes without threading a call through every
+        # handler that can change either - itemSelectionChanged fires from
+        # clear()/addItems()/setCurrentItem() alike, including the ones
+        # inside _on_programs_loaded/_on_keygroups_loaded
+        self.program_list.itemSelectionChanged.connect(
+            self._update_delete_actions_enabled
+        )
+        self.keygroup_list.itemSelectionChanged.connect(
+            self._update_delete_actions_enabled
+        )
         self._worker.submit_program_list()
 
         # enable knobs and wire their (debounced) writes
@@ -2027,14 +2096,20 @@ class ProgramEditorWindow(QMainWindow):
             _PORTAMENTO_TYPE_OPTIONS[self.portamento_type_combo.currentIndex()][1]
         )
 
-        # only ever set by _refresh_from_hardware() - restores whatever the
-        # user was looking at before the refresh (a plain program selection
-        # never sets this, so this is a no-op on the normal load path)
+        # set by _refresh_from_hardware() and _on_keygroup_deleted() -
+        # restores whatever the user was looking at before the reload (a
+        # plain program selection never sets this, so this is a no-op on
+        # the normal load path)
         restore = self._pending_restore_state
         self._pending_restore_state = None
         if restore is not None:
             keygroup_index = restore["keygroup_index"]
-            if 0 <= keygroup_index < self.keygroup_list.count():
+            if keygroup_index >= 0 and self.keygroup_list.count() > 0:
+                # clamp rather than requiring an exact match - covers
+                # deleting the keygroup that was last in the list, where
+                # the old index is now one past the new last row (see
+                # _on_keygroup_deleted)
+                keygroup_index = min(keygroup_index, self.keygroup_list.count() - 1)
                 self.keygroup_list.setCurrentRow(keygroup_index)
                 self.detail_stack.setCurrentIndex(restore["stack_index"])
                 zone_index = restore["zone_index"]
@@ -2052,6 +2127,82 @@ class ProgramEditorWindow(QMainWindow):
         if program_index != self.program_list.currentRow():
             return
         self.status_bar.showMessage(f"Couldn't load keygroups: {error_message}")
+
+    def _update_delete_actions_enabled(self):
+        # a lone remaining program can't actually be deleted - the hardware
+        # acknowledges DELP against it and silently ignores it (see
+        # s3ked's own DemoBridge.delete_program docstring, which reproduces
+        # this on purpose: "The last program cannot be deleted... it
+        # acknowledges the delete and the list stays at one"). Disabling
+        # the action here avoids a confirm dialog whose "Yes" visibly does
+        # nothing.
+        self._delete_program_action.setEnabled(
+            self.program_list.currentRow() >= 0 and self.program_list.count() > 1
+        )
+        self._delete_keygroup_action.setEnabled(self.keygroup_list.currentRow() >= 0)
+
+    def _confirm_delete_program(self):
+        item = self.program_list.currentItem()
+        if item is None:
+            return
+        program_index = self.program_list.currentRow()
+        program_name = item.text()
+        answer = QMessageBox.question(
+            self,
+            "Delete Program",
+            f'Delete program "{program_name}" and all of its keygroups?\n\n'
+            "This cannot be undone.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        self.status_bar.showMessage(f'Deleting program "{program_name}"…')
+        self._worker.submit_delete_program(program_index)
+
+    def _confirm_delete_keygroup(self):
+        keygroup_index = self.keygroup_list.currentRow()
+        if keygroup_index < 0:
+            return
+        program_index = self.program_list.currentRow()
+        lo, hi = self._keygroup_ranges[keygroup_index]
+        range_text = f"{midi_note_to_name(lo)} - {midi_note_to_name(hi)}"
+        answer = QMessageBox.question(
+            self,
+            "Delete Keygroup",
+            f"Delete keygroup {keygroup_index + 1} ({range_text})?\n\n"
+            "This cannot be undone.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        self.status_bar.showMessage(f"Deleting keygroup {keygroup_index + 1}…")
+        self._worker.submit_delete_keygroup(program_index, keygroup_index)
+
+    def _on_program_deleted(self, program_index):
+        self.status_bar.showMessage("Program deleted")
+        # full reload, not a targeted removal - a DELP that lands on the
+        # last remaining program is silently ignored by the hardware (see
+        # _update_delete_actions_enabled) and every other case renumbers/
+        # reorders everything after it, the same as a manual Refresh
+        self._worker.submit_program_list()
+
+    def _on_keygroup_deleted(self, program_index, keygroup_index):
+        if program_index != self.program_list.currentRow():
+            return
+        self.status_bar.showMessage("Keygroup deleted")
+        # same restore-then-reload path _refresh_from_hardware uses - keeps
+        # the view on the same row index (now showing whatever the delete
+        # renumbered into that slot) instead of resetting to keygroup 0;
+        # see the clamp in _on_keygroups_loaded for the case where the
+        # deleted keygroup was the last one in the list
+        self._pending_restore_state = {
+            "keygroup_index": keygroup_index,
+            "stack_index": self.detail_stack.currentIndex(),
+            "zone_index": self._zone_button_group.checkedId(),
+        }
+        self._worker.submit_keygroups(program_index)
 
     def _on_keygroup_selected(self, current, previous):
         if current is None:

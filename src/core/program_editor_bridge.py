@@ -319,6 +319,18 @@ class BridgeWorker(QThread):
     write_succeeded = Signal(str, str, object)
     write_failed = Signal(str, str, str)
 
+    # DELP/DELK - S3kBridge.delete_program/delete_keygroup default to
+    # confirm=True, which waits for and raises on the hardware's own
+    # OK/error reply (see s3k.bridge's "_destructive"), so a *_deleted
+    # signal here means the sampler actually applied the delete, not just
+    # that the frame was sent. Like writes, these are never coalesced -
+    # every delete the user confirms must reach the hardware.
+    program_deleted = Signal(int)  # program_index
+    program_delete_failed = Signal(int, str)
+
+    keygroup_deleted = Signal(int, int)  # program_index, keygroup_index
+    keygroup_delete_failed = Signal(int, int, str)
+
     # True the moment any job is queued while nothing else is pending, False
     # the moment the queue drains back to empty - one continuous span across
     # a whole burst of jobs (e.g. Refresh submits several at once) rather
@@ -385,6 +397,12 @@ class BridgeWorker(QThread):
         self._submit(
             ("write", writer_key, param_name, region, program_index, value, keygroup_index)
         )
+
+    def submit_delete_program(self, program_index):
+        self._submit(("delete_program", program_index))
+
+    def submit_delete_keygroup(self, program_index, keygroup_index):
+        self._submit(("delete_keygroup", program_index, keygroup_index))
 
     def stop(self):
         # lets whatever is already queued (in particular, pending writes)
@@ -589,3 +607,22 @@ class BridgeWorker(QThread):
             self.write_failed.emit(writer_key, param_name, str(e))
             return
         self.write_succeeded.emit(writer_key, param_name, value)
+
+    def _handle_delete_program(self, program_index):
+        try:
+            self._bridge.delete_program(program_index)
+        except Exception as e:
+            self.program_delete_failed.emit(program_index, str(e))
+            return
+        # the roster just changed - same reasoning as _handle_program_list's
+        # own reset: PRGNUM uniqueness for whatever remains isn't guaranteed
+        self._programs_renumbered = False
+        self.program_deleted.emit(program_index)
+
+    def _handle_delete_keygroup(self, program_index, keygroup_index):
+        try:
+            self._bridge.delete_keygroup(program_index, keygroup_index)
+        except Exception as e:
+            self.keygroup_delete_failed.emit(program_index, keygroup_index, str(e))
+            return
+        self.keygroup_deleted.emit(program_index, keygroup_index)
