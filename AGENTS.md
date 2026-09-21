@@ -51,12 +51,12 @@ to a specific commit; if something there looks wrong, it's either the wrong
 assumption on this project's side, or worth raising upstream, not editing
 in-place.
 
-### Two fields where this project's own hardware beats s3k.params' notes
+### Three fields where this project's own hardware beats s3k.params' notes
 
 `s3k.params`'s own measured notes are usually the most trustworthy source in
-the whole stack (see above) - but on two program-level fields, this project's
-user has since measured their own S3000-series unit and gotten a different
-answer, confirmed in front of them, not from a manual:
+the whole stack (see above) - but on three program-level fields, this
+project's user has since measured their own S3000-series unit and gotten a
+different answer, confirmed in front of them, not from a manual:
 
 - **`K_FREQ`** (keygroup filter key-tracking) - `s3k.params` declares
   `-30..99` (its own notes cite a 2026-08-24 sweep finding no clamp at 12 or
@@ -64,17 +64,40 @@ answer, confirmed in front of them, not from a manual:
   again on this project's own hardware (2026-09-20): the real range is
   `-24..+24` after all. `key_filter_track_knob` in `program_editor_window.py`
   uses `-24..24`, not `s3k.params`'s declared range - this is deliberate, see
-  the comment there.
+  the comment there. This one is a NARROWER subset of `s3k.params`' own
+  declared range, so every value the widget can send already passes the
+  dependency's own `encode_field` range check - no further work needed.
 - **`B_PTCHD`** (pitch-bend-down range) - `s3k.params` declares `0..12`,
   asymmetric with `B_PTCH` (bend-up)'s `0..24`. Measured on the same unit,
-  same session: it's actually `0..24`, symmetric with bend-up.
-  `bend_down_spinbox` uses `0..24` for the same reason.
+  same session, and reconfirmed directly by the user (2026-09-21), both
+  directions: it's actually `0..24`, symmetric with bend-up.
+  `bend_down_spinbox` uses `0..24` for the same reason. Unlike `K_FREQ`,
+  this one is WIDER than `s3k.params`' declared range - a raw
+  `p.lookup("B_PTCHD", "program")` still fails `encode_field`'s own range
+  check for anything above 12, against the currently pinned `s3ked` rev.
+  `core/program_editor_bridge.py`'s `_HARDWARE_RANGE_OVERRIDES`/
+  `_lookup_for_write` patches a corrected copy of the `Parameter` (a
+  `dataclasses.replace`, not an edit to the dependency itself) in front of
+  every write, so writes up to 24 actually reach the hardware. See
+  `tests/test_program_editor_window_demo_bridge.py`'s
+  `test_bend_down_raw_s3k_params_lookup_still_declares_the_narrower_0_to_12`
+  (still true - confirms the override is doing real work) and
+  `test_bend_down_spinbox_above_12_reaches_hardware_via_the_range_override`.
+- **`LFO2TRIG`** (LFO2's retrigger mode) - `s3k.params` declares the full raw
+  byte range `0..255` with no `values={}` enum and no measured note at all
+  (unlike `LFO1WAVE`/`LFO2WAVE`'s documented shape enums) - it genuinely
+  doesn't say what the real values mean. Measured on this project's own
+  hardware (2026-09-21): it's a plain boolean. `lfo2_trig_combo` in
+  `program_editor_window.py` offers only Off/On accordingly. No override
+  needed here (0/1 always fits `0..255`) - this is a UI-only narrowing, same
+  shape as `K_FREQ`.
 
 If you're auditing widget ranges against `s3k.params` and find one of these
-two "wrong," it isn't - re-read the comment at the call site before "fixing"
-it back to match the dependency. If you get hardware access and can re-verify
-either one (or find a third), update the comment with the date and what you
-found, the same way these two are documented now.
+three "wrong," it isn't - re-read the comment at the call site (and
+`_HARDWARE_RANGE_OVERRIDES` for `B_PTCHD`) before "fixing" it back to match
+the dependency. If you get hardware access and can re-verify any of these
+(or find another), update the comment with the date and what you found, the
+same way these three are documented now.
 
 ## Developing without hardware
 
@@ -266,6 +289,23 @@ LFO2's shape hasn't been measured the same way (LFO1's 4th shape was found
 by reading the *pitch* track, since LFO1 drives pitch; LFO2 drives pan, no
 equivalent measurement exists), so `lfo2_shape_combo` only offers 3 - don't
 assume LFO2 also secretly has a 4th shape without measuring it first.
+
+LFO1 also has its own sync/desync toggle, exposed as `lfo1_sync_combo` next
+to `lfo_shape_combo` on the LFO1 card. The underlying field is `DESYNC`
+("Enable de-synchronisation of LFO1 across notes"; `s3k.params` values
+`{0: "OFF", 1: "ON"}`) - i.e. the field is phrased as its own negation.
+`lfo1_sync_combo` is deliberately labeled the positive way round ("Sync":
+On/Off) to match how a user actually thinks about it, which means its
+*items* are listed in the opposite order from `DESYNC`'s own OFF/ON text,
+but the raw byte each combo index writes is **not** inverted - index 0
+("On", LFO1 stays synced) is `DESYNC=0`, index 1 ("Off", desynced) is
+`DESYNC=1`, same "combo index is the raw byte" convention as everything
+else on this page. See the construction comment on `lfo1_sync_combo` before
+reordering its items. LFO2 has no equivalent field - only LFO1's sync
+behaviour has been measured/exposed; don't assume LFO2 has one too without
+checking first (LFO2 does have its own `LFO2TRIG` retrigger boolean, but
+that's a different thing - see "Three fields where this project's own
+hardware beats s3k.params' notes" above).
 
 The **Modulation** section cards (one on each tab) expose the assignable
 modulation matrix (`MODS*`/`MODV*` fields): up to 3 (source, amount) slots

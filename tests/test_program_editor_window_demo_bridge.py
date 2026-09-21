@@ -196,6 +196,27 @@ def test_demo_bridge_keygroup_level_write_round_trips_through_real_encode_decode
     assert editor._failures.events == []
 
 
+def test_demo_bridge_lfo1_sync_and_lfo2_retrig_combos_round_trip(editor, qapp):
+    # both booleans, region "program" - DESYNC and LFO2TRIG. DESYNC's raw
+    # value equals the combo index directly despite the "Sync" label being
+    # the field's own polarity flipped (see lfo1_sync_combo's construction
+    # comment); LFO2TRIG is a plain hardware-measured boolean (AGENTS.md).
+    bridge = editor._demo_bridge
+
+    editor.lfo1_sync_combo.setCurrentIndex(1)  # "Off" -> DESYNC=1
+    editor._flush_write("DESYNC")
+    editor.lfo2_trig_combo.setCurrentIndex(1)  # "On" -> LFO2TRIG=1
+    editor._flush_write("LFO2TRIG")
+    editor._worker.wait_until_idle()
+    _pump_until(
+        qapp,
+        lambda: bridge.get_parameter(p.lookup("DESYNC", "program"), 0) == 1
+        and bridge.get_parameter(p.lookup("LFO2TRIG", "program"), 0) == 1,
+    )
+
+    assert editor._failures.events == []
+
+
 def _wait_for_multi_parts_load(editor, qapp):
     # multi parts load is already submitted during the editor fixture's
     # first-load sequence (see _on_programs_loaded's "first load only"
@@ -267,20 +288,27 @@ def test_demo_bridge_program_change_with_no_live_midi_connection_reports_change_
     assert editor._failures.events == []
 
 
-# --- Contract checks for AGENTS.md's two documented widget-range overrides ---
+# --- Contract checks for AGENTS.md's documented widget-range overrides ---
 #
 # AGENTS.md records that key_filter_track_knob (K_FREQ, -24..24) and
 # bend_down_spinbox (B_PTCHD, 0..24) deliberately use a range that differs
 # from what s3k.params itself declares, based on hardware measurements taken
 # on this project's own S3000-series unit rather than the dependency's
-# transcribed manual values. The two cases aren't symmetric:
+# transcribed manual values (reconfirmed for B_PTCHD by the user directly,
+# both directions, after the mismatch below was found). The two cases
+# aren't symmetric:
 #
 # - K_FREQ's widget range (-24..24) is a NARROWER subset of s3k.params'
-#   declared range (-30..99 as of the pinned rev) - always safe to write.
+#   declared range (-30..99 as of the pinned rev) - always safe to write
+#   with no override needed.
 # - B_PTCHD's widget range (0..24) is WIDER than s3k.params' declared range
 #   (0..12 as of the pinned rev) - values above 12 fail encode_field's own
-#   range check (see s3k.params._encode_one) against the CURRENTLY PINNED
-#   dependency, not just some future one.
+#   range check (see s3k.params._encode_one) against the raw, unmodified
+#   Parameter. program_editor_bridge.py's _HARDWARE_RANGE_OVERRIDES/
+#   _lookup_for_write patches a corrected copy of B_PTCHD's Parameter
+#   (maximum 12 -> 24) in front of every write, so the app itself no longer
+#   hits this - but p.lookup("B_PTCHD", "program") on its own still returns
+#   the dependency's original 0..12 unless routed through that helper.
 
 
 def test_key_filter_track_widget_boundary_values_are_accepted_by_pinned_s3k_params():
@@ -291,41 +319,37 @@ def test_key_filter_track_widget_boundary_values_are_accepted_by_pinned_s3k_para
         assert bridge.get_parameter(param, 0, keygroup=0) == boundary
 
 
-def test_bend_down_widget_range_exceeds_what_the_pinned_s3k_params_currently_accepts():
-    # documents a REAL, PRE-EXISTING mismatch (not introduced by this test):
-    # bend_down_spinbox lets a user dial in up to 24 semitones, but the
-    # pinned s3k.params rev still declares B_PTCHD as 0..12 - so anything
-    # above 12 raises here today, against the exact dependency this app
-    # ships with, independent of any future upgrade. If a future s3ked pin
-    # bump changes B_PTCHD's declared range to genuinely match the 0..24
-    # hardware measurement AGENTS.md records, THIS TEST should start failing
-    # (the ValueError stops happening) - that's the signal to flip it to
-    # assert success and drop this comment, not a regression to chase.
-    bridge = DemoBridge()
+def test_bend_down_raw_s3k_params_lookup_still_declares_the_narrower_0_to_12():
+    # p.lookup() on its own (bypassing program_editor_bridge.py's override
+    # helper) still returns what the pinned s3ked rev actually declares -
+    # confirms the override below is doing real work, not patching
+    # something that was never a problem. If a future s3ked pin bump widens
+    # this itself, this assertion (not the round-trip test below) is what
+    # will start failing - that's the signal the override in
+    # program_editor_bridge.py can be retired, not a regression to chase.
     param = p.lookup("B_PTCHD", "program")
     assert (param.minimum, param.maximum) == (0, 12)
 
+    bridge = DemoBridge()
     with pytest.raises(ValueError, match="outside 0..12"):
         bridge.set_parameter(param, 0, 20)
 
 
-def test_bend_down_spinbox_can_silently_fail_to_reach_hardware_above_12(editor, qapp):
-    # the UI-level consequence of the contract test above: turning "Bend
-    # down" past 12 does not raise or roll back in the UI - the spinbox
-    # keeps showing the typed value, and the only signal anything went
-    # wrong is a transient status-bar message from write_failed. Loading
-    # the program again would show the OLD value, silently reverting what
-    # the panel displayed. Kept as a regression pin, not a claim this is
-    # desired behaviour - see the contract test above for the underlying
-    # cause and AGENTS.md for why the widget range was set to 0..24 anyway.
+def test_bend_down_spinbox_above_12_reaches_hardware_via_the_range_override(
+    editor, qapp
+):
+    # the UI-level payoff of _lookup_for_write's override: turning "Bend
+    # down" up to 24 (confirmed on real hardware, both directions) now
+    # actually reaches the sampler instead of silently failing to write
+    # while the spinbox itself kept showing the unsaved value - see
+    # program_editor_bridge.py's _HARDWARE_RANGE_OVERRIDES comment.
+    bridge = editor._demo_bridge
     editor.bend_down_spinbox.setValue(20)
     editor._flush_write("B_PTCHD")
     editor._worker.wait_until_idle()
     _pump_until(
-        qapp, lambda: any(e[0] == "write" and e[2] == "B_PTCHD" for e in editor._failures.events)
+        qapp,
+        lambda: bridge.get_parameter(p.lookup("B_PTCHD", "program"), 0) == 20,
     )
 
-    write_failures = [e for e in editor._failures.events if e[0] == "write"]
-    assert write_failures == [("write", "B_PTCHD", "B_PTCHD", "B_PTCHD: 20 is outside 0..12")]
-    # the widget itself is never told to roll back
-    assert editor.bend_down_spinbox.value() == 20
+    assert editor._failures.events == []

@@ -85,6 +85,12 @@ class FakeBridge:
             return 2  # high
         if param.name in ("LFORAT", "LFODEP", "LFODEL", "LFO1WAVE"):
             return 0
+        # DESYNC is LFO1's own sync/desync toggle (see lfo1_sync_combo's
+        # construction comment on the value polarity) - 1 here means
+        # DESYNC=ON (desynced), which lfo1_sync_combo should show as index 1
+        # ("Off", i.e. Sync Off)
+        if param.name == "DESYNC":
+            return 1
         # LFO2 (hardwired to Pan on this hardware - see
         # program_editor_window.py's LFO2 card comment) - deliberately
         # different from LFORAT/LFODEP/LFODEL/LFO1WAVE above so a test can
@@ -97,6 +103,8 @@ class FakeBridge:
             return 3
         if param.name == "LFO2WAVE":
             return 1  # Sawtooth
+        if param.name == "LFO2TRIG":
+            return 1  # On - boolean per hardware measurement, see AGENTS.md
         # modulation matrix - MODSPAN1/MODVPAN1 given real, distinct values
         # (rather than falling through to the generic "return 30" below)
         # since MODSPAN1 must be a valid combo index (0-13), and a
@@ -541,6 +549,40 @@ def test_lfo2_panel_loads_and_writes(editor, qapp):
     _pump_until(qapp, lambda: bridge.set_parameter_calls)
 
     assert bridge.set_parameter_calls[-1] == ("PANRAT", 0, 60, 0)
+
+
+def test_lfo1_sync_combo_loads_and_writes(editor, qapp):
+    # FakeBridge reports DESYNC=1 (desynced) - lfo1_sync_combo shows this
+    # the positive "Sync" way round (see its own construction comment on
+    # the polarity): index 1 = "Off" (Sync Off, i.e. desynced), even though
+    # the raw byte and the combo index are NOT inverted relative to each
+    # other (index 1 IS raw 1 here)
+    assert editor.lfo1_sync_combo.currentIndex() == 1
+    assert editor.lfo1_sync_combo.currentText() == "Off"
+
+    bridge = editor._bridge
+    editor.lfo1_sync_combo.setCurrentIndex(0)  # "On" -> DESYNC=0
+    editor._flush_write("DESYNC")
+    editor._worker.wait_until_idle()
+    _pump_until(qapp, lambda: bridge.set_parameter_calls)
+
+    assert bridge.set_parameter_calls[-1] == ("DESYNC", 0, 0, 0)
+
+
+def test_lfo2_retrig_combo_loads_and_writes(editor, qapp):
+    # LFO2TRIG used to be a plain 0-255 spinbox with no write wiring at all
+    # (s3k.params documents no enum for it) - now a boolean combo per
+    # hardware measurement (see its own construction comment, and AGENTS.md)
+    assert editor.lfo2_trig_combo.currentIndex() == 1
+    assert editor.lfo2_trig_combo.currentText() == "On"
+
+    bridge = editor._bridge
+    editor.lfo2_trig_combo.setCurrentIndex(0)  # "Off"
+    editor._flush_write("LFO2TRIG")
+    editor._worker.wait_until_idle()
+    _pump_until(qapp, lambda: bridge.set_parameter_calls)
+
+    assert bridge.set_parameter_calls[-1] == ("LFO2TRIG", 0, 0, 0)
 
 
 def test_modulation_pan_slot_loads_and_writes(editor, qapp):
