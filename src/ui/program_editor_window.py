@@ -858,8 +858,8 @@ class ProgramEditorWindow(QMainWindow):
         # hardware for LFO1 depth (not yet exposed here either). No source
         # dropdown needed since the source is always LFO1.
         self.lfo1_to_pitch_knob = self._build_mod_amount_knob()
-        lfo1_to_pitch_col, self.lfo1_to_pitch_value_label = self._build_knob_column(
-            None, self.lfo1_to_pitch_knob, show_label=False
+        lfo1_to_pitch_col, self.lfo1_to_pitch_value_label = self._build_mod_amount_row(
+            self.lfo1_to_pitch_knob
         )
         self._wire_knob_write(
             self.lfo1_to_pitch_knob,
@@ -899,8 +899,8 @@ class ProgramEditorWindow(QMainWindow):
         detail_container_layout.setSpacing(12)
         detail_container_layout.addLayout(range_filter_row)
         detail_container_layout.addLayout(envelopes_row)
-        detail_container_layout.addWidget(keygroup_modulation_section)
         detail_container_layout.addWidget(zone_card)
+        detail_container_layout.addWidget(keygroup_modulation_section)
         detail_container_layout.addStretch()
         detail_container = QWidget()
         detail_container.setLayout(detail_container_layout)
@@ -2213,16 +2213,16 @@ class ProgramEditorWindow(QMainWindow):
     def _build_mod_amount_knob(self):
         # +/-50 like every MODV*/L_PTCH field's declared range, default
         # 0 (no modulation) same as every other "off by default" knob on
-        # this page. 32x32 (matching ENV2's rate/level knobs), not 40x40 -
-        # since the matrix grid puts this beside a ~29px-tall source combo
-        # rather than stacked below its own label, 40x40 read visibly
-        # oversized next to it; 32x32 was measured to sit comfortably
-        # beside the combo without shrinking to the Multis tab's 28x28
-        # (that one has 16 knobs to a single row and needs every pixel).
+        # this page. 28x28, matching the Multis tab's knobs
+        # (_build_multi_part_knob) rather than ENV2's 32x32 rate/level
+        # knobs - since the matrix grid puts this beside a ~29px-tall
+        # source combo rather than stacked below its own label, the
+        # smaller size reads better next to the combo and keeps every
+        # amount knob on this page (Multis tab included) the same size.
         knob = Knob()
         knob.setRange(-50, 50)
         knob.setDefaultValue(0)
-        knob.setFixedSize(32, 32)
+        knob.setFixedSize(28, 28)
         # enabled here rather than in __init__'s later "enable knobs" block
         # (see Knob.__init__ - it starts disabled) - unlike every other
         # knob on this page, these are built AND wired together by one
@@ -2230,6 +2230,23 @@ class ProgramEditorWindow(QMainWindow):
         # happen before enabling one is safe
         knob.setEnabled(True)
         return knob
+
+    def _build_mod_amount_row(self, knob):
+        # amount knob + live numeric readout side by side, same compact
+        # row shape as the Multis tab's knobs (_build_multi_part_knob) -
+        # unlike _build_knob_column's vertical (knob, then value below)
+        # layout, the matrix grid already carries a "Slot N"/"Amount"
+        # header (see _build_mod_matrix_header/_build_mod_matrix_amount_header),
+        # so there's no per-knob name label to stack above the value here,
+        # just the knob and its readout beside each other.
+        value_label = QLabel("-")
+        row = QHBoxLayout()
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(4)
+        row.addWidget(knob)
+        row.addWidget(value_label)
+        knob.valueChanged.connect(lambda v: value_label.setText(str(v)))
+        return row, value_label
 
     def _build_mod_slot(
         self,
@@ -2250,9 +2267,7 @@ class ProgramEditorWindow(QMainWindow):
         # card comments below for the full list.
         combo = self._build_mod_source_combo()
         knob = self._build_mod_amount_knob()
-        amount_column, value_label = self._build_knob_column(
-            None, knob, show_label=False
-        )
+        amount_column, value_label = self._build_mod_amount_row(knob)
 
         self._wire_combo_write(
             combo, source_param, source_region, keygroup_index_getter=keygroup_index_getter
@@ -2293,7 +2308,7 @@ class ProgramEditorWindow(QMainWindow):
         # with no source dropdown, for the Keygroup tab's own Modulation
         # card (the matching source lives on the Program tab)
         knob = self._build_mod_amount_knob()
-        column, value_label = self._build_knob_column(None, knob, show_label=False)
+        column, value_label = self._build_mod_amount_row(knob)
         self._wire_knob_write(
             knob,
             amount_param,
@@ -2335,6 +2350,9 @@ class ProgramEditorWindow(QMainWindow):
         # per row (LFO1 Rate/Depth/Delay and Pitch only ever have 1;
         # Pan/Loudness/Filter Frequency have up to 3) - this just places
         # whatever it's given, leaving the rest of that row's cells empty.
+        # amount_layout is centered (AlignHCenter, not just AlignVCenter)
+        # so every amount knob lines up under the centered "Amount" header
+        # instead of hugging the cell's left edge.
         label = QLabel(label_text)
         label.setFixedWidth(110)
         grid.addWidget(label, row, 0, Qt.AlignmentFlag.AlignVCenter)
@@ -2346,7 +2364,10 @@ class ProgramEditorWindow(QMainWindow):
                 )
             if amount_layout is not None:
                 grid.addLayout(
-                    amount_layout, row, start_col + 1, Qt.AlignmentFlag.AlignVCenter
+                    amount_layout,
+                    row,
+                    start_col + 1,
+                    Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignHCenter,
                 )
 
     def _build_mod_matrix_amount_header(self, grid, slot_count):
@@ -2365,14 +2386,20 @@ class ProgramEditorWindow(QMainWindow):
     def _build_mod_matrix_amount_row(self, grid, row, label_text, *amount_layouts):
         # the Keygroup tab's equivalent of _build_mod_matrix_row - one
         # amount_layout (or None to leave that slot's cell blank) per
-        # column, under _build_mod_matrix_amount_header's "Slot N" columns
+        # column, under _build_mod_matrix_amount_header's "Slot N" columns.
+        # Centered (AlignHCenter, not just AlignVCenter) so every amount
+        # knob lines up under its centered "Slot N" label instead of
+        # hugging the cell's left edge.
         label = QLabel(label_text)
         label.setFixedWidth(110)
         grid.addWidget(label, row, 0, Qt.AlignmentFlag.AlignVCenter)
         for slot_index, amount_layout in enumerate(amount_layouts):
             if amount_layout is not None:
                 grid.addLayout(
-                    amount_layout, row, 1 + slot_index, Qt.AlignmentFlag.AlignVCenter
+                    amount_layout,
+                    row,
+                    1 + slot_index,
+                    Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignHCenter,
                 )
 
     def _build_akai_name_edit(self):
