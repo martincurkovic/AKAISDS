@@ -430,16 +430,29 @@ class ProgramEditorWindow(QMainWindow):
                 keygroup_index_getter=self.keygroup_list.currentRow,
             )
 
-        # ENV2 - a 4-stage rate/level generator: rate knobs on top, that
-        # stage's level knob below it, stages left-to-right in order
+        # ENV2 - a 4-stage rate/level generator: one column per stage
+        # (left-to-right in order), a "Stage N" header naming each column
+        # and "Rate"/"Level" row labels naming each row - same grid shape
+        # as the Modulation cards' Amount-only card (_build_mod_matrix_
+        # amount_header/_row), reused here rather than ENV1's per-stage
+        # label-above/value-below columns (_build_knob_column): with two
+        # knobs per stage instead of ENV1's one, repeating "Rate"/"Level"
+        # under every single knob (as a first pass at this did, one column
+        # per stage with its own two labelled rows) made the card wider
+        # than ENV1's for no benefit - the row labels only need saying once
+        # each, on the left, same as the Modulation card's destinations.
         self._env2_rate_knobs = [Knob() for _ in range(4)]
         self._env2_level_knobs = [Knob() for _ in range(4)]
         self._env2_rate_value_labels = []
         self._env2_level_value_labels = []
-        env2_rate_row = QHBoxLayout()
-        env2_rate_row.setSpacing(6)
-        env2_level_row = QHBoxLayout()
-        env2_level_row.setSpacing(6)
+        env2_grid = QGridLayout()
+        env2_grid.setHorizontalSpacing(14)
+        env2_grid.setVerticalSpacing(6)
+        env2_header_rows = self._build_mod_matrix_amount_header(
+            env2_grid, 4, label_prefix="Stage"
+        )
+        env2_rate_layouts = []
+        env2_level_layouts = []
         # Akai factory-preset values, one per stage (double-click a knob to
         # reset to these) - same reasoning as ENV1's defaults above
         _ENV2_RATE_DEFAULTS = [0, 50, 50, 45]
@@ -453,15 +466,31 @@ class ProgramEditorWindow(QMainWindow):
             level_knob.setRange(0, 99)
             level_knob.setDefaultValue(_ENV2_LEVEL_DEFAULTS[i - 1])
             level_knob.setFixedSize(32, 32)
-            rate_col, rate_value_label = self._build_knob_column(f"R{i}", rate_knob)
-            level_col, level_value_label = self._build_knob_column(f"L{i}", level_knob)
-            env2_rate_row.addLayout(rate_col)
-            env2_level_row.addLayout(level_col)
+
+            rate_layout, rate_value_label = self._build_knob_value_row(rate_knob)
+            level_layout, level_value_label = self._build_knob_value_row(level_knob)
+            env2_rate_layouts.append(rate_layout)
+            env2_level_layouts.append(level_layout)
+
             self._env2_rate_value_labels.append(rate_value_label)
             self._env2_level_value_labels.append(level_value_label)
 
             rate_knob.valueChanged.connect(self._on_env2_knob_changed)
             level_knob.valueChanged.connect(self._on_env2_knob_changed)
+
+        # "Rate"/"Level" are much shorter than the Modulation cards' own
+        # destination names, so a narrow label_width keeps this grid from
+        # inheriting that card's wider label column for no reason
+        self._build_mod_matrix_amount_row(
+            env2_grid, env2_header_rows + 0, "Rate", *env2_rate_layouts, label_width=45
+        )
+        self._build_mod_matrix_amount_row(
+            env2_grid,
+            env2_header_rows + 1,
+            "Level",
+            *env2_level_layouts,
+            label_width=45,
+        )
 
         # ENV2's eight fields aren't a plain rate1..4/level1..4 sequence -
         # ATTAK2/DECAY2/RELSE2/SUSTN2 keep their ADSR-flavoured names from
@@ -486,11 +515,6 @@ class ProgramEditorWindow(QMainWindow):
                 "keygroup",
                 keygroup_index_getter=self.keygroup_list.currentRow,
             )
-
-        env2_controls_column = QVBoxLayout()
-        env2_controls_column.setSpacing(4)
-        env2_controls_column.addLayout(env2_rate_row)
-        env2_controls_column.addLayout(env2_level_row)
 
         env1_graph_row = QHBoxLayout()
         env1_graph_row.addStretch()
@@ -778,7 +802,7 @@ class ProgramEditorWindow(QMainWindow):
             "Envelope 1", env1_graph_row, env1_controls_row
         )
         env2_section = self._build_section_card(
-            "Envelope 2", env2_graph_row, env2_controls_column
+            "Envelope 2", env2_graph_row, env2_grid
         )
 
         # Range is a single short row and Filter is comparable in height -
@@ -858,7 +882,7 @@ class ProgramEditorWindow(QMainWindow):
         # hardware for LFO1 depth (not yet exposed here either). No source
         # dropdown needed since the source is always LFO1.
         self.lfo1_to_pitch_knob = self._build_mod_amount_knob()
-        lfo1_to_pitch_col, self.lfo1_to_pitch_value_label = self._build_mod_amount_row(
+        lfo1_to_pitch_col, self.lfo1_to_pitch_value_label = self._build_knob_value_row(
             self.lfo1_to_pitch_knob
         )
         self._wire_knob_write(
@@ -2231,15 +2255,24 @@ class ProgramEditorWindow(QMainWindow):
         knob.setEnabled(True)
         return knob
 
-    def _build_mod_amount_row(self, knob):
-        # amount knob + live numeric readout side by side, same compact
-        # row shape as the Multis tab's knobs (_build_multi_part_knob) -
-        # unlike _build_knob_column's vertical (knob, then value below)
-        # layout, the matrix grid already carries a "Slot N"/"Amount"
-        # header (see _build_mod_matrix_header/_build_mod_matrix_amount_header),
-        # so there's no per-knob name label to stack above the value here,
-        # just the knob and its readout beside each other.
+    def _build_knob_value_row(self, knob):
+        # knob + live numeric readout side by side, same compact row shape
+        # as the Multis tab's knobs (_build_multi_part_knob) - unlike
+        # _build_knob_column's vertical (knob, then value below) layout,
+        # this is for grids that already carry their own row/column
+        # headers (the Modulation cards' "Slot N"/"Amount" header - see
+        # _build_mod_matrix_header/_build_mod_matrix_amount_header - and
+        # ENV2's "Stage N"/"Rate"/"Level" grid below), so there's no
+        # per-knob name label to stack above the value here, just the knob
+        # and its readout beside each other. Fixed width (matching
+        # _build_multi_part_knob's own value_label) so the label's own
+        # width doesn't change as its text does ("0" vs "-50") - unfixed,
+        # a value crossing a digit-count boundary reflowed the row's total
+        # width, which visibly nudged the knob sideways since these rows
+        # sit centered in their grid cell (see _build_mod_matrix_row/
+        # _build_mod_matrix_amount_row's AlignHCenter).
         value_label = QLabel("-")
+        value_label.setFixedWidth(28)
         row = QHBoxLayout()
         row.setContentsMargins(0, 0, 0, 0)
         row.setSpacing(4)
@@ -2267,7 +2300,7 @@ class ProgramEditorWindow(QMainWindow):
         # card comments below for the full list.
         combo = self._build_mod_source_combo()
         knob = self._build_mod_amount_knob()
-        amount_column, value_label = self._build_mod_amount_row(knob)
+        amount_column, value_label = self._build_knob_value_row(knob)
 
         self._wire_combo_write(
             combo, source_param, source_region, keygroup_index_getter=keygroup_index_getter
@@ -2308,7 +2341,7 @@ class ProgramEditorWindow(QMainWindow):
         # with no source dropdown, for the Keygroup tab's own Modulation
         # card (the matching source lives on the Program tab)
         knob = self._build_mod_amount_knob()
-        column, value_label = self._build_mod_amount_row(knob)
+        column, value_label = self._build_knob_value_row(knob)
         self._wire_knob_write(
             knob,
             amount_param,
@@ -2370,28 +2403,38 @@ class ProgramEditorWindow(QMainWindow):
                     Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignHCenter,
                 )
 
-    def _build_mod_matrix_amount_header(self, grid, slot_count):
+    def _build_mod_matrix_amount_header(self, grid, slot_count, *, label_prefix="Slot"):
         # 1-row header for an Amount-only card (Keygroup tab - it never
         # shows a source, see the Modulation card comments below): just
         # "Slot N" per column, one column per slot rather than two. Returns
         # how many grid rows it used, same contract as the header above.
+        # label_prefix is also reused by ENV2's Rate/Level grid below
+        # ("Stage N" instead of "Slot N") - same shape (a centered header
+        # naming each column, so the data rows don't have to), different
+        # word for what a column actually is on that card.
         for slot_index in range(slot_count):
-            slot_label = QLabel(f"Slot {slot_index + 1}")
+            slot_label = QLabel(f"{label_prefix} {slot_index + 1}")
             slot_label.setAlignment(Qt.AlignmentFlag.AlignHCenter)
             grid.addWidget(
                 slot_label, 0, 1 + slot_index, Qt.AlignmentFlag.AlignHCenter
             )
         return 1
 
-    def _build_mod_matrix_amount_row(self, grid, row, label_text, *amount_layouts):
+    def _build_mod_matrix_amount_row(
+        self, grid, row, label_text, *amount_layouts, label_width=110
+    ):
         # the Keygroup tab's equivalent of _build_mod_matrix_row - one
         # amount_layout (or None to leave that slot's cell blank) per
         # column, under _build_mod_matrix_amount_header's "Slot N" columns.
         # Centered (AlignHCenter, not just AlignVCenter) so every amount
         # knob lines up under its centered "Slot N" label instead of
-        # hugging the cell's left edge.
+        # hugging the cell's left edge. label_width defaults to fitting the
+        # Modulation cards' longest destination name ("Filter Frequency")
+        # - ENV2's Rate/Level grid below passes a much narrower one, since
+        # "Rate"/"Level" are short and the whole point of that grid is to
+        # not waste width on a label column sized for something else.
         label = QLabel(label_text)
-        label.setFixedWidth(110)
+        label.setFixedWidth(label_width)
         grid.addWidget(label, row, 0, Qt.AlignmentFlag.AlignVCenter)
         for slot_index, amount_layout in enumerate(amount_layouts):
             if amount_layout is not None:
