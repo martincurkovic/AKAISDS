@@ -11,7 +11,8 @@ import os
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
-from PySide6.QtCore import QPointF, Qt
+from PySide6.QtCore import QPoint, QPointF, Qt
+from PySide6.QtGui import QWheelEvent
 from PySide6.QtWidgets import QApplication
 
 from ui.knob import Knob, _DRAG_SENSITIVITY_PX
@@ -120,3 +121,64 @@ def test_double_click_resets_to_the_default_value(qapp):
     knob.mouseDoubleClickEvent(_FakeMouseEvent(0))
 
     assert knob.value() == 75
+
+
+def _wheel_event(delta_y):
+    # a real QWheelEvent, not a duck-typed fake - Knob.wheelEvent delegates
+    # to QDial's own C++ implementation via super(), which needs the real
+    # thing (angleDelta(), isAccepted(), etc)
+    return QWheelEvent(
+        QPointF(0, 0),
+        QPointF(0, 0),
+        QPoint(0, 0),
+        QPoint(0, delta_y),
+        Qt.MouseButton.NoButton,
+        Qt.KeyboardModifier.NoModifier,
+        Qt.ScrollPhase.NoScrollPhase,
+        False,
+    )
+
+
+def test_wheel_at_max_value_is_still_accepted(qapp):
+    # plain QDial leaves this kind of event un-accepted once already
+    # clamped at its max - Qt then walks it up to the nearest ancestor
+    # that DOES want it, which in the real app is the section card's
+    # QScrollArea: scrolling a maxed-out knob further scrolled the whole
+    # page instead of doing nothing. See Knob.wheelEvent's own comment.
+    knob = Knob()
+    knob.setRange(0, 100)
+    knob.setValue(100)
+
+    event = _wheel_event(120)
+    knob.wheelEvent(event)
+
+    assert knob.value() == 100
+    assert event.isAccepted()
+
+
+def test_wheel_at_min_value_is_still_accepted(qapp):
+    knob = Knob()
+    knob.setRange(0, 100)
+    knob.setValue(0)
+
+    event = _wheel_event(-120)
+    knob.wheelEvent(event)
+
+    assert knob.value() == 0
+    assert event.isAccepted()
+
+
+def test_wheel_within_range_still_changes_the_value(qapp):
+    # the fix above must not turn wheel scrolling into a no-op - only the
+    # at-the-boundary case changes behaviour. Not asserting the exact step
+    # size - that's QDial/QAbstractSlider's own base behaviour, not
+    # something Knob.wheelEvent controls.
+    knob = Knob()
+    knob.setRange(0, 100)
+    knob.setValue(50)
+
+    event = _wheel_event(120)
+    knob.wheelEvent(event)
+
+    assert knob.value() > 50
+    assert event.isAccepted()
