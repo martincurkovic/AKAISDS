@@ -458,10 +458,10 @@ def test_changing_program_tune_writes_ptuno_in_raw_units(editor, qapp):
 def test_program_tab_loads_bend_and_portamento_from_hardware(editor):
     # FakeBridge.get_parameter: B_PTCH=7, B_PTCHD=4, PORTEN=1 (On),
     # PORTIME=55, PORTYPE=1 (Time)
-    assert editor.bend_up_spinbox.value() == 7
-    assert editor.bend_down_spinbox.value() == 4
+    assert editor.bend_up_combo.currentIndex() == 7
+    assert editor.bend_down_combo.currentIndex() == 4
     assert editor.portamento_enable_combo.currentText() == "On"
-    assert editor.portamento_rate_spinbox.value() == 55
+    assert editor.portamento_rate_knob.value() == 55
     assert editor.portamento_type_combo.currentText() == "Time"
 
 
@@ -470,9 +470,9 @@ def test_changing_bend_up_and_down_writes_separately(editor, qapp):
     # different hardware-declared ranges - not one control mirrored twice
     bridge = editor._bridge
 
-    editor.bend_up_spinbox.setValue(12)
+    editor.bend_up_combo.setCurrentIndex(12)
     editor._flush_write("B_PTCH")
-    editor.bend_down_spinbox.setValue(9)
+    editor.bend_down_combo.setCurrentIndex(9)
     editor._flush_write("B_PTCHD")
     editor._worker.wait_until_idle()
     _pump_until(qapp, lambda: len(bridge.set_parameter_calls) >= 2)
@@ -490,7 +490,7 @@ def test_changing_portamento_controls_writes_porten_portime_portype(editor, qapp
     _pump_until(qapp, lambda: bridge.set_parameter_calls)
     assert bridge.set_parameter_calls[-1] == ("PORTEN", 0, 0, 0)
 
-    editor.portamento_rate_spinbox.setValue(20)
+    editor.portamento_rate_knob.setValue(20)
     editor._flush_write("PORTIME")
     editor._worker.wait_until_idle()
     _pump_until(qapp, lambda: bridge.set_parameter_calls[-1][0] == "PORTIME")

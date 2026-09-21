@@ -291,7 +291,7 @@ def test_demo_bridge_program_change_with_no_live_midi_connection_reports_change_
 # --- Contract checks for AGENTS.md's documented widget-range overrides ---
 #
 # AGENTS.md records that key_filter_track_knob (K_FREQ, -24..24) and
-# bend_down_spinbox (B_PTCHD, 0..24) deliberately use a range that differs
+# bend_down_combo (B_PTCHD, 0..24) deliberately use a range that differs
 # from what s3k.params itself declares, based on hardware measurements taken
 # on this project's own S3000-series unit rather than the dependency's
 # transcribed manual values (reconfirmed for B_PTCHD by the user directly,
@@ -335,16 +335,16 @@ def test_bend_down_raw_s3k_params_lookup_still_declares_the_narrower_0_to_12():
         bridge.set_parameter(param, 0, 20)
 
 
-def test_bend_down_spinbox_above_12_reaches_hardware_via_the_range_override(
+def test_bend_down_combo_above_12_reaches_hardware_via_the_range_override(
     editor, qapp
 ):
     # the UI-level payoff of _lookup_for_write's override: turning "Bend
     # down" up to 24 (confirmed on real hardware, both directions) now
     # actually reaches the sampler instead of silently failing to write
-    # while the spinbox itself kept showing the unsaved value - see
+    # while the combo itself kept showing the unsaved value - see
     # program_editor_bridge.py's _HARDWARE_RANGE_OVERRIDES comment.
     bridge = editor._demo_bridge
-    editor.bend_down_spinbox.setValue(20)
+    editor.bend_down_combo.setCurrentIndex(20)
     editor._flush_write("B_PTCHD")
     editor._worker.wait_until_idle()
     _pump_until(

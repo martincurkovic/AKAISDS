@@ -71,7 +71,10 @@ different answer, confirmed in front of them, not from a manual:
   asymmetric with `B_PTCH` (bend-up)'s `0..24`. Measured on the same unit,
   same session, and reconfirmed directly by the user (2026-09-21), both
   directions: it's actually `0..24`, symmetric with bend-up.
-  `bend_down_spinbox` uses `0..24` for the same reason. Unlike `K_FREQ`,
+  `bend_down_combo` uses `0..24` for the same reason (a combo now, not a
+  spinbox - "Bend up"/"Bend down" both moved to combos with the widget's
+  index doubling as the raw value, same convention as every other combo on
+  this page). Unlike `K_FREQ`,
   this one is WIDER than `s3k.params`' declared range - a raw
   `p.lookup("B_PTCHD", "program")` still fails `encode_field`'s own range
   check for anything above 12, against the currently pinned `s3ked` rev.
@@ -82,7 +85,7 @@ different answer, confirmed in front of them, not from a manual:
   `tests/test_program_editor_window_demo_bridge.py`'s
   `test_bend_down_raw_s3k_params_lookup_still_declares_the_narrower_0_to_12`
   (still true - confirms the override is doing real work) and
-  `test_bend_down_spinbox_above_12_reaches_hardware_via_the_range_override`.
+  `test_bend_down_combo_above_12_reaches_hardware_via_the_range_override`.
 - **`LFO2TRIG`** (LFO2's retrigger mode) - `s3k.params` declares the full raw
   byte range `0..255` with no `values={}` enum and no measured note at all
   (unlike `LFO1WAVE`/`LFO2WAVE`'s documented shape enums) - it genuinely
