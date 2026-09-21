@@ -38,6 +38,8 @@ well under a second.
 
 `tests/test_program_editor_window.py` is the Program Editor window itself, against a `FakeBridge`. Needs a real (offscreen) `QApplication` since these are actual widgets, not pure logic.
 
+`tests/test_program_editor_window_demo_bridge.py` drives the same window against the REAL `s3ked.demo.DemoBridge` instead of `FakeBridge` - see its own module docstring. `FakeBridge` duck-types whatever the app currently expects from s3k/s3ked, so it can never catch the pinned dependency (see `pyproject.toml`'s `s3ked` rev) renaming/removing a parameter, moving it to a different region, or narrowing a declared min/max - none of that touches a single `p.lookup()`/`encode_field()`/`decode_field()` call when the bridge underneath is hand-authored. This file is the actual safety net for bumping the `s3ked` pin: run it (and the two range-mismatch tests inside it, see below) before and after any pin bump.
+
 `tests/test_dashboard_helpers.py`, `tests/test_knob.py`, `tests/test_keygroup_range_bar.py`, `tests/test_sample_info_dialog.py`, `tests/test_sample_settings_dialog.py`, `tests/test_qt_helpers.py` and `tests/test_envelope_graph.py` are pure logic pulled out of otherwise UI-heavy files - see "Pulling logic out of widgets" below.
 
 #### Why several tests exist
@@ -52,6 +54,7 @@ A number of tests in the suite are based on chasing down bugs during development
 - Refresh reloaded the current program's keygroups but never re-fetched the program list itself, so a program created on the hardware after the editor opened only ever showed up after closing and reopening the window
 - Assigning a program to a Multis-tab part always played the first program in the list, regardless of which one was picked - traced to every program sharing MIDI program number (`PRGNUM`) 0, which is the common case for freshly created/independently loaded programs. Fixed by renumbering before the first Program Change is sent.
 - The keygroup note-range display was one octave off (`C2` where the hardware's own front panel shows `C1`) - it was using the general-MIDI convention (note 60 = C4) instead of the S3000XL's own (note 60 = C3).
+- Writing `bend_down_spinbox` (a `B_PTCHD` field) above 12 semitones fails against the pinned `s3k.params` rev's own declared range check (`0..12`), even though the widget itself allows up to 24 - AGENTS.md documents *why* the widget uses 0..24 (a hardware measurement contradicting the dependency's transcribed manual value), but as of the currently pinned `s3ked` rev the dependency hasn't caught up to that measurement, so real writes above 12 fail silently to a status-bar message with no UI rollback. Found while building `test_program_editor_window_demo_bridge.py` against the real dependency rather than `FakeBridge` (which can't see range checks at all). See that file's `test_bend_down_widget_range_exceeds_what_the_pinned_s3k_params_currently_accepts` and `test_bend_down_spinbox_can_silently_fail_to_reach_hardware_above_12`.
 
 If you're fixing a bug, consider whether it's worth adding a test in here too.
 
