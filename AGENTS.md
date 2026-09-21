@@ -122,6 +122,30 @@ otherwise the worker thread is still running when the test ends and you'll
 hit the exact `QThread: Destroyed while thread is still running` this
 architecture was built to avoid.
 
+## Update checker (`core/update_checker.py`, `ui/update_helper.py`)
+
+Checks the public GitHub repo's `/repos/.../releases/latest` API for a newer
+tagged version than `ui/_version.py`'s `APP_VERSION`, entirely unauthenticated.
+This only works unattended because `.github/workflows/build.yml`'s release
+job publishes with `draft: true` - `/releases/latest` only ever returns the
+latest *published* (non-draft, non-prerelease) release, so an in-progress
+draft build is invisible to it and never gets offered to users as "the
+latest version". If a tagged build ever fails to get manually published on
+GitHub, the checker just keeps reporting the previous release as current -
+expected, not a bug.
+
+`UpdateCheckRunner` (`ui/update_helper.py`) is shared by `MainWindow`,
+`ProgramEditorWindow`, and `AboutDialog` - each owns its own instance, and
+each calls `.wait()` on it before actually closing (`closeEvent`/`done()`).
+That's the same root-cause bug class `BridgeWorker` above exists to
+prevent: a `QThread` (here, `UpdateCheckWorker`) whose Python wrapper gets
+garbage-collected while its underlying OS thread is still running.
+`ProgramEditorWindow` is the one most likely to actually hit this -
+`dashboard.py`'s `open_program_editor()` replaces `self.editor_window` on
+every click, so a just-closed editor with a check still in flight can lose
+its last Python reference well before that check (bounded by a 5s network
+timeout) actually finishes.
+
 ## Debug logging for real-hardware issues
 
 `core/debug_log.py` sets up a rotating log at `~/.akaisds/editor_debug.log`.
@@ -139,9 +163,10 @@ reading the whole file.
 
 The Program and Keygroup tabs are built from `_build_section_card(title,
 *row_layouts)` (groups related rows into one titled, bordered card - Volume/
-Pan/Velocity, LFO, Pitch, Filter, Envelope 1, Envelope 2, etc. - ENV1/ENV2
-used to share one "Envelopes" card and were later split into two, so don't
-assume the card list here is exhaustive or stable) and `_build_scroll_area(page)`
+Pan/Velocity, LFO1, LFO2, Pitch, Filter, Envelope 1, Envelope 2, Modulation,
+etc. - ENV1/ENV2 used to share one "Envelopes" card and were later split
+into two, so don't assume the card list here is exhaustive or stable) and
+`_build_scroll_area(page)`
 (wraps a whole tab's cards so the window doesn't have to be tall enough to
 show every card unscrolled). If you add another control, put it in the most
 relevant existing card rather than a new bare row - and if you add a whole
@@ -228,6 +253,68 @@ width again - that's reintroducing the exact bug above. See
 `test_adsr_stage_width_is_a_fixed_share_not_a_relative_one` and
 `test_env2_stage_width_is_a_fixed_share_not_a_relative_one` in
 `tests/test_envelope_graph.py`, which exist specifically to catch this.
+
+## LFO2 and the modulation matrix (Program/Keygroup tabs)
+
+`LFO2` is a real, independent second LFO - but on this hardware its own
+`rate`/`depth`/`delay`/`shape` are hardwired to modulate **Pan** (an
+auto-pan effect): they're `PANRAT`/`PANDEP`/`PANDEL`/`LFO2WAVE` in
+`s3k.params`, stored in the `program.pan` group despite being LFO2's own
+controls, not some pan-specific thing. `LFO2WAVE` only documents 3 shapes
+(Triangle/Sawtooth/Square) - unlike `LFO1WAVE`'s measured 4th ("Random"),
+LFO2's shape hasn't been measured the same way (LFO1's 4th shape was found
+by reading the *pitch* track, since LFO1 drives pitch; LFO2 drives pan, no
+equivalent measurement exists), so `lfo2_shape_combo` only offers 3 - don't
+assume LFO2 also secretly has a 4th shape without measuring it first.
+
+The **Modulation** section cards (one on each tab) expose the assignable
+modulation matrix (`MODS*`/`MODV*` fields): up to 3 (source, amount) slots
+per destination (Pan, Loudness, Filter Frequency), 1 slot each for LFO1's
+own Rate/Depth/Delay and for Pitch. The 14-source enum (`s3k.params.
+MOD_SOURCES`) is mirrored by hand as `_MOD_SOURCE_LABELS` in
+`program_editor_window.py`, **with envelope 3 (value 14) deliberately left
+out** - `s3k.params`' own hardware notes say env3 genuinely works on a base
+machine with no expansion board (it's the *second filter* it can also
+target that needs the IB304F board, not env3 itself), but this app has no
+Envelope 3 editor page yet, so offering it as a source with nothing to
+shape its ADSR would be confusing rather than useful. `test_mod_source_labels_match_s3k_params_minus_env3`
+guards this list against silently drifting from the dependency.
+
+**Why the matrix is split across both tabs**: every destination's *source*
+choice (`MODSPAN1..3`, `MODSAMP1..3`, `MODSLFOT/L/D`, `MODSFILT1..3`,
+`MODSPITCH`) lives in the `program` SysEx region - one shared choice for
+every keygroup in the program - so every source dropdown lives on the
+Program tab's card. Most *amounts* are program-level too and sit right next
+to their source there. But `MODVFILT1..3`, `MODVPITCH`, `MODVAMP3` (Loudness
+slot 3's amount only - slots 1/2 are program-level) and `L_PTCH` (a
+separate, always-on LFO1-to-pitch depth, not part of the 3-slot matrix at
+all) are stored in the `keygroup` region - a genuinely different value per
+keygroup - so those rows show only the source (with a footnote) on the
+Program tab, and only the amount knob on the Keygroup tab's own Modulation
+card. This split is not a UI choice, it's what the hardware actually
+stores - don't "fix" it into one card without re-checking each field's
+`region` in `s3k.params` first.
+
+Every slot is built through `_build_mod_slot`/`_build_mod_source_only_column`/
+`_build_mod_amount_only_column` (all in `program_editor_window.py`), each
+combo and knob explicitly labeled "Source"/"Amount" - with up to 3 slots
+side by side per row, unlabeled controls read as one thing split three ways
+rather than three independent routings, which is why these are the one
+place on this page where a combo/knob gets its own label instead of relying
+on the section card title alone. The amount knobs (`_build_mod_amount_knob`)
+are also the one place on this page that enables a `Knob` (see `Knob.__init__` -
+it starts disabled) right where it's built rather than in `__init__`'s later
+"enable knobs" block - deliberate, not a missed step, since each one is
+fully constructed AND wired by that same helper call with nothing else left
+to wait for. Don't "fix" these into the big enable block, and don't assume
+every knob not listed there is unwired - check whether it came from one of
+these three helpers first.
+
+Adding this card's rows is also what pushed `ProgramEditorWindow`'s
+`setMinimumSize` from `1040` to `1080` - re-measured the same way this
+file's own "section cards, scroll areas, and the busy indicator" section
+above describes (grow the window until `horizontalScrollBar().maximum()`
+hits zero on both tabs).
 
 ## PRGNUM and Program Change (Multis tab)
 
