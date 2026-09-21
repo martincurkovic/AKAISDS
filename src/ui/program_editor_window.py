@@ -181,7 +181,9 @@ class _ModMatrixGrid(QWidget):
                 continue  # first data row of each card stays unstriped
             rect = self._grid.cellRect(self._header_row_count + data_row, 0)
             if rect.isValid():
-                painter.fillRect(0, rect.top(), self.width(), rect.height(), stripe_color)
+                painter.fillRect(
+                    0, rect.top(), self.width(), rect.height(), stripe_color
+                )
 
         # measured against the last header row (single column per slot
         # there - the "Slot N" super-header row on the Source+Amount card
@@ -811,9 +813,7 @@ class ProgramEditorWindow(QMainWindow):
         env1_section = self._build_section_card(
             "Envelope 1", env1_graph_row, env1_controls_row
         )
-        env2_section = self._build_section_card(
-            "Envelope 2", env2_graph_row, env2_grid
-        )
+        env2_section = self._build_section_card("Envelope 2", env2_graph_row, env2_grid)
 
         # Range is a single short row and Filter is comparable in height -
         # side by side halves the vertical space these two cost together.
@@ -840,17 +840,23 @@ class ProgramEditorWindow(QMainWindow):
         # program, so there's nothing to pick per-keygroup.
         kg_filt1_col, self.mod_filt1_amount_knob, self.mod_filt1_amount_value_label = (
             self._build_mod_amount_only_column(
-                "MODVFILT1", "keygroup", keygroup_index_getter=self.keygroup_list.currentRow
+                "MODVFILT1",
+                "keygroup",
+                keygroup_index_getter=self.keygroup_list.currentRow,
             )
         )
         kg_filt2_col, self.mod_filt2_amount_knob, self.mod_filt2_amount_value_label = (
             self._build_mod_amount_only_column(
-                "MODVFILT2", "keygroup", keygroup_index_getter=self.keygroup_list.currentRow
+                "MODVFILT2",
+                "keygroup",
+                keygroup_index_getter=self.keygroup_list.currentRow,
             )
         )
         kg_filt3_col, self.mod_filt3_amount_knob, self.mod_filt3_amount_value_label = (
             self._build_mod_amount_only_column(
-                "MODVFILT3", "keygroup", keygroup_index_getter=self.keygroup_list.currentRow
+                "MODVFILT3",
+                "keygroup",
+                keygroup_index_getter=self.keygroup_list.currentRow,
             )
         )
         kg_mod_grid = QGridLayout()
@@ -870,7 +876,9 @@ class ProgramEditorWindow(QMainWindow):
 
         kg_pitch_col, self.mod_pitch_amount_knob, self.mod_pitch_amount_value_label = (
             self._build_mod_amount_only_column(
-                "MODVPITCH", "keygroup", keygroup_index_getter=self.keygroup_list.currentRow
+                "MODVPITCH",
+                "keygroup",
+                keygroup_index_getter=self.keygroup_list.currentRow,
             )
         )
         self._build_mod_matrix_amount_row(
@@ -879,7 +887,9 @@ class ProgramEditorWindow(QMainWindow):
 
         kg_amp3_col, self.mod_amp3_amount_knob, self.mod_amp3_amount_value_label = (
             self._build_mod_amount_only_column(
-                "MODVAMP3", "keygroup", keygroup_index_getter=self.keygroup_list.currentRow
+                "MODVAMP3",
+                "keygroup",
+                keygroup_index_getter=self.keygroup_list.currentRow,
             )
         )
         self._build_mod_matrix_amount_row(
@@ -1179,26 +1189,26 @@ class ProgramEditorWindow(QMainWindow):
             self.program_tune_spinbox, alignment=Qt.AlignmentFlag.AlignHCenter
         )
 
-        self.bend_up_spinbox = QSpinBox()
-        self.bend_up_spinbox.setRange(0, 24)
-        self.bend_up_spinbox.setSuffix(" st")
-        self.bend_up_spinbox.setFixedWidth(70)
-        bend_up_column = self._build_labeled_spinbox_column(
-            "Bend up", self.bend_up_spinbox
-        )
+        # combos rather than spinboxes - same "combo index IS the raw byte"
+        # convention as every other combo on this page (e.g. lfo1_sync_combo),
+        # which fits naturally here since both fields are already a small
+        # closed 0..24 range rather than free-form entry
+        self.bend_up_combo = QComboBox()
+        self.bend_up_combo.addItems([f"{i} st" for i in range(25)])
+        self.bend_up_combo.setMaximumWidth(70)
+        bend_up_column = self._build_labeled_combo_column("Bend up", self.bend_up_combo)
 
-        self.bend_down_spinbox = QSpinBox()
+        self.bend_down_combo = QComboBox()
         # s3k.params declares B_PTCHD's range as 0-12 (asymmetric with
         # B_PTCH's 0-24), transcribed from the Akai spec - contradicted by
         # this project's own hardware: confirmed 0-24, matching bend-up,
         # on real S3000-series hardware in front of the user (2026-09-20).
         # Same call as K_FREQ above: trust the direct measurement, don't
         # edit the dependency (AGENTS.md)
-        self.bend_down_spinbox.setRange(0, 24)
-        self.bend_down_spinbox.setSuffix(" st")
-        self.bend_down_spinbox.setFixedWidth(70)
-        bend_down_column = self._build_labeled_spinbox_column(
-            "Bend down", self.bend_down_spinbox
+        self.bend_down_combo.addItems([f"{i} st" for i in range(25)])
+        self.bend_down_combo.setMaximumWidth(70)
+        bend_down_column = self._build_labeled_combo_column(
+            "Bend down", self.bend_down_combo
         )
 
         self.portamento_enable_combo = QComboBox()
@@ -1217,15 +1227,16 @@ class ProgramEditorWindow(QMainWindow):
         )
         portamento_enable_column.addWidget(self.portamento_enable_combo)
 
-        self.portamento_rate_spinbox = QSpinBox()
+        self.portamento_rate_knob = Knob()
         # PORTIME's declared range is the full byte (0-255, s3k.params has
         # no measurement narrowing it) but every other 2-digit performance
         # knob on this hardware (LFORAT, FILFRQ, VOSCL, ...) tops out at 99,
         # so 0-99 is assumed here rather than offering the raw byte
-        self.portamento_rate_spinbox.setRange(0, 99)
-        self.portamento_rate_spinbox.setFixedWidth(70)
-        portamento_rate_column = self._build_labeled_spinbox_column(
-            "Rate", self.portamento_rate_spinbox
+        self.portamento_rate_knob.setRange(0, 99)
+        self.portamento_rate_knob.setDefaultValue(0)  # no known factory default
+        self.portamento_rate_knob.setFixedSize(28, 28)
+        portamento_rate_column, self.portamento_rate_value_label = (
+            self._build_labeled_knob_value_column("Rate", self.portamento_rate_knob)
         )
 
         self.portamento_type_combo = QComboBox()
@@ -1426,19 +1437,27 @@ class ProgramEditorWindow(QMainWindow):
             (lfo1_delay_combo, lfo1_delay_amount),
         )
 
-        self.mod_filt1_combo = self._build_mod_source_only_column("MODSFILT1", "program")
-        self.mod_filt2_combo = self._build_mod_source_only_column("MODSFILT2", "program")
-        self.mod_filt3_combo = self._build_mod_source_only_column("MODSFILT3", "program")
+        self.mod_filt1_combo = self._build_mod_source_only_column(
+            "MODSFILT1", "program"
+        )
+        self.mod_filt2_combo = self._build_mod_source_only_column(
+            "MODSFILT2", "program"
+        )
+        self.mod_filt3_combo = self._build_mod_source_only_column(
+            "MODSFILT3", "program"
+        )
         self._build_mod_matrix_row(
             mod_grid,
             header_rows + 5,
-            "Filter Frequency",
+            "Filter Freq.",
             (self.mod_filt1_combo, None),
             (self.mod_filt2_combo, None),
             (self.mod_filt3_combo, None),
         )
 
-        self.mod_pitch_combo = self._build_mod_source_only_column("MODSPITCH", "program")
+        self.mod_pitch_combo = self._build_mod_source_only_column(
+            "MODSPITCH", "program"
+        )
         self._build_mod_matrix_row(
             mod_grid, header_rows + 6, "Pitch", (self.mod_pitch_combo, None)
         )
@@ -1662,14 +1681,14 @@ class ProgramEditorWindow(QMainWindow):
             "program",
             value_converter=self._semitones_to_tune_offset,
         )
-        self.bend_up_spinbox.setEnabled(True)
-        self._wire_spinbox_write(self.bend_up_spinbox, "B_PTCH", "program")
-        self.bend_down_spinbox.setEnabled(True)
-        self._wire_spinbox_write(self.bend_down_spinbox, "B_PTCHD", "program")
+        self.bend_up_combo.setEnabled(True)
+        self._wire_combo_write(self.bend_up_combo, "B_PTCH", "program")
+        self.bend_down_combo.setEnabled(True)
+        self._wire_combo_write(self.bend_down_combo, "B_PTCHD", "program")
         self.portamento_enable_combo.setEnabled(True)
         self._wire_combo_write(self.portamento_enable_combo, "PORTEN", "program")
-        self.portamento_rate_spinbox.setEnabled(True)
-        self._wire_spinbox_write(self.portamento_rate_spinbox, "PORTIME", "program")
+        self.portamento_rate_knob.setEnabled(True)
+        self._wire_knob_write(self.portamento_rate_knob, "PORTIME", "program")
         self.portamento_type_combo.setEnabled(True)
         self._wire_combo_write(self.portamento_type_combo, "PORTYPE", "program")
         for knob in (
@@ -1988,18 +2007,19 @@ class ProgramEditorWindow(QMainWindow):
             self._tune_offset_to_semitones(program_values["PTUNO"])
         )
         self.program_tune_spinbox.blockSignals(False)
-        self.bend_up_spinbox.blockSignals(True)
-        self.bend_up_spinbox.setValue(program_values["B_PTCH"])
-        self.bend_up_spinbox.blockSignals(False)
-        self.bend_down_spinbox.blockSignals(True)
-        self.bend_down_spinbox.setValue(program_values["B_PTCHD"])
-        self.bend_down_spinbox.blockSignals(False)
+        self.bend_up_combo.blockSignals(True)
+        self.bend_up_combo.setCurrentIndex(program_values["B_PTCH"])
+        self.bend_up_combo.blockSignals(False)
+        self.bend_down_combo.blockSignals(True)
+        self.bend_down_combo.setCurrentIndex(program_values["B_PTCHD"])
+        self.bend_down_combo.blockSignals(False)
         self.portamento_enable_combo.blockSignals(True)
         self.portamento_enable_combo.setCurrentIndex(program_values["PORTEN"])
         self.portamento_enable_combo.blockSignals(False)
-        self.portamento_rate_spinbox.blockSignals(True)
-        self.portamento_rate_spinbox.setValue(program_values["PORTIME"])
-        self.portamento_rate_spinbox.blockSignals(False)
+        self.portamento_rate_knob.blockSignals(True)
+        self.portamento_rate_knob.setValue(program_values["PORTIME"])
+        self.portamento_rate_knob.blockSignals(False)
+        self.portamento_rate_value_label.setText(str(program_values["PORTIME"]))
         self.portamento_type_combo.blockSignals(True)
         self.portamento_type_combo.setCurrentIndex(program_values["PORTYPE"])
         self.portamento_type_combo.blockSignals(False)
@@ -2081,10 +2101,26 @@ class ProgramEditorWindow(QMainWindow):
         # and why. Loop for the same reason as _on_keygroups_loaded's own
         # modulation-loading loop above.
         keygroup_mod_knobs = [
-            (self.mod_filt1_amount_knob, self.mod_filt1_amount_value_label, "MODVFILT1"),
-            (self.mod_filt2_amount_knob, self.mod_filt2_amount_value_label, "MODVFILT2"),
-            (self.mod_filt3_amount_knob, self.mod_filt3_amount_value_label, "MODVFILT3"),
-            (self.mod_pitch_amount_knob, self.mod_pitch_amount_value_label, "MODVPITCH"),
+            (
+                self.mod_filt1_amount_knob,
+                self.mod_filt1_amount_value_label,
+                "MODVFILT1",
+            ),
+            (
+                self.mod_filt2_amount_knob,
+                self.mod_filt2_amount_value_label,
+                "MODVFILT2",
+            ),
+            (
+                self.mod_filt3_amount_knob,
+                self.mod_filt3_amount_value_label,
+                "MODVFILT3",
+            ),
+            (
+                self.mod_pitch_amount_knob,
+                self.mod_pitch_amount_value_label,
+                "MODVPITCH",
+            ),
             (self.mod_amp3_amount_knob, self.mod_amp3_amount_value_label, "MODVAMP3"),
             (self.lfo1_to_pitch_knob, self.lfo1_to_pitch_value_label, "L_PTCH"),
         ]
@@ -2313,7 +2349,10 @@ class ProgramEditorWindow(QMainWindow):
         amount_column, value_label = self._build_knob_value_row(knob)
 
         self._wire_combo_write(
-            combo, source_param, source_region, keygroup_index_getter=keygroup_index_getter
+            combo,
+            source_param,
+            source_region,
+            keygroup_index_getter=keygroup_index_getter,
         )
         self._wire_knob_write(
             knob,
@@ -2459,9 +2498,7 @@ class ProgramEditorWindow(QMainWindow):
         for slot_index in range(slot_count):
             slot_label = QLabel(f"{label_prefix} {slot_index + 1}")
             slot_label.setAlignment(Qt.AlignmentFlag.AlignHCenter)
-            grid.addWidget(
-                slot_label, 0, 1 + slot_index, Qt.AlignmentFlag.AlignHCenter
-            )
+            grid.addWidget(slot_label, 0, 1 + slot_index, Qt.AlignmentFlag.AlignHCenter)
         return 1
 
     def _build_mod_matrix_amount_row(

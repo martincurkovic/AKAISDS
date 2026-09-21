@@ -20,7 +20,7 @@ MULTI_PART_COUNT = 16
 # as of the pinned rev, transcribed from the Akai spec; measured on this
 # project's own S3000-series hardware (2026-09-20, reconfirmed 2026-09-21)
 # to actually be 0..24, symmetric with B_PTCH (bend-up). program_editor_
-# window.py's bend_down_spinbox already used 0..24 for the UI, but without
+# window.py's bend_down_combo already used 0..24 for the UI, but without
 # this, any write above 12 raised ValueError from encode_field's own range
 # check (s3k.params._encode_one) against the pinned dependency - a real,
 # reproducible failure against actual hardware, not just a future risk.
