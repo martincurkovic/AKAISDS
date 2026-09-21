@@ -19,6 +19,7 @@ from PySide6.QtCore import QTimer, QRegularExpression
 from PySide6.QtWidgets import (
     QGridLayout,
     QHBoxLayout,
+    QInputDialog,
     QListWidget,
     QListWidgetItem,
     QMainWindow,
@@ -364,6 +365,18 @@ class ProgramEditorWindow(QMainWindow):
         ]
 
         self.program_list.setContextMenuPolicy(Qt.ContextMenuPolicy.ActionsContextMenu)
+        # keygroups have no name field on the hardware at all - PRNAME is a
+        # program-level field (s3k.params) - so rename only ever applies to
+        # the program list, never keygroup_list
+        self._rename_program_action = QAction("Rename Program...", self.program_list)
+        self._rename_program_action.triggered.connect(self._confirm_rename_program)
+        self._rename_program_action.setEnabled(False)
+        self.program_list.addAction(self._rename_program_action)
+
+        _program_list_separator = QAction(self.program_list)
+        _program_list_separator.setSeparator(True)
+        self.program_list.addAction(_program_list_separator)
+
         self._delete_program_action = QAction("Delete Program...", self.program_list)
         self._delete_program_action.setShortcuts(_delete_shortcuts)
         self._delete_program_action.setShortcutContext(Qt.ShortcutContext.WidgetShortcut)
@@ -1686,10 +1699,10 @@ class ProgramEditorWindow(QMainWindow):
         # clear()/addItems()/setCurrentItem() alike, including the ones
         # inside _on_programs_loaded/_on_keygroups_loaded
         self.program_list.itemSelectionChanged.connect(
-            self._update_delete_actions_enabled
+            self._update_list_context_actions_enabled
         )
         self.keygroup_list.itemSelectionChanged.connect(
-            self._update_delete_actions_enabled
+            self._update_list_context_actions_enabled
         )
         self._worker.submit_program_list()
 
@@ -2128,18 +2141,68 @@ class ProgramEditorWindow(QMainWindow):
             return
         self.status_bar.showMessage(f"Couldn't load keygroups: {error_message}")
 
-    def _update_delete_actions_enabled(self):
+    def _update_list_context_actions_enabled(self):
         # a lone remaining program can't actually be deleted - the hardware
         # acknowledges DELP against it and silently ignores it (see
         # s3ked's own DemoBridge.delete_program docstring, which reproduces
         # this on purpose: "The last program cannot be deleted... it
         # acknowledges the delete and the list stays at one"). Disabling
         # the action here avoids a confirm dialog whose "Yes" visibly does
-        # nothing.
+        # nothing. Renaming has no such restriction - even the one
+        # remaining program can be renamed.
+        has_program = self.program_list.currentRow() >= 0
+        self._rename_program_action.setEnabled(has_program)
         self._delete_program_action.setEnabled(
-            self.program_list.currentRow() >= 0 and self.program_list.count() > 1
+            has_program and self.program_list.count() > 1
         )
         self._delete_keygroup_action.setEnabled(self.keygroup_list.currentRow() >= 0)
+
+    def _prompt_program_name(self, current_name):
+        dialog = QInputDialog(self)
+        dialog.setWindowTitle("Rename Program")
+        dialog.setLabelText("Program name:")
+        dialog.setTextValue(current_name)
+        # same character-set/length constraints as the controls page's own
+        # name field (_build_akai_name_edit) - QInputDialog builds its own
+        # QLineEdit internally rather than taking one, so reach into it and
+        # apply the same constraints instead of duplicating them
+        line_edit = dialog.findChild(QLineEdit)
+        line_edit.setMaxLength(NAME_LENGTH)
+        name_pattern = QRegularExpression(_NAME_INPUT_PATTERN)
+        name_pattern.setPatternOptions(
+            QRegularExpression.PatternOption.CaseInsensitiveOption
+        )
+        line_edit.setValidator(QRegularExpressionValidator(name_pattern, line_edit))
+        line_edit.selectAll()
+        if not dialog.exec():
+            return None
+        # uppercase-on-commit, not live-as-you-type, since this dialog's
+        # QLineEdit isn't wired to _on_program_name_typed's per-keystroke
+        # handler - what's actually stored ends up identical either way,
+        # since encode_name would uppercase it on write regardless (see
+        # _on_program_name_typed's own comment)
+        return dialog.textValue().rstrip().upper()
+
+    def _confirm_rename_program(self):
+        item = self.program_list.currentItem()
+        if item is None:
+            return
+        program_index = self.program_list.currentRow()
+        current_name = item.text()
+        new_name = self._prompt_program_name(current_name)
+        if new_name is None or new_name == current_name:
+            return
+        item.setText(new_name)
+        self._update_multi_program_combo_names(program_index, new_name)
+        # keeps the controls page's own name field in step, same reasoning
+        # as _commit_program_name - just triggered from the list here
+        # instead of that widget, so nothing else updates it for us
+        self.program_name_edit.blockSignals(True)
+        self.program_name_edit.setText(new_name)
+        self.program_name_edit.blockSignals(False)
+        self._write_knob_value(
+            "PRNAME", "program", new_name, keygroup_index=0, index=program_index
+        )
 
     def _confirm_delete_program(self):
         item = self.program_list.currentItem()
@@ -2184,7 +2247,7 @@ class ProgramEditorWindow(QMainWindow):
         self.status_bar.showMessage("Program deleted")
         # full reload, not a targeted removal - a DELP that lands on the
         # last remaining program is silently ignored by the hardware (see
-        # _update_delete_actions_enabled) and every other case renumbers/
+        # _update_list_context_actions_enabled) and every other case renumbers/
         # reorders everything after it, the same as a manual Refresh
         self._worker.submit_program_list()
 
