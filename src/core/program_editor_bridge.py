@@ -1,3 +1,4 @@
+import dataclasses
 import os
 import threading
 import time
@@ -11,6 +12,36 @@ import s3k.params as p
 # the sampler holds exactly one resident multi (no list of multis to choose
 # between) with a fixed 16 "multipart" slots
 MULTI_PART_COUNT = 16
+
+# Hardware-measured corrections to a field whose s3k.params-declared range
+# disagrees with what this project's own hardware actually accepts - see
+# AGENTS.md's "fields where this project's own hardware beats s3k.params'
+# notes". B_PTCHD (pitch-bend-down range): s3k.params still declares 0..12
+# as of the pinned rev, transcribed from the Akai spec; measured on this
+# project's own S3000-series hardware (2026-09-20, reconfirmed 2026-09-21)
+# to actually be 0..24, symmetric with B_PTCH (bend-up). program_editor_
+# window.py's bend_down_spinbox already used 0..24 for the UI, but without
+# this, any write above 12 raised ValueError from encode_field's own range
+# check (s3k.params._encode_one) against the pinned dependency - a real,
+# reproducible failure against actual hardware, not just a future risk.
+#
+# Only WRITES need this: decode_field never validates against minimum/
+# maximum (see its own docstring - only encode_field does), so reading a
+# stored value already outside the declared range works fine through the
+# unmodified Parameter regardless. Parameter is a frozen dataclass, so this
+# builds a corrected COPY at the point of use rather than editing the
+# dependency in place (AGENTS.md: don't edit s3k/s3ked itself).
+_HARDWARE_RANGE_OVERRIDES = {
+    ("B_PTCHD", "program"): {"maximum": 24},
+}
+
+
+def _lookup_for_write(param_name, region):
+    param = p.lookup(param_name, region)
+    override = _HARDWARE_RANGE_OVERRIDES.get((param_name, region))
+    if override is not None:
+        param = dataclasses.replace(param, **override)
+    return param
 
 
 class _LoggingOut:
@@ -198,6 +229,11 @@ _PROGRAM_LEVEL_FIELDS = [
     "PANDEL",
     "LFO2WAVE",
     "LFO2TRIG",
+    # LFO1's sync/desync toggle - genuinely independent of LFO1's own
+    # rate/depth/delay/shape above (all program.lfo group) despite living in
+    # the program.midi group in s3k.params; see program_editor_window.py's
+    # lfo1_sync_combo comment for the value-polarity note
+    "DESYNC",
     # modulation matrix, program half - assignable sources for every
     # destination (shared by every keygroup), plus the amounts that are
     # also program-level (Pan x3, Loudness slots 1-2, LFO1 Rate/Depth/
@@ -545,7 +581,7 @@ class BridgeWorker(QThread):
         self, writer_key, param_name, region, program_index, value, keygroup_index
     ):
         try:
-            param = p.lookup(param_name, region)
+            param = _lookup_for_write(param_name, region)
             self._bridge.set_parameter(
                 param, program_index, value, keygroup=keygroup_index
             )

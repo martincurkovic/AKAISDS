@@ -880,6 +880,24 @@ class ProgramEditorWindow(QMainWindow):
         )
         lfo_shape_column.addWidget(self.lfo_shape_combo)
 
+        # LFO1 sync - s3k.params' own field is DESYNC (values={0:"OFF",
+        # 1:"ON"}: "Enable de-synchronisation of LFO1 across notes"), which
+        # is LFO1's sync control phrased as its own negation. This combo is
+        # deliberately labeled the positive way round ("Sync": On/Off)
+        # rather than "Desync": On/Off) to match how a user actually thinks
+        # about it - but that means the label order is FLIPPED from
+        # DESYNC's own OFF/ON text while the raw byte each index writes is
+        # NOT flipped: index 0 ("On", i.e. LFO1 stays synced across notes)
+        # is DESYNC=0, index 1 ("Off", desynced) is DESYNC=1 - same "combo
+        # index is the raw byte" convention as every other combo here, just
+        # with index 0 meaning Sync-On/DESYNC-Off. Don't reorder these items
+        # without also checking this still lines up.
+        self.lfo1_sync_combo = QComboBox()
+        self.lfo1_sync_combo.addItems(["On", "Off"])
+        lfo1_sync_column = self._build_labeled_combo_column(
+            "LFO1 sync", self.lfo1_sync_combo
+        )
+
         lfo_rate_column, self.lfo_rate_value_label = self._build_knob_column(
             "LFO rate", self.lfo_rate_knob
         )
@@ -931,15 +949,15 @@ class ProgramEditorWindow(QMainWindow):
 
         # LFO2TRIG's declared range is the full raw byte (0-255) with no
         # values={} map or measured note narrowing it (unlike LFO1WAVE/
-        # LFO2WAVE's documented shape enums) - exposed as-is rather than
-        # guessing a smaller enum, same reasoning PORTIME's comment gives
-        # for when NOT to assume a narrower range without a documented or
-        # measured basis
-        self.lfo2_trig_spinbox = QSpinBox()
-        self.lfo2_trig_spinbox.setRange(0, 255)
-        self.lfo2_trig_spinbox.setFixedWidth(70)
-        lfo2_trig_column = self._build_labeled_spinbox_column(
-            "LFO2 retrig", self.lfo2_trig_spinbox
+        # LFO2WAVE's documented shape enums) - s3k.params itself doesn't say
+        # what the real values mean. Measured on this project's own
+        # S3000-series hardware (2026-09-21): it's a plain boolean, same
+        # "trust the direct measurement, don't edit the dependency" call as
+        # K_FREQ/B_PTCHD (AGENTS.md) - a third field in that list now.
+        self.lfo2_trig_combo = QComboBox()
+        self.lfo2_trig_combo.addItems(["Off", "On"])
+        lfo2_trig_column = self._build_labeled_combo_column(
+            "LFO2 retrig", self.lfo2_trig_combo
         )
 
         lfo2_rate_column, self.lfo2_rate_value_label = self._build_knob_column(
@@ -1110,7 +1128,9 @@ class ProgramEditorWindow(QMainWindow):
 
         # constrained widths for the combo-only rows below
         self.lfo_shape_combo.setMaximumWidth(180)
+        self.lfo1_sync_combo.setMaximumWidth(80)
         self.lfo2_shape_combo.setMaximumWidth(180)
+        self.lfo2_trig_combo.setMaximumWidth(80)
         self.polyph_combo.setMaximumWidth(80)
         self.note_priority_combo.setMaximumWidth(90)
         self.midi_channel_combo.setMaximumWidth(80)
@@ -1134,6 +1154,7 @@ class ProgramEditorWindow(QMainWindow):
         lfo_knobs_row.addStretch()
         lfo_shape_row = QHBoxLayout()
         lfo_shape_row.addLayout(lfo_shape_column)
+        lfo_shape_row.addLayout(lfo1_sync_column)
         lfo_shape_row.addStretch()
         lfo_section = self._build_section_card("LFO1", lfo_knobs_row, lfo_shape_row)
 
@@ -1455,12 +1476,16 @@ class ProgramEditorWindow(QMainWindow):
         self._wire_knob_write(self.lfo_depth_knob, "LFODEP", "program")
         self.lfo_delay_knob.setEnabled(True)
         self._wire_knob_write(self.lfo_delay_knob, "LFODEL", "program")
+        self.lfo1_sync_combo.setEnabled(True)
+        self._wire_combo_write(self.lfo1_sync_combo, "DESYNC", "program")
         self.lfo2_rate_knob.setEnabled(True)
         self._wire_knob_write(self.lfo2_rate_knob, "PANRAT", "program")
         self.lfo2_depth_knob.setEnabled(True)
         self._wire_knob_write(self.lfo2_depth_knob, "PANDEP", "program")
         self.lfo2_delay_knob.setEnabled(True)
         self._wire_knob_write(self.lfo2_delay_knob, "PANDEL", "program")
+        self.lfo2_trig_combo.setEnabled(True)
+        self._wire_combo_write(self.lfo2_trig_combo, "LFO2TRIG", "program")
         self.program_tune_spinbox.setEnabled(True)
         self._wire_spinbox_write(
             self.program_tune_spinbox,
@@ -1705,6 +1730,12 @@ class ProgramEditorWindow(QMainWindow):
         self.lfo_shape_combo.blockSignals(True)
         self.lfo_shape_combo.setCurrentIndex(program_values["LFO1WAVE"])
         self.lfo_shape_combo.blockSignals(False)
+        self.lfo1_sync_combo.blockSignals(True)
+        # DESYNC is the raw byte and IS the combo index here (see
+        # lfo1_sync_combo's own construction comment on the polarity) -
+        # setCurrentIndex(raw value) directly, no inversion
+        self.lfo1_sync_combo.setCurrentIndex(program_values["DESYNC"])
+        self.lfo1_sync_combo.blockSignals(False)
 
         # LFO2 - same shape as LFO1's own load block just above
         self.lfo2_rate_knob.blockSignals(True)
@@ -1722,9 +1753,9 @@ class ProgramEditorWindow(QMainWindow):
         self.lfo2_shape_combo.blockSignals(True)
         self.lfo2_shape_combo.setCurrentIndex(program_values["LFO2WAVE"])
         self.lfo2_shape_combo.blockSignals(False)
-        self.lfo2_trig_spinbox.blockSignals(True)
-        self.lfo2_trig_spinbox.setValue(program_values["LFO2TRIG"])
-        self.lfo2_trig_spinbox.blockSignals(False)
+        self.lfo2_trig_combo.blockSignals(True)
+        self.lfo2_trig_combo.setCurrentIndex(program_values["LFO2TRIG"])
+        self.lfo2_trig_combo.blockSignals(False)
 
         # Modulation matrix (Program tab half) - source combos use "index
         # is the value" like every other combo on this page, so
