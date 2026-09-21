@@ -55,6 +55,20 @@ class Knob(QDial):
             self._drag_start_value = None
             self.sliderReleased.emit()
 
+    def wheelEvent(self, event):
+        # QAbstractSlider's own wheelEvent (inherited via QDial) only
+        # accepts the event while it's actually still changing the value -
+        # once a knob is scrolled to its min/max, further ticks in the same
+        # direction leave it ignored, so Qt walks it up to the nearest
+        # ancestor that DOES want it: the section card's QScrollArea, which
+        # then scrolls the whole page out from under the user's cursor.
+        # Always accepting here (after letting the base class do its usual
+        # value-stepping first) keeps every wheel tick over a knob local to
+        # that knob, at every value, matching the drag-to-adjust behaviour
+        # right above.
+        super().wheelEvent(event)
+        event.accept()
+
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
