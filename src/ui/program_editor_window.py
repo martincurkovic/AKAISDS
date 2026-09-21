@@ -7,7 +7,7 @@ if __name__ == "__main__":
     # fail with "No module named 'ui'"
     sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from PySide6.QtGui import Qt, QAction, QRegularExpressionValidator
+from PySide6.QtGui import Qt, QAction, QRegularExpressionValidator, QPainter, QColor
 from PySide6.QtCore import QTimer, QRegularExpression
 from PySide6.QtWidgets import (
     QGridLayout,
@@ -37,6 +37,7 @@ from ui.note_spinbox import NoteSpinBox
 from ui.qt_helpers import FullWidthTabBar
 from ui.envelope_graph import ADSREnvelopeGraph, Envelope2Graph
 from ui.keygroup_range_bar import KeygroupRangeBar, keygroup_color
+from ui import theme
 from ui.about_dialog import AboutDialog
 from ui.update_helper import UpdateCheckRunner
 from core.midi_notes import midi_note_to_name
@@ -139,6 +140,66 @@ _NAME_INPUT_PATTERN = (
 )
 
 
+class _ModMatrixGrid(QWidget):
+    """Wraps a Modulation card's QGridLayout (see _build_mod_matrix_row/
+    _build_mod_matrix_amount_row and their header counterparts) to paint,
+    underneath the grid's own widgets, alternating-row shading for the
+    destination rows (not the header) and thin vertical separators between
+    slot column-groups - the grid/header alone made column membership
+    readable but rows still ran together, and slot boundaries were only
+    implied by header text, not by anything visible next to the data
+    itself.
+
+    QGridLayout has no per-cell background of its own and doesn't support
+    z-ordering two widgets in one cell, so this paints directly onto the
+    container BEHIND the grid's widgets (Qt paints a parent before its
+    children, so this reaches only the gaps around each combo/knob/label,
+    never on top of them) rather than trying to style individual cells.
+
+    column_boundaries is a list of (left_col, right_col) tuples - a
+    vertical line is drawn at the midpoint between each pair. Boundaries
+    are only meaningful BETWEEN slots (and between the label column and
+    the first slot) - never between a slot's own Source and Amount, which
+    are one logical unit.
+    """
+
+    def __init__(self, grid, header_row_count, data_row_count, column_boundaries):
+        super().__init__()
+        self.setLayout(grid)
+        self._grid = grid
+        self._header_row_count = header_row_count
+        self._data_row_count = data_row_count
+        self._column_boundaries = column_boundaries
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        palette = theme.current_palette()
+
+        stripe_color = QColor(palette["bg_zebra"])
+        for data_row in range(self._data_row_count):
+            if data_row % 2 == 0:
+                continue  # first data row of each card stays unstriped
+            rect = self._grid.cellRect(self._header_row_count + data_row, 0)
+            if rect.isValid():
+                painter.fillRect(0, rect.top(), self.width(), rect.height(), stripe_color)
+
+        # measured against the last header row (single column per slot
+        # there - the "Slot N" super-header row on the Source+Amount card
+        # spans 2 columns each, which would give a spanned item's cellRect
+        # for either of its own sub-columns, not a clean per-column split)
+        boundary_row = self._header_row_count - 1
+        painter.setPen(QColor(palette["border"]))
+        for left_col, right_col in self._column_boundaries:
+            left_rect = self._grid.cellRect(boundary_row, left_col)
+            right_rect = self._grid.cellRect(boundary_row, right_col)
+            if not (left_rect.isValid() and right_rect.isValid()):
+                continue
+            x = (left_rect.right() + right_rect.left()) // 2
+            painter.drawLine(x, 0, x, self.height())
+
+        super().paintEvent(event)
+
+
 class ProgramEditorWindow(QMainWindow):
     def __init__(self, main_window, bridge):
         super().__init__()
@@ -152,7 +213,10 @@ class ProgramEditorWindow(QMainWindow):
         # Modulation card's grid moved each slot's amount knob beside its
         # source combo instead of stacked below it (each slot now needs
         # combo-width + knob-width side by side, not max(combo, knob)).
-        self.setMinimumSize(1200, 800)
+        # Grew once more, 1200 -> 1220, once the theme's actual stylesheet
+        # (fonts/padding via Fusion) was applied rather than measured with
+        # no theme at all - 1200 was 1px short with it on.
+        self.setMinimumSize(1220, 800)
         self._sample_list = []
         self._keygroup_ranges = []  # [lo, hi] per keygroup - mirrors keygroup_range_bar
         self._pending_restore_state = None  # set only by _refresh_from_hardware()
@@ -816,8 +880,19 @@ class ProgramEditorWindow(QMainWindow):
         kg_mod_footnote_row = QHBoxLayout()
         kg_mod_footnote_row.addWidget(kg_mod_footnote)
 
+        # 4 destination rows above (Filter Frequency, Pitch (assignable),
+        # Loudness (slot 3), Pitch (LFO1)); this card is Amount-only (one
+        # column per slot, no Source column - see _ModMatrixGrid's own
+        # docstring), so a boundary sits between every column
+        kg_mod_matrix = _ModMatrixGrid(
+            kg_mod_grid, kg_header_rows, 4, [(0, 1), (1, 2), (2, 3)]
+        )
+        kg_mod_grid_row = QVBoxLayout()
+        kg_mod_grid_row.setContentsMargins(0, 0, 0, 0)
+        kg_mod_grid_row.addWidget(kg_mod_matrix)
+
         keygroup_modulation_section = self._build_section_card(
-            "Modulation", kg_mod_grid, kg_mod_footnote_row
+            "Modulation", kg_mod_grid_row, kg_mod_footnote_row
         )
 
         detail_container_layout = QVBoxLayout()
@@ -1343,8 +1418,17 @@ class ProgramEditorWindow(QMainWindow):
         mod_footnote_row = QHBoxLayout()
         mod_footnote_row.addWidget(mod_footnote)
 
+        # 7 destination rows above (Pan, Loudness, LFO1 Rate/Depth/Delay,
+        # Filter Frequency, Pitch); boundaries separate the label column
+        # from Slot 1, then Slot 1|2 and Slot 2|3 - never a slot's own
+        # Source|Amount pair (see _ModMatrixGrid's own docstring)
+        mod_matrix = _ModMatrixGrid(mod_grid, header_rows, 7, [(0, 1), (2, 3), (4, 5)])
+        mod_grid_row = QVBoxLayout()
+        mod_grid_row.setContentsMargins(0, 0, 0, 0)
+        mod_grid_row.addWidget(mod_matrix)
+
         modulation_section = self._build_section_card(
-            "Modulation", mod_grid, mod_footnote_row
+            "Modulation", mod_grid_row, mod_footnote_row
         )
 
         # two cards per row rather than one long stacked column - halves
@@ -2129,12 +2213,16 @@ class ProgramEditorWindow(QMainWindow):
     def _build_mod_amount_knob(self):
         # +/-50 like every MODV*/L_PTCH field's declared range, default
         # 0 (no modulation) same as every other "off by default" knob on
-        # this page. Small (40x40, matching the ENV1/ENV2 stage knobs)
-        # since a single row can hold up to 3 of these side by side.
+        # this page. 32x32 (matching ENV2's rate/level knobs), not 40x40 -
+        # since the matrix grid puts this beside a ~29px-tall source combo
+        # rather than stacked below its own label, 40x40 read visibly
+        # oversized next to it; 32x32 was measured to sit comfortably
+        # beside the combo without shrinking to the Multis tab's 28x28
+        # (that one has 16 knobs to a single row and needs every pixel).
         knob = Knob()
         knob.setRange(-50, 50)
         knob.setDefaultValue(0)
-        knob.setFixedSize(40, 40)
+        knob.setFixedSize(32, 32)
         # enabled here rather than in __init__'s later "enable knobs" block
         # (see Knob.__init__ - it starts disabled) - unlike every other
         # knob on this page, these are built AND wired together by one

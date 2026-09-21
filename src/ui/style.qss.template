@@ -203,6 +203,20 @@ QComboBox, QSpinBox, QDoubleSpinBox {
     color: ${text_bright};
 }
 
+/* QSpinBox/QDoubleSpinBox naturally render taller than QComboBox even with
+   identical padding above - Fusion reserves extra vertical room for their
+   stacked up/down buttons that a combo box's single drop-down arrow
+   doesn't need. Pinned to match by measurement (offscreen, this theme's
+   fonts): unstyled QSpinBox.sizeHint().height() == 29px; a QComboBox
+   sitting next to one (e.g. the Portamento card's Type combo next to its
+   Rate spinbox) read visibly shorter without this. min-height is
+   content-box height here (border/padding add on top, same as the shared
+   rule above), so this is NOT simply "29" - re-measure with
+   QComboBox.sizeHint() if this ever needs adjusting again. */
+QComboBox {
+    min-height: 23px;
+}
+
 QComboBox:hover, QSpinBox:hover, QDoubleSpinBox:hover {
     border-color: ${border_hover};
 }

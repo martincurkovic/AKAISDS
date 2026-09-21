@@ -45,6 +45,14 @@ DARK_PALETTE = {
     "text_on_accent": "#ffffff",
     "warning": "#d9a94a",
     "critical": "#d9544a",
+    # subtle alternating-row tint for the Program/Keygroup tabs' Modulation
+    # matrix grid (program_editor_window.py's _ModMatrixGrid) - not
+    # referenced by style.qss.template, same reasoning as keygroup_color_*
+    # below: read directly by a custom-painted widget instead. Deliberately
+    # close to bg_panel (this card's own background) rather than bg_input/
+    # bg_selected - a stripe should read as a faint banding cue, not as an
+    # editable field or a selection highlight.
+    "bg_zebra": "#25252d",
     # categorical colors for the keygroup range bar (ui/keygroup_range_bar.py)
     # not referenced by style.qss.template - these are read directly by
     # custom-painted widgets that need a fixed, validated series order.
@@ -93,6 +101,9 @@ LIGHT_PALETTE = {
     "text_on_accent": "#ffffff",
     "warning": "#f57927",
     "critical": "#d54439",
+    # same reasoning as DARK_PALETTE's bg_zebra - close to this theme's own
+    # bg_panel ("#ffffff"), just a faint step down rather than a strong tint
+    "bg_zebra": "#f6f3fb",
     # same 8-slot categorical set as DARK_PALETTE, stepped for the light
     # surface - see the comment there.
     "keygroup_color_1": "#2a78d6",
