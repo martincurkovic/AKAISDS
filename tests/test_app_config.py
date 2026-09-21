@@ -42,6 +42,28 @@ def test_save_and_get_device_type_round_trip(monkeypatch, tmp_path):
     assert app_config.get_saved_device_type() == "generic"
 
 
+def test_get_last_update_check_defaults_to_zero(monkeypatch, tmp_path):
+    _use_temp_config(monkeypatch, tmp_path)
+    assert app_config.get_last_update_check() == 0
+
+
+def test_save_and_get_last_update_check_round_trip(monkeypatch, tmp_path):
+    _use_temp_config(monkeypatch, tmp_path)
+    app_config.save_last_update_check(1234.5)
+    assert app_config.get_last_update_check() == 1234.5
+
+
+def test_get_skipped_update_version_defaults_to_none(monkeypatch, tmp_path):
+    _use_temp_config(monkeypatch, tmp_path)
+    assert app_config.get_skipped_update_version() is None
+
+
+def test_save_and_get_skipped_update_version_round_trip(monkeypatch, tmp_path):
+    _use_temp_config(monkeypatch, tmp_path)
+    app_config.save_skipped_update_version("1.2.0")
+    assert app_config.get_skipped_update_version() == "1.2.0"
+
+
 def test_settings_saved_independently_dont_clobber_each_other(monkeypatch, tmp_path):
     # save ports/channel/device type each read, modify, write the same config file
     # confirm whether saving ONE doesnt wipe out something saved earlier
