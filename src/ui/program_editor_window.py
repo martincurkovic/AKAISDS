@@ -623,16 +623,50 @@ class ProgramEditorWindow(QMainWindow):
             page_layout = QVBoxLayout()
             page_layout.setSpacing(6)
 
-            # sample row
-            sample_row = QHBoxLayout()
-            sample_label = QLabel("Sample")
-            sample_label.setFixedWidth(55)
+            # sample + loudness/pan all share one row - label above each
+            # control (_build_labeled_combo_column/_build_labeled_knob_
+            # value_column) instead of Sample's old label-to-the-left row
+            # with Loud/Pan's own knob row further down the page; freeing
+            # Loud/Pan's knobs down to 28px (matching the Multis tab/mod
+            # matrix knobs elsewhere on this page) made room for them
+            # beside Sample instead of needing a row of their own.
+            # Left-aligned (center=False) and bold (<b>...</b>) - same
+            # shape as the Multis tab's own column headers (e.g.
+            # part_header/level_header/pan_header below), not this page's
+            # usual centered/plain knob-column labels.
             combo = QComboBox()
             combo.setEnabled(False)
-            sample_row.addWidget(sample_label)
-            sample_row.addWidget(combo, stretch=1)
-            page_layout.addLayout(sample_row)
+            sample_column = self._build_labeled_combo_column(
+                "<b>Sample</b>", combo, center=False
+            )
             self._zone_combos.append(combo)
+
+            loud_knob = Knob()
+            loud_knob.setRange(-50, 50)
+            loud_knob.setFixedSize(28, 28)
+            loud_knob.setEnabled(True)
+            pan_knob = Knob()
+            pan_knob.setRange(-50, 50)
+            pan_knob.setFixedSize(28, 28)
+            pan_knob.setEnabled(True)
+
+            loud_col, loud_val_label = self._build_labeled_knob_value_column(
+                "<b>Loud</b>", loud_knob, center=False
+            )
+            pan_col, pan_val_label = self._build_labeled_knob_value_column(
+                "<b>Pan</b>", pan_knob, center=False
+            )
+
+            zone_top_row = QHBoxLayout()
+            zone_top_row.addLayout(sample_column, stretch=1)
+            zone_top_row.addLayout(loud_col)
+            zone_top_row.addLayout(pan_col)
+            page_layout.addLayout(zone_top_row)
+
+            self._zone_loudness.append(loud_knob)
+            self._zone_pan.append(pan_knob)
+            self._zone_loudness_labels.append(loud_val_label)
+            self._zone_pan_labels.append(pan_val_label)
 
             # velocity row
             vel_row = QHBoxLayout()
@@ -703,30 +737,6 @@ class ProgramEditorWindow(QMainWindow):
             page_layout.addLayout(loop_track_row)
             self._zone_looptype.append(loop_combo)
             self._zone_keytrack.append(keytrack_combo)
-
-            # loudness and pan as small knobs — ±50 range maps naturally
-            loud_knob = Knob()
-            loud_knob.setRange(-50, 50)
-            loud_knob.setFixedSize(40, 40)
-            loud_knob.setEnabled(True)
-            pan_knob = Knob()
-            pan_knob.setRange(-50, 50)
-            pan_knob.setFixedSize(40, 40)
-            pan_knob.setEnabled(True)
-
-            loud_col, loud_val_label = self._build_knob_column("Loud", loud_knob)
-            pan_col, pan_val_label = self._build_knob_column("Pan", pan_knob)
-
-            zone_knob_row = QHBoxLayout()
-            zone_knob_row.addLayout(loud_col)
-            zone_knob_row.addLayout(pan_col)
-            zone_knob_row.addStretch()
-            page_layout.addLayout(zone_knob_row)
-
-            self._zone_loudness.append(loud_knob)
-            self._zone_pan.append(pan_knob)
-            self._zone_loudness_labels.append(loud_val_label)
-            self._zone_pan_labels.append(pan_val_label)
 
             page.setLayout(page_layout)
             self._zone_stack.addWidget(page)
@@ -2313,18 +2323,52 @@ class ProgramEditorWindow(QMainWindow):
         )
         return combo, amount_column, knob, value_label
 
-    def _build_labeled_combo_column(self, label_text, combo):
+    def _build_labeled_combo_column(self, label_text, combo, *, center=True):
         # same "label above, centered" shape as _build_labeled_spinbox_column,
         # for a combo instead of a spinbox - still used outside the
         # Modulation matrix (e.g. lfo1_sync_combo/lfo2_trig_combo), which
-        # aren't part of a grid with its own header row
+        # aren't part of a grid with its own header row. center=False
+        # instead left-aligns the label flush with the combo's own
+        # (left-aligned) displayed text - for the Zone card's Sample combo
+        # (see _build_zone_page), which stretches to fill whatever width
+        # its row gives it: centering that label put it in the middle of
+        # the whole stretched width, nowhere near "BASS C1" etc.
         name_label = QLabel(label_text)
-        name_label.setAlignment(Qt.AlignmentFlag.AlignHCenter)
         column = QVBoxLayout()
         column.setSpacing(4)
-        column.addWidget(name_label, alignment=Qt.AlignmentFlag.AlignHCenter)
+        if center:
+            name_label.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+            column.addWidget(name_label, alignment=Qt.AlignmentFlag.AlignHCenter)
+        else:
+            column.addWidget(name_label)
         column.addWidget(combo)
         return column
+
+    def _build_labeled_knob_value_column(self, label_text, knob, *, center=True):
+        # label above, knob+value beside each other below it - the Zone
+        # card's Loud/Pan knobs' own shape (see _build_zone_page below),
+        # sharing a row with the Sample combo (_build_labeled_combo_column)
+        # rather than the knob row those two used to have further down the
+        # page. Neither existing knob helper fit: _build_knob_column stacks
+        # the value below the knob (fine stand-alone, but taller than this
+        # row has room for next to a combo), and _build_knob_value_row has
+        # no label at all (built for grids with their own header row,
+        # which this single pair of knobs isn't part of). center=False
+        # left-aligns the label instead, flush with the knob rather than
+        # floating over its middle - same reasoning, and same "Sample"/
+        # "Loud"/"Pan" row, as _build_labeled_combo_column's own center
+        # param.
+        name_label = QLabel(label_text)
+        column = QVBoxLayout()
+        column.setSpacing(4)
+        if center:
+            name_label.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+            column.addWidget(name_label, alignment=Qt.AlignmentFlag.AlignHCenter)
+        else:
+            column.addWidget(name_label)
+        knob_row, value_label = self._build_knob_value_row(knob)
+        column.addLayout(knob_row)
+        return column, value_label
 
     def _build_mod_source_only_column(self, source_param, source_region):
         # used where the matching amount field is per-keygroup (so it's
