@@ -561,6 +561,55 @@ it's currently shown - a plain `setVisible(False)` collapses it to zero
 height, which shoved the marker spinboxes below it up and down every time
 zoom crossed the "needs scrolling" threshold.
 
+### Editing loop points without audio - header and audio load independently
+
+A user pointed out that loading the actual waveform can take *minutes*
+over SDS, but the loop points themselves only need the sample's *header* -
+a handful of fast `get_parameter` reads over the same `BridgeWorker`
+connection every other tab on this page already uses, not the Transfer
+Dashboard's slow one. Asking someone to sit through a multi-minute SDS
+dump just to nudge a loop point was never necessary.
+
+`WaveformView.set_header(frame_count, start, loop_start, loop_end, end)`
+shows and makes the four markers draggable from header data alone, with
+**no envelope trace** (`has_header()` is true, `has_waveform()` stays
+false until real audio actually arrives, if it ever does).
+`_frame_count > 0` is what actually gates dragging/zoom/pan now, not
+`_samples is not None` - `_samples` only gates whether there's an
+envelope to paint. **Get this distinction wrong in a new method and you
+will reintroduce editing being silently blocked without audio** - this
+already happened once during development, in `_on_marker_spinbox_changed`
+(gated on `has_waveform()`, so typing a value into a spinbox before audio
+loaded did nothing at all) - caught by the same smoke test that verifies
+the whole feature end to end, not by a code read.
+
+`ProgramEditorWindow._on_sample_selected` now fires an automatic, async
+`submit_sample_detail()` the moment a sample is selected (if nothing's
+cached yet for it) - persistently connected in `__init__`
+(`_on_sample_detail_loaded`/`_on_sample_detail_load_failed`), *not*
+through `_wait_for_any_signal` (that blocking helper stays reserved for
+the one place a deliberate freeze is correct - the actual audio fetch;
+see its own comment above). `_sample_waveform_cache` entries can now exist
+in two shapes - header-only (`"samples": None`) and full (`"samples":
+[...]`) - both always carry `"frame_count"` regardless. **If the user
+edits a marker while only the header is loaded and *then* double-clicks
+to load audio, `_load_sample_waveform` must reuse the already-cached
+markers, not re-derive fresh ones from a new header read or
+`_demo_loop_points`** - re-deriving would silently discard the edit. The
+shared `_markers_from_header()` helper (header values -> `(frame_count,
+start, loop_start, loop_end, end)`, demo-mode seeding included) exists
+specifically so both fetch paths - the automatic one and
+`_load_sample_waveform`'s own fallback for the rare case where the
+automatic fetch hasn't resolved yet - compute identically, without
+duplicating the demo/real branching twice.
+
+`WaveformView.set_waveform` preserves the current zoom/pan when it's
+called for the sample already showing header-only markers (rather than
+resetting to fully zoomed out) - a user who zoomed in to nail a loop
+point precisely shouldn't get snapped back the moment audio happens to
+arrive. It still resets for a genuinely different sample, since that
+always goes through `clear()`/`set_header()` first.
+
 ### Diagnosing a load that silently does nothing
 
 A user hit intermittent "double-click loads nothing" failures in real

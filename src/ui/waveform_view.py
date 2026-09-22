@@ -23,6 +23,10 @@ _PLACEHOLDER_TEXT = (
     "Loading is slow and will freeze the interface"
 )
 _LOADING_TEXT = "Loading…"
+# shown along the bottom of the canvas once markers are known from the
+# sample's header but there's no audio to draw an envelope from yet - see
+# set_header
+_AUDIO_HINT_TEXT = "Double-click to load waveform audio (slow)"
 
 
 def build_envelope(samples, width):
@@ -89,16 +93,25 @@ def clamp_marker(order, index, frame, values, frame_count):
 class WaveformView(QWidget):
     # Loop-point editor for one sample: a fast min/max envelope plus four
     # draggable markers (start/loop start/loop end/end), horizontal
-    # zoom+pan, and Shift-held fine dragging. Has no sample loaded until
-    # told to (see set_waveform/clear) - in that placeholder state it shows
-    # instructional text instead of an empty box, and a double-click there
-    # emits load_requested rather than doing anything itself. Loading real
-    # sample audio means a live SDS transfer over a SEPARATE MIDI
-    # connection (the Transfer Dashboard's own SamplerController - see
-    # program_editor_window.py's _load_sample_waveform) that can
-    # legitimately take minutes and, by design, freezes the rest of the app
-    # while it runs - this widget only ever asks for that to happen and
-    # displays the result; it has no idea how the data actually arrives.
+    # zoom+pan, and Shift-held fine dragging. Has nothing loaded until told
+    # to (see set_waveform/set_header/clear) - in that placeholder state it
+    # shows instructional text instead of an empty box, and a double-click
+    # there emits load_requested rather than doing anything itself.
+    #
+    # Markers and audio arrive independently, and the markers alone are
+    # what actually matter for editing: set_header shows and makes the
+    # four markers draggable from the sample's HEADER alone (a handful of
+    # fast get_parameter reads over the same connection every other tab on
+    # this page uses), with no envelope trace - loading actual audio means
+    # a live SDS transfer over a SEPARATE MIDI connection (the Transfer
+    # Dashboard's own SamplerController - see program_editor_window.py's
+    # _load_sample_waveform) that can legitimately take minutes and, by
+    # design, freezes the rest of the app while it runs. A user shouldn't
+    # have to sit through that just to nudge a loop point - set_waveform
+    # layers the real envelope on top once (if ever) that audio arrives.
+    # This widget only ever asks for that to happen (load_requested) and
+    # displays whatever result shows up; it has no idea how either piece
+    # of data actually arrives.
     load_requested = Signal()
     # which marker moved ("start"/"loop_start"/"loop_end"/"end"), then the
     # four current frame positions - emitted once per drag, on release, not
@@ -160,9 +173,14 @@ class WaveformView(QWidget):
         self._loading = loading
         self.update()
 
+    def has_header(self):
+        # markers are known (from the sample's header) and draggable, even
+        # if there's no audio/envelope yet - see set_header
+        return self._frame_count > 0
+
     def clear(self):
         # back to the placeholder state - used when the user selects a
-        # sample this session hasn't loaded audio for yet (see
+        # sample this session has neither a header nor audio for yet (see
         # program_editor_window.py's _on_sample_selected)
         self._samples = None
         self._envelope = []
@@ -173,7 +191,40 @@ class WaveformView(QWidget):
         self.update()
         self._emit_view_changed()
 
+    def set_header(self, frame_count, start, loop_start, loop_end, end):
+        """Loop points known from the sample's header alone - no audio
+        yet. Shows and makes the four markers draggable immediately
+        instead of making the user wait through however long a full SDS
+        dump takes (see program_editor_window.py's _load_sample_waveform)
+        just to nudge a loop point. set_waveform (if/once real audio
+        arrives) layers the envelope on top of whatever's already here.
+        """
+        self._samples = None
+        self._envelope = []
+        self._frame_count = frame_count
+        self._markers = {
+            "start": start,
+            "loop_start": loop_start,
+            "loop_end": loop_end,
+            "end": end,
+        }
+        self._zoom = _MIN_ZOOM
+        self._view_start = 0
+        self.update()
+        self._emit_markers_changed()
+        self._emit_view_changed()
+
     def set_waveform(self, samples, start, loop_start, loop_end, end):
+        # if set_header already showed this sample's markers and the user
+        # zoomed/panned while waiting for the audio to arrive, keep that
+        # view instead of snapping back to fully zoomed out -
+        # _load_sample_waveform only ever calls this for the sample that's
+        # STILL selected (the whole window is frozen for the duration of
+        # the fetch, so nothing else could have changed what this widget
+        # was showing meanwhile). A genuinely new/different sample always
+        # goes through clear()/set_header() first, which is what actually
+        # resets the view - so preserving it here is never stale.
+        preserve_view = self._samples is None and self._frame_count == len(samples)
         self._samples = samples
         self._frame_count = len(samples)
         self._markers = {
@@ -182,11 +233,9 @@ class WaveformView(QWidget):
             "loop_end": loop_end,
             "end": end,
         }
-        # a freshly loaded sample always opens fully zoomed out - carrying
-        # the previous sample's zoom/pan across would show an arbitrary,
-        # probably-empty slice of the new one
-        self._zoom = _MIN_ZOOM
-        self._view_start = 0
+        if not preserve_view:
+            self._zoom = _MIN_ZOOM
+            self._view_start = 0
         self._rebuild_envelope()
         self.update()
         self._emit_markers_changed()
@@ -199,7 +248,7 @@ class WaveformView(QWidget):
         clamped frame so the caller can snap its own displayed value to
         match (e.g. typing a value past the sample's own end).
         """
-        if self._samples is None:
+        if self._frame_count == 0:
             return None
         index = _MARKER_ORDER.index(name)
         clamped = clamp_marker(_MARKER_ORDER, index, frame, self._markers, self._frame_count)
@@ -226,8 +275,10 @@ class WaveformView(QWidget):
 
     def set_view_start(self, start):
         # driven by an external QScrollBar (program_editor_window.py) -
-        # dragging/clicking the scrollbar pans the same way wheel-pan does
-        if self._samples is None:
+        # dragging/clicking the scrollbar pans the same way wheel-pan does.
+        # Works in header-only mode too (no audio, just markers) - zooming
+        # in still gives more precise dragging even with no envelope drawn.
+        if self._frame_count == 0:
             return
         self._view_start = start
         self._clamp_view_start()
@@ -240,8 +291,9 @@ class WaveformView(QWidget):
         # zooming - defaults to the view's current center. Wheel-zoom
         # passes the frame under the cursor so zooming in/out feels like
         # it's happening "at the mouse", the same convention as every
-        # pinch-to-zoom map/image viewer
-        if self._samples is None:
+        # pinch-to-zoom map/image viewer. Works in header-only mode too -
+        # see set_view_start's own comment.
+        if self._frame_count == 0:
             return
         old_view_length = self._view_length()
         if anchor_frame is None:
@@ -274,6 +326,11 @@ class WaveformView(QWidget):
         super().resizeEvent(event)
 
     def _rebuild_envelope(self):
+        # called unconditionally by set_view_start/set_zoom, which now also
+        # run in header-only mode (no audio) - nothing to rebuild there
+        if self._samples is None:
+            self._envelope = []
+            return
         view_start = self._view_start
         view_length = self._view_length()
         visible = self._samples[view_start : view_start + view_length]
@@ -310,7 +367,9 @@ class WaveformView(QWidget):
         painter.setPen(QColor(palette["border"]))
         painter.drawRoundedRect(rect, _BORDER_RADIUS, _BORDER_RADIUS)
 
-        if self._samples is None:
+        if self._frame_count == 0:
+            # nothing known at all yet (no header, no audio) - the big
+            # centered placeholder
             painter.setPen(QColor(palette["text_disabled"]))
             painter.drawText(
                 self.rect(),
@@ -319,16 +378,20 @@ class WaveformView(QWidget):
             )
             return
 
-        mid_y = self.height() / 2
-        half = self.height() / 2 - 6
-        pen = QPen(QColor(palette["accent"]))
-        pen.setWidthF(1.0)
-        painter.setPen(pen)
-        for x, (lo, hi) in enumerate(self._envelope):
-            y_lo = mid_y - (hi / 32768) * half
-            y_hi = mid_y - (lo / 32768) * half
-            painter.drawLine(int(x), int(y_lo), int(x), int(y_hi) + 1)
+        if self._samples is not None:
+            mid_y = self.height() / 2
+            half = self.height() / 2 - 6
+            pen = QPen(QColor(palette["accent"]))
+            pen.setWidthF(1.0)
+            painter.setPen(pen)
+            for x, (lo, hi) in enumerate(self._envelope):
+                y_lo = mid_y - (hi / 32768) * half
+                y_hi = mid_y - (lo / 32768) * half
+                painter.drawLine(int(x), int(y_lo), int(x), int(y_hi) + 1)
 
+        # markers draw whenever the header is known, audio or not - the
+        # whole point of set_header is editing before/without audio ever
+        # arriving
         colors = self._marker_colors(palette)
         view_start = self._view_start
         view_length = self._view_length()
@@ -351,6 +414,17 @@ class WaveformView(QWidget):
                 QPointF(x + _HANDLE_SIZE, 0),
                 QPointF(x, _HANDLE_SIZE * 1.6),
             ]))
+
+        if self._samples is None:
+            # header-only: no envelope was drawn above - a small hint
+            # along the bottom edge instead of the big centered
+            # placeholder, which would sit on top of the markers
+            painter.setPen(QColor(palette["text_disabled"]))
+            painter.drawText(
+                QRectF(0, self.height() - 22, self.width(), 20),
+                Qt.AlignmentFlag.AlignCenter,
+                _LOADING_TEXT if self._loading else _AUDIO_HINT_TEXT,
+            )
 
     def _marker_near(self, x):
         best = None
@@ -390,7 +464,9 @@ class WaveformView(QWidget):
         super().mouseDoubleClickEvent(event)
 
     def mousePressEvent(self, event):
-        if self._samples is None:
+        # frame_count, not samples - dragging must work in header-only
+        # mode (markers known, no audio/envelope yet) too
+        if self._frame_count == 0:
             return
         self._dragging = self._marker_near(event.position().x())
         if self._dragging is not None:
@@ -489,7 +565,9 @@ class WaveformView(QWidget):
         super().hideEvent(event)
 
     def wheelEvent(self, event):
-        if self._samples is None:
+        # frame_count, not samples - zoom/pan are useful in header-only
+        # mode too (more precise dragging), same as set_zoom/set_view_start
+        if self._frame_count == 0:
             return
         angle = event.angleDelta()
 
@@ -562,7 +640,7 @@ class WaveformView(QWidget):
         return super().event(event)
 
     def _handle_pinch_zoom(self, event):
-        if self._samples is None:
+        if self._frame_count == 0:
             return
         # value() is the incremental scale change for this one event (a
         # small step like 0.02 per pinch increment), not an absolute zoom

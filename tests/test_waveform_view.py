@@ -244,3 +244,92 @@ def test_wheel_ctrl_zoom_still_accepts_either_axis(qapp):
     zoom_before2 = view2._zoom
     view2.wheelEvent(_FakeWheelEvent(ax=120, ay=0, ctrl=True))
     assert view2._zoom != zoom_before2
+
+
+# --- WaveformView.set_header: editable markers without audio -----------------
+# A real SDS sample dump can take minutes; the header alone (a handful of
+# fast get_parameter reads) is comparatively instant. set_header lets a
+# user see and drag loop points immediately, before - or entirely without
+# ever - loading the actual audio. Also needs a real WaveformView, for the
+# same reason as the wheelEvent section above.
+
+
+def test_set_header_shows_markers_with_no_audio(qapp):
+    view = WaveformView()
+    view.set_header(20000, start=0, loop_start=5000, loop_end=15000, end=19999)
+    assert view.has_header() is True
+    assert view.has_waveform() is False
+    assert view.markers() == {"start": 0, "loop_start": 5000, "loop_end": 15000, "end": 19999}
+    assert view.frame_count() == 20000
+
+
+def test_set_marker_works_in_header_only_mode(qapp):
+    view = WaveformView()
+    view.set_header(20000, start=0, loop_start=5000, loop_end=15000, end=19999)
+    clamped = view.set_marker("loop_start", 8000)
+    assert clamped == 8000
+    assert view.markers()["loop_start"] == 8000
+
+
+def test_set_marker_still_clamps_in_header_only_mode(qapp):
+    view = WaveformView()
+    view.set_header(20000, start=0, loop_start=5000, loop_end=15000, end=19999)
+    clamped = view.set_marker("loop_start", 99999)  # past loop_end
+    assert clamped == 15000
+
+
+def test_set_marker_returns_none_with_nothing_loaded_at_all(qapp):
+    view = WaveformView()
+    assert view.set_marker("start", 100) is None
+
+
+def test_zoom_and_pan_work_in_header_only_mode(qapp):
+    # more precise dragging is still useful without an envelope to look at
+    view = WaveformView()
+    view.resize(400, 180)
+    view.set_header(20000, start=0, loop_start=5000, loop_end=15000, end=19999)
+    zoom_before = view._zoom
+    view.zoom_in()
+    assert view._zoom > zoom_before
+    view.set_view_start(100)
+    assert view._view_start == 100
+
+
+def test_clear_resets_header_only_state_too(qapp):
+    view = WaveformView()
+    view.set_header(20000, start=0, loop_start=5000, loop_end=15000, end=19999)
+    view.clear()
+    assert view.has_header() is False
+    assert view.frame_count() == 0
+    assert view.set_marker("start", 5) is None
+
+
+def test_set_waveform_preserves_the_view_for_the_same_already_known_sample(qapp):
+    # a user who zoomed in while editing header-only markers shouldn't get
+    # snapped back to fully zoomed out the moment audio happens to arrive
+    view = WaveformView()
+    view.resize(400, 180)
+    frame_count = 10000
+    view.set_header(frame_count, start=0, loop_start=2500, loop_end=7500, end=9999)
+    view.zoom_in()
+    zoom_after_zoom_in = view._zoom
+    view.set_view_start(500)
+
+    samples = [0] * frame_count
+    view.set_waveform(samples, 0, 2500, 7500, 9999)
+    assert view._zoom == zoom_after_zoom_in
+    assert view._view_start == 500
+
+
+def test_set_waveform_resets_the_view_for_a_genuinely_new_sample(qapp):
+    # clear()/set_header() (a real sample switch) must still reset the view
+    view = WaveformView()
+    view.resize(400, 180)
+    view.set_header(10000, start=0, loop_start=2500, loop_end=7500, end=9999)
+    view.zoom_in()
+    view.clear()
+
+    samples = [0] * 5000
+    view.set_waveform(samples, 0, 1000, 3000, 4999)
+    assert view._zoom == pytest.approx(1.0)
+    assert view._view_start == 0

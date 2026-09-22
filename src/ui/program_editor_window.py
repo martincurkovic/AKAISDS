@@ -355,6 +355,13 @@ class ProgramEditorWindow(QMainWindow):
         self._worker.keygroup_delete_failed.connect(
             lambda _p, _k, e: self.status_bar.showMessage(f"Couldn't delete keygroup: {e}")
         )
+        # automatic, async header-only fetch triggered by plain sample
+        # selection (_on_sample_selected) - separate from
+        # _fetch_sample_header_blocking's own transient listener on these
+        # same two signals, used only by _load_sample_waveform's fallback
+        # path; both coexisting is fine, Qt signals support multiple slots
+        self._worker.sample_detail_loaded.connect(self._on_sample_detail_loaded)
+        self._worker.sample_detail_load_failed.connect(self._on_sample_detail_load_failed)
         self._worker.start()
 
         # placeholder - real program, keygroup panels come later
@@ -1643,10 +1650,11 @@ class ProgramEditorWindow(QMainWindow):
         self.main_tabs.setTabBar(FullWidthTabBar(self.main_tabs))
         self.main_tabs.addTab(multis_tab_page, "Multis")
         self.main_tabs.addTab(programs_tab_page, "Programs")
-        self.main_tabs.addTab(samples_tab_page, "Samples")
+        self._samples_tab_index = self.main_tabs.addTab(samples_tab_page, "Samples")
         # Multis stays the first tab, but isn't fully working yet - open on
         # Programs instead
         self.main_tabs.setCurrentIndex(1)
+        self.main_tabs.currentChanged.connect(self._on_main_tab_changed)
 
         bottom_row = QHBoxLayout()
         bottom_row.addWidget(refresh_button)
@@ -3532,15 +3540,29 @@ class ProgramEditorWindow(QMainWindow):
                 0
             )  # this is what triggers keygroup loading for the first program
 
+    def _on_main_tab_changed(self, index):
+        # select the first sample by default the first time the user
+        # switches to the Samples tab, same as the Programs tab already
+        # auto-selects its own first row on load (_on_programs_loaded) -
+        # only when nothing's selected yet, so this never overrides a
+        # choice the user already made by switching away and back
+        if (
+            index == self._samples_tab_index
+            and self.sample_list_widget.currentRow() < 0
+            and self.sample_list_widget.count() > 0
+        ):
+            self.sample_list_widget.setCurrentRow(0)
+
     def _on_sample_selected(self, current, previous):
         if current is None:
             self._clear_waveform_view()
             return
-        entry = self._sample_waveform_cache.get(self.sample_list_widget.currentRow())
-        if entry is not None:
+        sample_index = self.sample_list_widget.currentRow()
+        entry = self._sample_waveform_cache.get(sample_index)
+        if entry is not None and entry["samples"] is not None:
             # range before set_waveform - see the comment at
             # _load_sample_waveform's own set_marker_spinbox_range call
-            self._set_marker_spinbox_range(len(entry["samples"]))
+            self._set_marker_spinbox_range(entry["frame_count"])
             self.waveform_view.set_waveform(
                 entry["samples"],
                 entry["start"],
@@ -3548,8 +3570,51 @@ class ProgramEditorWindow(QMainWindow):
                 entry["loop_end"],
                 entry["end"],
             )
+        elif entry is not None:
+            # header known, audio not (yet) - see _on_sample_detail_loaded
+            self._set_marker_spinbox_range(entry["frame_count"])
+            self.waveform_view.set_header(
+                entry["frame_count"],
+                entry["start"],
+                entry["loop_start"],
+                entry["loop_end"],
+                entry["end"],
+            )
         else:
+            # nothing known about this sample yet - clear to the
+            # placeholder and kick off the (fast, async - not the blocking
+            # audio transfer) header fetch automatically, so markers show
+            # up and become draggable without the user needing to
+            # double-click first. See _on_sample_detail_loaded.
             self._clear_waveform_view()
+            self._worker.submit_sample_detail(sample_index)
+
+    def _on_sample_detail_loaded(self, sample_index, values):
+        # automatic header fetch triggered by _on_sample_selected (also
+        # reachable via _fetch_sample_header_blocking's own transient
+        # listener when _load_sample_waveform fetches directly - both are
+        # fine to have connected at once, this one just does nothing
+        # useful if that path's cache write beats it here since they'd
+        # compute the same values)
+        frame_count, start, loop_start, loop_end, end = self._markers_from_header(values)
+        entry = {
+            "samples": None,
+            "framerate": None,
+            "frame_count": frame_count,
+            "start": start,
+            "loop_start": loop_start,
+            "loop_end": loop_end,
+            "end": end,
+        }
+        self._sample_waveform_cache[sample_index] = entry
+        if sample_index == self.sample_list_widget.currentRow():
+            self._set_marker_spinbox_range(frame_count)
+            self.waveform_view.set_header(frame_count, start, loop_start, loop_end, end)
+
+    def _on_sample_detail_load_failed(self, sample_index, error):
+        if sample_index != self.sample_list_widget.currentRow():
+            return
+        self.status_bar.showMessage(f"Couldn't read sample header: {error}")
 
     def _clear_waveform_view(self):
         self.waveform_view.clear()
@@ -3583,7 +3648,9 @@ class ProgramEditorWindow(QMainWindow):
             spinbox.blockSignals(False)
 
     def _on_marker_spinbox_changed(self, name, value):
-        if not self.waveform_view.has_waveform():
+        # has_header, not has_waveform - editing must work before/without
+        # audio ever loading (see WaveformView.set_header)
+        if not self.waveform_view.has_header():
             return
         # set_marker clamps and emits markers_changed synchronously, which
         # is what actually syncs every spinbox's displayed value (including
@@ -3791,6 +3858,36 @@ class ProgramEditorWindow(QMainWindow):
         loop_end = (frame_count * 3) // 4
         return start, loop_start, loop_end, end
 
+    def _markers_from_header(self, values):
+        # shared by both header-fetch paths - the automatic, async one
+        # that fires on plain sample selection (_on_sample_detail_loaded)
+        # and _load_sample_waveform's own fallback for the rare case where
+        # that hasn't resolved yet by the time the user double-clicks for
+        # audio. Returns (frame_count, start, loop_start, loop_end, end).
+        demo_mode = bool(os.environ.get("AKAISDS_DEMO_SAMPLER"))
+        frame_count = values["SLNGTH"]
+        if demo_mode:
+            # DemoBridge's own sample headers are all-zero (this project
+            # doesn't edit s3k/s3ked - see AGENTS.md), which collapses
+            # every marker to frame 0: invisible, and effectively
+            # un-draggable too, since clamp_marker's neighbour bounds
+            # collapse to [0, 0] right along with it. A nominal frame
+            # count stands in for SLNGTH (also 0) purely so there's
+            # something to show/drag before real audio - _fetch_demo_
+            # sample_audio's own synthesized length replaces it once
+            # audio actually loads. Never applies to a real header value.
+            frame_count = frame_count or 20000
+            start, loop_start, loop_end, end = self._demo_loop_points(frame_count)
+        else:
+            start = values["SSTART"]
+            # LOOPAT1 is the loop END, not the start (see
+            # _SAMPLE_DETAIL_FIELDS's comment) - loop_start is derived,
+            # never read directly
+            loop_start = max(0, values["LOOPAT1"] - values["LLNGTH1"])
+            loop_end = values["LOOPAT1"]
+            end = values["SMPEND"]
+        return frame_count, start, loop_start, loop_end, end
+
     def _read_wav_samples(self, path):
         # sds_encoder.write_wav_file (what the Dashboard's receive path
         # always writes through) only ever produces 8-bit unsigned or
@@ -3874,14 +3971,41 @@ class ProgramEditorWindow(QMainWindow):
         QApplication.processEvents()
 
         try:
-            logger.debug(f"_load_sample_waveform: fetching header for sample {sample_index}")
-            header = self._fetch_sample_header_blocking(sample_index)
-            if header is None:
+            entry = self._sample_waveform_cache.get(sample_index)
+            if entry is not None:
+                # header (and anything the user already dragged/typed
+                # against it in header-only mode - see
+                # _on_sample_detail_loaded/set_header) is already known
+                # from the automatic fetch that ran when this sample was
+                # first selected. Reuse it rather than re-deriving fresh
+                # markers from a fresh header read, which would silently
+                # discard any edit made before audio ever arrived.
                 logger.debug(
-                    "_load_sample_waveform: header fetch returned None - bailing out"
+                    "_load_sample_waveform: reusing already-known header/markers "
+                    f"for sample {sample_index}"
                 )
-                return
-            logger.debug(f"_load_sample_waveform: header fetched: {header!r}")
+                start = entry["start"]
+                loop_start = entry["loop_start"]
+                loop_end = entry["loop_end"]
+                end = entry["end"]
+            else:
+                # rare: the automatic on-selection fetch hasn't resolved
+                # yet (the user double-clicked before it landed) - fall
+                # back to fetching it directly
+                logger.debug(
+                    f"_load_sample_waveform: fetching header for sample {sample_index}"
+                )
+                header = self._fetch_sample_header_blocking(sample_index)
+                if header is None:
+                    logger.debug(
+                        "_load_sample_waveform: header fetch returned None - bailing out"
+                    )
+                    return
+                logger.debug(f"_load_sample_waveform: header fetched: {header!r}")
+                _frame_count, start, loop_start, loop_end, end = self._markers_from_header(
+                    header
+                )
+
             if demo_mode:
                 samples, framerate = self._fetch_demo_sample_audio(sample_index)
             else:
@@ -3898,30 +4022,10 @@ class ProgramEditorWindow(QMainWindow):
                 f"at {framerate}Hz"
             )
 
-            if demo_mode:
-                # DemoBridge's own sample headers are all-zero (this
-                # project doesn't edit s3k/s3ked - see AGENTS.md), which
-                # collapses every marker to frame 0: invisible, and
-                # effectively un-draggable too, since clamp_marker's
-                # neighbour bounds collapse to [0, 0] right along with it.
-                # Demo mode already substitutes its own audio for the same
-                # reason SamplerController has nothing to give it
-                # (_fetch_demo_sample_audio) - this does the same for the
-                # loop points, spread out purely for display/editing here.
-                # Never applies to a real header value.
-                start, loop_start, loop_end, end = self._demo_loop_points(len(samples))
-            else:
-                start = header["SSTART"]
-                # LOOPAT1 is the loop END, not the start (see
-                # _SAMPLE_DETAIL_FIELDS's comment) - loop_start is derived,
-                # never read directly
-                loop_start = max(0, header["LOOPAT1"] - header["LLNGTH1"])
-                loop_end = header["LOOPAT1"]
-                end = header["SMPEND"]
-
             entry = {
                 "samples": samples,
                 "framerate": framerate,
+                "frame_count": len(samples),
                 "start": start,
                 "loop_start": loop_start,
                 "loop_end": loop_end,
