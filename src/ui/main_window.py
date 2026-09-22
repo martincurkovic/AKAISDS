@@ -1,6 +1,7 @@
 from PySide6.QtWidgets import QMainWindow, QFileDialog
 from PySide6.QtCore import QTimer
 import os
+import sys
 import time
 from PySide6.QtGui import QAction, QKeySequence
 from ui.dashboard import TransferDashboard
@@ -46,13 +47,6 @@ class ApplicationWindow(QMainWindow):
         # Settings menu action
         file_menu = self.menuBar().addMenu("File")
 
-        about_action = QAction("About AKAISDS...", self)
-        about_action.setMenuRole(QAction.MenuRole.AboutRole)
-        about_action.triggered.connect(self._show_about_dialog)
-        file_menu.addAction(about_action)
-
-        file_menu.addSeparator()
-
         open_files_action = QAction("Open Files...", self)
         open_files_action.setShortcut(QKeySequence.StandardKey.Open)
         open_files_action.triggered.connect(self._open_files_dialog)
@@ -67,7 +61,13 @@ class ApplicationWindow(QMainWindow):
 
         settings_action = QAction("Settings...", self)
         settings_action.setMenuRole(QAction.MenuRole.PreferencesRole)
-        settings_action.setShortcut(QKeySequence.StandardKey.Preferences)
+        # QKeySequence.StandardKey.Preferences only has a default binding in
+        # Qt's macOS keybinding table (Cmd+,) - Windows/Linux get no default
+        # shortcut at all, so it silently does nothing there. Ctrl+, is the
+        # closest equivalent on those platforms.
+        settings_action.setShortcut(
+            QKeySequence.StandardKey.Preferences if sys.platform == "darwin" else "Ctrl+,"
+        )
         settings_action.triggered.connect(self.dashboard_view.open_settings_dialog)
         file_menu.addAction(settings_action)
 
@@ -150,6 +150,11 @@ class ApplicationWindow(QMainWindow):
         # macOS - see QAction.MenuRole), so this stays a plain Help menu on
         # every platform rather than trying to fake native placement
         help_menu = self.menuBar().addMenu("&Help")
+
+        about_action = QAction("About AKAISDS...", self)
+        about_action.setMenuRole(QAction.MenuRole.AboutRole)
+        about_action.triggered.connect(self._show_about_dialog)
+        help_menu.addAction(about_action)
 
         check_for_updates_action = QAction("Check for Updates...", self)
         check_for_updates_action.triggered.connect(self._check_for_updates_manual)
