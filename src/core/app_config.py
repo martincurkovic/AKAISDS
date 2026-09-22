@@ -1,7 +1,7 @@
 import json
 from pathlib import Path
 
-CONFIG_PATH = Path.home() / ".akaisds_config.json"
+CONFIG_PATH = Path.home() / ".akaisds/config.json"
 
 
 def load_config():
