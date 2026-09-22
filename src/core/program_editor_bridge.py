@@ -204,6 +204,24 @@ _KEYGROUP_DETAIL_FIELDS = [
     "CP4",
 ]
 
+#: sample-header fields the Samples tab's waveform view needs. LOOPAT1 is
+#: the loop's END, not its start - LLNGTH1 measures backwards from it, so
+#: the loop region is [LOOPAT1 - LLNGTH1, LOOPAT1]. This is confirmed in
+#: s3ked's own RESOLUTION_NOTES.md (search "LOOPAT1 is the loop END") -
+#: the S3000XL manual and an independent implementation (ConvertWithMoss)
+#: both agree, and it is NOT mentioned in s3k.params' own notes= field for
+#: LOOPAT1, so it's easy to get backwards reading that file alone. Getting
+#: this wrong doesn't just misplace a marker - it's the exact bug s3ked's
+#: own history describes as producing silent/degraded loops.
+_SAMPLE_DETAIL_FIELDS = [
+    "SSTART",
+    "SMPEND",
+    "LOOPAT1",
+    "LLNGTH1",
+    "SLNGTH",
+    "SSRATE",
+]
+
 _PROGRAM_LEVEL_FIELDS = [
     "PANPOS",
     "PRLOUD",
@@ -285,7 +303,7 @@ class BridgeWorker(QThread):
     # fast should end up showing the fifth, not sit through four stale
     # reads first. Writes and Program Changes are never coalesced: every
     # one of those must reach the hardware.
-    _COALESCE_KINDS = {"keygroups", "detail", "multi_parts"}
+    _COALESCE_KINDS = {"keygroups", "detail", "multi_parts", "sample_detail"}
 
     programs_loaded = Signal(list)
     programs_load_failed = Signal(str)
@@ -298,6 +316,15 @@ class BridgeWorker(QThread):
 
     detail_loaded = Signal(int, int, dict)  # program_index, keygroup_index, values
     detail_load_failed = Signal(int, int, str)
+
+    # sample_index, values (_SAMPLE_DETAIL_FIELDS) - header only (name/loop
+    # points/rate etc), never audio. s3k has no bulk sample-audio transfer
+    # at all (no RSPACK/ASPACK) - actual waveform data comes from the
+    # Transfer Dashboard's own SamplerController instead, over a completely
+    # separate MIDI connection, driven directly from program_editor_window.py
+    # rather than through this worker (see its _load_sample_waveform).
+    sample_detail_loaded = Signal(int, dict)
+    sample_detail_load_failed = Signal(int, str)
 
     parts_loaded = Signal(list)  # [(program_name, channel, level, pan), ...] per part
     parts_load_failed = Signal(str)
@@ -387,6 +414,9 @@ class BridgeWorker(QThread):
 
     def submit_multi_parts(self):
         self._submit(("multi_parts",))
+
+    def submit_sample_detail(self, sample_index):
+        self._submit(("sample_detail", sample_index))
 
     def submit_program_change(self, part_index, program_index, program_name, channel):
         self._submit(("program_change", part_index, program_index, program_name, channel))
@@ -532,6 +562,18 @@ class BridgeWorker(QThread):
             self.detail_load_failed.emit(program_index, keygroup_index, str(e))
             return
         self.detail_loaded.emit(program_index, keygroup_index, values)
+
+    def _handle_sample_detail(self, sample_index):
+        values = {}
+        try:
+            for field in _SAMPLE_DETAIL_FIELDS:
+                values[field] = self._bridge.get_parameter(
+                    p.lookup(field, "sample"), sample_index
+                )
+        except Exception as e:
+            self.sample_detail_load_failed.emit(sample_index, str(e))
+            return
+        self.sample_detail_loaded.emit(sample_index, values)
 
     def _handle_multi_parts(self):
         parts = []

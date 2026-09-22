@@ -1,5 +1,11 @@
+import math
 import os
+import random
+import struct
 import sys
+import tempfile
+import time
+import wave
 
 if __name__ == "__main__":
     # running this file directly (not through main.py) puts src/ui on
@@ -15,8 +21,9 @@ from PySide6.QtGui import (
     QPainter,
     QColor,
 )
-from PySide6.QtCore import QTimer, QRegularExpression
+from PySide6.QtCore import QEventLoop, QTimer, QRegularExpression
 from PySide6.QtWidgets import (
+    QApplication,
     QGridLayout,
     QHBoxLayout,
     QInputDialog,
@@ -46,6 +53,7 @@ from ui.note_spinbox import NoteSpinBox
 from ui.qt_helpers import FullWidthTabBar
 from ui.envelope_graph import ADSREnvelopeGraph, Envelope2Graph
 from ui.keygroup_range_bar import KeygroupRangeBar, keygroup_color
+from ui.waveform_view import WaveformView
 from ui import theme
 from ui.about_dialog import AboutDialog
 from ui.update_helper import UpdateCheckRunner
@@ -148,6 +156,15 @@ _NAME_INPUT_PATTERN = (
     "[" + AKAI_CHARSET.replace("-", "\\-") + "]{0," + str(NAME_LENGTH) + "}"
 )
 
+# real audio for AKAISDS_DEMO_SAMPLER's fake sample-audio path (see
+# _fetch_demo_sample_audio) - the same fixture the test suite uses, not
+# anything under WaveformRenderer/ (that folder is the user's own separate
+# reference repo, copied in for the WaveformView port - never AKAISDS's own
+# fixture path, and its contents can move/disappear without notice)
+_DEMO_TEST_AUDIO_PATH = os.path.normpath(
+    os.path.join(os.path.dirname(__file__), "..", "..", "tests", "test_audio.wav")
+)
+
 
 class _ModMatrixGrid(QWidget):
     """Wraps a Modulation card's QGridLayout (see _build_mod_matrix_row/
@@ -233,6 +250,15 @@ class ProgramEditorWindow(QMainWindow):
         self._pending_restore_state = None  # set only by _refresh_from_hardware()
         self._refresh_in_progress = False
         self._multi_refresh_in_progress = False
+        # session-only cache of loaded sample audio + loop-point markers,
+        # keyed by sample index - {"samples", "framerate", "start",
+        # "loop_start", "loop_end", "end"}. Loading audio means a live SDS
+        # transfer (see _load_sample_waveform), so re-selecting a sample
+        # already loaded this session shows it instantly instead of
+        # re-running that. Cleared whenever the sample list itself reloads
+        # (_on_samples_loaded) - a resident sample's own index can start
+        # meaning something else after that.
+        self._sample_waveform_cache = {}
 
         self._main_window = main_window
         self._bridge = bridge
@@ -1607,6 +1633,7 @@ class ProgramEditorWindow(QMainWindow):
         programs_tab_page.setLayout(content_layout)
 
         multis_tab_page = self._build_multis_tab()
+        samples_tab_page = self._build_samples_tab()
 
         self.main_tabs = QTabWidget()
         # same full-width tab bar as the MIDI Settings dialog - must be
@@ -1614,6 +1641,7 @@ class ProgramEditorWindow(QMainWindow):
         self.main_tabs.setTabBar(FullWidthTabBar(self.main_tabs))
         self.main_tabs.addTab(multis_tab_page, "Multis")
         self.main_tabs.addTab(programs_tab_page, "Programs")
+        self.main_tabs.addTab(samples_tab_page, "Samples")
         # Multis stays the first tab, but isn't fully working yet - open on
         # Programs instead
         self.main_tabs.setCurrentIndex(1)
@@ -1704,6 +1732,9 @@ class ProgramEditorWindow(QMainWindow):
         self.keygroup_list.itemSelectionChanged.connect(
             self._update_list_context_actions_enabled
         )
+        self.sample_list_widget.currentItemChanged.connect(self._on_sample_selected)
+        self.waveform_view.load_requested.connect(self._load_sample_waveform)
+        self.waveform_view.marker_committed.connect(self._on_waveform_marker_committed)
         self._worker.submit_program_list()
 
         # enable knobs and wire their (debounced) writes
@@ -2825,6 +2856,54 @@ class ProgramEditorWindow(QMainWindow):
 
         return knob, value_label, widget
 
+    def _build_samples_tab(self):
+        # same row-widget-free QListWidget + labeled column shape as the
+        # Programs tab's own program_list/keygroup_list (see __init__) -
+        # deliberately not sharing that code since this list's rows are
+        # plain sample names with no per-row widget, unlike the keygroup
+        # list's colored-swatch rows
+        self.sample_list_widget = QListWidget()
+        self.sample_list_widget.setObjectName("sampleList")
+        self.sample_list_widget.setFixedWidth(200)
+
+        samples_column = QVBoxLayout()
+        samples_column.setContentsMargins(0, 0, 0, 0)
+        samples_column.setSpacing(6)
+        samples_column.addWidget(QLabel("<b>Samples</b>"))
+        samples_column.addWidget(self.sample_list_widget)
+        samples_container = QWidget()
+        samples_container.setLayout(samples_column)
+
+        self.waveform_view = WaveformView()
+
+        # only shown while a sample's audio is actually being received -
+        # see _on_sample_receive_progress/_load_sample_waveform. The
+        # waveform view's own placeholder text already says loading will
+        # freeze the interface; this is what proves it's actually making
+        # progress rather than just hung, since receive_progress is real
+        # data from the transfer (word count in vs. total), not a fake
+        # animation.
+        self.sample_load_progress = QProgressBar()
+        self.sample_load_progress.setVisible(False)
+
+        waveform_column = QVBoxLayout()
+        waveform_column.setContentsMargins(0, 0, 0, 0)
+        waveform_column.setSpacing(6)
+        waveform_column.addWidget(QLabel("<b>Loop Points</b>"))
+        waveform_column.addWidget(self.waveform_view)
+        waveform_column.addWidget(self.sample_load_progress)
+        waveform_column.addStretch()
+        waveform_container = QWidget()
+        waveform_container.setLayout(waveform_column)
+
+        content_layout = QHBoxLayout()
+        content_layout.setContentsMargins(14, 14, 14, 14)
+        content_layout.addWidget(samples_container)
+        content_layout.addWidget(waveform_container, stretch=1)
+        page = QWidget()
+        page.setLayout(content_layout)
+        return page
+
     def _build_multis_tab(self):
         # the sampler holds exactly one resident multi - no list to choose
         # between, just its fixed 16 parts, each with an independent
@@ -3299,6 +3378,31 @@ class ProgramEditorWindow(QMainWindow):
 
     def _on_samples_loaded(self, samples):
         self._sample_list = samples
+
+        # a sample's INDEX is what addresses its header/audio (see
+        # _load_sample_waveform) and that index can mean something
+        # completely different after a reload (renamed/deleted/reordered
+        # on the hardware) - cached audio keyed by the old index would be
+        # silently wrong rather than just stale, so drop it rather than try
+        # to carry it forward by name
+        self._sample_waveform_cache = {}
+        previous_sample = (
+            self.sample_list_widget.currentItem().text()
+            if self.sample_list_widget.currentItem()
+            else None
+        )
+        self.sample_list_widget.blockSignals(True)
+        self.sample_list_widget.clear()
+        self.sample_list_widget.addItems(samples)
+        self.sample_list_widget.blockSignals(False)
+        if previous_sample is not None:
+            match = self.sample_list_widget.findItems(
+                previous_sample, Qt.MatchFlag.MatchExactly
+            )
+            self.sample_list_widget.setCurrentItem(match[0] if match else None)
+        else:
+            self.waveform_view.clear()
+
         for combo in self._zone_combos:
             combo.blockSignals(True)
             combo.clear()
@@ -3318,6 +3422,312 @@ class ProgramEditorWindow(QMainWindow):
             self.program_list.setCurrentRow(
                 0
             )  # this is what triggers keygroup loading for the first program
+
+    def _on_sample_selected(self, current, previous):
+        if current is None:
+            self.waveform_view.clear()
+            return
+        entry = self._sample_waveform_cache.get(self.sample_list_widget.currentRow())
+        if entry is not None:
+            self.waveform_view.set_waveform(
+                entry["samples"],
+                entry["start"],
+                entry["loop_start"],
+                entry["loop_end"],
+                entry["end"],
+            )
+        else:
+            self.waveform_view.clear()
+
+    def _wait_for_any_signal(self, signals, timeout_ms=None):
+        # Blocks the calling (GUI) thread until the first of *signals*
+        # fires, or *timeout_ms* elapses - while still pumping the Qt event
+        # loop, so cross-thread signals (BridgeWorker) and MIDI callbacks
+        # (SamplerController) still get delivered. This is the ONE place in
+        # this window that deliberately blocks instead of returning and
+        # letting a result arrive later through a persistently-connected
+        # slot the way every other BridgeWorker signal in __init__ does -
+        # used only by _load_sample_waveform, where the whole point is a
+        # real, visible freeze (see WaveformView's own placeholder copy)
+        # rather than something to engineer around. timeout_ms=None waits
+        # forever - appropriate for an actual SDS sample dump, which can
+        # legitimately take minutes (see README's own transfer-time table)
+        # and has no timeout of its own to inherit.
+        #
+        # Returns (which_index, emitted_args) for whichever signal fired
+        # first, or (None, None) on timeout.
+        loop = QEventLoop()
+        result = {}
+
+        def _make_capture(index):
+            def _capture(*args):
+                result["which"] = index
+                result["args"] = args
+                loop.quit()
+
+            return _capture
+
+        connections = [sig.connect(_make_capture(i)) for i, sig in enumerate(signals)]
+        timer = None
+        if timeout_ms:
+            timer = QTimer(self)
+            timer.setSingleShot(True)
+            timer.timeout.connect(loop.quit)
+            timer.start(timeout_ms)
+        loop.exec()
+        for sig, connection in zip(signals, connections):
+            sig.disconnect(connection)
+        if timer is not None:
+            timer.stop()
+        if "which" not in result:
+            return None, None
+        return result["which"], result["args"]
+
+    def _fetch_sample_header_blocking(self, sample_index):
+        # header only (SSTART/SMPEND/LOOPAT1/LLNGTH1/etc) - fast, goes
+        # through the normal BridgeWorker/S3kBridge connection. See
+        # _SAMPLE_DETAIL_FIELDS in program_editor_bridge.py for the
+        # LOOPAT1-is-the-loop-END correction this relies on.
+        self._worker.submit_sample_detail(sample_index)
+        which, args = self._wait_for_any_signal(
+            [self._worker.sample_detail_loaded, self._worker.sample_detail_load_failed],
+            timeout_ms=20000,
+        )
+        if which == 0:
+            returned_index, values = args
+            if returned_index == sample_index:
+                return values
+            return None
+        if which == 1:
+            _returned_index, error = args
+            self.status_bar.showMessage(f"Couldn't read sample header: {error}")
+            return None
+        self.status_bar.showMessage("Timed out reading sample header")
+        return None
+
+    def _fetch_sample_audio_blocking(self, sampler_controller, sample_index):
+        # the slow part - a real SDS sample dump over the Transfer
+        # Dashboard's own MIDI connection (main_window.sampler_controller),
+        # completely separate from BridgeWorker's. s3k has no bulk
+        # sample-audio transfer at all (see AGENTS.md), so this is the only
+        # way to actually get audio out of the sampler. sample_received is
+        # always emitted before receive_finished on success (see
+        # SamplerController._finish_receiving), so racing the two still
+        # resolves on the fast path rather than waiting for
+        # receive_finished's extra pacing delay.
+        fd, temp_path = tempfile.mkstemp(suffix=".wav", prefix="akaisds_sample_")
+        os.close(fd)
+        # real word-count-in/total progress from the transfer itself, not a
+        # fake animation - shown next to the waveform (see
+        # _on_sample_receive_progress) so a slow dump reads as "in
+        # progress" instead of "hung", since the rest of the app really is
+        # frozen the whole time this runs
+        progress_connection = sampler_controller.receive_progress.connect(
+            self._on_sample_receive_progress
+        )
+        try:
+            sampler_controller.receive_samples([(sample_index, temp_path)])
+            which, args = self._wait_for_any_signal(
+                [sampler_controller.sample_received, sampler_controller.receive_finished],
+                timeout_ms=None,
+            )
+            if which == 0:
+                try:
+                    return self._read_wav_samples(temp_path)
+                except (OSError, wave.Error) as e:
+                    self.status_bar.showMessage(f"Couldn't read received sample: {e}")
+                    return None, None
+            self.status_bar.showMessage("Couldn't receive sample audio from hardware")
+            return None, None
+        finally:
+            sampler_controller.receive_progress.disconnect(progress_connection)
+            try:
+                os.remove(temp_path)
+            except OSError:
+                pass
+
+    def _on_sample_receive_progress(self, current, total):
+        self.sample_load_progress.setRange(0, max(total, 1))
+        self.sample_load_progress.setValue(current)
+        self.sample_load_progress.setVisible(True)
+
+    def _fetch_demo_sample_audio(self, sample_index):
+        # AKAISDS_DEMO_SAMPLER has no equivalent on the audio side -
+        # SamplerController always wants a real MIDI connection, unlike
+        # program_editor_bridge.connect()'s DemoBridge (see AGENTS.md's
+        # "Developing without hardware"). This loads real audio from
+        # tests/test_audio.wav (same file the test suite's own fixtures
+        # use - see _DEMO_TEST_AUDIO_PATH) so the Samples tab's loading/
+        # progress/marker-editing UI can all be exercised without hardware
+        # against something that actually looks like a waveform. Falls
+        # back to a synthesized tone if that file is ever missing/moved
+        # again rather than failing outright - demo mode staying broken
+        # until someone notices and fixes a fixture path is exactly what
+        # happened before this fallback existed.
+        try:
+            samples, framerate = self._read_wav_samples(_DEMO_TEST_AUDIO_PATH)
+        except (OSError, wave.Error):
+            samples, framerate = self._synthesize_demo_sample_audio(sample_index)
+
+        # paced with real sleeps + a few genuine receive_progress-shaped
+        # updates so it also exercises _on_sample_receive_progress, rather
+        # than completing instantly with the progress bar never appearing
+        total = len(samples)
+        steps = 6
+        for step in range(1, steps + 1):
+            current = total * step // steps
+            self._on_sample_receive_progress(current, total)
+            self.status_bar.showMessage(
+                f"Loading audio for sample {sample_index} (demo) - "
+                f"{current}/{total} frames..."
+            )
+            QApplication.processEvents()
+            time.sleep(0.1)
+
+        return samples, framerate
+
+    def _synthesize_demo_sample_audio(self, sample_index):
+        # fallback for _fetch_demo_sample_audio when tests/test_audio.wav
+        # can't be read - deterministic per sample_index (reloading the
+        # same sample gives the same fake tone), not meant to resemble
+        # real sampled audio content
+        framerate = 44100
+        frame_count = 20000 + (sample_index * 4127) % 60000
+        rng = random.Random(sample_index)
+        freq = 110 * (1.5 ** (sample_index % 5))
+        samples = [0] * frame_count
+        for i in range(frame_count):
+            t = i / framerate
+            decay = math.exp(-t * 1.5)
+            tone = math.sin(2 * math.pi * freq * t)
+            tone += 0.35 * math.sin(2 * math.pi * freq * 2 * t)
+            noise = (rng.random() - 0.5) * 0.06
+            samples[i] = int(max(-1.0, min(1.0, tone * decay + noise)) * 32000)
+        return samples, framerate
+
+    def _read_wav_samples(self, path):
+        # sds_encoder.write_wav_file (what the Dashboard's receive path
+        # always writes through) only ever produces 8-bit unsigned or
+        # 16-bit signed mono WAV - never anything else - so this doesn't
+        # need the general-purpose format handling a standalone WAV loader
+        # would (see WaveformRenderer/src/core/wav_parser.py, the prototype
+        # this was adapted from, for the fuller version). Returns samples
+        # normalised to a 16-bit-equivalent signed range, matching what
+        # WaveformView's paintEvent divides by.
+        with wave.open(path, "rb") as wf:
+            framerate = wf.getframerate()
+            sampwidth = wf.getsampwidth()
+            raw = wf.readframes(wf.getnframes())
+        if sampwidth == 1:
+            samples = [(b - 128) << 8 for b in raw]
+        else:
+            samples = list(struct.unpack("<" + "h" * (len(raw) // 2), raw))
+        return samples, framerate
+
+    def _load_sample_waveform(self):
+        sample_index = self.sample_list_widget.currentRow()
+        if sample_index < 0:
+            return
+
+        # same env var program_editor_bridge.connect() checks for the s3k
+        # side (DemoBridge) - SamplerController has no demo mode of its
+        # own, so this is what makes the audio side fake too, entirely
+        # within this window (see _fetch_demo_sample_audio)
+        demo_mode = bool(os.environ.get("AKAISDS_DEMO_SAMPLER"))
+        sampler_controller = getattr(self._main_window, "sampler_controller", None)
+        if not demo_mode:
+            if sampler_controller is None:
+                self.status_bar.showMessage(
+                    "Can't load sample audio - no Transfer Dashboard connection available"
+                )
+                return
+            if sampler_controller.is_transfer_busy():
+                self.status_bar.showMessage(
+                    "Can't load sample audio - a transfer is already in progress "
+                    "on the Transfer Dashboard"
+                )
+                return
+
+        self.waveform_view.set_loading(True)
+        # freezes the rest of the editor for the duration, deliberately -
+        # see WaveformView's own placeholder copy. Doesn't reach the menu
+        # bar (Cmd+R/Cmd+Delete etc still fire), which is a known gap, not
+        # a guarantee - the real backstop against overlapping transfers is
+        # the is_transfer_busy() check above and BridgeWorker's own queue,
+        # not this disable.
+        self.main_tabs.setEnabled(False)
+        self.status_bar.showMessage(
+            f"Loading audio for sample {sample_index} - this can take a "
+            "while and will freeze the interface..."
+        )
+        # let the "Loading…" placeholder and the disabled tab widget above
+        # actually paint before the blocking waits below start - otherwise
+        # the freeze begins before the user ever sees why
+        QApplication.processEvents()
+
+        try:
+            header = self._fetch_sample_header_blocking(sample_index)
+            if header is None:
+                return
+            if demo_mode:
+                samples, framerate = self._fetch_demo_sample_audio(sample_index)
+            else:
+                samples, framerate = self._fetch_sample_audio_blocking(
+                    sampler_controller, sample_index
+                )
+            if samples is None:
+                return
+
+            entry = {
+                "samples": samples,
+                "framerate": framerate,
+                "start": header["SSTART"],
+                # LOOPAT1 is the loop END, not the start (see
+                # _SAMPLE_DETAIL_FIELDS's comment) - loop_start is derived,
+                # never read directly
+                "loop_start": max(0, header["LOOPAT1"] - header["LLNGTH1"]),
+                "loop_end": header["LOOPAT1"],
+                "end": header["SMPEND"],
+            }
+            self._sample_waveform_cache[sample_index] = entry
+            if sample_index == self.sample_list_widget.currentRow():
+                self.waveform_view.set_waveform(
+                    entry["samples"],
+                    entry["start"],
+                    entry["loop_start"],
+                    entry["loop_end"],
+                    entry["end"],
+                )
+            self.status_bar.showMessage(
+                f"Loaded {len(samples)} sample frames for sample {sample_index}"
+            )
+        finally:
+            self.main_tabs.setEnabled(True)
+            self.waveform_view.set_loading(False)
+            self.sample_load_progress.setVisible(False)
+
+    def _on_waveform_marker_committed(self, which, start, loop_start, loop_end, end):
+        sample_index = self.sample_list_widget.currentRow()
+        if sample_index < 0:
+            return
+        entry = self._sample_waveform_cache.get(sample_index)
+        if entry is not None:
+            entry.update(
+                start=start, loop_start=loop_start, loop_end=loop_end, end=end
+            )
+        if which == "start":
+            self._write_knob_value("SSTART", "sample", start, index=sample_index)
+        elif which == "end":
+            self._write_knob_value("SMPEND", "sample", end, index=sample_index)
+        else:
+            # "loop_start" or "loop_end" - LOOPAT1 (the loop END) and
+            # LLNGTH1 (measured backwards from it) jointly encode the loop
+            # region, so either edge moving means writing both - see
+            # _SAMPLE_DETAIL_FIELDS's comment on LOOPAT1
+            self._write_knob_value("LOOPAT1", "sample", loop_end, index=sample_index)
+            self._write_knob_value(
+                "LLNGTH1", "sample", loop_end - loop_start, index=sample_index
+            )
 
     def _on_zone_sample_changed(self, field, zone_idx):
         text = self._zone_combos[zone_idx].currentText()

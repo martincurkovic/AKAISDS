@@ -994,6 +994,23 @@ class SamplerController(QObject):
         # public version of _is_open_loop() - safe for UI layer to call directly
         return self._is_open_loop()
 
+    def is_transfer_busy(self):
+        # public check for "would receive_samples()/receive_sample_generic()/
+        # send_file_queue() etc. just reject this right now" - same condition
+        # duplicated inline at the top of each of those, exposed here so a
+        # caller (e.g. the Program Editor's Samples tab, which shares this
+        # controller with the Dashboard over one MIDI connection) can check
+        # first rather than fire a request that's guaranteed to be silently
+        # ignored with only a status_changed string to notice by
+        return bool(
+            self._send_queue
+            or self._stereo_queue
+            or self._file_queue
+            or self._receiving
+            or self._receive_queue
+            or self._awaiting_sample_info
+        )
+
     def _send_current_packet(self):
         # send whatever packet self._send_index currently points to.
         # called once to kick off transfer, then again every time the response tells us to advance or retry
