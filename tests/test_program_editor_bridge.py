@@ -397,6 +397,57 @@ def test_worker_emits_detail_load_failed_on_error():
     assert failed == [(3, 2, "device timed out")]
 
 
+# --- BridgeWorker: sample detail (Samples tab / loop points) -----------------
+
+
+def test_worker_reads_every_expected_sample_detail_field():
+    worker = BridgeWorker(_EchoDetailBridge())
+    loaded = []
+    worker.sample_detail_loaded.connect(lambda *a: loaded.append(a))
+
+    worker.submit_sample_detail(5)
+    worker.process_pending()
+
+    sample_index, values = loaded[0]
+    assert sample_index == 5
+    assert set(values) == set(program_editor_bridge._SAMPLE_DETAIL_FIELDS)
+    assert all(
+        values[field] == field
+        for field in program_editor_bridge._SAMPLE_DETAIL_FIELDS
+    )
+
+
+def test_worker_emits_sample_detail_load_failed_on_error():
+    class _FailingBridge:
+        def get_parameter(self, *_a, **_kw):
+            raise RuntimeError("device timed out")
+
+    worker = BridgeWorker(_FailingBridge())
+    failed = []
+    worker.sample_detail_load_failed.connect(lambda *a: failed.append(a))
+
+    worker.submit_sample_detail(7)
+    worker.process_pending()
+
+    assert failed == [(7, "device timed out")]
+
+
+def test_worker_coalesces_queued_sample_detail_requests_to_the_latest():
+    worker = BridgeWorker(_EchoDetailBridge())
+    loaded = []
+    worker.sample_detail_loaded.connect(lambda *a: loaded.append(a))
+
+    # same "get me the current state of X" reasoning as keygroups/detail/
+    # multi_parts - rapid clicking through the sample list shouldn't queue
+    # up a backlog of stale header reads
+    worker.submit_sample_detail(0)
+    worker.submit_sample_detail(1)
+    worker.submit_sample_detail(2)
+    worker.process_pending()
+
+    assert [sample_index for sample_index, _values in loaded] == [2]
+
+
 # --- BridgeWorker: writes --------------------------------------------------------
 
 

@@ -109,6 +109,25 @@ returns a `DemoBridge` instead of opening a real MIDI port. Useful for UI work,
 but **cannot** exercise anything that depends on real timing/latency or on
 `S3kBridge`'s actual thread-safety constraints - see the next section.
 
+The same env var also fakes the Samples tab's *audio* - `SamplerController`
+has no demo mode of its own (it always wants a real MIDI connection), so
+`ProgramEditorWindow._fetch_demo_sample_audio` loads real audio from
+`tests/test_audio.wav` instead of calling
+`main_window.sampler_controller.receive_samples()` when this is set.
+`python src/ui/program_editor_window.py` (this file's own `__main__` block)
+already runs with a `main_window` that has no `sampler_controller` at all,
+so this is the only way that path ever produces anything there. Every
+sample index loads the same fixture (there's only the one) - paced with
+real `time.sleep()` + several genuine `receive_progress`-shaped updates so
+the progress bar is exercised too. Falls back to `_synthesize_demo_sample_audio` (a deterministic fake tone,
+not meant to resemble real audio) if that file is ever missing or
+unreadable, rather than failing outright - demo mode silently staying
+broken until someone notices a moved/renamed fixture is worse than an
+obviously-fake tone. `WaveformRenderer/` (the separate reference repo
+`WaveformView` was ported from) is the user's own copied-in material, not
+an AKAISDS fixture path - `tests/test_audio.wav` is the only one this
+window should ever read from.
+
 ## `BridgeWorker` - read this before touching anything under `core/program_editor_bridge.py`
 
 `S3kBridge` documents itself as unsafe for concurrent calls on one connection.
@@ -412,6 +431,50 @@ showed every note one octave higher than the hardware. `ui/note_spinbox.py`'s
 changes again - see `tests/test_note_spinbox.py`'s full-range round-trip test.
 Don't "correct" the octave number back to the general-MIDI convention; C3 is
 right for this hardware.
+
+## Samples tab: loop points, and the one place this window deliberately blocks
+
+`s3k` has no bulk sample-audio transfer at all - no RSPACK/ASPACK, only
+header reads (`SDATA`/byte-addressable `SHEADER`). So the Samples tab's
+waveform (`ui/waveform_view.py`'s `WaveformView`, built into
+`program_editor_window.py`'s `_build_samples_tab`) gets its header fields
+(loop points, start/end, rate) through the normal `BridgeWorker`/`S3kBridge`
+connection like everything else on this page, but gets the actual audio from
+`main_window.sampler_controller` - the Transfer Dashboard's own hand-rolled
+SDS receiver, reached because `ProgramEditorWindow` already holds a
+`main_window` reference. That's a **second, separate MIDI connection** to
+the same physical port, open at the same time as this window's own bridge -
+not new (the Dashboard's `midi_manager` was already left open whenever
+`open_program_editor()` just hides the dashboard rather than closing
+anything), but worth knowing about if sample loads and other hardware
+actions ever seem to interleave strangely.
+
+**`LOOPAT1` is the loop's END, not its start.** `LLNGTH1` measures
+*backwards* from it - the loop region is `[LOOPAT1 - LLNGTH1, LOOPAT1]`.
+This is confirmed in `s3ked`'s own `docs/RESOLUTION_NOTES.md` (§136 in the
+upstream repo, not bundled in the installed wheel - see the project's git
+checkout if you need to re-read it): the S3000XL manual says so directly,
+an independent implementation (`ConvertWithMoss`) agrees, and getting it
+backwards is exactly the bug that produced silent/degraded loops throughout
+that project's own history. **This is NOT mentioned in `s3k.params`' own
+`notes=` field for `LOOPAT1`** - reading only that file, the natural
+assumption is that `LOOPAT1` is where the loop starts. It isn't.
+`program_editor_bridge.py`'s `_SAMPLE_DETAIL_FIELDS` comment carries the
+same warning at the point every consumer reads from. `loop_start` is always
+*derived* (`LOOPAT1 - LLNGTH1`) in this codebase, never read or written
+directly - there is no such raw field.
+
+Loading a sample's audio is a real SDS dump and can legitimately take
+minutes for a large sample (see the README's own transfer-time table) - the
+UI is meant to freeze while it happens, not work around it; `WaveformView`'s
+own placeholder text says so before the user double-clicks. The mechanism
+behind that, `ProgramEditorWindow._wait_for_any_signal`, is the **one place
+in this whole window** that blocks the calling thread on a signal instead of
+returning and letting a result arrive later through a persistently-connected
+slot (`BridgeWorker`'s whole design, per its own docstring, is the opposite
+of this - connect once in `__init__`, let signals arrive asynchronously).
+Don't reach for `_wait_for_any_signal` anywhere else on this page without a
+comparably good reason; everywhere else, the async pattern is correct.
 
 ## Testing
 
