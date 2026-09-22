@@ -9,6 +9,7 @@ from ui.waveform_view import (
     _MARKER_ORDER,
     build_envelope,
     clamp_marker,
+    dominant_wheel_delta,
     frame_for_x,
     x_for_frame,
 )
@@ -94,3 +95,34 @@ def test_clamp_marker_stays_within_the_sample_itself_at_the_two_ends():
 
     index = _MARKER_ORDER.index("end")
     assert clamp_marker(_MARKER_ORDER, index, 5000, values, frame_count=1000) == 999
+
+
+# --- dominant_wheel_delta ---------------------------------------------------------
+
+
+def test_dominant_wheel_delta_picks_the_larger_magnitude_axis():
+    assert dominant_wheel_delta(angle_x=120, angle_y=0) == 120
+    assert dominant_wheel_delta(angle_x=0, angle_y=120) == 120
+    assert dominant_wheel_delta(angle_x=120, angle_y=40) == 120
+    assert dominant_wheel_delta(angle_x=40, angle_y=120) == 120
+
+
+def test_dominant_wheel_delta_ignores_a_stray_component_on_a_real_swipe():
+    # regression test for a real, reported bug: a real horizontal trackpad
+    # swipe (large x) can report a small stray y value for the first event
+    # or two before macOS locks the gesture onto one axis. The first fix
+    # for "horizontal swipes do nothing" used "y whenever it's nonzero,
+    # else x" - which read that stray y INSTEAD of the real, dominant x
+    # delta, causing a visible wrong-direction jump right as the swipe
+    # began before the real x delta ever took over ("bouncing" back).
+    # Whatever axis is actually larger in magnitude must win, regardless
+    # of which one happens to be exactly zero.
+    assert dominant_wheel_delta(angle_x=120, angle_y=3) == 120
+    assert dominant_wheel_delta(angle_x=120, angle_y=-3) == 120
+    assert dominant_wheel_delta(angle_x=-120, angle_y=3) == -120
+
+
+def test_dominant_wheel_delta_still_reports_a_pure_vertical_scroll():
+    # mouse wheels only ever report through angle_y - must not regress to
+    # requiring a nonzero angle_x
+    assert dominant_wheel_delta(angle_x=0, angle_y=-120) == -120

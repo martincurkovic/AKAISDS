@@ -86,6 +86,25 @@ def clamp_marker(order, index, frame, values, frame_count):
     return max(lo_bound, min(hi_bound, frame))
 
 
+def dominant_wheel_delta(angle_x, angle_y):
+    """Which of a QWheelEvent's two angleDelta() axes to actually act on.
+
+    Plain function, independent of Qt - same reasoning as the other
+    coordinate helpers above. A trackpad swipe reports through whichever
+    axis actually moved (left/right is angle_x, not angle_y - mouse wheels
+    only ever report angle_y), so a naive "always prefer y unless it's
+    exactly zero" reads a real horizontal swipe's tiny, often-nonzero
+    stray y component (present for the first event or two before macOS
+    locks the gesture onto one axis) instead of the real, much larger x
+    delta - a visible wrong-direction jump right as the swipe begins,
+    "bouncing" back once the real x delta takes over. Comparing
+    magnitudes picks whichever axis is actually dominant on every event,
+    correct both during that brief unlocked start and through the rest of
+    the gesture (only one axis is ever nonzero once macOS locks it).
+    """
+    return angle_x if abs(angle_x) > abs(angle_y) else angle_y
+
+
 class WaveformView(QWidget):
     # Loop-point editor for one sample: a fast min/max envelope plus four
     # draggable markers (start/loop start/loop end/end), horizontal
@@ -492,12 +511,12 @@ class WaveformView(QWidget):
         if self._samples is None:
             return
         angle = event.angleDelta()
-        # a trackpad's two-finger swipe reports through whichever axis
-        # actually moved - a left/right swipe is angle.x(), not angle.y().
-        # Reading only .y() (mouse wheels only ever report there) meant a
-        # horizontal swipe was silently ignored outright, not just mapped
-        # wrong.
-        delta = angle.y() if angle.y() != 0 else angle.x()
+        # see dominant_wheel_delta's own docstring for why this isn't just
+        # angle.y() (a horizontal swipe was silently ignored outright) or
+        # "y whenever it's nonzero, else x" (a real, reported bug: a stray
+        # y component at the start of a horizontal swipe caused a visible
+        # wrong-direction jump before the real x delta took over)
+        delta = dominant_wheel_delta(angle.x(), angle.y())
         if delta == 0:
             return
         if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
