@@ -167,6 +167,20 @@ _DEMO_TEST_AUDIO_PATH = os.path.normpath(
     os.path.join(os.path.dirname(__file__), "..", "..", "tests", "test_audio.wav")
 )
 
+# real transfers run at a fixed rate regardless of the audio's own sample
+# rate - it's a fixed 31250 baud serial line underneath, so what actually
+# changes with sample rate is the WORD COUNT, not the per-word cost. Backed
+# out of the README's own measured transfer-time table (5-second samples,
+# every row): (3.7*60)/(5*44100), (2.5*60)/(5*30000), (1.9*60)/(5*22050),
+# (1.3*60)/(5*15000), 56/(5*11025), 41/(5*8000) - all land within a few
+# percent of 1.0ms/word (1.007-1.040ms, mean 1.02ms), confirming the
+# fixed-rate assumption rather than being sample-rate-dependent. Used only
+# to pace _fetch_demo_sample_audio so someone can evaluate what this
+# feature actually feels like (the progress bar, the frozen interface, how
+# long "double-click and wait" really is) without needing hardware -
+# nothing here talks to a real connection at any bit rate.
+_DEMO_MS_PER_WORD = 1.02
+
 
 class _ModMatrixGrid(QWidget):
     """Wraps a Modulation card's QGridLayout (see _build_mod_matrix_row/
@@ -3809,11 +3823,20 @@ class ProgramEditorWindow(QMainWindow):
         except (OSError, wave.Error):
             samples, framerate = self._synthesize_demo_sample_audio(sample_index)
 
-        # paced with real sleeps + a few genuine receive_progress-shaped
-        # updates so it also exercises _on_sample_receive_progress, rather
-        # than completing instantly with the progress bar never appearing
+        # paced with real sleeps to roughly match how long an actual SDS
+        # transfer takes (see _DEMO_MS_PER_WORD) rather than a token delay -
+        # the whole point of demo mode here is letting someone evaluate
+        # this feature's real-world feel (the progress bar, the frozen
+        # interface, how long "double-click and wait" really is) without
+        # needing hardware in front of them. ~200ms between progress ticks
+        # is a reasonable UI update cadence regardless of how long the
+        # whole thing takes; never fewer than 6 ticks even for a short
+        # sample, so the progress bar still visibly moves rather than
+        # jumping straight to done.
         total = len(samples)
-        steps = 6
+        total_seconds = total * _DEMO_MS_PER_WORD / 1000
+        steps = max(6, round(total_seconds / 0.2))
+        step_seconds = total_seconds / steps
         for step in range(1, steps + 1):
             current = total * step // steps
             self._on_sample_receive_progress(current, total)
@@ -3822,7 +3845,7 @@ class ProgramEditorWindow(QMainWindow):
                 f"{current}/{total} frames..."
             )
             QApplication.processEvents()
-            time.sleep(0.1)
+            time.sleep(step_seconds)
 
         return samples, framerate
 
