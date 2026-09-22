@@ -31,6 +31,16 @@ class FakeBridge:
         self.multipart_pans = [i - 8 for i in range(MULTI_PART_COUNT)]
         self.multi_name = "DEMO MULTI"
         self.set_parameter_calls = []
+        # sample header (Samples tab / loop points) - distinct values, real
+        # loop math (LOOPAT1 is the loop END, not the start - see AGENTS.md/
+        # _SAMPLE_DETAIL_FIELDS - so loop_start = 8000 - 3000 = 5000)
+        self.sample_headers = {
+            i: {
+                "SSTART": 100, "SMPEND": 9999, "LOOPAT1": 8000,
+                "LLNGTH1": 3000, "SLNGTH": 10000, "SSRATE": 44100,
+            }
+            for i in range(len(self._samples))
+        }
 
     def sample_list(self):
         return self._samples
@@ -67,6 +77,10 @@ class FakeBridge:
             self.multipart_pans[program_index] = value
 
     def get_parameter(self, param, program_index, keygroup=0, **kwargs):
+        if param.region == "sample":
+            # program_index here is really a sample index - checked first
+            # since it's unrelated to (and needn't be a valid) program index
+            return self.sample_headers[program_index][param.name]
         if param.region == "multi" and param.name == "MULTINAME":
             return self.multi_name
         if param.name == "PANPOS":
@@ -880,3 +894,71 @@ def test_multi_part_channel_write_targets_the_part_not_the_selected_program(
     _pump_until(qapp, lambda: bridge.set_parameter_calls)
 
     assert bridge.set_parameter_calls[-1] == ("PMCHAN", 7, 11, 0)
+
+
+# --- Samples tab: header-only editing (see AGENTS.md's "Editing loop points
+# without audio") -----------------------------------------------------------
+
+
+def test_selecting_a_sample_shows_header_only_markers_before_audio_loads(editor, qapp):
+    # the whole point of set_header/has_header - markers should show up
+    # fast, from the header alone, well before anyone chooses to load the
+    # slow audio (a real SDS transfer, seconds to minutes)
+    editor.sample_list_widget.setCurrentRow(0)
+    editor._worker.wait_until_idle()
+    _pump_until(qapp, lambda: editor.waveform_view.has_header())
+
+    assert editor.waveform_view.has_waveform() is False
+    # LOOPAT1=8000 is the loop END, LLNGTH1=3000 measured backwards from it
+    # - loop_start = 8000 - 3000 = 5000 (see FakeBridge.sample_headers)
+    assert editor.waveform_view.markers() == {
+        "start": 100, "loop_start": 5000, "loop_end": 8000, "end": 9999,
+    }
+
+    loop_start_spinbox = editor._marker_spinboxes["loop_start"][1]
+    assert loop_start_spinbox.isEnabled() is True
+    assert loop_start_spinbox.value() == 5000
+
+
+def test_switching_to_samples_tab_selects_first_sample_only_once(editor, qapp):
+    assert editor.sample_list_widget.currentRow() == -1
+    editor.main_tabs.setCurrentIndex(editor._samples_tab_index)
+    assert editor.sample_list_widget.currentRow() == 0
+
+    # a deliberate different selection must survive switching away and
+    # back - this only ever fires when nothing is selected yet
+    editor.sample_list_widget.setCurrentRow(2)
+    editor.main_tabs.setCurrentIndex(0)  # Multis
+    editor.main_tabs.setCurrentIndex(editor._samples_tab_index)
+    assert editor.sample_list_widget.currentRow() == 2
+
+
+def test_load_sample_waveform_preserves_header_only_edits(editor, qapp, monkeypatch):
+    # regression test for the exact bug this whole feature is built to
+    # avoid: editing a marker while only the header is loaded must survive
+    # once real audio arrives, not get silently overwritten by a fresh
+    # header re-read or demo re-derivation (_load_sample_waveform must
+    # reuse the cache, not recompute markers, whenever an entry already
+    # exists)
+    monkeypatch.setenv("AKAISDS_DEMO_SAMPLER", "1")
+    editor.sample_list_widget.setCurrentRow(0)
+    editor._worker.wait_until_idle()
+    _pump_until(qapp, lambda: editor.waveform_view.has_header())
+
+    # simulate the user having already dragged/typed loop_start to 4000
+    # while only the header was loaded
+    editor._sample_waveform_cache[0]["loop_start"] = 4000
+    editor.waveform_view.set_marker("loop_start", 4000)
+
+    # stub the slow audio fetch with something instant - the realistic
+    # throttle (_DEMO_MS_PER_WORD) is exercised elsewhere and would make
+    # this test take real wall-clock seconds otherwise
+    monkeypatch.setattr(
+        editor, "_fetch_demo_sample_audio", lambda sample_index: ([0] * 500, 44100)
+    )
+
+    editor._load_sample_waveform()
+
+    assert editor._sample_waveform_cache[0]["loop_start"] == 4000
+    assert editor.waveform_view.markers()["loop_start"] == 4000
+    assert editor.waveform_view.has_waveform() is True
