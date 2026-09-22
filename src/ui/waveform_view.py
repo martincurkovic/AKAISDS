@@ -27,14 +27,8 @@ _ZOOM_STEP = 1.6  # multiplicative factor per wheel notch / zoom button click
 # at it
 _MARKER_ORDER = ("start", "loop_start", "loop_end", "end")
 
-_PLACEHOLDER_TEXT = (
-    "Double-click to load waveform\n\nLoading is slow and will freeze the interface"
-)
+_PLACEHOLDER_TEXT = "Double-click to load audio waveform\n\nLoading is slow and will freeze the interface until finished"
 _LOADING_TEXT = "Loading…"
-# shown along the bottom of the canvas once markers are known from the
-# sample's header but there's no audio to draw an envelope from yet - see
-# set_header
-_AUDIO_HINT_TEXT = "Double-click to load audio waveform (slow)\nInterface will not be usable until loading finished"
 
 
 def build_envelope(samples, width):
@@ -652,7 +646,7 @@ class WaveformView(QWidget):
             painter.drawText(
                 self.rect(),
                 Qt.AlignmentFlag.AlignCenter,
-                _LOADING_TEXT if self._loading else _AUDIO_HINT_TEXT,
+                _LOADING_TEXT if self._loading else _PLACEHOLDER_TEXT,
             )
 
     def _markers_within_hit_radius(self, x):
