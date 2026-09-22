@@ -45,10 +45,10 @@ class FakeBridge:
                 # 3000 * 65536
                 "LLNGTH1": 3000 * 65536, "SLNGTH": 10000, "SSRATE": 44100,
                 "SPTYPE": 0, "SPITCH": 60, "SHLTO": -12,
-                # STUNO is centered at 32768 (0 semitones), 256 raw units
-                # per semitone - see _sample_tune_offset_to_semitones - so
-                # 33280 is +2.00 semitones
-                "STUNO": 33280,
+                # STUNO is a plain signed 1/256-semitone raw value (same
+                # scale as VTUNO) - see _sample_tune_offset_to_semitones -
+                # so 512 is +2.00 semitones
+                "STUNO": 512,
             }
             for i in range(len(self._samples))
         }
@@ -373,7 +373,7 @@ class FakeSamplerController(QObject):
             self._bridge.sample_headers[new_index] = {
                 "SSTART": 0, "SMPEND": 0, "LOOPAT1": 0, "LLNGTH1": 0,
                 "SLNGTH": 0, "SSRATE": 44100, "SPTYPE": 0, "SPITCH": 60,
-                "SHLTO": 0, "STUNO": 32768,
+                "SHLTO": 0, "STUNO": 0,
             }
         # deferred, not synchronous - _perform_sample_edit_real connects
         # its _wait_for_any_signal listener AFTER calling send_file_queue,
@@ -1568,8 +1568,9 @@ def test_sample_loop_tune_value_label_updates_as_the_knob_turns(editor, qapp):
 
 
 def test_selecting_a_sample_shows_tune_from_header(editor, qapp):
-    # FakeBridge.get_parameter reports raw STUNO=33280 -> +2.00 semitones
-    # (centered at 32768 - see _sample_tune_offset_to_semitones)
+    # FakeBridge.get_parameter reports raw STUNO=512 -> +2.00 semitones
+    # (plain signed 1/256-semitone raw value, same scale as VTUNO - see
+    # _sample_tune_offset_to_semitones)
     editor.sample_list_widget.setCurrentRow(0)
     editor._worker.wait_until_idle()
     _pump_until(qapp, lambda: editor.waveform_view.has_header())
@@ -1580,8 +1581,12 @@ def test_selecting_a_sample_shows_tune_from_header(editor, qapp):
 
 def test_changing_sample_tune_writes_stuno_in_raw_units(editor, qapp):
     # same raw encoding as program_tune_spinbox/the keygroup zone's Tune
-    # spinbox (256 raw units per semitone), but centered at 32768 rather
-    # than 0 - -2.00 semitones is raw 32768 - 512 = 32256
+    # spinbox (256 raw units per semitone) - but STUNO's own declared s3k
+    # range is unsigned with no sign-extension, so a negative semitone
+    # value has to go out as its unsigned 16-bit two's-complement
+    # equivalent: -2.00 semitones is raw -512, which wraps to 65536-512
+    # = 65024 (confirmed bit-for-bit identical to VTUNO's own signed
+    # encode of -512 - see _semitones_to_sample_tune_offset's own comment)
     editor.sample_list_widget.setCurrentRow(0)
     editor._worker.wait_until_idle()
     _pump_until(qapp, lambda: editor.waveform_view.has_header())
@@ -1592,19 +1597,35 @@ def test_changing_sample_tune_writes_stuno_in_raw_units(editor, qapp):
     editor._worker.wait_until_idle()
     _pump_until(qapp, lambda: bridge.set_parameter_calls)
 
-    assert ("STUNO", 0, 32256, 0) in bridge.set_parameter_calls
+    assert ("STUNO", 0, 65024, 0) in bridge.set_parameter_calls
     assert editor._sample_waveform_cache[0]["stuno"] == pytest.approx(-2.0)
 
 
-def test_sample_tune_spinbox_range_stays_within_stunos_raw_bounds(editor):
-    # STUNO's raw field is unsigned 0..65535 - encode_field rejects
-    # anything outside that, so the spinbox's own range must never let a
-    # typed value round-trip to a raw value past either end (see
-    # _semitones_to_sample_tune_offset)
-    assert editor.sample_tune_spinbox.minimum() == -128.0
-    assert editor.sample_tune_spinbox.maximum() == 127.99
-    assert 0 <= editor._semitones_to_sample_tune_offset(-128.0) <= 65535
-    assert 0 <= editor._semitones_to_sample_tune_offset(127.99) <= 65535
+def test_sample_tune_spinbox_range_is_plus_minus_fifty(editor):
+    # +/-50.00 semitones, confirmed against real hardware - matching
+    # VTUNO/program_tune_spinbox's own range, not STUNO's declared (but
+    # sign-blind) 0..65535 raw span
+    assert editor.sample_tune_spinbox.minimum() == -50.0
+    assert editor.sample_tune_spinbox.maximum() == 50.0
+    assert 0 <= editor._semitones_to_sample_tune_offset(-50.0) <= 65535
+    assert 0 <= editor._semitones_to_sample_tune_offset(50.0) <= 65535
+
+
+def test_sample_tune_offset_round_trips_through_the_unsigned_wraparound(editor):
+    # regression test for a real bug: the original implementation centered
+    # STUNO at raw 32768 (treating it like a signed field re-based around
+    # its own midpoint), which isn't how the field actually works - it's
+    # a plain signed value, just with no sign-extension in s3k.params'
+    # own declared range. +50.00st read back as -78.00st under the old
+    # (wrong) formula, and writing 0.00st sent an out-of-range value to
+    # real hardware. Every semitone value in the spinbox's own range must
+    # convert to raw and back losslessly.
+    for semitones in (-50.0, -2.0, 0.0, 2.0, 50.0):
+        raw = editor._semitones_to_sample_tune_offset(semitones)
+        assert 0 <= raw <= 65535
+        assert editor._sample_tune_offset_to_semitones(raw) == pytest.approx(
+            semitones
+        )
 
 
 def test_confirm_rename_sample_updates_list_zone_combos_and_writes_shname(

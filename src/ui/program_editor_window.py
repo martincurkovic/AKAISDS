@@ -3497,7 +3497,11 @@ class ProgramEditorWindow(QMainWindow):
         sample_tune_label = QLabel("Tune")
         sample_tune_label.setFixedWidth(70)
         self.sample_tune_spinbox = QDoubleSpinBox()
-        self.sample_tune_spinbox.setRange(-128.0, 127.99)
+        # +/-50.00 semitones, confirmed against real hardware - same range
+        # as VTUNO/program_tune_spinbox, not STUNO's own declared (but
+        # sign-blind) 0..65535 raw span - see _sample_tune_offset_to_
+        # semitones's own comment
+        self.sample_tune_spinbox.setRange(-50.0, 50.0)
         self.sample_tune_spinbox.setSingleStep(0.01)
         self.sample_tune_spinbox.setDecimals(2)
         self.sample_tune_spinbox.setSuffix(" st")
@@ -3764,17 +3768,26 @@ class ProgramEditorWindow(QMainWindow):
     def _semitones_to_tune_offset(self, semitones):
         return round(semitones * 100 * 2.56)
 
-    # STUNO ("Sample tuning offset") is the same 1/256-semitone raw scale
-    # as PTUNO/VTUNO/KGTUNO above, but s3k.params documents its raw range
-    # as unsigned 0..65535 rather than signed - confirmed by encode_field
-    # itself rejecting a negative raw value for this field. 32768 (dead
-    # center of that range) is 0 semitones, same convention this app
-    # already uses for MIDI pan/velocity-style centered fields.
+    # STUNO ("Sample tuning offset") is a plain signed 1/256-semitone raw
+    # value on the wire - the exact same encoding as PTUNO/VTUNO/KGTUNO,
+    # confirmed against real hardware (+50.00st there round-trips through
+    # a bare, un-shifted _tune_offset_to_semitones/_semitones_to_tune_
+    # offset exactly like VTUNO does). The one wrinkle is that s3k.params
+    # documents STUNO's declared range as unsigned 0..65535 with no sign-
+    # extension (unlike VTUNO/PTUNO/KGTUNO, whose negative minimums make
+    # decode_field sign-extend them automatically) - encode_field itself
+    # rejects a negative raw value outright for this field. So a value at
+    # or past the 16-bit halfway point has to be manually reinterpreted as
+    # negative here on read, and manually wrapped back to its unsigned
+    # two's-complement equivalent on write (bit-for-bit identical to what
+    # VTUNO's own signed encode would produce - verified directly against
+    # encode_field) so it clears that bounds check.
     def _sample_tune_offset_to_semitones(self, raw_value):
-        return round((raw_value - 32768) / 2.56) / 100
+        signed_raw = raw_value if raw_value < 32768 else raw_value - 65536
+        return self._tune_offset_to_semitones(signed_raw)
 
     def _semitones_to_sample_tune_offset(self, semitones):
-        return round(semitones * 100 * 2.56) + 32768
+        return self._semitones_to_tune_offset(semitones) % 65536
 
     # old sampler hardware can't keep up with a write per wheel-notch or
     # per drag-frame - a value is only actually sent once it's held still
