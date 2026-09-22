@@ -1,12 +1,18 @@
-from PySide6.QtWidgets import QWidget, QSizePolicy
-from PySide6.QtGui import QPainter, QPen, QColor, QPolygonF
-from PySide6.QtCore import Qt, QRectF, QPointF, Signal
+from PySide6.QtWidgets import QApplication, QWidget, QSizePolicy
+from PySide6.QtGui import QCursor, QPainter, QPen, QColor, QPolygonF
+from PySide6.QtCore import Qt, QEvent, QRectF, QPointF, Signal
 
+from core import debug_log
 from ui import theme
 
 _BORDER_RADIUS = 4  # matches envelope_graph.py's own card-edge radius
 _HIT_RADIUS_PX = 6  # how close a click has to land to a marker to grab it
 _HANDLE_SIZE = 5  # the little triangle at the top of each marker line
+_FINE_DRAG_DIVISOR = 8  # how much slower a Shift-held drag moves
+
+_MIN_ZOOM = 1.0  # the whole sample visible at once
+_MAX_ZOOM = 500.0  # view can shrink to roughly 1/500th of the sample
+_ZOOM_STEP = 1.6  # multiplicative factor per wheel notch / zoom button click
 
 # order matters: this is also the neighbour-clamping order - each marker can
 # only move between the ones on either side of it in this list
@@ -29,7 +35,10 @@ def build_envelope(samples, width):
     enough for the original WaveformRenderer prototype's static display, but
     not for a widget that repaints on every mouse-move while dragging a
     marker. This reduces every repaint to one min/max pair per pixel,
-    computed once per load/resize instead of once per paint.
+    computed once per load/resize/zoom/pan instead of once per paint. The
+    caller (WaveformView._rebuild_envelope) is responsible for slicing
+    *samples* down to the currently visible zoom window first - this
+    function has no idea zoom/pan exist.
     """
     n = len(samples)
     width = max(1, int(width))
@@ -44,25 +53,32 @@ def build_envelope(samples, width):
     return envelope
 
 
-def frame_for_x(x, width, frame_count):
-    """Inverse of the x-position a marker at *frame* would be drawn at."""
-    if width <= 1 or frame_count <= 1:
-        return 0
+def frame_for_x(x, width, view_start, view_length):
+    """Inverse of x_for_frame - maps a widget-local x pixel to the absolute
+    frame it represents, relative to the currently visible
+    [view_start, view_start + view_length) window, not the whole sample.
+    At full zoom (view_start=0, view_length=the sample's own frame count)
+    this is the same mapping as before zoom/pan existed.
+    """
+    if width <= 1 or view_length <= 1:
+        return view_start
     frac = min(1.0, max(0.0, x / (width - 1)))
-    return int(round(frac * (frame_count - 1)))
+    return view_start + int(round(frac * (view_length - 1)))
 
 
-def x_for_frame(frame, width, frame_count):
-    if frame_count <= 1:
+def x_for_frame(frame, width, view_start, view_length):
+    if view_length <= 1:
         return 0.0
-    return (frame / (frame_count - 1)) * (width - 1)
+    return ((frame - view_start) / (view_length - 1)) * (width - 1)
 
 
 def clamp_marker(order, index, frame, values, frame_count):
     """Clamp *frame* between this marker's neighbours (and the sample's own
     bounds at the two ends) - start <= loop_start <= loop_end <= end always
     holds, so a drag can never cross a neighbouring marker or the sample's
-    own extent.
+    own extent. Whole-sample bounds, independent of the current zoom/pan
+    window - you can still drag a marker toward a position currently
+    scrolled off-screen, same as any timeline editor.
     """
     frame = max(0, min(frame_count - 1, frame))
     lo_bound = values[order[index - 1]] if index > 0 else 0
@@ -72,31 +88,36 @@ def clamp_marker(order, index, frame, values, frame_count):
 
 class WaveformView(QWidget):
     # Loop-point editor for one sample: a fast min/max envelope plus four
-    # draggable markers (start/loop start/loop end/end). Has no sample
-    # loaded until told to (see set_waveform/clear) - in that placeholder
-    # state it shows instructional text instead of an empty box, and a
-    # double-click there emits load_requested rather than doing anything
-    # itself. Loading real sample audio means a live SDS transfer over a
-    # SEPARATE MIDI connection (the Transfer Dashboard's own
-    # SamplerController - see program_editor_window.py's
-    # _load_sample_waveform) that can legitimately take minutes and, by
-    # design, freezes the rest of the app while it runs - this widget only
-    # ever asks for that to happen and displays the result; it has no idea
-    # how the data actually arrives.
+    # draggable markers (start/loop start/loop end/end), horizontal
+    # zoom+pan, and Shift-held fine dragging. Has no sample loaded until
+    # told to (see set_waveform/clear) - in that placeholder state it shows
+    # instructional text instead of an empty box, and a double-click there
+    # emits load_requested rather than doing anything itself. Loading real
+    # sample audio means a live SDS transfer over a SEPARATE MIDI
+    # connection (the Transfer Dashboard's own SamplerController - see
+    # program_editor_window.py's _load_sample_waveform) that can
+    # legitimately take minutes and, by design, freezes the rest of the app
+    # while it runs - this widget only ever asks for that to happen and
+    # displays the result; it has no idea how the data actually arrives.
     load_requested = Signal()
     # which marker moved ("start"/"loop_start"/"loop_end"/"end"), then the
     # four current frame positions - emitted once per drag, on release, not
     # continuously while dragging (same "redraw live, write on release"
-    # split envelope_graph.py's own knobs use for their hardware writes)
+    # split envelope_graph.py's own knobs use for their hardware writes).
+    # Also emitted by program_editor_window.py's marker spinboxes on commit
+    # (Enter/focus-loss) - see set_marker.
     marker_committed = Signal(str, int, int, int, int)
-    # start, loop_start, loop_end, end - emitted on load and on every drag
-    # step (unlike marker_committed, continuously, not just on release) so
-    # a numeric readout can track a drag live. The canvas has no room for
-    # per-marker text without markers overlapping when they're close
-    # together (or, in demo mode with an all-zero sample header, sitting
-    # exactly on top of each other) - see program_editor_window.py's
-    # marker value labels, which are what this actually feeds.
+    # start, loop_start, loop_end, end - emitted on load and on every drag/
+    # spinbox step (unlike marker_committed, continuously, not just on
+    # commit) so a numeric readout can track a drag live. The canvas has no
+    # room for per-marker text without markers overlapping when they're
+    # close together - see program_editor_window.py's marker spinboxes,
+    # which are what this actually feeds.
     markers_changed = Signal(int, int, int, int)
+    # view_start, view_length, frame_count - enough for an external
+    # QScrollBar to size and position itself. Emitted whenever zoom or pan
+    # changes, including indirectly (a new sample loading resets the view).
+    view_changed = Signal(int, int, int)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -112,10 +133,25 @@ class WaveformView(QWidget):
         self._frame_count = 0
         self._markers = {name: 0 for name in _MARKER_ORDER}
         self._dragging = None
+        self._drag_anchor_x = 0.0
+        self._drag_value = 0.0  # float accumulator - see mouseMoveEvent
+        # fine (Shift-held) mode warps the OS cursor back to a fixed point
+        # every move event instead of letting it travel with the drag - see
+        # mouseMoveEvent - so it never runs out of screen to move across
+        # while crawling through a multi-thousand-frame fine adjustment.
+        # _warp_anchor_global is that fixed point, in screen coordinates
+        # (QCursor.setPos() needs global, not widget-local, coordinates).
+        self._fine_active = False
+        self._warp_anchor_global = None
         self._loading = False
+        self._zoom = _MIN_ZOOM
+        self._view_start = 0
 
     def has_waveform(self):
         return self._samples is not None
+
+    def frame_count(self):
+        return self._frame_count
 
     def markers(self):
         return dict(self._markers)
@@ -132,7 +168,10 @@ class WaveformView(QWidget):
         self._envelope = []
         self._frame_count = 0
         self._dragging = None
+        self._zoom = _MIN_ZOOM
+        self._view_start = 0
         self.update()
+        self._emit_view_changed()
 
     def set_waveform(self, samples, start, loop_start, loop_end, end):
         self._samples = samples
@@ -143,13 +182,91 @@ class WaveformView(QWidget):
             "loop_end": loop_end,
             "end": end,
         }
+        # a freshly loaded sample always opens fully zoomed out - carrying
+        # the previous sample's zoom/pan across would show an arbitrary,
+        # probably-empty slice of the new one
+        self._zoom = _MIN_ZOOM
+        self._view_start = 0
         self._rebuild_envelope()
         self.update()
         self._emit_markers_changed()
+        self._emit_view_changed()
+
+    def set_marker(self, name, frame):
+        """Move one marker directly (not via a mouse drag) - what the
+        marker spinboxes in program_editor_window.py call as the user
+        types/steps a value. Clamped exactly like a drag; returns the
+        clamped frame so the caller can snap its own displayed value to
+        match (e.g. typing a value past the sample's own end).
+        """
+        if self._samples is None:
+            return None
+        index = _MARKER_ORDER.index(name)
+        clamped = clamp_marker(_MARKER_ORDER, index, frame, self._markers, self._frame_count)
+        self._markers[name] = clamped
+        self.update()
+        self._emit_markers_changed()
+        return clamped
 
     def _emit_markers_changed(self):
         m = self._markers
         self.markers_changed.emit(m["start"], m["loop_start"], m["loop_end"], m["end"])
+
+    def _view_length(self):
+        if self._frame_count == 0:
+            return 0
+        return max(1, min(self._frame_count, int(round(self._frame_count / self._zoom))))
+
+    def _clamp_view_start(self):
+        max_start = max(0, self._frame_count - self._view_length())
+        self._view_start = max(0, min(max_start, self._view_start))
+
+    def _emit_view_changed(self):
+        self.view_changed.emit(self._view_start, self._view_length(), self._frame_count)
+
+    def set_view_start(self, start):
+        # driven by an external QScrollBar (program_editor_window.py) -
+        # dragging/clicking the scrollbar pans the same way wheel-pan does
+        if self._samples is None:
+            return
+        self._view_start = start
+        self._clamp_view_start()
+        self._rebuild_envelope()
+        self.update()
+        self._emit_view_changed()
+
+    def set_zoom(self, zoom, anchor_frame=None):
+        # anchor_frame is the frame that stays under the same x pixel after
+        # zooming - defaults to the view's current center. Wheel-zoom
+        # passes the frame under the cursor so zooming in/out feels like
+        # it's happening "at the mouse", the same convention as every
+        # pinch-to-zoom map/image viewer
+        if self._samples is None:
+            return
+        old_view_length = self._view_length()
+        if anchor_frame is None:
+            anchor_frame = self._view_start + old_view_length / 2
+        anchor_fraction = (
+            (anchor_frame - self._view_start) / (old_view_length - 1)
+            if old_view_length > 1
+            else 0.0
+        )
+        self._zoom = max(_MIN_ZOOM, min(_MAX_ZOOM, zoom))
+        new_view_length = self._view_length()
+        self._view_start = int(round(anchor_frame - anchor_fraction * (new_view_length - 1)))
+        self._clamp_view_start()
+        self._rebuild_envelope()
+        self.update()
+        self._emit_view_changed()
+
+    def zoom_in(self, anchor_frame=None):
+        self.set_zoom(self._zoom * _ZOOM_STEP, anchor_frame)
+
+    def zoom_out(self, anchor_frame=None):
+        self.set_zoom(self._zoom / _ZOOM_STEP, anchor_frame)
+
+    def reset_zoom(self):
+        self.set_zoom(_MIN_ZOOM)
 
     def resizeEvent(self, event):
         if self._samples is not None:
@@ -157,10 +274,15 @@ class WaveformView(QWidget):
         super().resizeEvent(event)
 
     def _rebuild_envelope(self):
-        self._envelope = build_envelope(self._samples, self.width())
+        view_start = self._view_start
+        view_length = self._view_length()
+        visible = self._samples[view_start : view_start + view_length]
+        self._envelope = build_envelope(visible, self.width())
 
     def _x_for(self, name):
-        return x_for_frame(self._markers[name], self.width(), self._frame_count)
+        return x_for_frame(
+            self._markers[name], self.width(), self._view_start, self._view_length()
+        )
 
     def _marker_colors(self, palette):
         # start/end are the sample's own boundaries (matches the mockup's
@@ -208,7 +330,14 @@ class WaveformView(QWidget):
             painter.drawLine(int(x), int(y_lo), int(x), int(y_hi) + 1)
 
         colors = self._marker_colors(palette)
+        view_start = self._view_start
+        view_length = self._view_length()
         for name in _MARKER_ORDER:
+            frame = self._markers[name]
+            # off the visible edge in either direction - draw nothing
+            # rather than a marker pinned to x=0/width that looks real
+            if frame < view_start or frame > view_start + view_length - 1:
+                continue
             x = self._x_for(name)
             pen = QPen(colors[name])
             pen.setWidthF(1.5)
@@ -226,7 +355,12 @@ class WaveformView(QWidget):
     def _marker_near(self, x):
         best = None
         best_dist = None
+        view_start = self._view_start
+        view_length = self._view_length()
         for name in _MARKER_ORDER:
+            frame = self._markers[name]
+            if frame < view_start or frame > view_start + view_length - 1:
+                continue  # not visible - can't be clicked
             dist = abs(self._x_for(name) - x)
             if best_dist is None or dist < best_dist:
                 best, best_dist = name, dist
@@ -235,32 +369,186 @@ class WaveformView(QWidget):
         return None
 
     def mouseDoubleClickEvent(self, event):
+        # diagnostic-only logging - see program_editor_window.py's
+        # _load_sample_waveform for why this exists (an intermittent
+        # "double-click does nothing" failure in real interactive use that
+        # no scripted or QTest-simulated repro could reproduce). This is
+        # the other half of the trace: whether the double-click reached
+        # here and passed the "is actually the placeholder state" guard at
+        # all, before anything downstream (BridgeWorker, SamplerController)
+        # ever gets involved.
         if self._samples is None and not self._loading:
+            debug_log.get_logger().debug(
+                "WaveformView.mouseDoubleClickEvent: accepted, emitting load_requested"
+            )
             self.load_requested.emit()
+        else:
+            debug_log.get_logger().debug(
+                "WaveformView.mouseDoubleClickEvent: ignored "
+                f"(has_waveform={self._samples is not None}, loading={self._loading})"
+            )
         super().mouseDoubleClickEvent(event)
 
     def mousePressEvent(self, event):
         if self._samples is None:
             return
         self._dragging = self._marker_near(event.position().x())
+        if self._dragging is not None:
+            self._drag_anchor_x = event.position().x()
+            self._drag_value = float(self._markers[self._dragging])
 
     def mouseMoveEvent(self, event):
         if self._dragging is None:
             return
         index = _MARKER_ORDER.index(self._dragging)
-        frame = frame_for_x(event.position().x(), self.width(), self._frame_count)
-        self._markers[self._dragging] = clamp_marker(
-            _MARKER_ORDER, index, frame, self._markers, self._frame_count
-        )
+        fine = bool(event.modifiers() & Qt.KeyboardModifier.ShiftModifier)
+
+        if fine and not self._fine_active:
+            self._enter_fine_drag()
+        elif not fine and self._fine_active:
+            self._exit_fine_drag()
+
+        if self._fine_active:
+            # the cursor gets warped back to _warp_anchor_global at the end
+            # of every move event below, so THIS event's global position is
+            # already the delta since the last one - not since drag start.
+            # The warp itself generates its own synthetic move event on
+            # most platforms, landing exactly on the anchor - skip it
+            # rather than read it as a zero-length real move (harmless
+            # either way since dx would be 0, but skips the redundant
+            # clamp/repaint/signal-emit work)
+            current = event.globalPosition()
+            anchor = self._warp_anchor_global
+            if (round(current.x()), round(current.y())) == (
+                round(anchor.x()), round(anchor.y())
+            ):
+                return
+            dx = (current.x() - anchor.x()) / _FINE_DRAG_DIVISOR
+            QCursor.setPos(anchor)  # QCursor.pos() is already a QPoint
+        else:
+            x = event.position().x()
+            dx = x - self._drag_anchor_x
+            self._drag_anchor_x = x
+
+        view_length = self._view_length()
+        frames_per_px = (view_length - 1) / max(1, self.width() - 1)
+        # a float accumulator (_drag_value) carries the sub-frame remainder
+        # between events instead of rounding it away each time, so fine
+        # dragging doesn't feel "sticky" or drift off the real cursor
+        # motion over a long drag
+        self._drag_value += dx * frames_per_px
+        frame = int(round(self._drag_value))
+        clamped = clamp_marker(_MARKER_ORDER, index, frame, self._markers, self._frame_count)
+        # resync the accumulator to the clamped result - otherwise dragging
+        # past a neighbour and back would need to "wind back" through
+        # every frame it overshot before the marker starts moving again
+        self._drag_value = clamped
+        self._markers[self._dragging] = clamped
         self.update()
         self._emit_markers_changed()
+
+    def _enter_fine_drag(self):
+        # Shift held mid-drag: the same physical mouse movement now covers
+        # only 1/_FINE_DRAG_DIVISOR of the distance, for precise placement -
+        # which means crawling across the same screen-width of physical
+        # travel many times over for a large move. Hiding the cursor and
+        # warping it back to a fixed point every event (see mouseMoveEvent)
+        # is the standard trick creative tools (Blender included) use so
+        # the user can keep moving the mouse in one direction indefinitely
+        # instead of running out of screen and stalling at the edge.
+        self._fine_active = True
+        self._warp_anchor_global = QCursor.pos()
+        QApplication.setOverrideCursor(Qt.CursorShape.BlankCursor)
+
+    def _exit_fine_drag(self):
+        # Shift released mid-drag, or the drag ending - always paired with
+        # _enter_fine_drag's setOverrideCursor so the app is never left
+        # with a permanently invisible cursor
+        self._fine_active = False
+        self._warp_anchor_global = None
+        QApplication.restoreOverrideCursor()
 
     def mouseReleaseEvent(self, event):
         if self._dragging is None:
             return
+        if self._fine_active:
+            self._exit_fine_drag()
         which = self._dragging
         self._dragging = None
         m = self._markers
         self.marker_committed.emit(
             which, m["start"], m["loop_start"], m["loop_end"], m["end"]
         )
+
+    def hideEvent(self, event):
+        # safety net: if this widget is hidden mid-drag (switching tabs,
+        # the window closing) with no mouseReleaseEvent ever arriving, make
+        # sure the app isn't left with a stuck invisible cursor
+        if self._fine_active:
+            self._exit_fine_drag()
+        super().hideEvent(event)
+
+    def wheelEvent(self, event):
+        if self._samples is None:
+            return
+        angle = event.angleDelta()
+        # a trackpad's two-finger swipe reports through whichever axis
+        # actually moved - a left/right swipe is angle.x(), not angle.y().
+        # Reading only .y() (mouse wheels only ever report there) meant a
+        # horizontal swipe was silently ignored outright, not just mapped
+        # wrong.
+        delta = angle.y() if angle.y() != 0 else angle.x()
+        if delta == 0:
+            return
+        if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
+            # holding a modifier and scrolling to zoom, on any platform -
+            # separate from _handle_native_pinch's real macOS trackpad
+            # pinch gesture below, which does not arrive as a Ctrl+wheel
+            # event and needs its own handler
+            anchor_frame = frame_for_x(
+                event.position().x(), self.width(), self._view_start, self._view_length()
+            )
+            if delta > 0:
+                self.zoom_in(anchor_frame)
+            else:
+                self.zoom_out(anchor_frame)
+        else:
+            # plain wheel/trackpad scroll to pan (either axis - see above)
+            # - a fixed fraction of the current view per notch, so panning
+            # stays useful at any zoom level instead of crawling at high
+            # zoom or flying past at low
+            view_length = self._view_length()
+            pan_frames = int(-delta / 120 * max(1, view_length // 10))
+            self.set_view_start(self._view_start + pan_frames)
+        event.accept()
+
+    def event(self, event):
+        # macOS trackpad pinch-to-zoom arrives as its own native gesture
+        # event, not a modified wheel event (an earlier version of this
+        # code assumed Qt translated it to Ctrl+wheel - it doesn't; that
+        # was never actually verified against a real trackpad). event()
+        # is the right override for this, same as Qt's own docs example -
+        # QWidget has no dedicated nativeGestureEvent() virtual to override.
+        if (
+            event.type() == QEvent.Type.NativeGesture
+            and event.gestureType() == Qt.NativeGestureType.ZoomNativeGesture
+        ):
+            self._handle_pinch_zoom(event)
+            return True
+        return super().event(event)
+
+    def _handle_pinch_zoom(self, event):
+        if self._samples is None:
+            return
+        # value() is the incremental scale change for this one event (a
+        # small step like 0.02 per pinch increment), not an absolute zoom
+        # level - multiplies into the current zoom rather than replacing
+        # it, same as repeated zoom_in()/zoom_out() calls do. Clamped away
+        # from 0/negative defensively - set_zoom's own min/max clamp
+        # handles the normal range, this only guards an extreme single
+        # event value.
+        factor = max(0.1, 1.0 + event.value())
+        anchor_frame = frame_for_x(
+            event.position().x(), self.width(), self._view_start, self._view_length()
+        )
+        self.set_zoom(self._zoom * factor, anchor_frame)

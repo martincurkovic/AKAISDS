@@ -397,6 +397,18 @@ class BridgeWorker(QThread):
                 self._queue = deque(j for j in self._queue if j[0] != kind)
             self._queue.append(job)
             self._idle.notify_all()
+        # diagnostic-only - see AGENTS.md's "Diagnosing a load that
+        # silently does nothing". isRunning()/isFinished() are QThread's
+        # own state, independent of anything this class tracks itself -
+        # if the OS thread backing run() has already died (an exception
+        # escaping run() entirely, a stale/destroyed QThread object,
+        # anything not caught by _safe_dispatch), this is what would
+        # actually prove it rather than inferring it from an absence of
+        # activity.
+        debug_log.get_logger().debug(
+            f"BridgeWorker._submit: queued {job!r} (queue_len={len(self._queue)}, "
+            f"is_running={self.isRunning()}, is_finished={self.isFinished()})"
+        )
         if was_idle:
             self.busy_changed.emit(True)
 
@@ -462,7 +474,7 @@ class BridgeWorker(QThread):
                     return
                 job = self._queue.popleft()
                 self._busy = True
-            self._dispatch(job)
+            self._safe_dispatch(job)
             with self._idle:
                 self._busy = False
                 now_idle = not self._queue
@@ -482,13 +494,38 @@ class BridgeWorker(QThread):
                     return
                 job = self._queue.popleft()
                 self._busy = True
-            self._dispatch(job)
+            self._safe_dispatch(job)
             with self._idle:
                 self._busy = False
                 now_idle = not self._queue
                 self._idle.notify_all()
             if now_idle:
                 self.busy_changed.emit(False)
+
+    def _safe_dispatch(self, job):
+        # An exception escaping _dispatch() here would propagate all the
+        # way out of run() and silently kill this thread for the rest of
+        # the app's life: the GUI thread stays completely responsive
+        # (submit_*() just keeps appending to self._queue), but nothing
+        # ever pops from that queue again - every future request just sits
+        # there forever with no error anywhere. This exact failure mode
+        # cost real debugging time (see AGENTS.md's "Diagnosing a load
+        # that silently does nothing") before the "GUI still works but
+        # nothing ever loads again" pattern was traced back to the worker
+        # thread itself having died. Every individual _handle_* already
+        # wraps its own bridge calls in a try/except and always emits a
+        # *_failed signal - this is the backstop for anything that still
+        # gets past that (a bug in a handler itself, a malformed job
+        # tuple, anything not anticipated by that handler's own except
+        # clause).
+        try:
+            self._dispatch(job)
+        except Exception:
+            debug_log.get_logger().error(
+                f"BridgeWorker: unhandled exception dispatching {job!r} - "
+                "would otherwise have killed the worker thread silently",
+                exc_info=True,
+            )
 
     def _dispatch(self, job):
         kind = job[0]
@@ -564,6 +601,15 @@ class BridgeWorker(QThread):
         self.detail_loaded.emit(program_index, keygroup_index, values)
 
     def _handle_sample_detail(self, sample_index):
+        # diagnostic-only - see AGENTS.md's "Diagnosing a load that
+        # silently does nothing" - confirms the worker thread actually
+        # started dispatching this job at all, distinct from _submit's own
+        # logging (which only proves it was queued, not that anything ever
+        # picked it up)
+        debug_log.get_logger().debug(
+            f"[{threading.current_thread().name}] _handle_sample_detail: "
+            f"dispatch started for sample_index={sample_index}"
+        )
         values = {}
         try:
             for field in _SAMPLE_DETAIL_FIELDS:

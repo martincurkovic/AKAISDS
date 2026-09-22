@@ -34,6 +34,7 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QMessageBox,
     QPushButton,
+    QScrollBar,
     QSizePolicy,
     QVBoxLayout,
     QComboBox,
@@ -57,6 +58,7 @@ from ui.waveform_view import WaveformView
 from ui import theme
 from ui.about_dialog import AboutDialog
 from ui.update_helper import UpdateCheckRunner
+from core import debug_log
 from core.midi_notes import midi_note_to_name
 from core.program_editor_bridge import BridgeWorker, MULTI_PART_COUNT
 
@@ -1735,7 +1737,9 @@ class ProgramEditorWindow(QMainWindow):
         self.sample_list_widget.currentItemChanged.connect(self._on_sample_selected)
         self.waveform_view.load_requested.connect(self._load_sample_waveform)
         self.waveform_view.marker_committed.connect(self._on_waveform_marker_committed)
-        self.waveform_view.markers_changed.connect(self._update_marker_labels)
+        self.waveform_view.markers_changed.connect(self._update_marker_spinboxes)
+        self.waveform_view.view_changed.connect(self._on_waveform_view_changed)
+        self.waveform_scrollbar.valueChanged.connect(self._on_waveform_scrollbar_moved)
         self._worker.submit_program_list()
 
         # enable knobs and wire their (debounced) writes
@@ -2887,15 +2891,66 @@ class ProgramEditorWindow(QMainWindow):
         self.sample_load_progress = QProgressBar()
         self.sample_load_progress.setVisible(False)
 
+        # zoom controls + horizontal pan scrollbar - WaveformView also
+        # answers to Ctrl+wheel (zoom, centered on the cursor - this is
+        # what a macOS trackpad pinch gesture arrives as too) and plain
+        # wheel (pan), but neither is discoverable without a hint, so
+        # these are the "I didn't know that was possible" path to the same
+        # thing. See _on_waveform_view_changed/_on_waveform_scrollbar_moved
+        # for how the scrollbar and WaveformView's own pan stay in sync.
+        # plain ASCII hyphen, not the Unicode minus sign (U+2212) - the
+        # latter rendered as a stray dot/glyph instead of a clean "-" with
+        # this button's font
+        # style.qss.template's QPushButton rule pads 12px each side (24px
+        # total) plus a 1px border - 28px left only ~2px for the glyph
+        # itself, which is why "+"/"-" rendered as barely-visible
+        # fragments rather than a font/glyph problem
+        zoom_out_button = QPushButton("-")
+        zoom_out_button.setFixedWidth(36)
+        zoom_out_button.setToolTip("Zoom out (Ctrl+scroll on the waveform also works)")
+        zoom_out_button.clicked.connect(self.waveform_view.zoom_out)
+        zoom_in_button = QPushButton("+")
+        zoom_in_button.setFixedWidth(36)
+        zoom_in_button.setToolTip("Zoom in (Ctrl+scroll on the waveform also works)")
+        zoom_in_button.clicked.connect(self.waveform_view.zoom_in)
+        zoom_fit_button = QPushButton("Fit")
+        zoom_fit_button.setToolTip("Reset zoom to show the whole sample")
+        zoom_fit_button.clicked.connect(self.waveform_view.reset_zoom)
+        zoom_row = QHBoxLayout()
+        zoom_row.setSpacing(6)
+        zoom_row.addWidget(QLabel("Zoom"))
+        zoom_row.addWidget(zoom_out_button)
+        zoom_row.addWidget(zoom_in_button)
+        zoom_row.addWidget(zoom_fit_button)
+        zoom_row.addStretch()
+
+        self.waveform_scrollbar = QScrollBar(Qt.Orientation.Horizontal)
+        self.waveform_scrollbar.setVisible(False)
+        # a plain setVisible(False) on the scrollbar directly collapses it
+        # to zero height in the layout, so the spinbox row below jumps up
+        # to fill the gap and then jumps back down the moment zooming in
+        # makes the bar reappear - a fixed-height container reserves that
+        # space permanently regardless of whether the bar inside it is
+        # currently shown, so the spinboxes never move
+        scrollbar_container = QWidget()
+        scrollbar_container.setFixedHeight(self.waveform_scrollbar.sizeHint().height())
+        scrollbar_container_layout = QVBoxLayout(scrollbar_container)
+        scrollbar_container_layout.setContentsMargins(0, 0, 0, 0)
+        scrollbar_container_layout.addWidget(self.waveform_scrollbar)
+
         # the canvas has no room for per-marker text without labels
         # overlapping once two markers are close together (start/loop_start/
         # loop_end can all sit right on top of each other for a short or
-        # non-looping sample) - a legend row underneath, always legible
-        # regardless of marker spacing, is what actually answers "which
-        # marker is which and where is it" instead of the color alone.
-        # kept in sync with the waveform live (see WaveformView.
-        # markers_changed / _update_marker_labels), not just after a commit.
-        self._marker_value_labels = {}
+        # non-looping sample) - spinboxes underneath, always legible
+        # regardless of marker spacing and zoom, are what actually answer
+        # "which marker is which and where is it", AND give exact/keyboard-
+        # precise editing (type a value, or arrow-key/spin nudge one frame
+        # at a time) as an alternative to a mouse drag - kept in sync with
+        # the waveform live in both directions (drag -> spinbox via
+        # WaveformView.markers_changed/_update_marker_spinboxes; spinbox ->
+        # drag via _on_marker_spinbox_changed calling WaveformView.
+        # set_marker), not just after a commit.
+        self._marker_spinboxes = {}
         legend_row = QHBoxLayout()
         legend_row.setSpacing(18)
         for name, display in (
@@ -2904,22 +2959,51 @@ class ProgramEditorWindow(QMainWindow):
             ("loop_end", "Loop End"),
             ("end", "End"),
         ):
-            label = QLabel()
-            self._marker_value_labels[name] = (label, display)
-            legend_row.addWidget(label)
+            # same colors as the canvas markers (WaveformView._marker_colors)
+            # - start/end share the neutral "boundary" tone, loop start/end
+            # share the loop region's teal, since they're one region's two
+            # edges rather than two independent things
+            palette = theme.current_palette()
+            swatch_color = (
+                palette["text_disabled"]
+                if name in ("start", "end")
+                else palette["keygroup_color_3"]
+            )
+            swatch = QLabel()
+            swatch.setFixedSize(10, 10)
+            swatch.setStyleSheet(f"background-color: {swatch_color}; border-radius: 2px;")
+            spinbox = QSpinBox()
+            spinbox.setRange(0, 0)
+            spinbox.setEnabled(False)
+            spinbox.setFixedWidth(80)
+            spinbox.valueChanged.connect(
+                lambda v, n=name: self._on_marker_spinbox_changed(n, v)
+            )
+            spinbox.editingFinished.connect(
+                lambda n=name: self._flush_marker_write(n)
+            )
+            self._marker_spinboxes[name] = (swatch, spinbox)
+            marker_field = QHBoxLayout()
+            marker_field.setSpacing(4)
+            marker_field.addWidget(swatch)
+            marker_field.addWidget(QLabel(display + ":"))
+            marker_field.addWidget(spinbox)
+            legend_row.addLayout(marker_field)
         legend_row.addStretch()
 
         waveform_column = QVBoxLayout()
         waveform_column.setContentsMargins(0, 0, 0, 0)
         waveform_column.setSpacing(6)
         waveform_column.addWidget(QLabel("<b>Loop Points</b>"))
+        waveform_column.addLayout(zoom_row)
         waveform_column.addWidget(self.waveform_view)
+        waveform_column.addWidget(scrollbar_container)
         waveform_column.addLayout(legend_row)
         waveform_column.addWidget(self.sample_load_progress)
         waveform_column.addStretch()
         waveform_container = QWidget()
         waveform_container.setLayout(waveform_column)
-        self._update_marker_labels(None, None, None, None)
+        self._update_marker_spinboxes(None, None, None, None)
 
         content_layout = QHBoxLayout()
         content_layout.setContentsMargins(14, 14, 14, 14)
@@ -3454,6 +3538,9 @@ class ProgramEditorWindow(QMainWindow):
             return
         entry = self._sample_waveform_cache.get(self.sample_list_widget.currentRow())
         if entry is not None:
+            # range before set_waveform - see the comment at
+            # _load_sample_waveform's own set_marker_spinbox_range call
+            self._set_marker_spinbox_range(len(entry["samples"]))
             self.waveform_view.set_waveform(
                 entry["samples"],
                 entry["start"],
@@ -3466,21 +3553,53 @@ class ProgramEditorWindow(QMainWindow):
 
     def _clear_waveform_view(self):
         self.waveform_view.clear()
-        self._update_marker_labels(None, None, None, None)
+        self._update_marker_spinboxes(None, None, None, None)
+        self._set_marker_spinbox_range(0)
 
-    def _update_marker_labels(self, start, loop_start, loop_end, end):
-        # legend row under the waveform - see the comment where it's built
-        # in _build_samples_tab for why this exists instead of drawing text
-        # on the canvas next to each marker
-        palette = theme.current_palette()
-        boundary = palette["text_disabled"]
-        loop = palette["keygroup_color_3"]
-        colors = {"start": boundary, "end": boundary, "loop_start": loop, "loop_end": loop}
+    def _set_marker_spinbox_range(self, frame_count):
+        # each spinbox can address any frame in the WHOLE sample (typing an
+        # exact value shouldn't be limited by whatever's currently
+        # scrolled into view) - clamp_marker still enforces start <=
+        # loop_start <= loop_end <= end regardless of this range
+        enabled = frame_count > 0
+        maximum = max(0, frame_count - 1)
+        for _name, (_swatch, spinbox) in self._marker_spinboxes.items():
+            spinbox.blockSignals(True)
+            spinbox.setEnabled(enabled)
+            spinbox.setRange(0, maximum)
+            spinbox.blockSignals(False)
+
+    def _update_marker_spinboxes(self, start, loop_start, loop_end, end):
+        # kept in sync with the waveform view live in both directions -
+        # see WaveformView.markers_changed (drag/set_marker -> here) and
+        # _on_marker_spinbox_changed (here -> WaveformView.set_marker)
         values = {"start": start, "loop_start": loop_start, "loop_end": loop_end, "end": end}
-        for name, (label, display) in self._marker_value_labels.items():
+        for name, (_swatch, spinbox) in self._marker_spinboxes.items():
             value = values[name]
-            text = "–" if value is None else str(value)
-            label.setText(f'<span style="color:{colors[name]};">■</span> {display}: {text}')
+            if value is None:
+                continue
+            spinbox.blockSignals(True)
+            spinbox.setValue(value)
+            spinbox.blockSignals(False)
+
+    def _on_marker_spinbox_changed(self, name, value):
+        if not self.waveform_view.has_waveform():
+            return
+        # set_marker clamps and emits markers_changed synchronously, which
+        # is what actually syncs every spinbox's displayed value (including
+        # this one, if the typed/stepped value got clamped) - see
+        # _update_marker_spinboxes
+        clamped = self.waveform_view.set_marker(name, value)
+        if clamped is None:
+            return
+        sample_index = self.sample_list_widget.currentRow()
+        if sample_index < 0:
+            return
+        markers = self.waveform_view.markers()
+        entry = self._sample_waveform_cache.get(sample_index)
+        if entry is not None:
+            entry.update(markers)
+        self._schedule_marker_write(sample_index, name, markers)
 
     def _wait_for_any_signal(self, signals, timeout_ms=None):
         # Blocks the calling (GUI) thread until the first of *signals*
@@ -3536,15 +3655,26 @@ class ProgramEditorWindow(QMainWindow):
             [self._worker.sample_detail_loaded, self._worker.sample_detail_load_failed],
             timeout_ms=20000,
         )
+        logger = debug_log.get_logger()
         if which == 0:
             returned_index, values = args
             if returned_index == sample_index:
                 return values
+            logger.debug(
+                "_fetch_sample_header_blocking: sample_detail_loaded arrived for "
+                f"a stale index ({returned_index}, expected {sample_index}) - "
+                "discarding"
+            )
             return None
         if which == 1:
             _returned_index, error = args
+            logger.debug(f"_fetch_sample_header_blocking: sample_detail_load_failed: {error}")
             self.status_bar.showMessage(f"Couldn't read sample header: {error}")
             return None
+        logger.debug(
+            "_fetch_sample_header_blocking: timed out after 20s waiting for "
+            "sample_detail_loaded/sample_detail_load_failed - neither ever fired"
+        )
         self.status_bar.showMessage("Timed out reading sample header")
         return None
 
@@ -3681,8 +3811,23 @@ class ProgramEditorWindow(QMainWindow):
         return samples, framerate
 
     def _load_sample_waveform(self):
+        # diagnostic-only logging through this whole method - added
+        # specifically because a user hit intermittent "double-click does
+        # nothing" failures in real interactive use that no scripted or
+        # QTest-simulated repro could reproduce, and the shared debug log
+        # (core/debug_log.py) showed the BridgeWorker/DemoBridge layer
+        # itself was never at fault (zero FAILED entries, zero overlapping
+        # calls across the whole session). That points at something
+        # upstream of any bridge call - this is what should catch it next
+        # time: every early return below is logged, so the log will show
+        # exactly which guard is being hit instead of just "nothing
+        # happened". See WaveformView.mouseDoubleClickEvent for the other
+        # half (whether the double-click even got here).
+        logger = debug_log.get_logger()
         sample_index = self.sample_list_widget.currentRow()
+        logger.debug(f"_load_sample_waveform: entered, sample_index={sample_index}")
         if sample_index < 0:
+            logger.debug("_load_sample_waveform: no sample selected - bailing out")
             return
 
         # same env var program_editor_bridge.connect() checks for the s3k
@@ -3693,11 +3838,18 @@ class ProgramEditorWindow(QMainWindow):
         sampler_controller = getattr(self._main_window, "sampler_controller", None)
         if not demo_mode:
             if sampler_controller is None:
+                logger.debug(
+                    "_load_sample_waveform: no sampler_controller available - bailing out"
+                )
                 self.status_bar.showMessage(
                     "Can't load sample audio - no Transfer Dashboard connection available"
                 )
                 return
             if sampler_controller.is_transfer_busy():
+                logger.debug(
+                    "_load_sample_waveform: sampler_controller busy with another "
+                    "transfer - bailing out"
+                )
                 self.status_bar.showMessage(
                     "Can't load sample audio - a transfer is already in progress "
                     "on the Transfer Dashboard"
@@ -3722,9 +3874,14 @@ class ProgramEditorWindow(QMainWindow):
         QApplication.processEvents()
 
         try:
+            logger.debug(f"_load_sample_waveform: fetching header for sample {sample_index}")
             header = self._fetch_sample_header_blocking(sample_index)
             if header is None:
+                logger.debug(
+                    "_load_sample_waveform: header fetch returned None - bailing out"
+                )
                 return
+            logger.debug(f"_load_sample_waveform: header fetched: {header!r}")
             if demo_mode:
                 samples, framerate = self._fetch_demo_sample_audio(sample_index)
             else:
@@ -3732,7 +3889,14 @@ class ProgramEditorWindow(QMainWindow):
                     sampler_controller, sample_index
                 )
             if samples is None:
+                logger.debug(
+                    "_load_sample_waveform: audio fetch returned None - bailing out"
+                )
                 return
+            logger.debug(
+                f"_load_sample_waveform: audio fetched, {len(samples)} frames "
+                f"at {framerate}Hz"
+            )
 
             if demo_mode:
                 # DemoBridge's own sample headers are all-zero (this
@@ -3765,6 +3929,13 @@ class ProgramEditorWindow(QMainWindow):
             }
             self._sample_waveform_cache[sample_index] = entry
             if sample_index == self.sample_list_widget.currentRow():
+                # range must be set BEFORE set_waveform - set_waveform's own
+                # marker sync (_update_marker_spinboxes, via
+                # markers_changed) calls spinbox.setValue(), which silently
+                # clamps to whatever range is currently set; a spinbox
+                # still at its old (0, 0) range swallows that value instead
+                # of displaying it
+                self._set_marker_spinbox_range(len(entry["samples"]))
                 self.waveform_view.set_waveform(
                     entry["samples"],
                     entry["start"],
@@ -3781,27 +3952,85 @@ class ProgramEditorWindow(QMainWindow):
             self.sample_load_progress.setVisible(False)
 
     def _on_waveform_marker_committed(self, which, start, loop_start, loop_end, end):
+        # canvas drag release - see _on_marker_spinbox_changed/
+        # _flush_marker_write for the spinbox side of the same editing
+        # surface, which goes through the exact same two helpers below so
+        # the "which marker(s) actually need writing" logic lives in
+        # exactly one place regardless of which input drove the change
         sample_index = self.sample_list_widget.currentRow()
         if sample_index < 0:
             return
+        markers = {
+            "start": start, "loop_start": loop_start, "loop_end": loop_end, "end": end,
+        }
         entry = self._sample_waveform_cache.get(sample_index)
         if entry is not None:
-            entry.update(
-                start=start, loop_start=loop_start, loop_end=loop_end, end=end
-            )
+            entry.update(markers)
+        # a drag-release is already a single, deliberate "I'm done" event
+        # (the same reasoning sliderReleased gets elsewhere on this page) -
+        # schedule immediately followed by an immediate flush is what
+        # turns the normal debounce into an instant write without
+        # duplicating _schedule_marker_write's field-pairing logic
+        self._schedule_marker_write(sample_index, which, markers)
+        self._flush_marker_write(which)
+
+    def _schedule_marker_write(self, sample_index, which, markers):
+        # LOOPAT1 (the loop END) and LLNGTH1 (measured backwards from it)
+        # jointly encode the loop region - see _SAMPLE_DETAIL_FIELDS's
+        # comment on LOOPAT1 - so moving either loop edge means writing
+        # both fields, holding the OTHER edge fixed (loop_start moving
+        # keeps loop_end/LOOPAT1 fixed and only changes LLNGTH1; loop_end
+        # moving keeps loop_start fixed, so both LOOPAT1 and LLNGTH1 change)
         if which == "start":
-            self._write_knob_value("SSTART", "sample", start, index=sample_index)
-        elif which == "end":
-            self._write_knob_value("SMPEND", "sample", end, index=sample_index)
-        else:
-            # "loop_start" or "loop_end" - LOOPAT1 (the loop END) and
-            # LLNGTH1 (measured backwards from it) jointly encode the loop
-            # region, so either edge moving means writing both - see
-            # _SAMPLE_DETAIL_FIELDS's comment on LOOPAT1
-            self._write_knob_value("LOOPAT1", "sample", loop_end, index=sample_index)
-            self._write_knob_value(
-                "LLNGTH1", "sample", loop_end - loop_start, index=sample_index
+            self._schedule_write(
+                "SSTART", "sample", markers["start"],
+                index=sample_index, debounce_key="SSTART",
             )
+        elif which == "end":
+            self._schedule_write(
+                "SMPEND", "sample", markers["end"],
+                index=sample_index, debounce_key="SMPEND",
+            )
+        else:
+            self._schedule_write(
+                "LOOPAT1", "sample", markers["loop_end"],
+                index=sample_index, debounce_key="LOOPAT1",
+            )
+            self._schedule_write(
+                "LLNGTH1", "sample", markers["loop_end"] - markers["loop_start"],
+                index=sample_index, debounce_key="LLNGTH1",
+            )
+
+    def _flush_marker_write(self, which):
+        if which == "start":
+            self._flush_write("SSTART")
+        elif which == "end":
+            self._flush_write("SMPEND")
+        else:
+            self._flush_write("LOOPAT1")
+            self._flush_write("LLNGTH1")
+
+    def _on_waveform_view_changed(self, view_start, view_length, frame_count):
+        # keeps the pan scrollbar in step with WaveformView's own zoom/pan
+        # state, however it changed (wheel-zoom, wheel-pan, the Fit/+/-
+        # buttons, or a fresh sample loading) - blockSignals so this never
+        # bounces back through _on_waveform_scrollbar_moved
+        self.waveform_scrollbar.blockSignals(True)
+        if frame_count == 0 or view_length >= frame_count:
+            # nothing loaded, or fully zoomed out - there's nothing to
+            # scroll to, so the bar takes up space for no reason if it's
+            # merely disabled rather than hidden outright
+            self.waveform_scrollbar.setVisible(False)
+            self.waveform_scrollbar.setRange(0, 0)
+        else:
+            self.waveform_scrollbar.setVisible(True)
+            self.waveform_scrollbar.setPageStep(view_length)
+            self.waveform_scrollbar.setRange(0, frame_count - view_length)
+            self.waveform_scrollbar.setValue(view_start)
+        self.waveform_scrollbar.blockSignals(False)
+
+    def _on_waveform_scrollbar_moved(self, value):
+        self.waveform_view.set_view_start(value)
 
     def _on_zone_sample_changed(self, field, zone_idx):
         text = self._zone_combos[zone_idx].currentText()
