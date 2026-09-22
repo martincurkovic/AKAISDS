@@ -1,15 +1,19 @@
 # tests for ui/waveform_view.py's coordinate/clamping math - kept out of
 # WaveformView's paintEvent/mouse handlers specifically so it can be tested
 # without a QApplication or any actual rendering, same reasoning as
-# test_envelope_graph.py's own _adsr_points tests.
+# test_envelope_graph.py's own _adsr_points tests. The one exception is at
+# the bottom of this file (wheelEvent's pan-axis behaviour), which needs a
+# real WaveformView + a live QApplication - see the section comment there.
 
 import pytest
+from PySide6.QtCore import Qt
+from PySide6.QtWidgets import QApplication
 
 from ui.waveform_view import (
     _MARKER_ORDER,
+    WaveformView,
     build_envelope,
     clamp_marker,
-    dominant_wheel_delta,
     frame_for_x,
     x_for_frame,
 )
@@ -97,32 +101,146 @@ def test_clamp_marker_stays_within_the_sample_itself_at_the_two_ends():
     assert clamp_marker(_MARKER_ORDER, index, 5000, values, frame_count=1000) == 999
 
 
-# --- dominant_wheel_delta ---------------------------------------------------------
+# --- WaveformView.wheelEvent: pan axis ----------------------------------------
+# Unlike everything above, this needs a real WaveformView + a live
+# QApplication, since it exercises the actual event handler and its effect
+# on view state, not a standalone pure function.
+#
+# Two earlier approaches both tried to INFER which axis a wheel event's
+# angleDelta() "really meant" - first per event (compare magnitudes, pick
+# the larger), then per gesture (lock the winning axis at
+# QWheelEvent.phase()'s own ScrollBegin, hold it through ScrollUpdate).
+# Both were real, shipped fixes for real, reported bugs, and both still
+# eventually bounced: a slow swipe's per-event deltas on both axes are
+# small and close together, so ordinary hand tremor on the axis orthogonal
+# to the intended motion can outweigh the real one regardless of whether
+# the comparison happens once per event or once per gesture - there is no
+# per-event or per-gesture heuristic that reliably wins against noise that
+# can dominate at any point along the way.
+#
+# The fix that actually held: stop inferring. angle.x() is unambiguous by
+# construction - nothing but a genuine horizontal swipe/wheel produces a
+# nonzero value there - so it always wins outright, with no comparison
+# against angle.y() at all. A plain vertical-only mouse wheel has no x
+# axis to report, so Shift+scroll is required to explicitly repurpose its
+# angle.y() for pan; unmodified vertical scroll does nothing.
 
 
-def test_dominant_wheel_delta_picks_the_larger_magnitude_axis():
-    assert dominant_wheel_delta(angle_x=120, angle_y=0) == 120
-    assert dominant_wheel_delta(angle_x=0, angle_y=120) == 120
-    assert dominant_wheel_delta(angle_x=120, angle_y=40) == 120
-    assert dominant_wheel_delta(angle_x=40, angle_y=120) == 120
+@pytest.fixture(scope="module")
+def qapp():
+    app = QApplication.instance() or QApplication([])
+    yield app
 
 
-def test_dominant_wheel_delta_ignores_a_stray_component_on_a_real_swipe():
-    # regression test for a real, reported bug: a real horizontal trackpad
-    # swipe (large x) can report a small stray y value for the first event
-    # or two before macOS locks the gesture onto one axis. The first fix
-    # for "horizontal swipes do nothing" used "y whenever it's nonzero,
-    # else x" - which read that stray y INSTEAD of the real, dominant x
-    # delta, causing a visible wrong-direction jump right as the swipe
-    # began before the real x delta ever took over ("bouncing" back).
-    # Whatever axis is actually larger in magnitude must win, regardless
-    # of which one happens to be exactly zero.
-    assert dominant_wheel_delta(angle_x=120, angle_y=3) == 120
-    assert dominant_wheel_delta(angle_x=120, angle_y=-3) == 120
-    assert dominant_wheel_delta(angle_x=-120, angle_y=3) == -120
+class _FakeAngle:
+    def __init__(self, x, y):
+        self._x, self._y = x, y
+
+    def x(self):
+        return self._x
+
+    def y(self):
+        return self._y
 
 
-def test_dominant_wheel_delta_still_reports_a_pure_vertical_scroll():
-    # mouse wheels only ever report through angle_y - must not regress to
-    # requiring a nonzero angle_x
-    assert dominant_wheel_delta(angle_x=0, angle_y=-120) == -120
+class _FakePos:
+    def x(self):
+        return 200
+
+    def y(self):
+        return 90
+
+
+class _FakeWheelEvent:
+    def __init__(self, ax, ay, shift=False, ctrl=False):
+        self._angle = _FakeAngle(ax, ay)
+        mods = Qt.KeyboardModifier.NoModifier
+        if shift:
+            mods |= Qt.KeyboardModifier.ShiftModifier
+        if ctrl:
+            mods |= Qt.KeyboardModifier.ControlModifier
+        self._mods = mods
+
+    def angleDelta(self):
+        return self._angle
+
+    def modifiers(self):
+        return self._mods
+
+    def position(self):
+        return _FakePos()
+
+    def accept(self):
+        pass
+
+
+def _loaded_waveform_view():
+    view = WaveformView()
+    view.resize(400, 180)
+    samples = [int(20000 * ((i % 50) / 50 - 0.5)) for i in range(10000)]
+    view.set_waveform(samples, 100, 2500, 7500, 9900)
+    view.zoom_in()
+    view.zoom_in()
+    return view
+
+
+def test_wheel_horizontal_delta_always_pans_no_modifier_needed(qapp):
+    view = _loaded_waveform_view()
+    before = view._view_start
+    view.wheelEvent(_FakeWheelEvent(ax=120, ay=0))
+    assert view._view_start != before
+
+
+def test_wheel_vertical_delta_alone_does_nothing(qapp):
+    # deliberate: there's no vertical content to scroll, and repurposing
+    # unmodified vertical wheel/scroll for pan was the source of every
+    # axis-guessing bug this section's own comment describes
+    view = _loaded_waveform_view()
+    before = view._view_start
+    view.wheelEvent(_FakeWheelEvent(ax=0, ay=120))
+    assert view._view_start == before
+
+
+def test_wheel_shift_plus_vertical_delta_pans(qapp):
+    # the explicit "hold Shift to scroll sideways" fallback for a plain
+    # mouse with no horizontal wheel axis at all
+    view = _loaded_waveform_view()
+    before = view._view_start
+    view.wheelEvent(_FakeWheelEvent(ax=0, ay=120, shift=True))
+    assert view._view_start != before
+
+
+def test_wheel_horizontal_delta_wins_even_with_a_larger_stray_vertical_one(qapp):
+    # regression test for the exact bug that survived both earlier fixes:
+    # a slow swipe can report a SMALLER x than its stray y - magnitude
+    # comparison alone would pick y here and move the view the wrong way.
+    # x must win purely by being nonzero, never by being larger.
+    pure_x_view = _loaded_waveform_view()
+    start = pure_x_view._view_start
+    pure_x_view.wheelEvent(_FakeWheelEvent(ax=2, ay=0))
+    pure_x_delta = pure_x_view._view_start - start
+
+    mixed_view = _loaded_waveform_view()
+    assert mixed_view._view_start == start  # same starting point, fresh view
+    mixed_view.wheelEvent(_FakeWheelEvent(ax=2, ay=40))  # y is 20x larger than x
+    mixed_delta = mixed_view._view_start - start
+
+    assert mixed_delta == pure_x_delta, (
+        "a large stray y component must never change the outcome of a "
+        "real (even if smaller) x delta"
+    )
+
+
+def test_wheel_ctrl_zoom_still_accepts_either_axis(qapp):
+    # zoom (Ctrl+scroll) is a deliberate, distinct modifier action with no
+    # left/right ambiguity to get wrong - unlike plain pan, it's fine for
+    # it to accept whichever axis is nonzero
+    view = _loaded_waveform_view()
+    zoom_before = view._zoom
+    view.wheelEvent(_FakeWheelEvent(ax=0, ay=120, ctrl=True))
+    assert view._zoom != zoom_before
+
+    view2 = _loaded_waveform_view()
+    zoom_before2 = view2._zoom
+    view2.wheelEvent(_FakeWheelEvent(ax=120, ay=0, ctrl=True))
+    assert view2._zoom != zoom_before2

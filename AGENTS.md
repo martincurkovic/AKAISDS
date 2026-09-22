@@ -498,14 +498,68 @@ two rather than re-deriving the field-pairing logic again.
 marker or drag position always resolves relative to what's actually
 visible. `clamp_marker` stays whole-sample-bounded regardless of zoom (you
 can still drag a marker toward a position currently scrolled off-screen).
-Ctrl+wheel zooms centered on the cursor (this is also what a macOS
-trackpad pinch gesture arrives as, for free); plain wheel pans. The Zoom
-+/-/Fit buttons and the horizontal `QScrollBar` next to the waveform are
-the discoverable/no-modifier equivalents - kept in sync via
-`WaveformView.view_changed` -> `_on_waveform_view_changed` (view ->
-scrollbar) and the scrollbar's own `valueChanged` -> `_on_waveform_scrollbar_moved`
-(scrollbar -> view), both `blockSignals`-guarded so neither bounces back
-into the other.
+Ctrl+wheel zooms centered on the cursor. **A real macOS trackpad pinch
+does NOT arrive as a Ctrl+wheel event** - an earlier version of this
+comment claimed it did, unverified; it's actually its own event
+(`QEvent.Type.NativeGesture` / `Qt.NativeGestureType.ZoomNativeGesture`),
+handled separately via `WaveformView.event()` -> `_handle_pinch_zoom`
+(`QWidget` has no dedicated virtual for this - overriding `event()` is the
+documented Qt way to catch it).
+
+**Panning went through three designs before landing.** All three tried to
+fix the same underlying bug class: a trackpad reports pan motion through
+`angleDelta().x()` (left/right) or `.y()` (up/down) depending on which way
+the fingers actually moved, and naive handling either drops one axis
+outright or gets the direction wrong for a moment before "bouncing" onto
+the right one.
+
+1. *Prefer y unless it's exactly zero, else x.* Fixed "horizontal swipes
+   do nothing" (mouse wheels only ever report `.y()`) but a genuine
+   horizontal swipe's small, nonzero stray `.y()` value - present for the
+   first event or two before macOS locks the gesture onto one axis - won
+   over the real, much larger `.x()` delta. Visible as a brief
+   wrong-direction jump right as a swipe began.
+2. *Compare magnitudes, pick the larger, per event.* Fixed the start-of-
+   gesture case above, but a **slow** swipe's per-event deltas on both
+   axes are small and close together, so ordinary hand tremor on the axis
+   orthogonal to the intended motion could still occasionally win *at any
+   point*, not just the start - visible as continuous bouncing throughout
+   a slow drag, not just at the beginning.
+3. *Lock the winning axis once per gesture*, via `QWheelEvent.phase()`
+   (`ScrollBegin` decides, `ScrollUpdate`/`ScrollMomentum` hold the lock,
+   `ScrollEnd` clears it). Better, but still built on the same per-event
+   magnitude comparison at the moment the lock is decided - a slow
+   gesture's *first* event can itself be tremor-dominated, locking onto
+   the wrong axis for the whole gesture.
+
+**What actually shipped, after the user got fed up with chasing this and
+suggested it directly**: stop inferring intent from an ambiguous, noisy
+signal at all. `angle.x() != 0` always wins for pan, unconditionally, no
+comparison against `angle.y()` ever - nothing produces a nonzero `.x()`
+except a genuine horizontal swipe or a mouse's own horizontal wheel, so
+there is nothing to disambiguate. A plain vertical-only mouse wheel has no
+`.x()` to report at all, so Shift+scroll is required to explicitly
+repurpose its `.y()` for pan instead (the ordinary "hold Shift to scroll
+sideways" convention most other apps already use) - unmodified vertical
+scroll does nothing, deliberately, since repurposing it for pan (there is
+no vertical content to scroll) was the root of every version of this bug.
+`dominant_wheel_axis`/`dominant_wheel_delta` (the per-event and
+per-gesture designs' helper functions) and the phase-locking state are
+gone entirely, not just superseded - there was nothing left worth keeping
+once the ambiguity itself was removed rather than resolved more cleverly.
+Zoom (Ctrl+scroll) keeps a simple `x if nonzero else y` for its own delta,
+since zoom has no left/right ambiguity to get wrong the way pan did.
+
+The Zoom +/-/Fit buttons and the horizontal `QScrollBar` next to the
+waveform are the discoverable/no-modifier equivalents to wheel-driven
+zoom/pan - kept in sync via `WaveformView.view_changed` ->
+`_on_waveform_view_changed` (view -> scrollbar) and the scrollbar's own
+`valueChanged` -> `_on_waveform_scrollbar_moved` (scrollbar -> view), both
+`blockSignals`-guarded so neither bounces back into the other. The
+scrollbar itself sits in a fixed-height container regardless of whether
+it's currently shown - a plain `setVisible(False)` collapses it to zero
+height, which shoved the marker spinboxes below it up and down every time
+zoom crossed the "needs scrolling" threshold.
 
 ### Diagnosing a load that silently does nothing
 

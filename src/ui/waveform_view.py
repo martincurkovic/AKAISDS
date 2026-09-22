@@ -86,25 +86,6 @@ def clamp_marker(order, index, frame, values, frame_count):
     return max(lo_bound, min(hi_bound, frame))
 
 
-def dominant_wheel_delta(angle_x, angle_y):
-    """Which of a QWheelEvent's two angleDelta() axes to actually act on.
-
-    Plain function, independent of Qt - same reasoning as the other
-    coordinate helpers above. A trackpad swipe reports through whichever
-    axis actually moved (left/right is angle_x, not angle_y - mouse wheels
-    only ever report angle_y), so a naive "always prefer y unless it's
-    exactly zero" reads a real horizontal swipe's tiny, often-nonzero
-    stray y component (present for the first event or two before macOS
-    locks the gesture onto one axis) instead of the real, much larger x
-    delta - a visible wrong-direction jump right as the swipe begins,
-    "bouncing" back once the real x delta takes over. Comparing
-    magnitudes picks whichever axis is actually dominant on every event,
-    correct both during that brief unlocked start and through the rest of
-    the gesture (only one axis is ever nonzero once macOS locks it).
-    """
-    return angle_x if abs(angle_x) > abs(angle_y) else angle_y
-
-
 class WaveformView(QWidget):
     # Loop-point editor for one sample: a fast min/max envelope plus four
     # draggable markers (start/loop start/loop end/end), horizontal
@@ -511,19 +492,15 @@ class WaveformView(QWidget):
         if self._samples is None:
             return
         angle = event.angleDelta()
-        # see dominant_wheel_delta's own docstring for why this isn't just
-        # angle.y() (a horizontal swipe was silently ignored outright) or
-        # "y whenever it's nonzero, else x" (a real, reported bug: a stray
-        # y component at the start of a horizontal swipe caused a visible
-        # wrong-direction jump before the real x delta took over)
-        delta = dominant_wheel_delta(angle.x(), angle.y())
-        if delta == 0:
-            return
+
         if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
             # holding a modifier and scrolling to zoom, on any platform -
-            # separate from _handle_native_pinch's real macOS trackpad
-            # pinch gesture below, which does not arrive as a Ctrl+wheel
-            # event and needs its own handler
+            # separate from _handle_pinch_zoom's real macOS trackpad pinch
+            # gesture, which does not arrive as a Ctrl+wheel event at all
+            # and needs its own handler
+            delta = angle.x() if angle.x() != 0 else angle.y()
+            if delta == 0:
+                return
             anchor_frame = frame_for_x(
                 event.position().x(), self.width(), self._view_start, self._view_length()
             )
@@ -531,14 +508,42 @@ class WaveformView(QWidget):
                 self.zoom_in(anchor_frame)
             else:
                 self.zoom_out(anchor_frame)
+            event.accept()
+            return
+
+        # Panning ONLY ever acts on a genuine angle.x() component - a real
+        # horizontal trackpad swipe or a mouse's own horizontal wheel,
+        # which is unambiguous by construction (nothing else produces a
+        # nonzero angle.x()). A plain wheel mouse has no horizontal axis
+        # at all, so Shift+scroll repurposes its angle.y() for pan instead
+        # - the same "hold Shift to scroll sideways" convention most other
+        # apps already use. Vertical scroll WITHOUT Shift does nothing.
+        #
+        # This used to auto-detect "the dominant axis" instead - first
+        # per event (a stray value on the wrong axis at the very start of
+        # a swipe could briefly out-vote the real one), then per gesture
+        # via QWheelEvent.phase() locking (better, but a slow swipe still
+        # occasionally bounced: both axes' per-event deltas are small and
+        # close together at low speed, so ordinary hand tremor on the
+        # "wrong" axis could still occasionally win even within one locked
+        # gesture). Both were fixing symptoms of the same root problem -
+        # trying to infer intent from a genuinely ambiguous, noisy signal.
+        # Never treating angle.y() as pan unless Shift makes the intent
+        # explicit removes the ambiguity outright rather than getting
+        # better at guessing it.
+        if angle.x() != 0:
+            delta = angle.x()
+        elif event.modifiers() & Qt.KeyboardModifier.ShiftModifier and angle.y() != 0:
+            delta = angle.y()
         else:
-            # plain wheel/trackpad scroll to pan (either axis - see above)
-            # - a fixed fraction of the current view per notch, so panning
-            # stays useful at any zoom level instead of crawling at high
-            # zoom or flying past at low
-            view_length = self._view_length()
-            pan_frames = int(-delta / 120 * max(1, view_length // 10))
-            self.set_view_start(self._view_start + pan_frames)
+            return
+
+        # a fixed fraction of the current view per notch, so panning stays
+        # useful at any zoom level instead of crawling at high zoom or
+        # flying past at low
+        view_length = self._view_length()
+        pan_frames = int(-delta / 120 * max(1, view_length // 10))
+        self.set_view_start(self._view_start + pan_frames)
         event.accept()
 
     def event(self, event):
