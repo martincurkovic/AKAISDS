@@ -182,6 +182,17 @@ _DEMO_TEST_AUDIO_PATH = os.path.normpath(
 _DEMO_MS_PER_WORD = 1.02
 
 
+def _synthesized_demo_frame_count(sample_index):
+    # split out of _synthesize_demo_sample_audio so
+    # ProgramEditorWindow._demo_sample_frame_count can learn the length it
+    # would produce without generating the whole (synthesized, per-frame
+    # Python loop) sample array just to read len() off it, and so the two
+    # can never drift apart into disagreeing on the same sample_index's
+    # length - deterministic per sample_index, same reasoning as
+    # _synthesize_demo_sample_audio's own comment.
+    return 20000 + (sample_index * 4127) % 60000
+
+
 class _ModMatrixGrid(QWidget):
     """Wraps a Modulation card's QGridLayout (see _build_mod_matrix_row/
     _build_mod_matrix_amount_row and their header counterparts) to paint,
@@ -3610,7 +3621,9 @@ class ProgramEditorWindow(QMainWindow):
         # fine to have connected at once, this one just does nothing
         # useful if that path's cache write beats it here since they'd
         # compute the same values)
-        frame_count, start, loop_start, loop_end, end = self._markers_from_header(values)
+        frame_count, start, loop_start, loop_end, end = self._markers_from_header(
+            sample_index, values
+        )
         entry = {
             "samples": None,
             "framerate": None,
@@ -3779,6 +3792,18 @@ class ProgramEditorWindow(QMainWindow):
         progress_connection = sampler_controller.receive_progress.connect(
             self._on_sample_receive_progress
         )
+        # each already-decoded packet's worth of sample words, live -
+        # feeds the same progressive-envelope path _fetch_demo_sample_audio
+        # drives for its own simulated dump (see
+        # WaveformView.append_live_samples), so the waveform actually
+        # grows in step with the real transfer instead of only a plain
+        # progress bar moving for however many minutes this takes. Purely
+        # additive on SamplerController's side (see sample_chunk_received's
+        # own comment) - the Transfer Dashboard's own receive path never
+        # connects to this and is unaffected.
+        chunk_connection = sampler_controller.sample_chunk_received.connect(
+            self._on_sample_chunk_received
+        )
         try:
             sampler_controller.receive_samples([(sample_index, temp_path)])
             which, args = self._wait_for_any_signal(
@@ -3795,6 +3820,7 @@ class ProgramEditorWindow(QMainWindow):
             return None, None
         finally:
             sampler_controller.receive_progress.disconnect(progress_connection)
+            sampler_controller.sample_chunk_received.disconnect(chunk_connection)
             try:
                 os.remove(temp_path)
             except OSError:
@@ -3804,6 +3830,13 @@ class ProgramEditorWindow(QMainWindow):
         self.sample_load_progress.setRange(0, max(total, 1))
         self.sample_load_progress.setValue(current)
         self.sample_load_progress.setVisible(True)
+
+    def _on_sample_chunk_received(self, chunk):
+        # SamplerController.sample_chunk_received - see
+        # _fetch_sample_audio_blocking's own comment on why this is
+        # connected there. Already 16-bit-scaled by the controller, same
+        # range WaveformView.paintEvent divides by everywhere else.
+        self.waveform_view.append_live_samples(chunk)
 
     def _fetch_demo_sample_audio(self, sample_index):
         # AKAISDS_DEMO_SAMPLER has no equivalent on the audio side -
@@ -3837,9 +3870,20 @@ class ProgramEditorWindow(QMainWindow):
         total_seconds = total * _DEMO_MS_PER_WORD / 1000
         steps = max(6, round(total_seconds / 0.2))
         step_seconds = total_seconds / steps
+        last_pushed = 0
         for step in range(1, steps + 1):
             current = total * step // steps
             self._on_sample_receive_progress(current, total)
+            # same progressive-envelope path the real hardware fetch feeds
+            # from SamplerController.sample_chunk_received - demo mode has
+            # no packets of its own (the whole file is already in hand
+            # from the read above), so this just reveals it prefix by
+            # prefix on the same cadence the progress bar already ticks
+            # on, so someone evaluating this without hardware sees the
+            # real feature, not just its progress bar
+            if sample_index == self.sample_list_widget.currentRow():
+                self.waveform_view.append_live_samples(samples[last_pushed:current])
+            last_pushed = current
             self.status_bar.showMessage(
                 f"Loading audio for sample {sample_index} (demo) - "
                 f"{current}/{total} frames..."
@@ -3855,7 +3899,7 @@ class ProgramEditorWindow(QMainWindow):
         # same sample gives the same fake tone), not meant to resemble
         # real sampled audio content
         framerate = 44100
-        frame_count = 20000 + (sample_index * 4127) % 60000
+        frame_count = _synthesized_demo_frame_count(sample_index)
         rng = random.Random(sample_index)
         freq = 110 * (1.5 ** (sample_index % 5))
         samples = [0] * frame_count
@@ -3867,6 +3911,25 @@ class ProgramEditorWindow(QMainWindow):
             noise = (rng.random() - 0.5) * 0.06
             samples[i] = int(max(-1.0, min(1.0, tone * decay + noise)) * 32000)
         return samples, framerate
+
+    def _demo_sample_frame_count(self, sample_index):
+        # the REAL length _fetch_demo_sample_audio will actually load for
+        # *sample_index* - a cheap wave-header peek (getnframes() reads
+        # just the header, not the audio data), or the fallback's own
+        # deterministic formula when the fixture's missing. Used by
+        # _markers_from_header's demo branch so header-only markers and
+        # begin_live_capture's live-capture total agree with the real
+        # eventual length from the moment a sample is selected. Getting
+        # this wrong doesn't break anything by itself once the whole load
+        # finishes (set_waveform always ends up with the real total
+        # regardless) - but a progressive load in between will visibly
+        # finish early/late and then snap once the mismatch surfaces. See
+        # AGENTS.md's "Progressive waveform loading" section.
+        try:
+            with wave.open(_DEMO_TEST_AUDIO_PATH, "rb") as wf:
+                return wf.getnframes()
+        except (OSError, wave.Error):
+            return _synthesized_demo_frame_count(sample_index)
 
     def _demo_loop_points(self, frame_count):
         # see the comment at _load_sample_waveform's call site - spreads
@@ -3881,7 +3944,7 @@ class ProgramEditorWindow(QMainWindow):
         loop_end = (frame_count * 3) // 4
         return start, loop_start, loop_end, end
 
-    def _markers_from_header(self, values):
+    def _markers_from_header(self, sample_index, values):
         # shared by both header-fetch paths - the automatic, async one
         # that fires on plain sample selection (_on_sample_detail_loaded)
         # and _load_sample_waveform's own fallback for the rare case where
@@ -3894,12 +3957,18 @@ class ProgramEditorWindow(QMainWindow):
             # doesn't edit s3k/s3ked - see AGENTS.md), which collapses
             # every marker to frame 0: invisible, and effectively
             # un-draggable too, since clamp_marker's neighbour bounds
-            # collapse to [0, 0] right along with it. A nominal frame
-            # count stands in for SLNGTH (also 0) purely so there's
-            # something to show/drag before real audio - _fetch_demo_
-            # sample_audio's own synthesized length replaces it once
-            # audio actually loads. Never applies to a real header value.
-            frame_count = frame_count or 20000
+            # collapse to [0, 0] right along with it. frame_count is
+            # substituted with the REAL length _fetch_demo_sample_audio
+            # will actually load for this sample_index (see
+            # _demo_sample_frame_count), not an arbitrary nominal
+            # placeholder - an earlier version used a fixed 20000 here,
+            # which usually didn't match tests/test_audio.wav's real
+            # length (~31000 frames) and was harmless right up until
+            # progressive loading existed to expose the mismatch mid-load
+            # (see AGENTS.md's "Progressive waveform loading" section -
+            # the envelope would visibly finish early/late, then the
+            # whole thing would snap once the real total replaced it).
+            frame_count = self._demo_sample_frame_count(sample_index)
             start, loop_start, loop_end, end = self._demo_loop_points(frame_count)
         else:
             start = values["SSTART"]
@@ -4025,9 +4094,27 @@ class ProgramEditorWindow(QMainWindow):
                     )
                     return
                 logger.debug(f"_load_sample_waveform: header fetched: {header!r}")
-                _frame_count, start, loop_start, loop_end, end = self._markers_from_header(
-                    header
+                frame_count, start, loop_start, loop_end, end = self._markers_from_header(
+                    sample_index, header
                 )
+                if sample_index == self.sample_list_widget.currentRow():
+                    # normally already shown by _on_sample_detail_loaded's
+                    # automatic fetch - this branch only runs when that
+                    # hasn't resolved yet, so this widget has never seen
+                    # this sample's header at all otherwise
+                    self._set_marker_spinbox_range(frame_count)
+                    self.waveform_view.set_header(
+                        frame_count, start, loop_start, loop_end, end
+                    )
+
+            if sample_index == self.sample_list_widget.currentRow():
+                # markers/frame_count are known either way by this point
+                # (the cache-hit branch above, or set_header just now) -
+                # switch the canvas from header-only to a progressively-
+                # filling waveform before the fetch below actually starts,
+                # so append_live_samples (called from within both fetch
+                # paths as data arrives) has something to grow
+                self.waveform_view.begin_live_capture()
 
             if demo_mode:
                 samples, framerate = self._fetch_demo_sample_audio(sample_index)

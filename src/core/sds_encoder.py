@@ -160,6 +160,22 @@ def sds_bytes_to_sample(byte_list, bit_depth=16):
     return raw
 
 
+def scale_sample_to_16bit(sample, bit_depth):
+    # upscales a decoded SDS sample word to the same 16-bit-equivalent
+    # range write_wav_file/its WAV round trip produces - used by
+    # sampler_controller.py's live sample_chunk_received signal, which
+    # hands a caller raw decoded words straight from the wire while a
+    # transfer is still in flight, with no WAV file in between to do this
+    # implicitly. bit_depth == 8 matches write_wav_file's own path once
+    # its (s+128)&0xFF -> unsigned WAV byte -> (b-128)<<8 round trip (see
+    # program_editor_window.py's _read_wav_samples) is followed through:
+    # the intermediate unsigned-offset step cancels out algebraically to
+    # the same left-shift every other bit depth already gets here.
+    if bit_depth >= 16:
+        return sample
+    return sample << (16 - bit_depth)
+
+
 def bitcrush_sample(sample_16bit, effective_bits):
     # reduce 16 bit sample's effective resolution to something lower for sonic purposes only
     # still sent as a 16 bit sample, but the bottom bits are zero'd out

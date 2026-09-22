@@ -224,7 +224,14 @@ class WaveformView(QWidget):
         # was showing meanwhile). A genuinely new/different sample always
         # goes through clear()/set_header() first, which is what actually
         # resets the view - so preserving it here is never stale.
-        preserve_view = self._samples is None and self._frame_count == len(samples)
+        # frame_count equality alone is enough proof of "still the same
+        # sample" - it doesn't also require self._samples is None the way
+        # it used to, now that begin_live_capture()/append_live_samples()
+        # (a live SDS dump progressively filling this in - see their own
+        # comments) can leave self._samples as a real, growing list by the
+        # time this is called, not just None (header-only, no fetch
+        # started yet).
+        preserve_view = self._frame_count == len(samples)
         self._samples = samples
         self._frame_count = len(samples)
         self._markers = {
@@ -240,6 +247,42 @@ class WaveformView(QWidget):
         self.update()
         self._emit_markers_changed()
         self._emit_view_changed()
+
+    def begin_live_capture(self):
+        """Switches from header-only (markers known, no envelope at all)
+        to a progressively-filling waveform - called once right before a
+        real or demo SDS dump actually starts (see
+        program_editor_window.py's _load_sample_waveform), so
+        append_live_samples has an empty list to grow into instead of the
+        canvas showing nothing at all until the whole transfer finishes
+        minutes later. Requires set_header to have already run
+        (frame_count/markers known) - a no-op otherwise, same guard every
+        other header-only-mode method here already uses.
+        """
+        if self._frame_count == 0:
+            return
+        self._samples = []
+        self._rebuild_envelope()
+        self.update()
+
+    def append_live_samples(self, chunk):
+        """Extends the in-progress waveform with newly-arrived sample
+        words - see program_editor_window.py's _on_sample_chunk_received
+        (real hardware, one SDS data packet's worth per call) and
+        _fetch_demo_sample_audio (its own simulated progressive reveal in
+        demo mode, paced the same way its progress bar already was). A
+        no-op before begin_live_capture() has ever run (self._samples is
+        still None then) - a stray call from a signal connection
+        outliving its fetch can't corrupt a header-only display it has no
+        business touching. Callers stop invoking this once set_waveform
+        lands the final, complete list; nothing here enforces that on its
+        own.
+        """
+        if self._samples is None or not chunk:
+            return
+        self._samples.extend(chunk)
+        self._rebuild_envelope()
+        self.update()
 
     def set_marker(self, name, frame):
         """Move one marker directly (not via a mouse drag) - what the
@@ -333,8 +376,27 @@ class WaveformView(QWidget):
             return
         view_start = self._view_start
         view_length = self._view_length()
-        visible = self._samples[view_start : view_start + view_length]
-        self._envelope = build_envelope(visible, self.width())
+        # clip to how much has actually arrived so far, not just what the
+        # view window wants - during a live capture (begin_live_capture/
+        # append_live_samples) self._samples is still growing, so this is
+        # frequently short of view_start + view_length. Once the sample is
+        # fully loaded len(self._samples) == frame_count, which can never
+        # be less than view_start + view_length (the view is always
+        # bounded within the sample), so loaded_end == view_start +
+        # view_length there and this clip is a no-op - exactly the old
+        # unconditional slice for every already-shipped, non-live case.
+        loaded_end = min(view_start + view_length, len(self._samples))
+        if loaded_end <= view_start:
+            self._envelope = []
+            return
+        visible = self._samples[view_start:loaded_end]
+        # only the fraction of the view actually loaded gets columns, so
+        # the envelope visibly grows left-to-right in step with the
+        # transfer instead of whatever prefix has arrived stretching to
+        # fill the entire canvas width (build_envelope has no idea some of
+        # its input is "not here yet" vs. genuinely the whole view).
+        width = round(self.width() * len(visible) / view_length) if view_length else 0
+        self._envelope = build_envelope(visible, width)
 
     def _x_for(self, name):
         return x_for_frame(
@@ -415,13 +477,19 @@ class WaveformView(QWidget):
                 QPointF(x, _HANDLE_SIZE * 1.6),
             ]))
 
-        if self._samples is None:
-            # header-only: no envelope was drawn above - a small hint
-            # along the bottom edge instead of the big centered
-            # placeholder, which would sit on top of the markers
+        if not self._envelope:
+            # nothing to look at yet where the envelope would otherwise
+            # be - either genuinely header-only (self._samples is None,
+            # no fetch started) or a live capture that's begun but hasn't
+            # had its first packet/chunk land yet (self._samples == [],
+            # see begin_live_capture/append_live_samples). Vertically
+            # centered like the big placeholder above, not pinned to the
+            # bottom - markers only occupy a few px at the very top (their
+            # triangle handles), so a centered single line doesn't run
+            # into them
             painter.setPen(QColor(palette["text_disabled"]))
             painter.drawText(
-                QRectF(0, self.height() - 22, self.width(), 20),
+                self.rect(),
                 Qt.AlignmentFlag.AlignCenter,
                 _LOADING_TEXT if self._loading else _AUDIO_HINT_TEXT,
             )

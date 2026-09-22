@@ -11,6 +11,16 @@ class SamplerController(QObject):
     transfer_finished = Signal(bool)
     file_transferred = Signal(str)
     receive_progress = Signal(int, int)
+    # newly-decoded, 16-bit-scaled sample words from ONE just-accepted SDS
+    # data packet during a receive - purely additive to receive_progress
+    # (which only ever carried a word COUNT, never the words themselves).
+    # Emitted synchronously from _on_receive_data_packet, same as
+    # receive_progress - a listener that doesn't connect to this (the
+    # Transfer Dashboard never does) sees no change in behaviour at all.
+    # See program_editor_window.py's _on_sample_chunk_received, the one
+    # actual consumer - a progressively-filling Samples-tab waveform
+    # instead of only a plain progress bar during a live SDS dump.
+    sample_chunk_received = Signal(list)
     sample_received = Signal(str)
     receive_finished = Signal(bool)
     sample_info_received = Signal(dict)
@@ -885,6 +895,31 @@ class SamplerController(QObject):
         bytes_per_word = (info["bit_depth"] + 6) // 7
         words_per_packet = sds_encoder.DATA_BYTES_PER_PACKET // bytes_per_word
         words_received = len(self._receive_packets) * words_per_packet
+
+        # decode just THIS packet's own words immediately, instead of
+        # waiting for _finish_receiving's one all-at-once decode of every
+        # packet once the whole transfer is done - every packet holds a
+        # whole number of words with no split across a packet boundary
+        # (see sds_encoder.build_data_packets, the inverse of this), so
+        # decoding one packet's payload in isolation gives exactly the
+        # words _finish_receiving's own decode would for that stretch.
+        # words_before_this_packet is exact (not derived from a running
+        # counter that could drift) because every packet before the last
+        # is always a full words_per_packet - only the trailing
+        # zero-padding on the very last packet ever needs trimming below.
+        words_before_this_packet = (len(self._receive_packets) - 1) * words_per_packet
+        chunk = []
+        for i in range(0, len(payload), bytes_per_word):
+            word_bytes = payload[i : i + bytes_per_word]
+            if len(word_bytes) < bytes_per_word:
+                break  # trailing zero padding within the packet itself
+            if words_before_this_packet + len(chunk) >= info["sample_length"]:
+                break  # zero-padded words past the declared sample length
+            chunk.append(sds_encoder.sds_bytes_to_sample(word_bytes, info["bit_depth"]))
+        if chunk:
+            self.sample_chunk_received.emit(
+                [sds_encoder.scale_sample_to_16bit(s, info["bit_depth"]) for s in chunk]
+            )
 
         self.receive_progress.emit(
             min(words_received, info["sample_length"]), info["sample_length"]
