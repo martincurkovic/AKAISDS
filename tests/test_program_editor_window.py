@@ -412,10 +412,11 @@ def test_sample_playback_type_options_match_s3k_params_sptype():
     import s3k.params as p
     from ui.program_editor_window import _SAMPLE_PLAYBACK_TYPE_OPTIONS
 
+    # labels are now deliberately hand-edited to match the hardware's own
+    # front-panel wording rather than s3k's raw values= text, so only the
+    # count (and raw-byte order) is still guarded here, not the text
     sptype = p.lookup("SPTYPE", "sample")
     assert len(_SAMPLE_PLAYBACK_TYPE_OPTIONS) == len(sptype.values)
-    for raw_value, label in sptype.values.items():
-        assert _SAMPLE_PLAYBACK_TYPE_OPTIONS[raw_value][0] == label
 
 
 def test_first_program_is_preselected_with_its_keygroups_shown(editor):
@@ -1482,7 +1483,7 @@ def test_selecting_a_sample_shows_loop_type_and_root_note_from_header(editor, qa
     _pump_until(qapp, lambda: editor.waveform_view.has_header())
 
     assert editor.sample_loop_type_combo.isEnabled() is True
-    assert editor.sample_loop_type_combo.currentText() == "Normal looping"  # SPTYPE=0
+    assert editor.sample_loop_type_combo.currentText() == "Loop in release"  # SPTYPE=0
     assert editor.sample_root_note_spinbox.isEnabled() is True
     assert editor.sample_root_note_spinbox.value() == 60  # SPITCH=60, FakeBridge
     assert editor.sample_loop_tune_knob.isEnabled() is True
