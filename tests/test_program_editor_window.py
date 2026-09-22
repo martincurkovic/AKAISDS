@@ -8,6 +8,8 @@ import time
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
+import s3k.messages as s3k_messages
+import s3k.params as s3k_params
 from PySide6.QtCore import Qt, QObject, QTimer, Signal
 from PySide6.QtWidgets import QApplication, QLabel, QWidget
 from ui.program_editor_window import ProgramEditorWindow, _LOOP_TYPE_OPTIONS
@@ -61,6 +63,81 @@ class FakeBridge:
 
     def program_list(self):
         return self._programs
+
+    # -- create program/keygroup (PDATA/KDATA) -------------------------------
+    #
+    # unlike this class's other fakes, get_header_bytes/send_and_receive
+    # here actually decode/build real wire-format bytes via s3k.messages/
+    # s3k.params, and send_and_receive genuinely mutates self._programs/
+    # self._keygroups - so a "Duplicate Program"/"Duplicate Keygroup" test
+    # exercises the real ProgramEditorWindow.._confirm_duplicate_*
+    # -> BridgeWorker._handle_create_* -> program_list()/get_parameter()
+    # round trip end to end, the same way test_reverse_sample_real_mode_
+    # happy_path_* exercises trim/reverse's own multi-step real-mode flow
+
+    def get_header_bytes(self, region, index, offset, count, selector=0, **kwargs):
+        assert offset == 0 and count == 192
+        header = bytearray(192)
+        if region == "program":
+            header[0] = 0x01  # BLOCK_IDENT["program"], see s3k.bridge
+            name_param = s3k_params.lookup("PRNAME", "program")
+            header[name_param.offset : name_param.offset + name_param.size] = (
+                s3k_params.encode_field(name_param, self._programs[index])
+            )
+            groups_param = s3k_params.lookup("GROUPS", "program")
+            header[groups_param.offset : groups_param.offset + groups_param.size] = (
+                s3k_params.encode_field(groups_param, len(self._keygroups[index]))
+            )
+            return bytes(header)
+        if region == "keygroup":
+            header[0] = 0x02  # BLOCK_IDENT["keygroup"]
+            lo, hi = self._keygroups[index][selector]
+            lo_param = s3k_params.lookup("LONOTE", "keygroup")
+            hi_param = s3k_params.lookup("HINOTE", "keygroup")
+            header[lo_param.offset : lo_param.offset + lo_param.size] = (
+                s3k_params.encode_field(lo_param, lo)
+            )
+            header[hi_param.offset : hi_param.offset + hi_param.size] = (
+                s3k_params.encode_field(hi_param, hi)
+            )
+            return bytes(header)
+        raise AssertionError(f"unexpected region {region!r}")
+
+    def send_and_receive(self, frame, timeout=None):
+        _channel, command, payload = s3k_messages.parse_frame(frame)
+        if command == s3k_messages.Command.PDATA:
+            program_index = payload[0] | (payload[1] << 7)
+            header = s3k_messages.decode_nibbles(payload[2:])
+            name_param = s3k_params.lookup("PRNAME", "program")
+            name = s3k_params.decode_field(
+                name_param,
+                header[name_param.offset : name_param.offset + name_param.size],
+            ).strip()
+            if program_index == len(self._programs):
+                self._programs.append(name)
+                self._keygroups[program_index] = []
+            else:
+                self._programs[program_index] = name
+        elif command == s3k_messages.Command.KDATA:
+            program_index = payload[0] | (payload[1] << 7)
+            keygroup_index = payload[2]
+            header = s3k_messages.decode_nibbles(payload[3:])
+            lo_param = s3k_params.lookup("LONOTE", "keygroup")
+            hi_param = s3k_params.lookup("HINOTE", "keygroup")
+            lo = s3k_params.decode_field(
+                lo_param, header[lo_param.offset : lo_param.offset + lo_param.size]
+            )
+            hi = s3k_params.decode_field(
+                hi_param, header[hi_param.offset : hi_param.offset + hi_param.size]
+            )
+            keygroups = self._keygroups.setdefault(program_index, [])
+            if keygroup_index == len(keygroups):
+                keygroups.append((lo, hi))
+            else:
+                keygroups[keygroup_index] = (lo, hi)
+        else:
+            raise AssertionError(f"unexpected command {command:#04x}")
+        return s3k_messages.Reply(code=int(s3k_messages.ReplyCode.OK)).encode()
 
     def get_header(self, region, index, **kwargs):
         if region == "multipart":
@@ -749,6 +826,125 @@ def test_refresh_picks_up_a_program_created_on_the_hardware(editor, qapp):
     # the previously-selected program stays selected across the refresh,
     # rather than resetting to the top of the list
     assert editor.program_list.currentItem().text() == "Bass stab"
+
+
+# -----------------------
+# Duplicate Program / Duplicate Keygroup (PDATA/KDATA)
+# -----------------------
+
+
+def test_duplicate_actions_enabled_with_a_selection_disabled_without(editor, qapp):
+    editor.keygroup_list.setCurrentRow(0)
+    editor._worker.wait_until_idle()
+    assert editor._duplicate_program_action.isEnabled() is True
+    assert editor._duplicate_keygroup_action.isEnabled() is True
+
+    editor.program_list.setCurrentRow(-1)
+    editor._update_list_context_actions_enabled()
+    assert editor._duplicate_program_action.isEnabled() is False
+    # keygroup selection follows the program - clearing the program clears
+    # the keygroup list too, so the keygroup action should also go disabled
+    assert editor.keygroup_list.currentRow() == -1
+    assert editor._duplicate_keygroup_action.isEnabled() is False
+
+
+def test_duplicate_actions_disabled_in_demo_mode_even_with_a_selection(
+    editor, qapp, monkeypatch
+):
+    editor.keygroup_list.setCurrentRow(0)
+    editor._worker.wait_until_idle()
+    monkeypatch.setenv("AKAISDS_DEMO_SAMPLER", "1")
+    editor._update_list_context_actions_enabled()
+
+    assert editor.program_list.currentRow() >= 0
+    assert editor.keygroup_list.currentRow() >= 0
+    assert editor._duplicate_program_action.isEnabled() is False
+    assert editor._duplicate_keygroup_action.isEnabled() is False
+
+
+def test_confirm_duplicate_program_submits_create_on_valid_name(editor, qapp, monkeypatch):
+    bridge = editor._bridge
+    monkeypatch.setattr(editor, "_prompt_akai_name", lambda *a, **k: "NEW PROGRAM")
+
+    editor._confirm_duplicate_program()
+    editor._worker.wait_until_idle()
+    _pump_until(qapp, lambda: editor.program_list.count() == 3)
+
+    assert bridge._programs == ["Bass stab", "EPiano warm", "NEW PROGRAM"]
+    # the freshly duplicated program keeps every keygroup of its source
+    assert bridge._keygroups[2] == bridge._keygroups[0]
+    # and ends up selected once the reload lands, rather than resetting to
+    # row 0 or leaving the source program selected (see
+    # _pending_program_selection_index's own comment)
+    assert editor.program_list.currentRow() == 2
+    assert editor.program_list.currentItem().text() == "NEW PROGRAM"
+
+
+def test_confirm_duplicate_program_does_nothing_when_dialog_cancelled(
+    editor, qapp, monkeypatch
+):
+    bridge = editor._bridge
+    monkeypatch.setattr(editor, "_prompt_akai_name", lambda *a, **k: None)
+
+    editor._confirm_duplicate_program()
+
+    assert bridge._programs == ["Bass stab", "EPiano warm"]
+
+
+def test_confirm_duplicate_program_refuses_a_name_collision(editor, qapp, monkeypatch):
+    import ui.program_editor_window as pew
+
+    bridge = editor._bridge
+    monkeypatch.setattr(editor, "_prompt_akai_name", lambda *a, **k: "EPiano warm")
+    warnings = []
+    monkeypatch.setattr(
+        pew.QMessageBox,
+        "warning",
+        lambda *a, **k: warnings.append(a) or pew.QMessageBox.StandardButton.Ok,
+    )
+
+    editor._confirm_duplicate_program()
+
+    # refused client-side before ever reaching the bridge - a same-name
+    # PDATA write would silently delete the existing "EPiano warm" program
+    # (see _confirm_duplicate_program's own comment)
+    assert bridge._programs == ["Bass stab", "EPiano warm"]
+    assert len(warnings) == 1
+
+
+def test_confirm_duplicate_keygroup_submits_create_on_confirm(editor, qapp, monkeypatch):
+    import ui.program_editor_window as pew
+
+    bridge = editor._bridge
+    editor.keygroup_list.setCurrentRow(0)
+    editor._worker.wait_until_idle()
+    monkeypatch.setattr(
+        pew.QMessageBox, "question", lambda *a, **k: pew.QMessageBox.StandardButton.Yes
+    )
+
+    editor._confirm_duplicate_keygroup()
+    editor._worker.wait_until_idle()
+    _pump_until(qapp, lambda: editor.keygroup_list.count() == 3)
+
+    # appended as a clone of keygroup 0, (24, 60) per the fixture
+    assert bridge._keygroups[0] == [(24, 60), (61, 96), (24, 60)]
+    assert _keygroup_row_text(editor, 2) == "Keygroup 3: C0 - C3"
+
+
+def test_confirm_duplicate_keygroup_does_nothing_when_declined(editor, qapp, monkeypatch):
+    import ui.program_editor_window as pew
+
+    bridge = editor._bridge
+    editor.keygroup_list.setCurrentRow(0)
+    editor._worker.wait_until_idle()
+    monkeypatch.setattr(
+        pew.QMessageBox, "question", lambda *a, **k: pew.QMessageBox.StandardButton.No
+    )
+
+    editor._confirm_duplicate_keygroup()
+
+    assert bridge._keygroups[0] == [(24, 60), (61, 96)]
+    assert editor.keygroup_list.count() == 2
 
 
 def test_switching_program_replaces_keygroup_list_without_crashing(editor, qapp):

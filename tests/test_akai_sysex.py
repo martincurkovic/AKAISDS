@@ -184,4 +184,62 @@ def test_compute_bandwidth_and_tuning_offsets_non_native_rate():
 
 def test_to_nibble_pairs_splits_low_high_nibbles():
     assert akai_sysex.to_nibble_pairs([0xAB]) == [0x0B, 0x0A]
+
+
+# -----------------------
+# PDATA / KDATA (create program / create keygroup)
+# -----------------------
+
+
+def test_pdata_request_shape_and_round_trip():
+    raw_header = bytes(range(192))
+    frame = akai_sysex.build_pdata_request(200, raw_header, channel=2)
+
+    assert frame[0] == 0xF0
+    assert frame[-1] == 0xF7
+    assert frame[1] == 0x47  # akai manufacturer id
+    assert frame[2] == 2  # channel
+    assert frame[3] == 0x07  # PDATA function code
+    assert frame[4] == 0x48  # S1000-family model id
+    assert frame[5] == 200 & 0x7F  # program number LSB
+    assert frame[6] == (200 >> 7) & 0x7F  # program number MSB - >=128 so this is exercised
+    nibbled = frame[7:-1]
+    assert len(nibbled) == 192 * 2
+    decoded = bytes(
+        (nibbled[i] & 0x0F) | ((nibbled[i + 1] & 0x0F) << 4)
+        for i in range(0, len(nibbled), 2)
+    )
+    assert decoded == raw_header
+
+
+def test_kdata_request_shape_and_round_trip():
+    raw_header = bytes(range(192))
+    frame = akai_sysex.build_kdata_request(5, 12, raw_header, channel=1)
+
+    assert frame[0] == 0xF0
+    assert frame[-1] == 0xF7
+    assert frame[1] == 0x47  # akai manufacturer id
+    assert frame[2] == 1  # channel
+    assert frame[3] == 0x09  # KDATA function code
+    assert frame[4] == 0x48
+    assert frame[5] == 5  # program number LSB
+    assert frame[6] == 0  # program number MSB
+    assert frame[7] == 12  # keygroup number
+    nibbled = frame[8:-1]
+    assert len(nibbled) == 192 * 2
+    decoded = bytes(
+        (nibbled[i] & 0x0F) | ((nibbled[i + 1] & 0x0F) << 4)
+        for i in range(0, len(nibbled), 2)
+    )
+    assert decoded == raw_header
     assert akai_sysex.to_nibble_pairs([0x00, 0xFF]) == [0x00, 0x00, 0x0F, 0x0F]
+
+
+def test_pdata_request_default_channel():
+    frame = akai_sysex.build_pdata_request(0, bytes(192))
+    assert frame[2] == 0  # channel defaults to 0
+
+
+def test_kdata_request_default_channel():
+    frame = akai_sysex.build_kdata_request(0, 0, bytes(192))
+    assert frame[2] == 0  # channel defaults to 0

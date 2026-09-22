@@ -4,6 +4,7 @@
 # process_pending() drains it synchronously on the test thread, so its
 # signals fire as plain direct connections - fast and deterministic.
 
+import s3k.messages as m
 import s3k.params as p
 
 import pytest
@@ -596,6 +597,372 @@ def test_worker_deletes_samples_are_never_coalesced():
     assert bridge.calls == [0, 1]
 
 
+# --- BridgeWorker: create program/keygroup (PDATA/KDATA) --------------------
+#
+# Unlike every other fake bridge in this file, send_and_receive here decodes
+# every frame for REAL via s3k.messages (parse_frame + decode_nibbles) -
+# a bug in program_editor_bridge's own frame-building or reply-reading would
+# show up as a decode failure or a wrong recorded value here, not just get
+# rubber-stamped by a bridge that trusts whatever it's handed. This is the
+# same protocol these two handlers were written against - see
+# akai_sysex.build_pdata_request/build_kdata_request's own docstrings and
+# program_editor_bridge.py's "create program/keygroup" section comment.
+
+
+class _CreateBridge:
+    def __init__(self, program_names, program_keygroups, error=None,
+                 error_on_step=None, reply_error_on_step=None):
+        # program_names: list[str], index = program index
+        # program_keygroups: {program_index: [(lonote, hinote), ...]} - one
+        # tuple per keygroup, used to build distinguishable fake keygroup
+        # headers so a test can tell which source keygroup a KDATA write
+        # actually cloned
+        self._program_names = list(program_names)
+        self._program_keygroups = program_keygroups
+        self._error = error
+        self._error_on_step = error_on_step  # 1-indexed send_and_receive call to fail on
+        # like error_on_step, but instead of raising, answers with a
+        # well-formed REPLY whose code is ReplyCode.ERROR - distinct code
+        # path from a raised exception (a real device can reject a write
+        # without the transport itself failing)
+        self._reply_error_on_step = reply_error_on_step
+        self.pdata_writes = []  # [(program_index, groups, name), ...]
+        self.kdata_writes = []  # [(program_index, keygroup_index, lonote, hinote), ...]
+        self._send_count = 0
+
+    def program_list(self):
+        return list(self._program_names)
+
+    def get_parameter(self, param, index, **kwargs):
+        assert (param.region, param.name) == ("program", "GROUPS")
+        return len(self._program_keygroups[index])
+
+    def get_header_bytes(self, region, index, offset, count, selector=0, **kwargs):
+        assert offset == 0 and count == 192
+        header = bytearray(192)
+        if region == "program":
+            header[0] = 0x01  # BLOCK_IDENT["program"], see s3k.bridge
+            name_param = p.lookup("PRNAME", "program")
+            header[name_param.offset : name_param.offset + name_param.size] = (
+                p.encode_field(name_param, self._program_names[index])
+            )
+            groups_param = p.lookup("GROUPS", "program")
+            header[groups_param.offset : groups_param.offset + groups_param.size] = (
+                p.encode_field(groups_param, len(self._program_keygroups[index]))
+            )
+            return bytes(header)
+        if region == "keygroup":
+            header[0] = 0x02  # BLOCK_IDENT["keygroup"]
+            lo, hi = self._program_keygroups[index][selector]
+            lo_param = p.lookup("LONOTE", "keygroup")
+            hi_param = p.lookup("HINOTE", "keygroup")
+            header[lo_param.offset : lo_param.offset + lo_param.size] = (
+                p.encode_field(lo_param, lo)
+            )
+            header[hi_param.offset : hi_param.offset + hi_param.size] = (
+                p.encode_field(hi_param, hi)
+            )
+            return bytes(header)
+        raise AssertionError(f"unexpected region {region!r}")
+
+    def send_and_receive(self, frame, timeout=None):
+        self._send_count += 1
+        if self._error is not None and self._send_count == self._error_on_step:
+            raise self._error
+        if self._send_count == self._reply_error_on_step:
+            return m.Reply(code=int(m.ReplyCode.ERROR)).encode()
+        _channel, command, payload = m.parse_frame(frame)
+        if command == m.Command.PDATA:
+            program_index = payload[0] | (payload[1] << 7)
+            header = m.decode_nibbles(payload[2:])
+            name_param = p.lookup("PRNAME", "program")
+            groups_param = p.lookup("GROUPS", "program")
+            name = p.decode_field(
+                name_param,
+                header[name_param.offset : name_param.offset + name_param.size],
+            ).strip()
+            groups = p.decode_field(
+                groups_param,
+                header[groups_param.offset : groups_param.offset + groups_param.size],
+            )
+            self.pdata_writes.append((program_index, groups, name))
+        elif command == m.Command.KDATA:
+            program_index = payload[0] | (payload[1] << 7)
+            keygroup_index = payload[2]
+            header = m.decode_nibbles(payload[3:])
+            lo_param = p.lookup("LONOTE", "keygroup")
+            hi_param = p.lookup("HINOTE", "keygroup")
+            lo = p.decode_field(
+                lo_param, header[lo_param.offset : lo_param.offset + lo_param.size]
+            )
+            hi = p.decode_field(
+                hi_param, header[hi_param.offset : hi_param.offset + hi_param.size]
+            )
+            self.kdata_writes.append((program_index, keygroup_index, lo, hi))
+        else:
+            raise AssertionError(f"unexpected command {command:#04x}")
+        return m.Reply(code=int(m.ReplyCode.OK)).encode()
+
+
+def test_worker_creates_program_with_every_source_keygroup_cloned():
+    bridge = _CreateBridge(
+        program_names=["BASS STAB"],
+        program_keygroups={0: [(24, 60), (61, 96), (97, 108)]},
+    )
+    worker = BridgeWorker(bridge)
+    created, failed = [], []
+    worker.program_created.connect(lambda *a: created.append(a))
+    worker.program_create_failed.connect(lambda *a: failed.append(a))
+
+    worker.submit_create_program(0, "NEW PROG")
+    worker.process_pending()
+
+    assert failed == []
+    assert created == [(0, 1)]  # source_index, new_index (appended at index 1)
+    # keygroup 0 bootstrapped with groups=1, then groups bumped to 2 and 3
+    # as keygroups 1 and 2 are added - every PDATA write, in order
+    assert bridge.pdata_writes == [
+        (1, 1, "NEW PROG"),
+        (1, 2, "NEW PROG"),
+        (1, 3, "NEW PROG"),
+    ]
+    # every source keygroup cloned, at the matching new index, in order
+    assert bridge.kdata_writes == [
+        (1, 0, 24, 60),
+        (1, 1, 61, 96),
+        (1, 2, 97, 108),
+    ]
+
+
+def test_worker_emits_program_create_failed_on_error_mid_sequence():
+    # fails on the 2nd send_and_receive call (keygroup 0's KDATA, right
+    # after the bootstrap PDATA succeeded) - nothing after that point
+    # should have been sent, and no program_created should fire
+    bridge = _CreateBridge(
+        program_names=["BASS STAB"],
+        program_keygroups={0: [(24, 60), (61, 96)]},
+        error=RuntimeError("device rejected it"),
+        error_on_step=2,
+    )
+    worker = BridgeWorker(bridge)
+    created, failed = [], []
+    worker.program_created.connect(lambda *a: created.append(a))
+    worker.program_create_failed.connect(lambda *a: failed.append(a))
+
+    worker.submit_create_program(0, "NEW PROG")
+    worker.process_pending()
+
+    assert created == []
+    assert failed == [(0, "device rejected it")]
+    assert bridge.pdata_writes == [(1, 1, "NEW PROG")]  # the bootstrap only
+    assert bridge.kdata_writes == []
+
+
+def test_worker_creates_keygroup_kdata_then_pdata_order():
+    bridge = _CreateBridge(
+        program_names=["BASS STAB"],
+        program_keygroups={0: [(24, 60), (61, 96)]},
+    )
+    worker = BridgeWorker(bridge)
+    created, failed = [], []
+    worker.keygroup_created.connect(lambda *a: created.append(a))
+    worker.keygroup_create_failed.connect(lambda *a: failed.append(a))
+
+    worker.submit_create_keygroup(0, 1)  # clone keygroup 1 (61-96)
+    worker.process_pending()
+
+    assert failed == []
+    assert created == [(0, 2)]  # program_index, new_keygroup_index (appended)
+    # KDATA (the clone) FIRST, THEN the whole-program PDATA with groups+1 -
+    # s3000editor's own "add keygroup to an existing program" order; the
+    # program already exists here so it's safe to write the new keygroup's
+    # storage before officially raising the group count
+    assert bridge.kdata_writes == [(0, 2, 61, 96)]
+    assert bridge.pdata_writes == [(0, 3, "BASS STAB")]
+
+
+def test_worker_emits_keygroup_create_failed_on_error():
+    bridge = _CreateBridge(
+        program_names=["BASS STAB"],
+        program_keygroups={0: [(24, 60)]},
+        error=RuntimeError("device timed out"),
+        error_on_step=1,
+    )
+    worker = BridgeWorker(bridge)
+    created, failed = [], []
+    worker.keygroup_created.connect(lambda *a: created.append(a))
+    worker.keygroup_create_failed.connect(lambda *a: failed.append(a))
+
+    worker.submit_create_keygroup(0, 0)
+    worker.process_pending()
+
+    assert created == []
+    assert failed == [(0, "device timed out")]
+    assert bridge.kdata_writes == []
+    assert bridge.pdata_writes == []
+
+
+def test_worker_refuses_a_keygroup_beyond_the_ninety_nine_cap():
+    bridge = _CreateBridge(
+        program_names=["FULL PROG"],
+        program_keygroups={0: [(24, 24)] * 99},
+    )
+    worker = BridgeWorker(bridge)
+    created, failed = [], []
+    worker.keygroup_created.connect(lambda *a: created.append(a))
+    worker.keygroup_create_failed.connect(lambda *a: failed.append(a))
+
+    worker.submit_create_keygroup(0, 0)
+    worker.process_pending()
+
+    assert created == []
+    assert len(failed) == 1
+    assert failed[0][0] == 0
+    assert "99" in failed[0][1]
+    # refused before ever touching the wire
+    assert bridge.kdata_writes == []
+    assert bridge.pdata_writes == []
+
+
+def test_worker_create_program_fails_cleanly_without_send_and_receive():
+    # the defensive backstop for demo mode (s3ked's own DemoBridge has no
+    # add-program primitive at all) - a bridge with no send_and_receive at
+    # all should fail with a clear message, not a raw AttributeError, even
+    # though the UI layer already disables the action in demo mode before
+    # this can normally be reached
+    class _NoSendBridge:
+        def program_list(self):
+            return ["BASS STAB"]
+
+        def get_parameter(self, param, index, **kwargs):
+            return 1
+
+    worker = BridgeWorker(_NoSendBridge())
+    failed = []
+    worker.program_create_failed.connect(lambda *a: failed.append(a))
+
+    worker.submit_create_program(0, "NEW PROG")
+    worker.process_pending()
+
+    assert len(failed) == 1
+    assert failed[0][0] == 0
+    assert "demo mode" in failed[0][1]
+
+
+def test_worker_creates_program_with_a_single_keygroup_source():
+    # group_count=1 means _handle_create_program's "every further keygroup"
+    # loop (range(1, group_count)) never runs at all - only the bootstrap
+    # PDATA(groups=1) + KDATA(0) pair should hit the wire
+    bridge = _CreateBridge(
+        program_names=["BASS STAB"],
+        program_keygroups={0: [(24, 60)]},
+    )
+    worker = BridgeWorker(bridge)
+    created, failed = [], []
+    worker.program_created.connect(lambda *a: created.append(a))
+    worker.program_create_failed.connect(lambda *a: failed.append(a))
+
+    worker.submit_create_program(0, "NEW PROG")
+    worker.process_pending()
+
+    assert failed == []
+    assert created == [(0, 1)]
+    assert bridge.pdata_writes == [(1, 1, "NEW PROG")]
+    assert bridge.kdata_writes == [(1, 0, 24, 60)]
+
+
+def test_worker_emits_program_create_failed_when_device_replies_error_code():
+    # distinct from the raised-exception path above - here the transport
+    # itself succeeds and the device answers with a well-formed REPLY whose
+    # own code says ERROR, which _send_and_check must also treat as failure
+    bridge = _CreateBridge(
+        program_names=["BASS STAB"],
+        program_keygroups={0: [(24, 60)]},
+        reply_error_on_step=1,
+    )
+    worker = BridgeWorker(bridge)
+    created, failed = [], []
+    worker.program_created.connect(lambda *a: created.append(a))
+    worker.program_create_failed.connect(lambda *a: failed.append(a))
+
+    worker.submit_create_program(0, "NEW PROG")
+    worker.process_pending()
+
+    assert created == []
+    assert len(failed) == 1
+    assert failed[0][0] == 0
+    assert "rejected" in failed[0][1]
+    assert bridge.kdata_writes == []
+
+
+def test_worker_emits_keygroup_create_failed_when_device_replies_error_code():
+    bridge = _CreateBridge(
+        program_names=["BASS STAB"],
+        program_keygroups={0: [(24, 60)]},
+        reply_error_on_step=1,
+    )
+    worker = BridgeWorker(bridge)
+    created, failed = [], []
+    worker.keygroup_created.connect(lambda *a: created.append(a))
+    worker.keygroup_create_failed.connect(lambda *a: failed.append(a))
+
+    worker.submit_create_keygroup(0, 0)
+    worker.process_pending()
+
+    assert created == []
+    assert len(failed) == 1
+    assert failed[0][0] == 0
+    assert "rejected" in failed[0][1]
+    assert bridge.pdata_writes == []
+
+
+def test_worker_creates_keygroup_when_source_program_has_only_one_keygroup():
+    bridge = _CreateBridge(
+        program_names=["BASS STAB"],
+        program_keygroups={0: [(24, 60)]},
+    )
+    worker = BridgeWorker(bridge)
+    created, failed = [], []
+    worker.keygroup_created.connect(lambda *a: created.append(a))
+    worker.keygroup_create_failed.connect(lambda *a: failed.append(a))
+
+    worker.submit_create_keygroup(0, 0)
+    worker.process_pending()
+
+    assert failed == []
+    assert created == [(0, 1)]
+    assert bridge.kdata_writes == [(0, 1, 24, 60)]
+    assert bridge.pdata_writes == [(0, 2, "BASS STAB")]
+
+
+def test_worker_create_jobs_are_never_coalesced():
+    # "create_program"/"create_keygroup" aren't in _COALESCE_KINDS - unlike
+    # the "give me the current state of X" read kinds, every confirmed
+    # duplication must actually reach the hardware, not get dropped in
+    # favour of a later one queued before the first even started. Submit
+    # two before processing anything, same shape as
+    # test_worker_deletes_samples_are_never_coalesced above.
+    bridge = _CreateBridge(
+        program_names=["A", "B"],
+        program_keygroups={0: [(24, 60)], 1: [(24, 60)]},
+    )
+    worker = BridgeWorker(bridge)
+    created = []
+    worker.program_created.connect(lambda *a: created.append(a))
+
+    worker.submit_create_program(0, "COPY A")
+    worker.submit_create_program(1, "COPY B")
+    worker.process_pending()
+
+    # both jobs actually ran - neither was dropped in favour of the other -
+    # two PDATA bootstraps and two program_created signals, one per job
+    assert len(created) == 2
+    assert [name for _index, _groups, name in bridge.pdata_writes if _groups == 1] == [
+        "COPY A",
+        "COPY B",
+    ]
+
+
 # --- BridgeWorker: multi parts ----------------------------------------------------
 
 
@@ -976,3 +1343,32 @@ def test_logging_bridge_out_access_resolves_to_none_when_wrapped_bridge_has_none
     bridge = LoggingBridge(_NoOutBridgeForLogging(), _FakeLogger())
 
     assert getattr(bridge, "out", None) is None
+
+
+class _CreateEchoBridge:
+    def get_header_bytes(self, region, index, offset, count, **kwargs):
+        return b"\x00" * count
+
+    def send_and_receive(self, frame, timeout=None):
+        return b"reply"
+
+
+def test_logging_bridge_wraps_get_header_bytes_and_send_and_receive():
+    # both are brand new to _WRAPPED_METHODS, added alongside the create
+    # program/keygroup feature - every step of that previously-untested-on-
+    # hardware path should get the same START/END/FAILED debug-log entries
+    # as everything else (see AGENTS.md's own "Debug logging for real-
+    # hardware issues" section)
+    logger = _FakeLogger()
+    bridge = LoggingBridge(_CreateEchoBridge(), logger)
+
+    header = bridge.get_header_bytes("program", 0, 0, 192)
+    reply = bridge.send_and_receive(b"\xf0...\xf7")
+
+    assert header == b"\x00" * 192
+    assert reply == b"reply"
+    assert any("START get_header_bytes" in m for m in logger.debug_calls)
+    assert any("END get_header_bytes" in m for m in logger.debug_calls)
+    assert any("START send_and_receive" in m for m in logger.debug_calls)
+    assert any("END send_and_receive" in m for m in logger.debug_calls)
+    assert logger.error_calls == []
