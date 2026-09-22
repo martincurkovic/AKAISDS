@@ -329,6 +329,38 @@ def build_sdata_message(
     return bytes([0xF0] + payload + [0xF7])
 
 
+def build_pdata_request(program_index, raw_header_bytes, channel=0):
+    # build PDATA (Program Common Data) sysex message - akai's own
+    # 'create or replace this program header' command, function code 0x07
+    # raw_header_bytes must be the FULL 192 byte raw program header (clone
+    # an existing one and patch just the fields that differ - see
+    # program_editor_bridge.py's create-program/create-keygroup handlers -
+    # never synthesize one from scratch, s3k.params only documents ~115 of
+    # the 192 real bytes)
+    # F0, 47, cc, PDATA(0x07), 48, pp, pp, <192 bytes nibbled>, F7
+    # where pp, pp is program number, LSB first 7 bit
+    pp_lsb = program_index & 0x7F
+    pp_msb = (program_index >> 7) & 0x7F
+    nibbled = to_nibble_pairs(raw_header_bytes)
+    payload = [0x47, channel & 0x7F, 0x07, 0x48, pp_lsb, pp_msb] + nibbled
+    return bytes([0xF0] + payload + [0xF7])
+
+
+def build_kdata_request(program_index, keygroup_index, raw_header_bytes, channel=0):
+    # build KDATA (Keygroup Data) sysex message - akai's own 'create or
+    # replace this keygroup header' command, function code 0x09
+    # raw_header_bytes must be the FULL 192 byte raw keygroup header, same
+    # clone-then-patch rule as build_pdata_request above
+    # F0, 47, cc, KDATA(0x09), 48, pp, pp, kk, <192 bytes nibbled>, F7
+    # where pp, pp is program number (LSB first 7 bit), kk is keygroup number
+    pp_lsb = program_index & 0x7F
+    pp_msb = (program_index >> 7) & 0x7F
+    kk = keygroup_index & 0x7F
+    nibbled = to_nibble_pairs(raw_header_bytes)
+    payload = [0x47, channel & 0x7F, 0x09, 0x48, pp_lsb, pp_msb, kk] + nibbled
+    return bytes([0xF0] + payload + [0xF7])
+
+
 if __name__ == "__main__":
     # a quick sanity check against some dummy file name data_bytes
     # only runs when this file is executed directly, not on import

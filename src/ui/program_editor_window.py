@@ -244,6 +244,18 @@ def _sample_edit_temp_name(original_name):
     return (original_name.strip()[: NAME_LENGTH - len(suffix)] + suffix)[:NAME_LENGTH]
 
 
+def _program_duplicate_default_name(original_name):
+    # default name pre-filled into the "Duplicate Program..." dialog - same
+    # truncate-to-make-room-for-a-suffix shape as _sample_edit_temp_name
+    # above, but a real space rather than a hyphen (AKAI_CHARSET has one,
+    # nothing here needs to dodge it the way the sample temp name does) and
+    # no requirement to avoid the source program's own name - this is only
+    # ever a user-editable *suggestion* shown in the prompt, never sent to
+    # the hardware as-is the way the sample trim/reverse temp name is
+    suffix = " COPY"
+    return (original_name.strip()[: NAME_LENGTH - len(suffix)] + suffix)[:NAME_LENGTH]
+
+
 class _ModMatrixGrid(QWidget):
     """Wraps a Modulation card's QGridLayout (see _build_mod_matrix_row/
     _build_mod_matrix_amount_row and their header counterparts) to paint,
@@ -326,6 +338,17 @@ class ProgramEditorWindow(QMainWindow):
         self._sample_list = []
         self._keygroup_ranges = []  # [lo, hi] per keygroup - mirrors keygroup_range_bar
         self._pending_restore_state = None  # set only by _refresh_from_hardware()
+        # set only by _on_program_created, right before it triggers the
+        # program-list reload a successful duplicate needs - tells
+        # _on_programs_loaded to select this row once that reload lands,
+        # instead of restoring whatever was selected before (which is still
+        # the SOURCE program at that point, not the new one). Index-based
+        # rather than name-based (unlike _on_programs_loaded's own existing
+        # previous-selection restore) since the new program's index is
+        # already known exactly and this sidesteps any character-set
+        # round-trip question about what the device echoes the name back
+        # as.
+        self._pending_program_selection_index = None
         self._refresh_in_progress = False
         self._multi_refresh_in_progress = False
         # session-only cache of loaded sample audio + loop-point markers,
@@ -435,6 +458,18 @@ class ProgramEditorWindow(QMainWindow):
                 f"Couldn't delete keygroup: {e}"
             )
         )
+        self._worker.program_created.connect(self._on_program_created)
+        self._worker.program_create_failed.connect(
+            lambda _index, e: self.status_bar.showMessage(
+                f"Couldn't duplicate program: {e}"
+            )
+        )
+        self._worker.keygroup_created.connect(self._on_keygroup_created)
+        self._worker.keygroup_create_failed.connect(
+            lambda _p, e: self.status_bar.showMessage(
+                f"Couldn't duplicate keygroup: {e}"
+            )
+        )
         self._worker.sample_deleted.connect(self._on_sample_deleted)
         self._worker.sample_delete_failed.connect(
             lambda _index, e: self.status_bar.showMessage(
@@ -493,6 +528,26 @@ class ProgramEditorWindow(QMainWindow):
         self._rename_program_action.setEnabled(False)
         self.program_list.addAction(self._rename_program_action)
 
+        # PDATA/KDATA (see program_editor_bridge.py's own write-up on them)
+        # have no add-program/add-keygroup primitive in s3ked's DemoBridge -
+        # only delete - so these two are disabled outright in demo mode
+        # (_update_list_context_actions_enabled) rather than faking a
+        # local-only simulation that can't really round-trip through
+        # anything. The tooltip explains that even while enabled, since Qt
+        # shows it regardless of which disabling reason actually applies.
+        self._duplicate_program_action = QAction(
+            "Duplicate Program...", self.program_list
+        )
+        self._duplicate_program_action.setToolTip(
+            "Not available in demo mode - the fake sampler has no way to "
+            "create new programs"
+        )
+        self._duplicate_program_action.triggered.connect(
+            self._confirm_duplicate_program
+        )
+        self._duplicate_program_action.setEnabled(False)
+        self.program_list.addAction(self._duplicate_program_action)
+
         _program_list_separator = QAction(self.program_list)
         _program_list_separator.setSeparator(True)
         self.program_list.addAction(_program_list_separator)
@@ -507,6 +562,24 @@ class ProgramEditorWindow(QMainWindow):
         self.program_list.addAction(self._delete_program_action)
 
         self.keygroup_list.setContextMenuPolicy(Qt.ContextMenuPolicy.ActionsContextMenu)
+        # same demo-mode caveat as _duplicate_program_action above
+        self._duplicate_keygroup_action = QAction(
+            "Duplicate Keygroup...", self.keygroup_list
+        )
+        self._duplicate_keygroup_action.setToolTip(
+            "Not available in demo mode - the fake sampler has no way to "
+            "create new keygroups"
+        )
+        self._duplicate_keygroup_action.triggered.connect(
+            self._confirm_duplicate_keygroup
+        )
+        self._duplicate_keygroup_action.setEnabled(False)
+        self.keygroup_list.addAction(self._duplicate_keygroup_action)
+
+        _keygroup_list_separator = QAction(self.keygroup_list)
+        _keygroup_list_separator.setSeparator(True)
+        self.keygroup_list.addAction(_keygroup_list_separator)
+
         self._delete_keygroup_action = QAction("Delete Keygroup...", self.keygroup_list)
         self._delete_keygroup_action.setShortcuts(_DELETE_SHORTCUTS)
         self._delete_keygroup_action.setShortcutContext(
@@ -1953,17 +2026,29 @@ class ProgramEditorWindow(QMainWindow):
             combo.blockSignals(False)
 
         if is_refresh:
-            # restore whichever program was selected before the refresh
-            # (falling back to the first one if it was renamed/deleted)
-            # rather than resetting to the top of the list every time
-            match = (
-                self.program_list.findItems(previous_program, Qt.MatchFlag.MatchExactly)
-                if previous_program is not None
-                else []
-            )
-            self.program_list.setCurrentItem(
-                match[0] if match else self.program_list.item(0)
-            )
+            if self._pending_program_selection_index is not None:
+                # a just-duplicated program wants this specific row, not
+                # whatever was selected before the reload (see the field's
+                # own comment in __init__)
+                index = self._pending_program_selection_index
+                self._pending_program_selection_index = None
+                self.program_list.setCurrentRow(
+                    index if 0 <= index < self.program_list.count() else 0
+                )
+            else:
+                # restore whichever program was selected before the refresh
+                # (falling back to the first one if it was renamed/deleted)
+                # rather than resetting to the top of the list every time
+                match = (
+                    self.program_list.findItems(
+                        previous_program, Qt.MatchFlag.MatchExactly
+                    )
+                    if previous_program is not None
+                    else []
+                )
+                self.program_list.setCurrentItem(
+                    match[0] if match else self.program_list.item(0)
+                )
         else:
             # first load only - _on_samples_loaded selects row 0 once
             # samples finish loading, which is what actually starts the
@@ -2284,12 +2369,23 @@ class ProgramEditorWindow(QMainWindow):
         # the action here avoids a confirm dialog whose "Yes" visibly does
         # nothing. Renaming has no such restriction - even the one
         # remaining program can be renamed.
+        # PDATA/KDATA creation has no demo-mode equivalent - s3ked's own
+        # DemoBridge has no add-program/add-keygroup primitive at all, only
+        # delete (see program_editor_bridge.py's own write-up on the two
+        # opcodes) - so both duplicate actions are unconditionally disabled
+        # here rather than faking a local-only simulation that can't really
+        # round-trip through anything
+        demo_mode = bool(os.environ.get("AKAISDS_DEMO_SAMPLER"))
+
         has_program = self.program_list.currentRow() >= 0
         self._rename_program_action.setEnabled(has_program)
+        self._duplicate_program_action.setEnabled(has_program and not demo_mode)
         self._delete_program_action.setEnabled(
             has_program and self.program_list.count() > 1
         )
-        self._delete_keygroup_action.setEnabled(self.keygroup_list.currentRow() >= 0)
+        has_keygroup = self.keygroup_list.currentRow() >= 0
+        self._duplicate_keygroup_action.setEnabled(has_keygroup and not demo_mode)
+        self._delete_keygroup_action.setEnabled(has_keygroup)
 
         # unlike DELP, no "last one is silently ignored" restriction is
         # documented for DELS (see sample_deleted's own comment in
@@ -2354,6 +2450,86 @@ class ProgramEditorWindow(QMainWindow):
         self._write_knob_value(
             "PRNAME", "program", new_name, keygroup_index=0, index=program_index
         )
+
+    def _confirm_duplicate_program(self):
+        item = self.program_list.currentItem()
+        if item is None:
+            return
+        source_index = self.program_list.currentRow()
+        current_name = item.text()
+        default_name = _program_duplicate_default_name(current_name)
+        new_name = self._prompt_akai_name(
+            "Duplicate Program", "New program name:", default_name
+        )
+        if new_name is None:
+            # Cancel from the dialog IS the confirmation gate here - unlike
+            # delete, there's no separate "cannot be undone" prompt on top
+            return
+        existing_names = [
+            self.program_list.item(i).text()
+            for i in range(self.program_list.count())
+        ]
+        if new_name in existing_names:
+            # PDATA's own spec: writing a name that matches an existing
+            # resident program deletes that program first - see
+            # program_editor_bridge.py's own write-up on PDATA/KDATA. Caught
+            # here, client-side, rather than discovered by watching some
+            # OTHER program silently vanish after confirming.
+            QMessageBox.warning(
+                self,
+                "Duplicate Program",
+                f'"{new_name}" is already in use by another resident '
+                "program.\n\nCreating a program with that name would "
+                "delete the existing one (the hardware's own PDATA "
+                "behaviour) - pick a different name.",
+            )
+            return
+        self.status_bar.showMessage(f'Duplicating program "{current_name}"…')
+        self._worker.submit_create_program(source_index, new_name)
+
+    def _confirm_duplicate_keygroup(self):
+        keygroup_index = self.keygroup_list.currentRow()
+        if keygroup_index < 0:
+            return
+        program_index = self.program_list.currentRow()
+        lo, hi = self._keygroup_ranges[keygroup_index]
+        range_text = f"{midi_note_to_name(lo)} - {midi_note_to_name(hi)}"
+        answer = QMessageBox.question(
+            self,
+            "Duplicate Keygroup",
+            f"Create a copy of keygroup {keygroup_index + 1} ({range_text})?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        self.status_bar.showMessage(f"Duplicating keygroup {keygroup_index + 1}…")
+        self._worker.submit_create_keygroup(program_index, keygroup_index)
+
+    def _on_program_created(self, source_index, new_index):
+        self.status_bar.showMessage("Program duplicated")
+        # select the new program once the reload below lands, not whatever
+        # is still selected right now (the source program) - see the
+        # field's own comment in __init__
+        self._pending_program_selection_index = new_index
+        # full reload, not a targeted insert - same reasoning
+        # _on_program_deleted's own comment gives for doing the same on
+        # delete
+        self._worker.submit_program_list()
+
+    def _on_keygroup_created(self, program_index, new_keygroup_index):
+        if program_index != self.program_list.currentRow():
+            return
+        self.status_bar.showMessage("Keygroup duplicated")
+        # same restore-then-reload path _on_keygroup_deleted uses, just
+        # landing on the new keygroup's own (already exactly known) index
+        # instead of the deleted one's old slot
+        self._pending_restore_state = {
+            "keygroup_index": new_keygroup_index,
+            "stack_index": self.detail_stack.currentIndex(),
+            "zone_index": self._zone_button_group.checkedId(),
+        }
+        self._worker.submit_keygroups(program_index)
 
     def _confirm_delete_program(self):
         item = self.program_list.currentItem()

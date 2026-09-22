@@ -4,9 +4,10 @@ import threading
 import time
 from collections import deque
 
-from core import app_config, debug_log
-from s3k.bridge import S3kBridge
+from core import akai_sysex, app_config, debug_log
+from s3k.bridge import DeviceError, S3kBridge
 from PySide6.QtCore import QThread, Signal
+import s3k.messages as m
 import s3k.params as p
 
 # the sampler holds exactly one resident multi (no list of multis to choose
@@ -81,7 +82,16 @@ class LoggingBridge:
     # core/debug_log.py for why (S3kBridge is documented as unsafe for
     # concurrent calls, and this module doesn't serialise them today)
     _WRAPPED_METHODS = ("get_parameter", "set_parameter", "get_header",
-                        "program_list", "sample_list")
+                        "program_list", "sample_list",
+                        # create-program/create-keygroup's own low-level
+                        # calls (program_editor_bridge.BridgeWorker._handle_
+                        # create_program/_handle_create_keygroup) - brand
+                        # new, destructive, untested-on-hardware as of
+                        # 2026-09-22, so every step gets the same START/END/
+                        # FAILED logging as everything else on this
+                        # connection rather than being invisible to
+                        # ~/.akaisds/editor_debug.log
+                        "get_header_bytes", "send_and_receive")
 
     def __init__(self, bridge, logger=None):
         self._bridge = bridge
@@ -372,6 +382,18 @@ class BridgeWorker(QThread):
     sample_deleted = Signal(int)  # sample_index
     sample_delete_failed = Signal(int, str)
 
+    # PDATA/KDATA - whole-header writes to an index that doesn't yet exist,
+    # which is how this protocol "creates" a program/keygroup (see
+    # _handle_create_program/_handle_create_keygroup below and AGENTS.md's
+    # own write-up). Like the deletes above, a *_created signal here means
+    # the sampler actually acknowledged every step with an OK REPLY, not
+    # just that the frames were sent.
+    program_created = Signal(int, int)  # source_index, new_index
+    program_create_failed = Signal(int, str)  # source_index, error
+
+    keygroup_created = Signal(int, int)  # program_index, new_keygroup_index
+    keygroup_create_failed = Signal(int, str)  # program_index, error
+
     # True the moment any job is queued while nothing else is pending, False
     # the moment the queue drains back to empty - one continuous span across
     # a whole burst of jobs (e.g. Refresh submits several at once) rather
@@ -462,6 +484,12 @@ class BridgeWorker(QThread):
 
     def submit_delete_sample(self, sample_index):
         self._submit(("delete_sample", sample_index))
+
+    def submit_create_program(self, source_index, new_name):
+        self._submit(("create_program", source_index, new_name))
+
+    def submit_create_keygroup(self, program_index, source_keygroup_index):
+        self._submit(("create_keygroup", program_index, source_keygroup_index))
 
     def stop(self):
         # lets whatever is already queued (in particular, pending writes)
@@ -739,3 +767,184 @@ class BridgeWorker(QThread):
             self.sample_delete_failed.emit(sample_index, str(e))
             return
         self.sample_deleted.emit(sample_index)
+
+    # -- create program/keygroup (PDATA/KDATA) -------------------------------
+    #
+    # Neither s3k nor s3ked ever builds or sends PDATA (whole program header,
+    # function code 0x07) or KDATA (whole keygroup header, function code
+    # 0x09) - s3k.messages.Command names both and classifies them
+    # DESTRUCTIVE_ON_WRITE, but nothing in either package ever constructs one.
+    # This is confirmed working protocol, not guesswork: s3000editor (a
+    # second, independent open-source Akai editor, source vendored at
+    # s3000editor-main/ in this repo's root) uses exactly these two opcodes
+    # this same way to implement its own "Add Program"/"Add Keygroup" - see
+    # its ui/MainComponent.cpp's addProgram()/addKeygroup() and
+    # s3000/ProgramEncoder.cpp/KeygroupEncoder.cpp.
+    #
+    # Both opcodes write a WHOLE raw 192 byte header to an index that
+    # doesn't exist yet - there's no separate "create" command. 192 is
+    # s3k.params.REGION_SIZES's own figure for "program"/"keygroup" (the
+    # table S3kBridge._check_bounds itself trusts), not region_params()'s
+    # smaller ~115-byte extent for "program" - the latter only reflects how
+    # many individual fields s3k.params happens to document, not the real
+    # on-wire header size, and building a new header from only those fields
+    # would leave ~77 real bytes unaccounted for. So this NEVER synthesizes
+    # a header from scratch: it clones the full 192 bytes of an existing
+    # resident program/keygroup (get_header_bytes(..., 0, 192), bypassing
+    # get_header()'s own smaller extent) and only patches the handful of
+    # fields that must differ (PRNAME, GROUPS) via s3k.params.encode_field -
+    # exactly what s3000editor's own ProgramEncoder::encode/
+    # KeygroupEncoder::encode do to a cloned buffer.
+    #
+    # GROUPS is documented readonly=True in s3k.params, and its own notes
+    # says so explicitly: "To change the number of keygroups in a program,
+    # the KDATA and DELK commands should be used." Patching it via
+    # encode_field on a locally-held buffer (never through set_parameter) is
+    # exactly what that note describes.
+
+    def _patch_field(self, header, param_name, region, value):
+        # splice one field's encoded bytes into a raw header bytearray at
+        # its documented offset - used to patch just PRNAME/GROUPS onto a
+        # cloned buffer, never to build one from nothing (see above)
+        param = p.lookup(param_name, region)
+        header[param.offset : param.offset + param.size] = p.encode_field(
+            param, value
+        )
+
+    def _send_and_check(self, frame, what):
+        # send a raw PDATA/KDATA frame and raise unless the device answers
+        # with an OK REPLY - reimplements the same ~4-line check
+        # S3kBridge._raise_for_reply does internally (that method is
+        # private API, so this is this app's own code rather than reaching
+        # into the dependency for it)
+        reply = self._bridge.send_and_receive(frame)
+        _channel, command, _payload = m.parse_frame(reply)
+        if command != m.Command.REPLY:
+            raise DeviceError(
+                f"expected REPLY {what}, got command {command:#04x}"
+            )
+        result = m.Reply.decode(reply)
+        if not result.ok:
+            raise DeviceError(f"device rejected {what} (code {result.code})")
+
+    def _handle_create_program(self, source_index, new_name):
+        try:
+            if not hasattr(self._bridge, "send_and_receive"):
+                # defensive backstop - the UI layer already disables this
+                # action in demo mode (s3ked's DemoBridge has no add-
+                # program primitive at all, only delete), so this should
+                # never actually fire in normal use
+                raise RuntimeError(
+                    "creating a program needs a real hardware connection "
+                    "(not available in demo mode)"
+                )
+            source_header = self._bridge.get_header_bytes(
+                "program", source_index, 0, 192
+            )
+            group_count = self._bridge.get_parameter(
+                p.lookup("GROUPS", "program"), source_index
+            )
+            new_index = len(self._bridge.program_list())
+
+            header = bytearray(source_header)
+            self._patch_field(header, "PRNAME", "program", new_name)
+            self._patch_field(header, "GROUPS", "program", 1)
+            self._send_and_check(
+                akai_sysex.build_pdata_request(new_index, bytes(header)),
+                f"creating program {new_index}",
+            )
+
+            # keygroup 0 bootstrap - same PDATA(groups=1)-then-KDATA(0)
+            # order s3000editor's own addProgram() uses for a brand new
+            # program (the program has to exist before a keygroup can be
+            # written under it)
+            kg0_raw = self._bridge.get_header_bytes(
+                "keygroup", source_index, 0, 192, selector=0
+            )
+            self._send_and_check(
+                akai_sysex.build_kdata_request(new_index, 0, kg0_raw),
+                f"creating keygroup 0 of program {new_index}",
+            )
+
+            # every further keygroup: KDATA first, then re-send the whole
+            # PDATA with GROUPS incremented - same order/reasoning as
+            # _handle_create_keygroup below (s3000editor's own "add
+            # keygroup to an existing program" step pair), just reused in
+            # a loop since this app clones every keygroup, not just one
+            for keygroup_index in range(1, group_count):
+                # selector must be the SOURCE program's keygroup index here
+                # - the default is 0, which would silently clone keygroup 0
+                # over and over for a multi-keygroup source
+                kg_raw = self._bridge.get_header_bytes(
+                    "keygroup", source_index, 0, 192, selector=keygroup_index
+                )
+                self._send_and_check(
+                    akai_sysex.build_kdata_request(
+                        new_index, keygroup_index, kg_raw
+                    ),
+                    f"creating keygroup {keygroup_index} of program {new_index}",
+                )
+                self._patch_field(header, "GROUPS", "program", keygroup_index + 1)
+                self._send_and_check(
+                    akai_sysex.build_pdata_request(new_index, bytes(header)),
+                    f"updating program {new_index} groups="
+                    f"{keygroup_index + 1}",
+                )
+        except Exception as e:
+            self.program_create_failed.emit(source_index, str(e))
+            return
+        # the roster just changed - same reasoning as _handle_delete_
+        # program's own reset: PRGNUM uniqueness for the new entry isn't
+        # guaranteed
+        self._programs_renumbered = False
+        self.program_created.emit(source_index, new_index)
+
+    def _handle_create_keygroup(self, program_index, source_keygroup_index):
+        try:
+            if not hasattr(self._bridge, "send_and_receive"):
+                # see _handle_create_program's own comment - same demo-mode
+                # backstop
+                raise RuntimeError(
+                    "creating a keygroup needs a real hardware connection "
+                    "(not available in demo mode)"
+                )
+            group_count = self._bridge.get_parameter(
+                p.lookup("GROUPS", "program"), program_index
+            )
+            if group_count >= 99:
+                # same ceiling s3000editor's own addKeygroup() guards
+                # client-side, matching GROUPS's own declared 1..99 range
+                raise ValueError(
+                    "program already has the maximum of 99 keygroups"
+                )
+            new_index = group_count
+
+            # KDATA for the new keygroup FIRST, then re-send the whole
+            # program header with GROUPS+1 - s3000editor's own addKeygroup()
+            # order for adding a keygroup to an EXISTING program (the
+            # program already exists here, so it's safe to write the new
+            # keygroup's storage before officially raising the group count -
+            # unlike _handle_create_program's bootstrap step, which has to
+            # create the program first since nothing exists yet to write a
+            # keygroup under)
+            kg_raw = self._bridge.get_header_bytes(
+                "keygroup", program_index, 0, 192, selector=source_keygroup_index
+            )
+            self._send_and_check(
+                akai_sysex.build_kdata_request(program_index, new_index, kg_raw),
+                f"creating keygroup {new_index}",
+            )
+
+            prog_raw = self._bridge.get_header_bytes(
+                "program", program_index, 0, 192
+            )
+            header = bytearray(prog_raw)
+            self._patch_field(header, "GROUPS", "program", group_count + 1)
+            self._send_and_check(
+                akai_sysex.build_pdata_request(program_index, bytes(header)),
+                f"updating program {program_index} groups={group_count + 1}",
+            )
+        except Exception as e:
+            self.keygroup_create_failed.emit(program_index, str(e))
+            return
+        self.keygroup_created.emit(program_index, new_index)
