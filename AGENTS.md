@@ -476,6 +476,81 @@ of this - connect once in `__init__`, let signals arrive asynchronously).
 Don't reach for `_wait_for_any_signal` anywhere else on this page without a
 comparably good reason; everywhere else, the async pattern is correct.
 
+### Editing: markers, spinboxes, zoom - one write path for both input methods
+
+Loop points are editable two ways, both feeding the same underlying state:
+dragging a marker on `WaveformView`'s canvas (Shift held = fine mode, a
+`_FINE_DRAG_DIVISOR`-times-slower relative-delta drag rather than the usual
+absolute mouse-position mapping - a float accumulator (`_drag_value`)
+carries the sub-frame remainder between mouse-move events so it doesn't
+drift over a long drag), or typing/stepping one of the four marker
+spinboxes in `program_editor_window.py`. **Both paths go through the same
+two helpers**, `_schedule_marker_write`/`_flush_marker_write` - which
+single field(s) a given marker maps to (`SSTART`/`SMPEND` are 1:1; either
+loop edge moving means writing both `LOOPAT1` and `LLNGTH1` together, since
+they jointly encode the region - see the LOOPAT1 note above) lives in
+exactly one place. If you add a third input method, wire it through these
+two rather than re-deriving the field-pairing logic again.
+
+`WaveformView` also has horizontal zoom/pan (`_zoom`, `_view_start`,
+`_view_length()`) - `x_for_frame`/`frame_for_x` take a view window
+(`view_start`, `view_length`), not the sample's whole frame count, so a
+marker or drag position always resolves relative to what's actually
+visible. `clamp_marker` stays whole-sample-bounded regardless of zoom (you
+can still drag a marker toward a position currently scrolled off-screen).
+Ctrl+wheel zooms centered on the cursor (this is also what a macOS
+trackpad pinch gesture arrives as, for free); plain wheel pans. The Zoom
++/-/Fit buttons and the horizontal `QScrollBar` next to the waveform are
+the discoverable/no-modifier equivalents - kept in sync via
+`WaveformView.view_changed` -> `_on_waveform_view_changed` (view ->
+scrollbar) and the scrollbar's own `valueChanged` -> `_on_waveform_scrollbar_moved`
+(scrollbar -> view), both `blockSignals`-guarded so neither bounces back
+into the other.
+
+### Diagnosing a load that silently does nothing
+
+A user hit intermittent "double-click loads nothing" failures in real
+interactive use that no scripted or `QTest`-simulated repro could
+reproduce. Reading `~/.akaisds/editor_debug.log` from their actual session
+(not a synthetic one - see "Debug logging for real-hardware issues" above)
+showed the `BridgeWorker`/`DemoBridge` layer itself was never at fault:
+zero `FAILED` entries and zero overlapping `START`/`END` pairs across the
+whole session - every call that was actually made completed cleanly and
+serially. That points upstream of any bridge call, to whether a
+double-click is even being recognized/delivered as one in the first place -
+not something `debug_log.py`'s existing bridge-call logging could ever
+show, since nothing gets that far. `WaveformView.mouseDoubleClickEvent` and
+`ProgramEditorWindow._load_sample_waveform` now both log to the same
+shared logger at every entry/early-return/fetch-result point specifically
+so a future occurrence leaves a trace of exactly where it stopped, instead
+of the investigation starting from zero again.
+
+**Follow-up, from that same logging**: a later session hit it again, and
+this time the log showed something concrete - `_load_sample_waveform`
+kept being entered (double-clicks were being recognized fine, the GUI
+thread was completely responsive) but the corresponding `sample_detail`
+job never produced a single bridge-layer log line - not even a START.
+`BridgeWorker.run()`'s dispatch call sat *outside* any try/except: an
+exception escaping `_dispatch()` (from a bug in a handler itself, not the
+bridge calls that handler's own try/except already guards - anything not
+anticipated by that handler's own `except` clause) propagates all the way
+out of `run()` and silently kills the OS thread for the rest of the app's
+life. The GUI stays completely responsive throughout (nothing about the
+main thread is affected), `submit_*()` keeps right on appending to
+`self._queue` from the GUI thread, and nothing ever pops from it again -
+every future request just sits there forever, no error, no crash, nothing
+in the log. `BridgeWorker._safe_dispatch` is the fix: wraps `_dispatch()`
+in a try/except that logs (`BridgeWorker: unhandled exception
+dispatching...`) and lets the loop continue instead of dying. See
+`test_worker_survives_a_job_whose_dispatch_raises_outside_its_own_handler`
+in `tests/test_program_editor_bridge.py`, which forces exactly this by
+queueing an unroutable job kind directly and confirming the worker is
+still alive and processes the next real one. If you ever see the
+"double-click recognized, GUI responsive, zero bridge-layer log lines"
+pattern again, check this log line first - it now names which job and
+carries the actual traceback, rather than needing to be re-diagnosed from
+scratch.
+
 ## Testing
 
 `TESTING.md` currently undersells this a little - as of this note there's also

@@ -159,6 +159,30 @@ def test_worker_emits_samples_load_failed_on_error():
     assert failed == ["no reply"]
 
 
+def test_worker_survives_a_job_whose_dispatch_raises_outside_its_own_handler():
+    # a real incident: an exception escaping _dispatch() (not caught by
+    # the handler's own try/except - e.g. a bug in the handler itself, or
+    # a malformed job tuple) used to propagate straight out of run(),
+    # silently killing the whole worker thread for the rest of the app's
+    # life. The GUI thread stayed completely responsive (submit_*() just
+    # keeps appending to the queue), but nothing ever processed a request
+    # again - no error, no crash, just "loading" that never completes.
+    # _safe_dispatch's job is to make sure ONE bad job can't do that -
+    # queue an unroutable job kind directly (bypassing the normal
+    # submit_*() methods, which only ever produce valid kinds) to force
+    # exactly the AttributeError _dispatch's getattr() would raise, then
+    # confirm the worker is still alive and processes the next real job.
+    worker = BridgeWorker(_ListBridge(items=["Bass stab"]))
+    loaded = []
+    worker.programs_loaded.connect(loaded.append)
+
+    worker._submit(("not_a_real_job_kind",))
+    worker.submit_program_list()
+    worker.process_pending()
+
+    assert loaded == [["Bass stab"]]
+
+
 # --- BridgeWorker: keygroups ---------------------------------------------------
 
 

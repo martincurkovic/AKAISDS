@@ -34,22 +34,41 @@ def test_build_envelope_handles_no_samples():
 
 
 # --- frame_for_x / x_for_frame (inverses of each other) ------------------------
+# both take a view window (view_start, view_length), not the whole sample's
+# frame count - at "full zoom" (view_start=0, view_length=the sample's own
+# length) that window IS the whole sample, so most of these exercise that
+# case; a couple exercise a genuinely zoomed-in window explicitly.
 
 
 def test_frame_for_x_spans_the_full_range():
-    assert frame_for_x(0, width=100, frame_count=1000) == 0
-    assert frame_for_x(99, width=100, frame_count=1000) == 999
+    assert frame_for_x(0, width=100, view_start=0, view_length=1000) == 0
+    assert frame_for_x(99, width=100, view_start=0, view_length=1000) == 999
 
 
 def test_x_for_frame_and_frame_for_x_round_trip():
-    width, frame_count = 400, 5000
+    width, view_length = 400, 5000
     for frame in (0, 1, 2500, 4999):
-        x = x_for_frame(frame, width, frame_count)
-        assert frame_for_x(x, width, frame_count) == pytest.approx(frame, abs=1)
+        x = x_for_frame(frame, width, view_start=0, view_length=view_length)
+        assert frame_for_x(x, width, 0, view_length) == pytest.approx(frame, abs=1)
 
 
 def test_x_for_frame_handles_a_single_frame_sample_without_dividing_by_zero():
-    assert x_for_frame(0, width=100, frame_count=1) == 0.0
+    assert x_for_frame(0, width=100, view_start=0, view_length=1) == 0.0
+
+
+def test_frame_for_x_respects_a_zoomed_in_view_window():
+    # zoomed into frames [1000, 1100) - x=0 is frame 1000, not frame 0
+    assert frame_for_x(0, width=100, view_start=1000, view_length=100) == 1000
+    assert frame_for_x(99, width=100, view_start=1000, view_length=100) == 1099
+
+
+def test_x_for_frame_and_frame_for_x_round_trip_when_zoomed():
+    width, view_start, view_length = 400, 1000, 100
+    for frame in (1000, 1050, 1099):
+        x = x_for_frame(frame, width, view_start, view_length)
+        assert frame_for_x(x, width, view_start, view_length) == pytest.approx(
+            frame, abs=1
+        )
 
 
 # --- clamp_marker ----------------------------------------------------------------
