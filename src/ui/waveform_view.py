@@ -763,13 +763,29 @@ class WaveformView(QWidget):
         self._markers = push_marker(
             _MARKER_ORDER, index, frame, self._markers, self._frame_count
         )
-        # resync the accumulator to the actually-applied frame - still
-        # needed for the whole-sample-bounds clamp at the very ends
-        # (push_marker itself never stops this marker short of *frame*
-        # just because a neighbour was in the way - it pushes the
-        # neighbour along instead - so this is only ever a no-op except
-        # at frame 0 / frame_count - 1)
-        self._drag_value = self._markers[self._dragging]
+        # ONLY resync the accumulator when *frame* itself just got clamped
+        # to the whole-sample bounds (push_marker's own first line) -
+        # never unconditionally. push_marker itself never stops this
+        # marker short of *frame* for any OTHER reason - it pushes
+        # neighbours along instead, never the dragged marker itself - so
+        # self._markers[self._dragging] == frame in every non-clamped
+        # case, and resyncing to it there would silently throw away
+        # _drag_value's sub-frame remainder on literally every move event.
+        # That's fatal for a slow drag specifically: a smooth, unhurried
+        # mouse move is delivered as many small per-event deltas, each
+        # individually well under half a frame at typical zoom, so each
+        # one's contribution would round right back down to the SAME
+        # frame and vanish before the next event could add to it - the
+        # marker would barely move no matter how far the real cursor
+        # travelled, while a fast flick (fewer, larger per-event deltas,
+        # each already past the rounding threshold on its own) tracked
+        # fine. Only clamp/resync at the true ends, where running the
+        # accumulator past the bound would otherwise make the marker
+        # "stick" through a dead zone before it starts moving back on a
+        # reversed drag.
+        clamped_frame = max(0, min(self._frame_count - 1, frame))
+        if clamped_frame != frame:
+            self._drag_value = clamped_frame
         self.update()
         self._emit_markers_changed()
 

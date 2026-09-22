@@ -318,6 +318,13 @@ class _FakePressEvent:
         return _FakeXPos(self._x)
 
 
+class _FakeMoveEvent(_FakePressEvent):
+    # mouseMoveEvent also reads .modifiers() (for Shift-held fine dragging)
+    # - always "none held" here, since none of these tests exercise that
+    def modifiers(self):
+        return Qt.KeyboardModifier.NoModifier
+
+
 def _stacked_waveform_view(frame_count=10000, stacked_frame=5000):
     # all four markers pushed onto the exact same frame - the scenario
     # this whole feature exists for
@@ -391,6 +398,77 @@ def test_dragging_a_marker_away_and_pressing_the_stack_again_finds_the_rest(qapp
 
     view.mousePressEvent(_FakePressEvent(stack_x))
     assert view._dragging == "loop_start"
+
+
+# --- WaveformView.mouseMoveEvent: a slow drag must accumulate sub-frame ------
+# movement across events, not lose it every time. Regression test for a real
+# bug: _drag_value (the float accumulator that's supposed to carry a drag's
+# sub-frame remainder between events - see its own comment) was being
+# unconditionally overwritten with the just-applied INTEGER frame after
+# every single move event, not only at the whole-sample bounds its own
+# comment claimed. A smooth, unhurried real mouse drag is delivered as many
+# small per-event deltas, each individually worth well under half a frame
+# at ordinary zoom - each one's contribution rounded right back down to the
+# SAME frame and was thrown away before the next event could add to it, so
+# the marker barely moved no matter how far the real cursor travelled. A
+# fast flick (fewer, larger per-event deltas, each already past the
+# rounding threshold on its own) happened to track fine, which is exactly
+# what made this so easy to miss by testing with a mouse waved around
+# quickly rather than dragged slowly and smoothly.
+
+
+def _fit_zoom_view(frame_count=1599, width=1500):
+    # mirrors the real bug report's own numbers - frames_per_px just over
+    # 1, the "Fit" zoom level (whole sample visible, nothing zoomed in) -
+    # to show this isn't a deep-zoom-only problem
+    view = WaveformView()
+    view.resize(width, 180)
+    view.set_header(frame_count, 0, 81, 651, frame_count - 1)
+    return view
+
+
+def test_slow_drag_accumulates_many_small_moves_into_real_progress(qapp):
+    view = _fit_zoom_view()
+    end_x = view._x_for("end")
+    view.mousePressEvent(_FakePressEvent(end_x))
+    assert view._dragging == "end"
+
+    # 500 tiny move events, each individually far too small to round to a
+    # whole frame on its own at this view's ~1 frame/px (0.3px * ~1.07 is
+    # well under the 0.5 rounding threshold) - mirrors a real slow drag's
+    # actual per-event granularity (many small deltas, not one big jump)
+    x = end_x
+    for _ in range(500):
+        x -= 0.3
+        view.mouseMoveEvent(_FakeMoveEvent(x))
+
+    total_real_px = end_x - x
+    started_at = view._frame_count - 1
+    # this much real, cumulative mouse travel must move the marker by a
+    # comparable, non-trivial amount, not leave it stuck at (or within a
+    # couple of frames of) its starting value
+    assert view._markers["end"] < started_at - total_real_px * 0.5
+
+
+def test_slow_and_fast_drags_covering_the_same_distance_land_in_the_same_place(
+    qapp,
+):
+    # the actual bug report: a slow drag (many small steps) and a fast one
+    # (few large steps) covering the identical real distance must end up
+    # at the same marker position - before the fix, only the fast one did
+    slow = _fit_zoom_view()
+    end_x = slow._x_for("end")
+    slow.mousePressEvent(_FakePressEvent(end_x))
+    x = end_x
+    for _ in range(500):
+        x -= 0.3  # total: -150px, in 500 tiny steps
+        slow.mouseMoveEvent(_FakeMoveEvent(x))
+
+    fast = _fit_zoom_view()
+    fast.mousePressEvent(_FakePressEvent(end_x))
+    fast.mouseMoveEvent(_FakeMoveEvent(end_x - 150))  # same -150px, one step
+
+    assert slow._markers["end"] == fast._markers["end"]
 
 
 # --- WaveformView._waveform_zone_color: greyed-out/loop-tinted envelope ------
