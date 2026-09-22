@@ -89,6 +89,14 @@ class WaveformView(QWidget):
     # continuously while dragging (same "redraw live, write on release"
     # split envelope_graph.py's own knobs use for their hardware writes)
     marker_committed = Signal(str, int, int, int, int)
+    # start, loop_start, loop_end, end - emitted on load and on every drag
+    # step (unlike marker_committed, continuously, not just on release) so
+    # a numeric readout can track a drag live. The canvas has no room for
+    # per-marker text without markers overlapping when they're close
+    # together (or, in demo mode with an all-zero sample header, sitting
+    # exactly on top of each other) - see program_editor_window.py's
+    # marker value labels, which are what this actually feeds.
+    markers_changed = Signal(int, int, int, int)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -137,6 +145,11 @@ class WaveformView(QWidget):
         }
         self._rebuild_envelope()
         self.update()
+        self._emit_markers_changed()
+
+    def _emit_markers_changed(self):
+        m = self._markers
+        self.markers_changed.emit(m["start"], m["loop_start"], m["loop_end"], m["end"])
 
     def resizeEvent(self, event):
         if self._samples is not None:
@@ -240,6 +253,7 @@ class WaveformView(QWidget):
             _MARKER_ORDER, index, frame, self._markers, self._frame_count
         )
         self.update()
+        self._emit_markers_changed()
 
     def mouseReleaseEvent(self, event):
         if self._dragging is None:

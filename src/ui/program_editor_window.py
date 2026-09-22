@@ -1735,6 +1735,7 @@ class ProgramEditorWindow(QMainWindow):
         self.sample_list_widget.currentItemChanged.connect(self._on_sample_selected)
         self.waveform_view.load_requested.connect(self._load_sample_waveform)
         self.waveform_view.marker_committed.connect(self._on_waveform_marker_committed)
+        self.waveform_view.markers_changed.connect(self._update_marker_labels)
         self._worker.submit_program_list()
 
         # enable knobs and wire their (debounced) writes
@@ -2886,15 +2887,39 @@ class ProgramEditorWindow(QMainWindow):
         self.sample_load_progress = QProgressBar()
         self.sample_load_progress.setVisible(False)
 
+        # the canvas has no room for per-marker text without labels
+        # overlapping once two markers are close together (start/loop_start/
+        # loop_end can all sit right on top of each other for a short or
+        # non-looping sample) - a legend row underneath, always legible
+        # regardless of marker spacing, is what actually answers "which
+        # marker is which and where is it" instead of the color alone.
+        # kept in sync with the waveform live (see WaveformView.
+        # markers_changed / _update_marker_labels), not just after a commit.
+        self._marker_value_labels = {}
+        legend_row = QHBoxLayout()
+        legend_row.setSpacing(18)
+        for name, display in (
+            ("start", "Start"),
+            ("loop_start", "Loop Start"),
+            ("loop_end", "Loop End"),
+            ("end", "End"),
+        ):
+            label = QLabel()
+            self._marker_value_labels[name] = (label, display)
+            legend_row.addWidget(label)
+        legend_row.addStretch()
+
         waveform_column = QVBoxLayout()
         waveform_column.setContentsMargins(0, 0, 0, 0)
         waveform_column.setSpacing(6)
         waveform_column.addWidget(QLabel("<b>Loop Points</b>"))
         waveform_column.addWidget(self.waveform_view)
+        waveform_column.addLayout(legend_row)
         waveform_column.addWidget(self.sample_load_progress)
         waveform_column.addStretch()
         waveform_container = QWidget()
         waveform_container.setLayout(waveform_column)
+        self._update_marker_labels(None, None, None, None)
 
         content_layout = QHBoxLayout()
         content_layout.setContentsMargins(14, 14, 14, 14)
@@ -3401,7 +3426,7 @@ class ProgramEditorWindow(QMainWindow):
             )
             self.sample_list_widget.setCurrentItem(match[0] if match else None)
         else:
-            self.waveform_view.clear()
+            self._clear_waveform_view()
 
         for combo in self._zone_combos:
             combo.blockSignals(True)
@@ -3425,7 +3450,7 @@ class ProgramEditorWindow(QMainWindow):
 
     def _on_sample_selected(self, current, previous):
         if current is None:
-            self.waveform_view.clear()
+            self._clear_waveform_view()
             return
         entry = self._sample_waveform_cache.get(self.sample_list_widget.currentRow())
         if entry is not None:
@@ -3437,7 +3462,25 @@ class ProgramEditorWindow(QMainWindow):
                 entry["end"],
             )
         else:
-            self.waveform_view.clear()
+            self._clear_waveform_view()
+
+    def _clear_waveform_view(self):
+        self.waveform_view.clear()
+        self._update_marker_labels(None, None, None, None)
+
+    def _update_marker_labels(self, start, loop_start, loop_end, end):
+        # legend row under the waveform - see the comment where it's built
+        # in _build_samples_tab for why this exists instead of drawing text
+        # on the canvas next to each marker
+        palette = theme.current_palette()
+        boundary = palette["text_disabled"]
+        loop = palette["keygroup_color_3"]
+        colors = {"start": boundary, "end": boundary, "loop_start": loop, "loop_end": loop}
+        values = {"start": start, "loop_start": loop_start, "loop_end": loop_end, "end": end}
+        for name, (label, display) in self._marker_value_labels.items():
+            value = values[name]
+            text = "–" if value is None else str(value)
+            label.setText(f'<span style="color:{colors[name]};">■</span> {display}: {text}')
 
     def _wait_for_any_signal(self, signals, timeout_ms=None):
         # Blocks the calling (GUI) thread until the first of *signals*
@@ -3605,6 +3648,19 @@ class ProgramEditorWindow(QMainWindow):
             samples[i] = int(max(-1.0, min(1.0, tone * decay + noise)) * 32000)
         return samples, framerate
 
+    def _demo_loop_points(self, frame_count):
+        # see the comment at _load_sample_waveform's call site - spreads
+        # the four markers out across the sample instead of DemoBridge's
+        # real (all-zero) header values, which collapse every one of them
+        # to frame 0
+        if frame_count <= 1:
+            return 0, 0, 0, 0
+        start = 0
+        end = frame_count - 1
+        loop_start = frame_count // 4
+        loop_end = (frame_count * 3) // 4
+        return start, loop_start, loop_end, end
+
     def _read_wav_samples(self, path):
         # sds_encoder.write_wav_file (what the Dashboard's receive path
         # always writes through) only ever produces 8-bit unsigned or
@@ -3678,16 +3734,34 @@ class ProgramEditorWindow(QMainWindow):
             if samples is None:
                 return
 
-            entry = {
-                "samples": samples,
-                "framerate": framerate,
-                "start": header["SSTART"],
+            if demo_mode:
+                # DemoBridge's own sample headers are all-zero (this
+                # project doesn't edit s3k/s3ked - see AGENTS.md), which
+                # collapses every marker to frame 0: invisible, and
+                # effectively un-draggable too, since clamp_marker's
+                # neighbour bounds collapse to [0, 0] right along with it.
+                # Demo mode already substitutes its own audio for the same
+                # reason SamplerController has nothing to give it
+                # (_fetch_demo_sample_audio) - this does the same for the
+                # loop points, spread out purely for display/editing here.
+                # Never applies to a real header value.
+                start, loop_start, loop_end, end = self._demo_loop_points(len(samples))
+            else:
+                start = header["SSTART"]
                 # LOOPAT1 is the loop END, not the start (see
                 # _SAMPLE_DETAIL_FIELDS's comment) - loop_start is derived,
                 # never read directly
-                "loop_start": max(0, header["LOOPAT1"] - header["LLNGTH1"]),
-                "loop_end": header["LOOPAT1"],
-                "end": header["SMPEND"],
+                loop_start = max(0, header["LOOPAT1"] - header["LLNGTH1"])
+                loop_end = header["LOOPAT1"]
+                end = header["SMPEND"]
+
+            entry = {
+                "samples": samples,
+                "framerate": framerate,
+                "start": start,
+                "loop_start": loop_start,
+                "loop_end": loop_end,
+                "end": end,
             }
             self._sample_waveform_cache[sample_index] = entry
             if sample_index == self.sample_list_widget.currentRow():

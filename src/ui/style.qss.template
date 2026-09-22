@@ -100,13 +100,14 @@ QListWidget::item:selected {
     background-color: ${bg_selected};
 }
 
-/* Program editor's Programs list (plain text rows, no per-row buttons) -
-   scoped by objectName rather than widening QListWidget::item generally,
-   since the dashboard's queue/hardware rows (and the keygroup list's own
-   swatch+label rows) already get their own comfortable height from the
-   custom row widget's own margins and don't need extra item padding
-   stacked on top. */
-QListWidget#programList::item {
+/* Program editor's Programs and Samples lists (plain text rows, no
+   per-row buttons) - scoped by objectName rather than widening
+   QListWidget::item generally, since the dashboard's queue/hardware rows
+   (and the keygroup list's own swatch+label rows) already get their own
+   comfortable height from the custom row widget's own margins and don't
+   need extra item padding stacked on top. */
+QListWidget#programList::item,
+QListWidget#sampleList::item {
     padding: 6px 8px;
 }
 
