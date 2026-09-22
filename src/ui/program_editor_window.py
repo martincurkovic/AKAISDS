@@ -101,7 +101,7 @@ _LOOP_TYPE_OPTIONS = [
         "once, gated by the amp envelope as usual.",
     ),
     (
-        "Play to sample end",
+        "One-shot",
         "Ignores note-off and always plays through to the physical "
         "end of the sample, regardless of when the key is released.",
     ),
@@ -122,10 +122,10 @@ _LOOP_TYPE_OPTIONS = [
 # means it can't silently drift if _LOOP_TYPE_OPTIONS's own wording is
 # ever revised.
 _SAMPLE_PLAYBACK_TYPE_OPTIONS = [
-    ("Normal looping", _LOOP_TYPE_OPTIONS[1][1]),  # ZPLAY's "Loop in release"
-    ("Loop until release", _LOOP_TYPE_OPTIONS[2][1]),  # ZPLAY's "Loop til release"
+    ("Loop in release", _LOOP_TYPE_OPTIONS[1][1]),  # ZPLAY's "Loop in release"
+    ("Loop til release", _LOOP_TYPE_OPTIONS[2][1]),  # ZPLAY's "Loop til release"
     ("No looping", _LOOP_TYPE_OPTIONS[3][1]),  # ZPLAY's "No loops"
-    ("Play to sample end", _LOOP_TYPE_OPTIONS[4][1]),  # same label, same tooltip
+    ("One-shot", _LOOP_TYPE_OPTIONS[4][1]),  # same label, same tooltip
 ]
 
 # (label, tooltip) per PORTYPE value - s3k.params transcribes this field as
@@ -2512,8 +2512,7 @@ class ProgramEditorWindow(QMainWindow):
             # delete, there's no separate "cannot be undone" prompt on top
             return
         existing_names = [
-            self.program_list.item(i).text()
-            for i in range(self.program_list.count())
+            self.program_list.item(i).text() for i in range(self.program_list.count())
         ]
         if new_name in existing_names:
             # PDATA's own spec: writing a name that matches an existing
@@ -3418,10 +3417,13 @@ class ProgramEditorWindow(QMainWindow):
         # loop type (SPTYPE) and root note (SPITCH) - two more sample-header
         # fields alongside the loop-point markers above, same "known from
         # the header alone, no audio load needed" reasoning as those (both
-        # are in _SAMPLE_DETAIL_FIELDS) - own row rather than folded into
-        # legend_row since these aren't waveform markers
-        sample_meta_row = QHBoxLayout()
-        sample_meta_row.setSpacing(18)
+        # are in _SAMPLE_DETAIL_FIELDS) - split across two rows (loop-
+        # related vs. root note/tune) since they now live in two separate
+        # section cards
+        loop_meta_row = QHBoxLayout()
+        loop_meta_row.setSpacing(18)
+        tune_meta_row = QHBoxLayout()
+        tune_meta_row.setSpacing(18)
         loop_type_label = QLabel("Loop Type")
         loop_type_label.setFixedWidth(70)
         self.sample_loop_type_combo = QComboBox()
@@ -3466,8 +3468,8 @@ class ProgramEditorWindow(QMainWindow):
         # _build_knob_column's taller label-above/value-below layout - same
         # reasoning as the Multis tab's own knobs: this sits inline in a
         # single-row group of controls, not on a page of its own.
-        loop_tune_label = QLabel("Loop Tune")
-        loop_tune_label.setFixedWidth(70)
+        loop_tune_label = QLabel("Loop Tune (cents)")
+        loop_tune_label.setFixedWidth(110)
         (
             self.sample_loop_tune_knob,
             self.sample_loop_tune_value_label,
@@ -3485,9 +3487,7 @@ class ProgramEditorWindow(QMainWindow):
         self.sample_loop_tune_knob.valueChanged.connect(
             self._on_sample_loop_tune_changed
         )
-        self.sample_loop_tune_knob.sliderReleased.connect(
-            self._commit_sample_loop_tune
-        )
+        self.sample_loop_tune_knob.sliderReleased.connect(self._commit_sample_loop_tune)
 
         # STUNO - the sample's own gross tuning offset, same widget shape
         # as program_tune_spinbox/the keygroup zone's Tune spinbox (a
@@ -3510,18 +3510,19 @@ class ProgramEditorWindow(QMainWindow):
         self.sample_tune_spinbox.valueChanged.connect(self._on_sample_tune_changed)
         self.sample_tune_spinbox.editingFinished.connect(self._commit_sample_tune)
 
-        sample_meta_row.addWidget(loop_type_label)
-        sample_meta_row.addWidget(self.sample_loop_type_combo)
-        sample_meta_row.addSpacing(12)
-        sample_meta_row.addWidget(root_note_label)
-        sample_meta_row.addWidget(self.sample_root_note_spinbox)
-        sample_meta_row.addSpacing(12)
-        sample_meta_row.addWidget(loop_tune_label)
-        sample_meta_row.addWidget(loop_tune_widget)
-        sample_meta_row.addSpacing(12)
-        sample_meta_row.addWidget(sample_tune_label)
-        sample_meta_row.addWidget(self.sample_tune_spinbox)
-        sample_meta_row.addStretch()
+        loop_meta_row.addWidget(loop_type_label)
+        loop_meta_row.addWidget(self.sample_loop_type_combo)
+        loop_meta_row.addSpacing(12)
+        loop_meta_row.addWidget(loop_tune_label)
+        loop_meta_row.addWidget(loop_tune_widget)
+        loop_meta_row.addStretch()
+
+        tune_meta_row.addWidget(root_note_label)
+        tune_meta_row.addWidget(self.sample_root_note_spinbox)
+        tune_meta_row.addSpacing(12)
+        tune_meta_row.addWidget(sample_tune_label)
+        tune_meta_row.addWidget(self.sample_tune_spinbox)
+        tune_meta_row.addStretch()
 
         # Trim/Reverse - destructive, hardware-write actions, so both stay
         # disabled until has_waveform() is true (real audio actually in
@@ -3539,7 +3540,7 @@ class ProgramEditorWindow(QMainWindow):
         )
         self.trim_sample_button.setEnabled(False)
         self.trim_sample_button.clicked.connect(self._confirm_trim_sample)
-        self.reverse_sample_button = QPushButton("Reverse")
+        self.reverse_sample_button = QPushButton("Reverse sample")
         self.reverse_sample_button.setToolTip(
             "Play the sample backwards, overwriting it on the sampler. "
             "Cannot be undone."
@@ -3550,17 +3551,28 @@ class ProgramEditorWindow(QMainWindow):
         sample_edit_row.addWidget(self.reverse_sample_button)
         sample_edit_row.addStretch()
 
+        # two section cards, same style as the Programs tab's own (see
+        # _build_section_card) - one for the loop editor itself, one for
+        # the sample-wide root note/tune fields
+        loop_controls_content = QVBoxLayout()
+        loop_controls_content.setSpacing(6)
+        loop_controls_content.addLayout(zoom_row)
+        loop_controls_content.addWidget(self.waveform_view)
+        loop_controls_content.addWidget(scrollbar_container)
+        loop_controls_content.addLayout(legend_row)
+        loop_controls_content.addLayout(loop_meta_row)
+        loop_controls_content.addLayout(sample_edit_row)
+        loop_controls_content.addWidget(self.sample_load_progress)
+        loop_controls_card = self._build_section_card(
+            "Loop Controls", loop_controls_content
+        )
+        tune_card = self._build_section_card("Root Note & Tune", tune_meta_row)
+
         waveform_column = QVBoxLayout()
         waveform_column.setContentsMargins(0, 0, 0, 0)
-        waveform_column.setSpacing(6)
-        waveform_column.addWidget(QLabel("<b>Loop Points</b>"))
-        waveform_column.addLayout(zoom_row)
-        waveform_column.addWidget(self.waveform_view)
-        waveform_column.addWidget(scrollbar_container)
-        waveform_column.addLayout(legend_row)
-        waveform_column.addLayout(sample_meta_row)
-        waveform_column.addLayout(sample_edit_row)
-        waveform_column.addWidget(self.sample_load_progress)
+        waveform_column.setSpacing(10)
+        waveform_column.addWidget(loop_controls_card)
+        waveform_column.addWidget(tune_card)
         waveform_column.addStretch()
         waveform_container = QWidget()
         waveform_container.setLayout(waveform_column)
@@ -4697,8 +4709,7 @@ class ProgramEditorWindow(QMainWindow):
             # frame count - see _LOOP_LENGTH_FIXED_POINT_SCALE's own comment
             loop_start = max(
                 0,
-                values["LOOPAT1"]
-                - values["LLNGTH1"] // _LOOP_LENGTH_FIXED_POINT_SCALE,
+                values["LOOPAT1"] - values["LLNGTH1"] // _LOOP_LENGTH_FIXED_POINT_SCALE,
             )
             loop_end = values["LOOPAT1"]
             end = values["SMPEND"]
