@@ -11,8 +11,15 @@ _HANDLE_SIZE = 5  # the little triangle at the top of each marker line
 _FINE_DRAG_DIVISOR = 8  # how much slower a Shift-held drag moves
 
 _MIN_ZOOM = 1.0  # the whole sample visible at once
-_MAX_ZOOM = 500.0  # view can shrink to roughly 1/500th of the sample
 _ZOOM_STEP = 1.6  # multiplicative factor per wheel notch / zoom button click
+# there used to be a flat _MAX_ZOOM = 500.0 ceiling here ("view can shrink
+# to roughly 1/500th of the sample") - see WaveformView._max_zoom for why
+# that's gone: for any sample bigger than about 500x the canvas's own
+# width in frames, 500x zoom could never reach single-sample resolution
+# at all, which was the actual reason dragging a marker couldn't get
+# sample-accurate no matter how far zoomed in - frames_per_px in
+# mouseMoveEvent never dropped below 1, so every drag pixel skipped
+# several frames at once regardless of how many times you zoomed in.
 
 # order matters: this is also the order push_marker cascades a push
 # through - moving one marker past its neighbour pushes that neighbour
@@ -21,14 +28,13 @@ _ZOOM_STEP = 1.6  # multiplicative factor per wheel notch / zoom button click
 _MARKER_ORDER = ("start", "loop_start", "loop_end", "end")
 
 _PLACEHOLDER_TEXT = (
-    "Double-click to load waveform\n\n"
-    "Loading is slow and will freeze the interface"
+    "Double-click to load waveform\n\nLoading is slow and will freeze the interface"
 )
 _LOADING_TEXT = "Loading…"
 # shown along the bottom of the canvas once markers are known from the
 # sample's header but there's no audio to draw an envelope from yet - see
 # set_header
-_AUDIO_HINT_TEXT = "Double-click to load waveform audio (slow)"
+_AUDIO_HINT_TEXT = "Double-click to load audio waveform (slow)\nInterface will not be usable until loading finished"
 
 
 def build_envelope(samples, width):
@@ -178,6 +184,13 @@ class WaveformView(QWidget):
         self._dragging = None
         self._drag_anchor_x = 0.0
         self._drag_value = 0.0  # float accumulator - see mouseMoveEvent
+        # click-to-cycle: which marker a press near this same stack of
+        # overlapping candidates should pick NEXT - see
+        # _markers_within_hit_radius/mousePressEvent. Reset whenever the
+        # markers themselves get replaced wholesale (clear/set_header) so
+        # a stale cycle position from a previous sample can't leak in.
+        self._press_cycle_candidates = []
+        self._press_cycle_index = 0
         # fine (Shift-held) mode warps the OS cursor back to a fixed point
         # every move event instead of letting it travel with the drag - see
         # mouseMoveEvent - so it never runs out of screen to move across
@@ -216,6 +229,8 @@ class WaveformView(QWidget):
         self._envelope = []
         self._frame_count = 0
         self._dragging = None
+        self._press_cycle_candidates = []
+        self._press_cycle_index = 0
         self._zoom = _MIN_ZOOM
         self._view_start = 0
         self.update()
@@ -238,6 +253,8 @@ class WaveformView(QWidget):
             "loop_end": loop_end,
             "end": end,
         }
+        self._press_cycle_candidates = []
+        self._press_cycle_index = 0
         self._zoom = _MIN_ZOOM
         self._view_start = 0
         self.update()
@@ -328,7 +345,9 @@ class WaveformView(QWidget):
         if self._frame_count == 0:
             return None
         index = _MARKER_ORDER.index(name)
-        self._markers = push_marker(_MARKER_ORDER, index, frame, self._markers, self._frame_count)
+        self._markers = push_marker(
+            _MARKER_ORDER, index, frame, self._markers, self._frame_count
+        )
         self.update()
         self._emit_markers_changed()
         return self._markers[name]
@@ -340,7 +359,20 @@ class WaveformView(QWidget):
     def _view_length(self):
         if self._frame_count == 0:
             return 0
-        return max(1, min(self._frame_count, int(round(self._frame_count / self._zoom))))
+        return max(
+            1, min(self._frame_count, int(round(self._frame_count / self._zoom)))
+        )
+
+    def _max_zoom(self):
+        # the zoom level at which _view_length() bottoms out at exactly 1
+        # visible sample - always reachable, whatever the sample's own
+        # size, unlike a flat constant (see the removed _MAX_ZOOM's own
+        # comment for the bug this used to cause). frame_count itself is
+        # the right ceiling: _view_length()'s own formula is
+        # round(frame_count / zoom), and that reaches 1 exactly at
+        # zoom == frame_count, with no benefit to allowing anything past
+        # that (view_length is already floored at 1 regardless).
+        return max(_MIN_ZOOM, float(self._frame_count))
 
     def _clamp_view_start(self):
         max_start = max(0, self._frame_count - self._view_length())
@@ -379,9 +411,11 @@ class WaveformView(QWidget):
             if old_view_length > 1
             else 0.0
         )
-        self._zoom = max(_MIN_ZOOM, min(_MAX_ZOOM, zoom))
+        self._zoom = max(_MIN_ZOOM, min(self._max_zoom(), zoom))
         new_view_length = self._view_length()
-        self._view_start = int(round(anchor_frame - anchor_fraction * (new_view_length - 1)))
+        self._view_start = int(
+            round(anchor_frame - anchor_fraction * (new_view_length - 1))
+        )
         self._clamp_view_start()
         self._rebuild_envelope()
         self.update()
@@ -452,6 +486,74 @@ class WaveformView(QWidget):
             "loop_end": loop,
         }
 
+    def _draw_zero_crossing_line(self, painter, palette):
+        # a plain horizontal guide at zero amplitude - border colour, not
+        # accent/text, since this is a background reference line, not
+        # something meant to draw the eye the way the waveform or its
+        # markers do. Drawn once the header/frame_count is known (same
+        # gate as the markers below), not gated on has_waveform() - it's
+        # just as useful a reference before real audio ever arrives.
+        mid_y = self.height() / 2
+        pen = QPen(QColor(palette["border"]))
+        pen.setWidthF(1.0)
+        painter.setPen(pen)
+        painter.drawLine(QPointF(0, mid_y), QPointF(self.width(), mid_y))
+
+    def _draw_connected_samples(self, painter, palette, view_start, view_length):
+        # zoomed in enough that individual samples are more than a pixel
+        # apart (view_length <= the canvas's own width, so every visible
+        # sample gets its own distinguishable x) - build_envelope's own
+        # one-min/max-pair-per-pixel-column approach degenerates here:
+        # each column maps to at most one sample, so min == max and every
+        # "bar" collapses to a lone dot, which is what actually read as a
+        # row of disconnected dashes instead of a continuous waveform.
+        # Drawing an actual point-to-point polyline through each visible
+        # sample's own value instead is what every other waveform editor
+        # does once you're zoomed in this far. Only ever called when
+        # view_length <= self.width(), so this is never more per-paint
+        # work than the bar-drawing loop it replaces here - it does NOT
+        # replace that loop at lower zoom levels, where thousands of
+        # samples can share a single column and a real per-sample
+        # drawLine would be both pointless (sub-pixel) and slow (see
+        # build_envelope's own comment on exactly that).
+        mid_y = self.height() / 2
+        half = self.height() / 2 - 6
+        width = self.width()
+        loaded_end = min(view_start + view_length, len(self._samples))
+        pen = QPen()
+        pen.setWidthF(1.0)
+        current_color = None
+        prev_point = None
+        for frame in range(view_start, loaded_end):
+            x = x_for_frame(frame, width, view_start, view_length)
+            y = mid_y - (self._samples[frame] / 32768) * half
+            point = QPointF(x, y)
+            color = self._waveform_zone_color(frame, palette)
+            if color != current_color:
+                pen.setColor(color)
+                painter.setPen(pen)
+                current_color = color
+            if prev_point is not None:
+                painter.drawLine(prev_point, point)
+            prev_point = point
+
+    def _waveform_zone_color(self, frame, palette):
+        # colors the envelope trace by which region a frame falls in:
+        # dimmed ("greyed out") outside the Start/End markers - that
+        # audio is on the sampler but never actually plays - the loop
+        # region's own teal within [loop_start, loop_end] (the exact
+        # same token the loop markers themselves already use - see
+        # _marker_colors - so the coloured waveform band and its own
+        # boundary markers read as one thing), and the ordinary accent
+        # colour everywhere else within [start, end] (the ordinary,
+        # non-looping lead-in/out around the loop).
+        m = self._markers
+        if frame < m["start"] or frame > m["end"]:
+            return QColor(palette["text_disabled"])
+        if m["loop_start"] <= frame <= m["loop_end"]:
+            return QColor(palette["keygroup_color_3"])
+        return QColor(palette["accent"])
+
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
@@ -473,16 +575,38 @@ class WaveformView(QWidget):
             )
             return
 
+        self._draw_zero_crossing_line(painter, palette)
+
         if self._samples is not None:
-            mid_y = self.height() / 2
-            half = self.height() / 2 - 6
-            pen = QPen(QColor(palette["accent"]))
-            pen.setWidthF(1.0)
-            painter.setPen(pen)
-            for x, (lo, hi) in enumerate(self._envelope):
-                y_lo = mid_y - (hi / 32768) * half
-                y_hi = mid_y - (lo / 32768) * half
-                painter.drawLine(int(x), int(y_lo), int(x), int(y_hi) + 1)
+            view_start = self._view_start
+            view_length = self._view_length()
+            if 0 < view_length <= self.width():
+                # zoomed in far enough that samples are individually
+                # distinguishable - connect them instead of a per-column
+                # min/max bar (see _draw_connected_samples' own comment)
+                self._draw_connected_samples(painter, palette, view_start, view_length)
+            else:
+                mid_y = self.height() / 2
+                half = self.height() / 2 - 6
+                pen = QPen()
+                pen.setWidthF(1.0)
+                current_color = None
+                for x, (lo, hi) in enumerate(self._envelope):
+                    # one min/max pair per pixel column already (see
+                    # build_envelope's own comment on why) - frame_for_x maps
+                    # that column back to roughly the frame it represents, the
+                    # same mapping x_for_frame (marker positioning) already
+                    # inverts, so the colour boundary lines up with where the
+                    # markers themselves are drawn below
+                    frame = frame_for_x(x, self.width(), view_start, view_length)
+                    color = self._waveform_zone_color(frame, palette)
+                    if color != current_color:
+                        pen.setColor(color)
+                        painter.setPen(pen)
+                        current_color = color
+                    y_lo = mid_y - (hi / 32768) * half
+                    y_hi = mid_y - (lo / 32768) * half
+                    painter.drawLine(int(x), int(y_lo), int(x), int(y_hi) + 1)
 
         # markers draw whenever the header is known, audio or not - the
         # whole point of set_header is editing before/without audio ever
@@ -504,11 +628,15 @@ class WaveformView(QWidget):
             painter.drawLine(QPointF(x, 0), QPointF(x, self.height()))
             painter.setBrush(colors[name])
             painter.setPen(Qt.PenStyle.NoPen)
-            painter.drawPolygon(QPolygonF([
-                QPointF(x - _HANDLE_SIZE, 0),
-                QPointF(x + _HANDLE_SIZE, 0),
-                QPointF(x, _HANDLE_SIZE * 1.6),
-            ]))
+            painter.drawPolygon(
+                QPolygonF(
+                    [
+                        QPointF(x - _HANDLE_SIZE, 0),
+                        QPointF(x + _HANDLE_SIZE, 0),
+                        QPointF(x, _HANDLE_SIZE * 1.6),
+                    ]
+                )
+            )
 
         if not self._envelope:
             # nothing to look at yet where the envelope would otherwise
@@ -527,21 +655,29 @@ class WaveformView(QWidget):
                 _LOADING_TEXT if self._loading else _AUDIO_HINT_TEXT,
             )
 
-    def _marker_near(self, x):
-        best = None
-        best_dist = None
+    def _markers_within_hit_radius(self, x):
+        # every visible marker within _HIT_RADIUS_PX of x, closest first
+        # (ties - genuinely equal distance, e.g. several markers pushed
+        # onto the exact same frame - break in _MARKER_ORDER's own order,
+        # since Python's sort is stable and that's the order this list
+        # gets built in). The full candidate list, not just the single
+        # closest one, is what mousePressEvent's click-to-cycle needs to
+        # let a click pick something other than whichever marker happens
+        # to win ties - otherwise, once several markers land on the same
+        # frame (a push cascade can do this - see push_marker), only the
+        # frontmost one could ever be grabbed again.
         view_start = self._view_start
         view_length = self._view_length()
+        candidates = []
         for name in _MARKER_ORDER:
             frame = self._markers[name]
             if frame < view_start or frame > view_start + view_length - 1:
                 continue  # not visible - can't be clicked
             dist = abs(self._x_for(name) - x)
-            if best_dist is None or dist < best_dist:
-                best, best_dist = name, dist
-        if best_dist is not None and best_dist <= _HIT_RADIUS_PX:
-            return best
-        return None
+            if dist <= _HIT_RADIUS_PX:
+                candidates.append((dist, name))
+        candidates.sort(key=lambda pair: pair[0])
+        return [name for _dist, name in candidates]
 
     def mouseDoubleClickEvent(self, event):
         # diagnostic-only logging - see program_editor_window.py's
@@ -569,9 +705,23 @@ class WaveformView(QWidget):
         # mode (markers known, no audio/envelope yet) too
         if self._frame_count == 0:
             return
-        self._dragging = self._marker_near(event.position().x())
+        x = event.position().x()
+        candidates = self._markers_within_hit_radius(x)
+        if candidates and candidates == self._press_cycle_candidates:
+            # same stack of overlapping markers as last press (order-
+            # sensitive on purpose - candidates is always sorted the same
+            # way for the same stack, so this only matches a genuine
+            # repeat click) - advance to the NEXT one in rotation instead
+            # of grabbing the same closest one every time, which is what
+            # made overlapping markers hard to separate again in the
+            # first place (see AGENTS.md)
+            self._press_cycle_index = (self._press_cycle_index + 1) % len(candidates)
+        else:
+            self._press_cycle_candidates = candidates
+            self._press_cycle_index = 0
+        self._dragging = candidates[self._press_cycle_index] if candidates else None
         if self._dragging is not None:
-            self._drag_anchor_x = event.position().x()
+            self._drag_anchor_x = x
             self._drag_value = float(self._markers[self._dragging])
 
     def mouseMoveEvent(self, event):
@@ -597,7 +747,8 @@ class WaveformView(QWidget):
             current = event.globalPosition()
             anchor = self._warp_anchor_global
             if (round(current.x()), round(current.y())) == (
-                round(anchor.x()), round(anchor.y())
+                round(anchor.x()),
+                round(anchor.y()),
             ):
                 return
             dx = (current.x() - anchor.x()) / _FINE_DRAG_DIVISOR
@@ -685,7 +836,10 @@ class WaveformView(QWidget):
             if delta == 0:
                 return
             anchor_frame = frame_for_x(
-                event.position().x(), self.width(), self._view_start, self._view_length()
+                event.position().x(),
+                self.width(),
+                self._view_start,
+                self._view_length(),
             )
             if delta > 0:
                 self.zoom_in(anchor_frame)

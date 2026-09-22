@@ -5,10 +5,14 @@
 # the bottom of this file (wheelEvent's pan-axis behaviour), which needs a
 # real WaveformView + a live QApplication - see the section comment there.
 
+import math
+
 import pytest
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QColor
 from PySide6.QtWidgets import QApplication
 
+from ui import theme
 from ui.waveform_view import (
     _MARKER_ORDER,
     WaveformView,
@@ -289,6 +293,187 @@ def test_wheel_ctrl_zoom_still_accepts_either_axis(qapp):
     assert view2._zoom != zoom_before2
 
 
+# --- WaveformView.mousePressEvent: click-to-cycle overlapping markers --------
+# Once a push (see push_marker) has landed several markers on the exact
+# same frame, they all sit at the same pixel column too - the first press
+# there always used to grab whichever one won _MARKER_ORDER's own tie-
+# break (effectively always "start"), making it impossible to grab any of
+# the others again without first dragging that one out of the way. Each
+# successive press on the same stack now cycles to the next one instead.
+
+
+class _FakeXPos:
+    def __init__(self, x):
+        self._x = x
+
+    def x(self):
+        return self._x
+
+
+class _FakePressEvent:
+    def __init__(self, x):
+        self._x = x
+
+    def position(self):
+        return _FakeXPos(self._x)
+
+
+def _stacked_waveform_view(frame_count=10000, stacked_frame=5000):
+    # all four markers pushed onto the exact same frame - the scenario
+    # this whole feature exists for
+    view = WaveformView()
+    view.resize(400, 180)
+    view.set_header(frame_count, stacked_frame, stacked_frame, stacked_frame, stacked_frame)
+    return view
+
+
+def test_repeated_press_on_a_stack_cycles_through_every_marker(qapp):
+    view = _stacked_waveform_view()
+    x = view._x_for("start")  # all four are at the same x
+
+    picks = []
+    for _ in range(5):  # one full cycle plus one, to check it wraps
+        view.mousePressEvent(_FakePressEvent(x))
+        picks.append(view._dragging)
+        view.mouseReleaseEvent(_FakePressEvent(x))  # end the drag, same as a real click
+
+    assert picks == ["start", "loop_start", "loop_end", "end", "start"]
+
+
+def test_pressing_elsewhere_then_back_on_the_stack_restarts_the_cycle(qapp):
+    view = _stacked_waveform_view()
+    stack_x = view._x_for("start")
+
+    view.mousePressEvent(_FakePressEvent(stack_x))
+    assert view._dragging == "start"
+    view.mouseReleaseEvent(_FakePressEvent(stack_x))
+
+    # click somewhere with no markers at all
+    view.mousePressEvent(_FakePressEvent(stack_x + 100))
+    assert view._dragging is None
+    view.mouseReleaseEvent(_FakePressEvent(stack_x + 100))
+
+    # back on the stack - starts over from the closest one, not where the
+    # earlier cycle left off
+    view.mousePressEvent(_FakePressEvent(stack_x))
+    assert view._dragging == "start"
+
+
+def test_cycling_only_covers_markers_actually_in_the_stack(qapp):
+    # only loop_start/loop_end overlap here - start and end are well
+    # apart, so cycling on the loop pair's shared spot must never pick
+    # either of them
+    view = WaveformView()
+    view.resize(400, 180)
+    view.set_header(10000, 0, 5000, 5000, 9999)
+    x = view._x_for("loop_start")
+
+    view.mousePressEvent(_FakePressEvent(x))
+    first = view._dragging
+    view.mouseReleaseEvent(_FakePressEvent(x))
+    view.mousePressEvent(_FakePressEvent(x))
+    second = view._dragging
+
+    assert {first, second} == {"loop_start", "loop_end"}
+    assert first != second
+
+
+def test_dragging_a_marker_away_and_pressing_the_stack_again_finds_the_rest(qapp):
+    # the actual escape hatch this feature exists for: peel one marker off
+    # a stack, then the remaining ones must still be reachable
+    view = _stacked_waveform_view()
+    stack_x = view._x_for("start")
+
+    view.mousePressEvent(_FakePressEvent(stack_x))
+    assert view._dragging == "start"
+    view.set_marker("start", 1000)  # moved away, same as a completed drag
+    view.mouseReleaseEvent(_FakePressEvent(stack_x))
+
+    view.mousePressEvent(_FakePressEvent(stack_x))
+    assert view._dragging == "loop_start"
+
+
+# --- WaveformView._waveform_zone_color: greyed-out/loop-tinted envelope ------
+# outside Start/End: greyed out (that audio is resident but never plays).
+# inside Loop Start/Loop End: the loop's own teal (same token the loop
+# markers themselves already use). everywhere else within Start/End: the
+# ordinary accent colour.
+
+
+def test_waveform_zone_color_outside_start_end_is_greyed_out(qapp):
+    view = WaveformView()
+    view.resize(400, 180)
+    view.set_header(1000, start=100, loop_start=300, loop_end=700, end=900)
+    palette = theme.current_palette()
+    assert view._waveform_zone_color(50, palette) == QColor(palette["text_disabled"])
+    assert view._waveform_zone_color(950, palette) == QColor(palette["text_disabled"])
+
+
+def test_waveform_zone_color_within_loop_region_is_loop_tinted(qapp):
+    view = WaveformView()
+    view.resize(400, 180)
+    view.set_header(1000, start=100, loop_start=300, loop_end=700, end=900)
+    palette = theme.current_palette()
+    # inclusive at both loop edges
+    for frame in (300, 500, 700):
+        assert view._waveform_zone_color(frame, palette) == QColor(
+            palette["keygroup_color_3"]
+        )
+
+
+def test_waveform_zone_color_between_start_and_loop_is_the_ordinary_accent(qapp):
+    view = WaveformView()
+    view.resize(400, 180)
+    view.set_header(1000, start=100, loop_start=300, loop_end=700, end=900)
+    palette = theme.current_palette()
+    assert view._waveform_zone_color(200, palette) == QColor(palette["accent"])  # lead-in
+    assert view._waveform_zone_color(800, palette) == QColor(palette["accent"])  # lead-out
+    # right at start/end themselves - still played, still the ordinary colour
+    assert view._waveform_zone_color(100, palette) == QColor(palette["accent"])
+    assert view._waveform_zone_color(900, palette) == QColor(palette["accent"])
+
+
+# --- WaveformView.paintEvent: zero-crossing line / connected samples ---------
+# No pixel-level assertions here (nothing else in this file does either -
+# there's no infrastructure for it) - these are crash-guards for the two
+# new paint code paths: the zero-crossing line (drawn every paint once a
+# header is known) and _draw_connected_samples (only reachable once
+# zoomed in far enough that view_length <= the canvas width - see
+# paintEvent's own mode switch). grab() forces a real, full paint cycle
+# offscreen; it raises if paintEvent itself raises.
+
+
+def test_paint_does_not_crash_in_header_only_mode(qapp):
+    view = WaveformView()
+    view.resize(400, 180)
+    view.set_header(1000, start=0, loop_start=250, loop_end=750, end=999)
+    view.grab()
+
+
+def test_paint_does_not_crash_at_high_zoom_in_connected_sample_mode(qapp):
+    view = WaveformView()
+    view.resize(400, 180)
+    samples = [int(1000 * math.sin(i / 5)) for i in range(2000)]
+    view.set_waveform(samples, 0, 500, 1500, 1999)
+    for _ in range(20):
+        view.zoom_in()
+    assert 0 < view._view_length() <= view.width()  # actually exercising that mode
+    view.grab()
+
+
+def test_paint_does_not_crash_at_high_zoom_with_only_one_sample_loaded(qapp):
+    # begin_live_capture/append_live_samples (progressive loading) can
+    # leave self._samples shorter than the current zoomed-in view window
+    view = WaveformView()
+    view.resize(400, 180)
+    view.set_header(2000, start=0, loop_start=500, loop_end=1500, end=1999)
+    for _ in range(20):
+        view.zoom_in()
+    view.begin_live_capture()
+    view.append_live_samples([100])
+    view.grab()
+
+
 # --- WaveformView.set_header: editable markers without audio -----------------
 # A real SDS sample dump can take minutes; the header alone (a handful of
 # fast get_parameter reads) is comparatively instant. set_header lets a
@@ -339,6 +524,38 @@ def test_zoom_and_pan_work_in_header_only_mode(qapp):
     assert view._zoom > zoom_before
     view.set_view_start(100)
     assert view._view_start == 100
+
+
+def test_max_zoom_reaches_single_sample_resolution_for_a_huge_sample(qapp):
+    # regression test: zoom used to be capped at a flat 500x, which for
+    # any sample bigger than ~500 * the canvas's own width in frames
+    # could never reach single-sample resolution at all no matter how far
+    # zoomed in - the actual reason dragging a marker couldn't get
+    # sample-accurate (see AGENTS.md and _max_zoom's own comment)
+    view = WaveformView()
+    view.resize(400, 180)
+    frame_count = 5_000_000  # far past what the old 500x cap could reach
+    view.set_header(frame_count, 0, 100, 200, frame_count - 1)
+    view.set_zoom(frame_count)  # the theoretical max, per _max_zoom
+    assert view._view_length() == 1
+    # frames_per_px, the actual per-pixel drag precision mouseMoveEvent
+    # uses, must now be well under 1 - many pixels of movement per frame,
+    # not several frames per pixel
+    frames_per_px = (view._view_length() - 1) / max(1, view.width() - 1)
+    assert frames_per_px < 1
+
+
+def test_zoom_in_reaches_single_sample_resolution_through_repeated_steps(qapp):
+    # the discoverable path (Zoom + button / scroll wheel) must be able to
+    # actually reach the new, much higher ceiling through ordinary
+    # repeated zoom_in() calls, not just by calling set_zoom() directly
+    view = WaveformView()
+    view.resize(400, 180)
+    frame_count = 2000
+    view.set_header(frame_count, 0, 100, 200, frame_count - 1)
+    for _ in range(200):  # comfortably more than enough steps
+        view.zoom_in()
+    assert view._view_length() == 1
 
 
 def test_clear_resets_header_only_state_too(qapp):

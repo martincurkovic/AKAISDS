@@ -999,6 +999,146 @@ every_field_that_actually_moved`/`test_drag_release_push_writes_every_
 field_that_actually_moved` pin this down directly - both fail if the
 write side falls back to inferring fields from `which` alone.
 
+### Click-to-cycle for markers stacked on the same frame
+
+Added 2026-09-22, follow-up to the push behaviour above. Once a push
+lands several markers on the exact same frame (very easy to do
+deliberately or by accident once markers push each other around), they
+also sit at the exact same pixel column - and the FIRST version of push
+had a real usability bug once that happens: `WaveformView`'s old
+`_marker_near(x)` always broke a tie by `_MARKER_ORDER`'s own order
+(effectively always "start"), so once several markers stacked, only the
+frontmost one could ever be grabbed again - there was no way to click
+back onto, say, `end` specifically without first dragging `start` out of
+the way.
+
+Fixed the way overlapping-object selection is usually solved: repeated
+clicks on the same stack now cycle through every marker there instead of
+always grabbing the same one. `_marker_near` is gone, replaced by
+`_markers_within_hit_radius(x)` (returns every visible marker within
+`_HIT_RADIUS_PX`, closest first - stable-sorted, so a genuine tie still
+breaks in `_MARKER_ORDER`'s order, same as before). `mousePressEvent`
+remembers the candidate list + a rotating index (`_press_cycle_
+candidates`/`_press_cycle_index`) - a press whose candidate list is
+*exactly* the same list as last press's (not just "near the same pixel" -
+comparing the actual sorted name list, so it can't misfire from a small
+mouse jitter that happens to change which markers are in radius) advances
+to the next candidate; anything else (a different stack, empty space,
+the very first press) resets to the closest one. Reset explicitly in
+`clear()`/`set_header()` too, so a stale cycle position from whatever
+sample was showing before can't leak into a newly-loaded one. Marker
+spinboxes need none of this - each one is its own always-directly-
+clickable widget regardless of where its marker happens to sit on the
+canvas, so typing a value there was already an unambiguous way to
+separate a stack even before this fix (still true, and still worth
+knowing about as the reliable fallback).
+
+### Waveform trace tinted by region
+
+Added 2026-09-22, per direct user request. The envelope trace
+(`paintEvent`'s per-column `drawLine` loop) used to be one flat colour
+(`palette["accent"]`) end to end. `_waveform_zone_color(frame, palette)`
+now picks per-column: `palette["text_disabled"]` (greyed out) outside
+`[start, end]` - that audio is resident on the sampler but never actually
+plays - `palette["keygroup_color_3"]` (the loop region's own teal) inside
+`[loop_start, loop_end]` inclusive, deliberately the SAME token the loop
+markers themselves already use (`_marker_colors`) so the tinted band and
+its own boundary markers read as one thing rather than two coincidentally
+similar colours, and the ordinary `accent` everywhere else within
+`[start, end]` (the non-looping lead-in/lead-out around the loop). Each
+envelope column's frame is recovered via `frame_for_x` - the same
+column-to-frame mapping `x_for_frame` (marker positioning) already
+inverts, so the colour boundaries line up with where the markers
+themselves draw, pixel for pixel, without a second coordinate system to
+keep in sync. Only costs a per-column QColor comparison + occasional
+`setPen` beyond what was already there (same O(width) loop paintEvent
+always ran) - color inaccuracy during the brief window a sample is still
+progressively loading (see "Progressive waveform loading" above, where
+`self._envelope` can be narrower than the canvas) is an accepted,
+deliberately-not-engineered-around cosmetic rounding case, not a bug -
+`frame_for_x` is computed against the full canvas width regardless of how
+much has loaded, which is exact once loading finishes and only briefly,
+harmlessly approximate before that.
+
+### Zero-crossing line, and connected samples at high zoom
+
+Added 2026-09-22, per direct user request (screenshot-driven: zoomed in
+far enough that `build_envelope`'s one-min/max-pair-per-column approach
+was visibly producing disconnected dashes instead of a waveform, and
+there was nothing marking zero amplitude at all).
+
+`_draw_zero_crossing_line` is a plain horizontal guide at `mid_y`, drawn
+in `palette["border"]` (a background-reference colour, not something
+meant to draw the eye the way the waveform/markers do) right after the
+placeholder-state early return, so it shows in header-only mode too, not
+just once real audio has loaded.
+
+`_draw_connected_samples` is the fix for the dashes: `build_envelope`'s
+per-column min/max bar is the right tool when many samples share one
+pixel column (a huge sample, zoomed out) but degenerates once zoomed in
+past 1:1 - each column maps to at most one sample, so min == max and
+every "bar" collapses to a dot. `paintEvent` now switches to an actual
+point-to-point polyline through each visible sample's own value whenever
+`view_length <= self.width()` (samples individually distinguishable) -
+cheap specifically BECAUSE that condition bounds the number of samples to
+iterate by the canvas width, same order of work as the bar loop it
+replaces, not a "draw every raw sample" fallback the way a naive fix
+might read. Below that threshold, the existing `self._envelope` bar
+rendering is unchanged. Both paths call the same `_waveform_zone_color`
+per segment, so the greyed-out/loop-tinted colouring (see just above)
+applies identically in both rendering modes - one wasn't retrofitted onto
+the other as an afterthought.
+
+No pixel-level tests exist for either (nothing in this file has that
+infrastructure) - `tests/test_waveform_view.py`'s
+`test_paint_does_not_crash_at_high_zoom_in_connected_sample_mode`/
+`test_paint_does_not_crash_at_high_zoom_with_only_one_sample_loaded` are
+crash-guards (`grab()` forces a real offscreen paint cycle) for the new
+code path, particularly the progressive-loading interaction: zoomed in
+far enough that `view_length <= width`, but `self._samples` (still
+filling in via `begin_live_capture`/`append_live_samples`) is SHORTER
+than that - `_draw_connected_samples` bounds its own loop to
+`min(view_start + view_length, len(self._samples))` for exactly this
+reason, mirroring `_rebuild_envelope`'s own `loaded_end` clamp.
+
+### Zoom ceiling: a flat 500x could never reach single-sample resolution
+
+Added 2026-09-22, per direct user report: dragging a marker "as zoomed in
+as possible" still wasn't sample-accurate, forcing a fallback to the
+marker spinboxes for exact placement. Root cause was `_MAX_ZOOM = 500.0`,
+a flat ceiling on `self._zoom` - `_view_length()`'s own formula is
+`round(frame_count / zoom)`, so for any sample bigger than roughly
+`500 * canvas_width_px` frames, `frame_count / 500` still left MORE
+samples visible than the canvas had pixels for, even at max zoom.
+`mouseMoveEvent`'s own `frames_per_px = (view_length - 1) / (width - 1)`
+then stayed above 1 no matter how far you zoomed - every single pixel of
+mouse movement was skipping several frames at once, permanently, for any
+sample past that size, which is exactly what made fine dragging
+impossible specifically on larger samples (a real S3000-series sample can
+be several hundred thousand to a few million frames).
+
+Fixed by making the ceiling depend on the sample actually loaded instead
+of a fixed number: `WaveformView._max_zoom()` returns
+`max(_MIN_ZOOM, float(self._frame_count))` - the exact zoom value at
+which `_view_length()`'s own formula bottoms out at 1 (`round(frame_count
+/ frame_count) == 1`), so single-sample resolution is always reachable
+regardless of how large the sample is, and `set_zoom` clamps against this
+instead of the old flat `_MAX_ZOOM` constant (removed - see its own
+replacement comment). This also means zoom now naturally crosses into
+`_draw_connected_samples`' rendering mode (see just above -
+`view_length <= width`) for every sample once zoomed in far enough,
+which used to be geometrically unreachable for big samples under the old
+cap even though the rendering code itself was already written to support
+it. No change to `_ZOOM_STEP` (1.6x/notch) - reaching a much higher
+ceiling for a huge sample just takes more scroll notches/button clicks,
+which is normal for "zoom all the way in" in any such editor and not
+worth trading off against the step size used for everyday zoom levels.
+`test_max_zoom_reaches_single_sample_resolution_for_a_huge_sample`/
+`test_zoom_in_reaches_single_sample_resolution_through_repeated_steps` in
+`tests/test_waveform_view.py` pin this down (both fail against the old
+flat constant - verified directly by reverting the fix and re-running
+them).
+
 ## Testing
 
 `TESTING.md` currently undersells this a little - as of this note there's also
