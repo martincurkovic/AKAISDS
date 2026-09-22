@@ -464,6 +464,29 @@ same warning at the point every consumer reads from. `loop_start` is always
 *derived* (`LOOPAT1 - LLNGTH1`) in this codebase, never read or written
 directly - there is no such raw field.
 
+**`LLNGTH1`'s raw value is 32.16 fixed point, not a plain frame count** -
+`s3k.params` has no scaling logic for it (every "num" field decodes as a
+plain integer), but the real field is `frames * 65536` (confirmed against
+the vendored `s3000editor` reference encoder's own `writeFixed32_16`, and
+independently against `s3ked`'s own `RESOLUTION_NOTES.md` akaiutil cross-
+check). Get this wrong and the loop still "works" in-app (read and write
+were both naively wrong in the same direction, so round-tripping through
+this app alone looked fine) but the hardware reads a loop length ~65536x
+too short. See `_LOOP_LENGTH_FIXED_POINT_SCALE` in
+`program_editor_window.py`.
+
+**`STUNO` (sample tune) and `PRGNUM` (program number) both have raw-vs-
+display quirks, confirmed against real hardware:**
+- `STUNO` is a plain *signed* 1/256-semitone value, same scale as `VTUNO` -
+  but `s3k.params` declares its range unsigned `0..65535` with no sign-
+  extension, so `encode_field` rejects a negative raw value outright.
+  `_sample_tune_offset_to_semitones`/`_semitones_to_sample_tune_offset`
+  manually sign-extend on read and wrap to unsigned two's-complement on
+  write. Range is ±50.00st, not the raw field's declared ±128-ish span.
+- `PRGNUM`'s raw value is off by one from the S3000XL's own panel
+  numbering (raw 8 shows as program 9) - `program_number_spinbox` displays
+  `raw + 1` and writes `displayed - 1`.
+
 Loading a sample's audio is a real SDS dump and can legitimately take
 minutes for a large sample (see the README's own transfer-time table) - the
 UI is meant to freeze while it happens, not work around it; `WaveformView`'s
