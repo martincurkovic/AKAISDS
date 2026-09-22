@@ -59,6 +59,8 @@ from ui import theme
 from ui.about_dialog import AboutDialog
 from ui.update_helper import UpdateCheckRunner
 from core import debug_log
+from core import sample_editing
+from core import sds_encoder
 from core.midi_notes import midi_note_to_name
 from core.program_editor_bridge import BridgeWorker, MULTI_PART_COUNT
 
@@ -222,6 +224,24 @@ def _synthesized_demo_frame_count(sample_index):
     # length - deterministic per sample_index, same reasoning as
     # _synthesize_demo_sample_audio's own comment.
     return 20000 + (sample_index * 4127) % 60000
+
+
+def _sample_edit_temp_name(original_name):
+    # the working name a Trim/Reverse's transformed replacement is sent
+    # under FIRST, before the original is deleted - see
+    # ProgramEditorWindow._perform_sample_edit_real's own comment on why
+    # this must never be the original's own name: s3k's own docs say
+    # keygroup zones resolve a sample by NAME, live, against whatever
+    # resident sample currently carries it, with no uniqueness enforced -
+    # two samples briefly sharing a name makes that resolution genuinely
+    # ambiguous (measured, not just theoretical - see AGENTS.md's own
+    # writeup of this). A distinct temp name avoids that window outright.
+    # AKAI_CHARSET has no underscore, so a hyphen suffix stands in for
+    # one; names are capped at NAME_LENGTH (12) regardless of how long
+    # the original already is, so this always truncates to leave room for
+    # the fixed suffix rather than risking going over.
+    suffix = "-TMP"
+    return (original_name.strip()[: NAME_LENGTH - len(suffix)] + suffix)[:NAME_LENGTH]
 
 
 class _ModMatrixGrid(QWidget):
@@ -3204,6 +3224,33 @@ class ProgramEditorWindow(QMainWindow):
         sample_meta_row.addWidget(self.sample_root_note_spinbox)
         sample_meta_row.addStretch()
 
+        # Trim/Reverse - destructive, hardware-write actions, so both stay
+        # disabled until has_waveform() is true (real audio actually in
+        # memory to transform, not just header-only markers) - see
+        # _set_sample_edit_buttons_enabled. See _confirm_trim_sample/
+        # _confirm_reverse_sample for the confirmation dialogs and
+        # _perform_sample_edit_real for why this is a real, multi-step
+        # send/delete/rename pipeline rather than a simple in-place write.
+        sample_edit_row = QHBoxLayout()
+        sample_edit_row.setSpacing(8)
+        self.trim_sample_button = QPushButton("Trim to Markers")
+        self.trim_sample_button.setToolTip(
+            "Cut the sample down to the current Start/End markers, "
+            "overwriting it on the sampler. Cannot be undone."
+        )
+        self.trim_sample_button.setEnabled(False)
+        self.trim_sample_button.clicked.connect(self._confirm_trim_sample)
+        self.reverse_sample_button = QPushButton("Reverse")
+        self.reverse_sample_button.setToolTip(
+            "Play the sample backwards, overwriting it on the sampler. "
+            "Cannot be undone."
+        )
+        self.reverse_sample_button.setEnabled(False)
+        self.reverse_sample_button.clicked.connect(self._confirm_reverse_sample)
+        sample_edit_row.addWidget(self.trim_sample_button)
+        sample_edit_row.addWidget(self.reverse_sample_button)
+        sample_edit_row.addStretch()
+
         waveform_column = QVBoxLayout()
         waveform_column.setContentsMargins(0, 0, 0, 0)
         waveform_column.setSpacing(6)
@@ -3213,6 +3260,7 @@ class ProgramEditorWindow(QMainWindow):
         waveform_column.addWidget(scrollbar_container)
         waveform_column.addLayout(legend_row)
         waveform_column.addLayout(sample_meta_row)
+        waveform_column.addLayout(sample_edit_row)
         waveform_column.addWidget(self.sample_load_progress)
         waveform_column.addStretch()
         waveform_container = QWidget()
@@ -3777,6 +3825,7 @@ class ProgramEditorWindow(QMainWindow):
                 entry["end"],
             )
             self._update_sample_meta_controls(entry["sptype"], entry["spitch"])
+            self._set_sample_edit_buttons_enabled(True)
         elif entry is not None:
             # header known, audio not (yet) - see _on_sample_detail_loaded
             self._set_marker_spinbox_range(entry["frame_count"])
@@ -3788,6 +3837,7 @@ class ProgramEditorWindow(QMainWindow):
                 entry["end"],
             )
             self._update_sample_meta_controls(entry["sptype"], entry["spitch"])
+            self._set_sample_edit_buttons_enabled(False)
         else:
             # nothing known about this sample yet - clear to the
             # placeholder and kick off the (fast, async - not the blocking
@@ -3823,6 +3873,7 @@ class ProgramEditorWindow(QMainWindow):
             self._set_marker_spinbox_range(frame_count)
             self.waveform_view.set_header(frame_count, start, loop_start, loop_end, end)
             self._update_sample_meta_controls(values["SPTYPE"], values["SPITCH"])
+            self._set_sample_edit_buttons_enabled(False)
 
     def _on_sample_detail_load_failed(self, sample_index, error):
         if sample_index != self.sample_list_widget.currentRow():
@@ -3834,6 +3885,15 @@ class ProgramEditorWindow(QMainWindow):
         self._update_marker_spinboxes(None, None, None, None)
         self._set_marker_spinbox_range(0)
         self._update_sample_meta_controls(None, None)
+        self._set_sample_edit_buttons_enabled(False)
+
+    def _set_sample_edit_buttons_enabled(self, enabled):
+        # Trim/Reverse need real audio in memory to transform, not just
+        # header-only markers - has_waveform(), same gate
+        # mouseDoubleClickEvent uses to decide whether a double-click
+        # should even try loading audio again
+        self.trim_sample_button.setEnabled(enabled)
+        self.reverse_sample_button.setEnabled(enabled)
 
     def _update_sample_meta_controls(self, sptype, spitch):
         # sptype/spitch None means "nothing known about this sample yet" -
@@ -3932,20 +3992,40 @@ class ProgramEditorWindow(QMainWindow):
             entry.update(markers)
         self._schedule_marker_write(sample_index, name, markers)
 
-    def _wait_for_any_signal(self, signals, timeout_ms=None):
+    def _wait_for_any_signal(self, signals, start, timeout_ms=None):
         # Blocks the calling (GUI) thread until the first of *signals*
         # fires, or *timeout_ms* elapses - while still pumping the Qt event
         # loop, so cross-thread signals (BridgeWorker) and MIDI callbacks
-        # (SamplerController) still get delivered. This is the ONE place in
-        # this window that deliberately blocks instead of returning and
-        # letting a result arrive later through a persistently-connected
-        # slot the way every other BridgeWorker signal in __init__ does -
-        # used only by _load_sample_waveform, where the whole point is a
-        # real, visible freeze (see WaveformView's own placeholder copy)
-        # rather than something to engineer around. timeout_ms=None waits
-        # forever - appropriate for an actual SDS sample dump, which can
+        # (SamplerController) still get delivered. This is the ONE
+        # mechanism in this window for deliberately blocking instead of
+        # returning and letting a result arrive later through a
+        # persistently-connected slot the way every other BridgeWorker
+        # signal in __init__ does - used by _load_sample_waveform and
+        # _perform_sample_edit_real, both of which want a real, visible
+        # freeze (see WaveformView's own placeholder copy) rather than
+        # something to engineer around. timeout_ms=None waits forever -
+        # appropriate for an actual SDS sample dump, which can
         # legitimately take minutes (see README's own transfer-time table)
         # and has no timeout of its own to inherit.
+        #
+        # *start* is the callable that actually kicks off the operation
+        # (a submit_*()/send_*()/receive_*() call) - called only AFTER
+        # every listener below is connected, never before. Every signal
+        # here fires from a background thread (BridgeWorker) or async
+        # MIDI callback (SamplerController), and there is no guarantee
+        # the GUI thread reaches this method's own connect() calls before
+        # that thread finishes and emits - a submit-then-connect ordering
+        # left a real window where a fast-completing operation could
+        # finish and emit before anything was listening, silently
+        # dropping the result and timing out for no visible reason.
+        # Found via a real hang: FakeBridge.delete_sample (a plain dict/
+        # list operation with none of real hardware's SysEx round-trip
+        # latency) reliably completed and emitted before a
+        # submit_delete_sample()-then-_wait_for_any_signal() ordering's
+        # own connect() calls ran. Connecting first closes this
+        # regardless of how fast the operation underneath ever is - a
+        # real S3kBridge/SamplerController call is never this fast today,
+        # but nothing here should depend on that staying true.
         #
         # Returns (which_index, emitted_args) for whichever signal fired
         # first, or (None, None) on timeout.
@@ -3967,7 +4047,15 @@ class ProgramEditorWindow(QMainWindow):
             timer.setSingleShot(True)
             timer.timeout.connect(loop.quit)
             timer.start(timeout_ms)
-        loop.exec()
+        # start() returning exactly False (not None, not omitted) means
+        # the operation never actually began (e.g. send_file_queue
+        # declining because another transfer is already running) - skip
+        # the wait outright rather than sitting until *timeout_ms* (or,
+        # with timeout_ms=None, forever) for a signal that will now never
+        # come. Every other start() callable here returns None (a plain
+        # submit_*() call) and is unaffected.
+        if start() is not False:
+            loop.exec()
         for sig, connection in zip(signals, connections):
             sig.disconnect(connection)
         if timer is not None:
@@ -3981,9 +4069,9 @@ class ProgramEditorWindow(QMainWindow):
         # through the normal BridgeWorker/S3kBridge connection. See
         # _SAMPLE_DETAIL_FIELDS in program_editor_bridge.py for the
         # LOOPAT1-is-the-loop-END correction this relies on.
-        self._worker.submit_sample_detail(sample_index)
         which, args = self._wait_for_any_signal(
             [self._worker.sample_detail_loaded, self._worker.sample_detail_load_failed],
+            start=lambda: self._worker.submit_sample_detail(sample_index),
             timeout_ms=20000,
         )
         logger = debug_log.get_logger()
@@ -4042,9 +4130,9 @@ class ProgramEditorWindow(QMainWindow):
             self._on_sample_chunk_received
         )
         try:
-            sampler_controller.receive_samples([(sample_index, temp_path)])
             which, args = self._wait_for_any_signal(
                 [sampler_controller.sample_received, sampler_controller.receive_finished],
+                start=lambda: sampler_controller.receive_samples([(sample_index, temp_path)]),
                 timeout_ms=None,
             )
             if which == 0:
@@ -4401,6 +4489,7 @@ class ProgramEditorWindow(QMainWindow):
                     entry["loop_end"],
                     entry["end"],
                 )
+                self._set_sample_edit_buttons_enabled(True)
             self.status_bar.showMessage(
                 f"Loaded {len(samples)} sample frames for sample {sample_index}"
             )
@@ -4408,6 +4497,352 @@ class ProgramEditorWindow(QMainWindow):
             self.main_tabs.setEnabled(True)
             self.waveform_view.set_loading(False)
             self.sample_load_progress.setVisible(False)
+
+    def _confirm_trim_sample(self):
+        sample_index = self.sample_list_widget.currentRow()
+        if sample_index < 0 or not self.waveform_view.has_waveform():
+            return
+        markers = self.waveform_view.markers()
+        frame_count = self.waveform_view.frame_count()
+        if markers["start"] == 0 and markers["end"] == frame_count - 1:
+            self.status_bar.showMessage(
+                "Nothing to trim - Start/End already cover the whole sample"
+            )
+            return
+        item = self.sample_list_widget.currentItem()
+        sample_name = item.text() if item is not None else ""
+        answer = QMessageBox.question(
+            self,
+            "Trim Sample",
+            f'Trim "{sample_name}" down to the current Start/End markers '
+            f'({markers["start"]}-{markers["end"]} of {frame_count} frames)?\n\n'
+            "This overwrites the sample's audio on the sampler and cannot "
+            "be undone.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        self._perform_sample_edit(sample_index, sample_editing.trim_samples, "Trim")
+
+    def _confirm_reverse_sample(self):
+        sample_index = self.sample_list_widget.currentRow()
+        if sample_index < 0 or not self.waveform_view.has_waveform():
+            return
+        entry = self._sample_waveform_cache.get(sample_index)
+        if entry is None or len(entry["samples"]) <= 1:
+            self.status_bar.showMessage("Nothing to reverse - sample is too short")
+            return
+        item = self.sample_list_widget.currentItem()
+        sample_name = item.text() if item is not None else ""
+        answer = QMessageBox.question(
+            self,
+            "Reverse Sample",
+            f'Reverse "{sample_name}"\'s audio?\n\n'
+            "This overwrites the sample's audio on the sampler and cannot "
+            "be undone.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        self._perform_sample_edit(sample_index, sample_editing.reverse_samples, "Reverse")
+
+    def _perform_sample_edit(self, sample_index, transform, action_label):
+        # shared by _confirm_trim_sample/_confirm_reverse_sample - both are
+        # "take the samples already in memory, transform them with a pure
+        # function from core/sample_editing.py, then get the result onto
+        # the hardware" with nothing else actually different between them
+        entry = self._sample_waveform_cache.get(sample_index)
+        if entry is None or entry["samples"] is None:
+            return
+        item = self.sample_list_widget.currentItem()
+        original_name = item.text() if item is not None else ""
+        markers = self.waveform_view.markers()
+        new_samples, new_start, new_loop_start, new_loop_end, new_end = transform(
+            entry["samples"],
+            markers["start"],
+            markers["loop_start"],
+            markers["loop_end"],
+            markers["end"],
+        )
+        framerate = entry["framerate"]
+
+        demo_mode = bool(os.environ.get("AKAISDS_DEMO_SAMPLER"))
+        sampler_controller = getattr(self._main_window, "sampler_controller", None)
+        if not demo_mode:
+            if sampler_controller is None:
+                self.status_bar.showMessage(
+                    f"Can't {action_label.lower()} sample - no Transfer Dashboard "
+                    "connection available"
+                )
+                return
+            if sampler_controller.is_transfer_busy():
+                self.status_bar.showMessage(
+                    f"Can't {action_label.lower()} sample - a transfer is already "
+                    "in progress on the Transfer Dashboard"
+                )
+                return
+
+        self.waveform_view.set_loading(True)
+        self.main_tabs.setEnabled(False)
+        self.status_bar.showMessage(
+            f'{action_label} "{original_name}" - this can take a while and will '
+            "freeze the interface..."
+        )
+        QApplication.processEvents()
+
+        try:
+            if demo_mode:
+                self._perform_sample_edit_demo(
+                    sample_index,
+                    entry,
+                    new_samples,
+                    framerate,
+                    new_start,
+                    new_loop_start,
+                    new_loop_end,
+                    new_end,
+                    action_label,
+                )
+            else:
+                self._perform_sample_edit_real(
+                    sample_index,
+                    sampler_controller,
+                    original_name,
+                    new_samples,
+                    framerate,
+                    action_label,
+                )
+        finally:
+            self.main_tabs.setEnabled(True)
+            self.waveform_view.set_loading(False)
+            self.sample_load_progress.setVisible(False)
+
+    def _perform_sample_edit_demo(
+        self,
+        sample_index,
+        entry,
+        new_samples,
+        framerate,
+        new_start,
+        new_loop_start,
+        new_loop_end,
+        new_end,
+        action_label,
+    ):
+        # SamplerController has no demo mode of its own (see AGENTS.md's
+        # "Developing without hardware") - this bypasses it entirely,
+        # mutating the cache/view directly, same reasoning as
+        # _fetch_demo_sample_audio. Paced the same way so evaluating this
+        # without hardware still shows the real time cost of a full
+        # resend, not an instant no-op - real hardware genuinely does a
+        # full SDS send for this (see _perform_sample_edit_real).
+        total = len(new_samples)
+        total_seconds = total * _DEMO_MS_PER_WORD / 1000
+        steps = max(6, round(total_seconds / 0.2))
+        step_seconds = total_seconds / steps
+        for step in range(1, steps + 1):
+            current = total * step // steps
+            self._on_sample_receive_progress(current, total)
+            self.status_bar.showMessage(
+                f"{action_label} sample (demo) - {current}/{total} frames..."
+            )
+            QApplication.processEvents()
+            time.sleep(step_seconds)
+
+        entry["samples"] = new_samples
+        entry["frame_count"] = len(new_samples)
+        entry["framerate"] = framerate
+        entry["start"] = new_start
+        entry["loop_start"] = new_loop_start
+        entry["loop_end"] = new_loop_end
+        entry["end"] = new_end
+        if sample_index == self.sample_list_widget.currentRow():
+            self._set_marker_spinbox_range(len(new_samples))
+            self.waveform_view.set_waveform(
+                new_samples, new_start, new_loop_start, new_loop_end, new_end
+            )
+        self.status_bar.showMessage(f"{action_label} complete (demo)")
+
+    def _perform_sample_edit_real(
+        self, sample_index, sampler_controller, original_name, new_samples, framerate,
+        action_label,
+    ):
+        # The only audio-replace mechanism anywhere in this stack (s3k has
+        # none at all - see AGENTS.md) is: send a full SDS dump under some
+        # sample number, then separately delete whatever used to be
+        # there. This does it in the safer of the two possible orders -
+        # send the replacement FIRST, under a temporary name
+        # (_sample_edit_temp_name), and only delete the original once
+        # that's confirmed resident:
+        #
+        # - Deleting first and sending second would risk losing the
+        #   sample outright if the send then failed for any reason
+        #   (a dropped connection, a MIDI hiccup) - a permanent loss for
+        #   what was meant to be a routine edit.
+        # - Sending the replacement under the ORIGINAL's own name first
+        #   (skipping the temp-name step) would risk a worse, quieter
+        #   failure: s3k's own docs say keygroup zones resolve a sample
+        #   by NAME, live, against whatever resident sample currently
+        #   carries it, with no uniqueness enforced on the hardware
+        #   (measured, not just theoretical). Two samples briefly sharing
+        #   the original's name would make every zone using that name
+        #   genuinely ambiguous - which one actually plays is undefined -
+        #   for however long that window lasts.
+        #
+        # So: send under a name nothing else on the sampler should be
+        # using, confirm it landed, delete the original, look up where
+        # the replacement actually ended up (its index shifts once the
+        # original - at a lower index - is gone), then rename it back
+        # with a plain SHNAME-only write (doesn't touch audio at all -
+        # see akai_sysex.build_rename_sample_request's own comment).
+        # This has not been exercised against real hardware in this
+        # codebase - it's built entirely from already-tested primitives
+        # (send_file_queue is the Transfer Dashboard's own real Send
+        # path; submit_delete_sample and the SHNAME rename write were
+        # both added and tested last session) but the specific sequence
+        # is new. Watch the first real run of this closely.
+        logger = debug_log.get_logger()
+        temp_name = _sample_edit_temp_name(original_name)
+
+        fd, temp_path = tempfile.mkstemp(suffix=".wav", prefix="akaisds_edit_")
+        os.close(fd)
+        try:
+            sds_encoder.write_wav_file(temp_path, new_samples, framerate, bit_depth=16)
+
+            progress_connection = sampler_controller.transfer_progress.connect(
+                self._on_sample_receive_progress
+            )
+
+            def _start_send():
+                # returning exactly False here (send_file_queue declining
+                # to start) makes _wait_for_any_signal skip its own wait
+                # instead of hanging until timeout_ms=None's "forever"
+                return sampler_controller.send_file_queue(
+                    [
+                        {
+                            "filepath": temp_path,
+                            "name": temp_name,
+                            "bit_depth": 16,
+                            "sample_rate": None,
+                            "mono": False,
+                        }
+                    ]
+                )
+
+            try:
+                which, args = self._wait_for_any_signal(
+                    [sampler_controller.transfer_finished],
+                    start=_start_send,
+                    timeout_ms=None,
+                )
+            finally:
+                sampler_controller.transfer_progress.disconnect(progress_connection)
+
+            if which is None or args is None:
+                logger.debug(
+                    "_perform_sample_edit_real: send_file_queue refused to start"
+                )
+                self.status_bar.showMessage(
+                    f"{action_label} failed - couldn't start sending the "
+                    "modified sample"
+                )
+                return
+
+            if not args[0]:
+                logger.debug(
+                    f"_perform_sample_edit_real: send of {temp_name!r} did not "
+                    "complete successfully"
+                )
+                self.status_bar.showMessage(
+                    f"{action_label} failed - couldn't send the modified sample. "
+                    "The original sample was not touched."
+                )
+                return
+
+            # replacement confirmed resident under temp_name - now safe to
+            # remove the original
+            which, args = self._wait_for_any_signal(
+                [self._worker.sample_deleted, self._worker.sample_delete_failed],
+                start=lambda: self._worker.submit_delete_sample(sample_index),
+                timeout_ms=20000,
+            )
+            if which != 0:
+                error = args[1] if args else "timed out waiting for a response"
+                logger.debug(
+                    f"_perform_sample_edit_real: delete of sample {sample_index} "
+                    f"failed: {error}"
+                )
+                self.status_bar.showMessage(
+                    f'{action_label} sent successfully as "{temp_name}", but '
+                    f"deleting the original failed ({error}) - both copies are "
+                    "now resident; delete the original manually."
+                )
+                self._worker.submit_sample_list()
+                return
+
+            # reload to find the replacement's actual index - it shifted
+            # once the original (at a lower index) was deleted, so this
+            # can't be known in advance, only looked up - the same live
+            # NAME-based lookup the hardware itself uses to resolve
+            # keygroup zones, not a remembered number from the send above
+            which, args = self._wait_for_any_signal(
+                [self._worker.samples_loaded, self._worker.samples_load_failed],
+                start=self._worker.submit_sample_list,
+                timeout_ms=20000,
+            )
+            if which != 0:
+                self.status_bar.showMessage(
+                    f"{action_label} sent and original deleted, but couldn't "
+                    f'refresh the sample list to rename "{temp_name}" back to '
+                    f'"{original_name}" - do it manually.'
+                )
+                return
+            samples_after_delete = args[0]
+            if temp_name not in samples_after_delete:
+                logger.debug(
+                    f"_perform_sample_edit_real: {temp_name!r} missing from the "
+                    f"reloaded list {samples_after_delete!r}"
+                )
+                self.status_bar.showMessage(
+                    f"{action_label} sent and original deleted, but "
+                    f'"{temp_name}" is missing from the reloaded sample list - '
+                    "check the sampler directly."
+                )
+                return
+            new_index = samples_after_delete.index(temp_name)
+
+            # SHNAME-only write, fire-and-forget - same as every other
+            # rename on this page (_confirm_rename_sample doesn't wait for
+            # confirmation either); writes are never coalesced, so this is
+            # guaranteed to reach the hardware
+            self._write_knob_value(
+                "SHNAME", "sample", original_name, keygroup_index=0, index=new_index
+            )
+
+            # one more reload so the sample list reflects the rename - and
+            # to land on a clean final selection: nothing stayed selected
+            # through the two reloads above for _on_samples_loaded's own
+            # restore-by-name logic to restore, so this explicitly selects
+            # the (correctly renamed again) sample itself
+            which, args = self._wait_for_any_signal(
+                [self._worker.samples_loaded, self._worker.samples_load_failed],
+                start=self._worker.submit_sample_list,
+                timeout_ms=20000,
+            )
+            self.status_bar.showMessage(f'{action_label} complete: "{original_name}"')
+            if which == 0:
+                final_samples = args[0]
+                if original_name in final_samples:
+                    self.sample_list_widget.setCurrentRow(
+                        final_samples.index(original_name)
+                    )
+        finally:
+            try:
+                os.remove(temp_path)
+            except OSError:
+                pass
 
     def _on_waveform_marker_committed(self, which, start, loop_start, loop_end, end):
         # canvas drag release - see _on_marker_spinbox_changed/

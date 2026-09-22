@@ -8,7 +8,7 @@ import time
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QObject, QTimer, Signal
 from PySide6.QtWidgets import QApplication, QLabel, QWidget
 from ui.program_editor_window import ProgramEditorWindow, _LOOP_TYPE_OPTIONS
 from core.program_editor_bridge import MULTI_PART_COUNT
@@ -49,6 +49,15 @@ class FakeBridge:
     def delete_sample(self, sample_index):
         del self._samples[sample_index]
         del self.sample_headers[sample_index]
+        # re-key every later header down by one, matching how _samples'
+        # own positions just shifted - real hardware addresses samples by
+        # position/number, so a lower-index delete shifts every later one
+        # down too; without this, a header fetch for a sample after the
+        # deleted one would silently return some OTHER sample's data
+        self.sample_headers = {
+            (i - 1 if i > sample_index else i): header
+            for i, header in self.sample_headers.items()
+        }
 
     def program_list(self):
         return self._programs
@@ -67,6 +76,9 @@ class FakeBridge:
         self.set_parameter_calls.append((param.name, program_index, value, keygroup))
         if param.region == "multi" and param.name == "MULTINAME":
             self.multi_name = value
+            return
+        if param.region == "sample" and param.name == "SHNAME":
+            self._samples[program_index] = value
             return
         # PMCHAN/PANPOS exist in both the "program" and "multipart" regions
         # (see program_editor_window.py's midi_channel_combo/pan_knob vs.
@@ -230,6 +242,64 @@ def _keygroup_row_text(editor, row):
     item = editor.keygroup_list.item(row)
     label = editor.keygroup_list.itemWidget(item).findChild(QLabel, "keygroupRangeLabel")
     return label.text()
+
+
+class FakeSamplerController(QObject):
+    # stands in for main_window.sampler_controller in
+    # _perform_sample_edit_real tests - a real QObject with real Signals
+    # (not the fake-Qt harness test_sampler_controller.py uses), since
+    # _wait_for_any_signal needs genuine signal/slot delivery through a
+    # real QEventLoop. send_file_queue mutates the SAME FakeBridge
+    # instance the editor's own BridgeWorker reads from, mirroring how
+    # real hardware is one shared device behind two separate connections
+    # (see AGENTS.md's "Samples tab" section) - a send here is visible to
+    # a subsequent submit_sample_list() the same way it would be on a
+    # real sampler.
+    transfer_progress = Signal(int, int)
+    transfer_finished = Signal(bool)
+    file_transferred = Signal(str)
+
+    def __init__(self, bridge):
+        super().__init__()
+        self._bridge = bridge
+        self.sent_entries = []
+        self.next_result = True  # what the next send's transfer_finished reports
+        self.busy = False
+
+    def is_transfer_busy(self):
+        return self.busy
+
+    def send_file_queue(self, file_entries, channel=None, starting_sample_number=None):
+        entry = file_entries[0]
+        # read the sent WAV's own samples now, while the file still
+        # exists - _perform_sample_edit_real deletes its temp file in a
+        # finally: block as soon as the whole operation returns, well
+        # before a test gets a chance to inspect it afterwards
+        from core import sds_encoder
+
+        sent_samples, sent_rate = sds_encoder.read_wav_samples(entry["filepath"])
+        self.sent_entries.append({**entry, "samples": list(sent_samples), "rate": sent_rate})
+        result = self.next_result
+        if result:
+            new_index = len(self._bridge._samples)
+            self._bridge._samples.append(entry["name"])
+            self._bridge.sample_headers[new_index] = {
+                "SSTART": 0, "SMPEND": 0, "LOOPAT1": 0, "LLNGTH1": 0,
+                "SLNGTH": 0, "SSRATE": 44100, "SPTYPE": 0, "SPITCH": 60,
+            }
+        # deferred, not synchronous - _perform_sample_edit_real connects
+        # its _wait_for_any_signal listener AFTER calling send_file_queue,
+        # same as the real (fully async) SamplerController; emitting
+        # synchronously here would fire before that connection exists and
+        # the wait would hang forever, same as the real one would if it
+        # somehow replied before the caller finished wiring up
+        QTimer.singleShot(0, lambda: self._finish_send(result, entry["filepath"]))
+        return True
+
+    def _finish_send(self, result, filepath):
+        if result:
+            self.file_transferred.emit(filepath)
+        self.transfer_finished.emit(result)
 
 
 def test_mod_source_labels_match_s3k_params_minus_env3():
@@ -1243,3 +1313,287 @@ def test_sample_list_context_actions_disabled_with_nothing_selected(editor, qapp
 
     assert editor._rename_sample_action.isEnabled() is False
     assert editor._delete_sample_action.isEnabled() is False
+
+
+# --- Samples tab: Trim/Reverse ------------------------------------------
+
+
+def _stub_demo_audio(editor, monkeypatch, samples, framerate=44100):
+    # _fetch_demo_sample_audio and _demo_sample_frame_count must always
+    # agree on a sample's length (see AGENTS.md's "Progressive waveform
+    # loading" - a mismatch between the two is exactly the bug fixed
+    # there) - the cached header/markers come from _demo_sample_frame_
+    # count, so stubbing only _fetch_demo_sample_audio with a different
+    # length leaves stale, mismatched markers behind, which broke these
+    # tests' own "nothing to do" guards during development. Stub both,
+    # always in agreement.
+    monkeypatch.setattr(
+        editor, "_fetch_demo_sample_audio", lambda sample_index: (samples, framerate)
+    )
+    monkeypatch.setattr(
+        editor, "_demo_sample_frame_count", lambda sample_index: len(samples)
+    )
+
+
+def test_trim_and_reverse_buttons_disabled_until_audio_loaded(editor, qapp, monkeypatch):
+    editor.sample_list_widget.setCurrentRow(0)
+    editor._worker.wait_until_idle()
+    _pump_until(qapp, lambda: editor.waveform_view.has_header())
+
+    assert editor.trim_sample_button.isEnabled() is False
+    assert editor.reverse_sample_button.isEnabled() is False
+
+    monkeypatch.setenv("AKAISDS_DEMO_SAMPLER", "1")
+    _stub_demo_audio(editor, monkeypatch, [0] * 500)
+    editor._load_sample_waveform()
+
+    assert editor.trim_sample_button.isEnabled() is True
+    assert editor.reverse_sample_button.isEnabled() is True
+
+    editor.sample_list_widget.setCurrentRow(-1)
+
+    assert editor.trim_sample_button.isEnabled() is False
+    assert editor.reverse_sample_button.isEnabled() is False
+
+
+def test_confirm_trim_sample_does_nothing_when_markers_cover_whole_sample(
+    editor, qapp, monkeypatch
+):
+    monkeypatch.setenv("AKAISDS_DEMO_SAMPLER", "1")
+    # stub BEFORE selecting the sample - the automatic async header fetch
+    # _on_sample_selected kicks off runs as soon as the row is selected,
+    # and caches markers derived from whichever _demo_sample_frame_count
+    # is live at that moment; stubbing afterwards leaves those markers
+    # stale/mismatched against the differently-sized stubbed audio
+    _stub_demo_audio(editor, monkeypatch, list(range(500)))
+    editor.sample_list_widget.setCurrentRow(0)
+    editor._worker.wait_until_idle()
+    _pump_until(qapp, lambda: editor.waveform_view.has_header())
+    editor._load_sample_waveform()
+    before = dict(editor._sample_waveform_cache[0])
+
+    editor._confirm_trim_sample()  # start=0, end=frame_count-1 already - nothing to do
+
+    assert editor._sample_waveform_cache[0] == before
+
+
+def test_confirm_reverse_sample_does_nothing_when_too_short(editor, qapp, monkeypatch):
+    monkeypatch.setenv("AKAISDS_DEMO_SAMPLER", "1")
+    _stub_demo_audio(editor, monkeypatch, [42])
+    editor.sample_list_widget.setCurrentRow(0)
+    editor._worker.wait_until_idle()
+    _pump_until(qapp, lambda: editor.waveform_view.has_header())
+    editor._load_sample_waveform()
+
+    editor._confirm_reverse_sample()
+
+    assert editor._sample_waveform_cache[0]["samples"] == [42]
+
+
+def test_trim_sample_in_demo_mode_shrinks_the_cached_sample_and_waveform(
+    editor, qapp, monkeypatch
+):
+    import ui.program_editor_window as pew
+
+    monkeypatch.setenv("AKAISDS_DEMO_SAMPLER", "1")
+    _stub_demo_audio(editor, monkeypatch, list(range(500)))
+    editor.sample_list_widget.setCurrentRow(0)
+    editor._worker.wait_until_idle()
+    _pump_until(qapp, lambda: editor.waveform_view.has_header())
+    editor._load_sample_waveform()
+
+    editor.waveform_view.set_marker("start", 100)
+    editor.waveform_view.set_marker("loop_start", 150)
+    editor.waveform_view.set_marker("loop_end", 300)
+    editor.waveform_view.set_marker("end", 400)
+
+    monkeypatch.setattr(
+        pew.QMessageBox, "question", lambda *a, **k: pew.QMessageBox.StandardButton.Yes
+    )
+    monkeypatch.setattr(pew, "_DEMO_MS_PER_WORD", 0.001)
+
+    editor._confirm_trim_sample()
+
+    entry = editor._sample_waveform_cache[0]
+    assert entry["samples"] == list(range(100, 401))
+    assert entry["frame_count"] == 301
+    assert (entry["start"], entry["loop_start"], entry["loop_end"], entry["end"]) == (
+        0, 50, 200, 300,
+    )
+    assert editor.waveform_view.frame_count() == 301
+    assert editor.waveform_view.markers() == {
+        "start": 0, "loop_start": 50, "loop_end": 200, "end": 300,
+    }
+
+
+def test_trim_sample_does_nothing_when_declined(editor, qapp, monkeypatch):
+    import ui.program_editor_window as pew
+
+    monkeypatch.setenv("AKAISDS_DEMO_SAMPLER", "1")
+    _stub_demo_audio(editor, monkeypatch, list(range(500)))
+    editor.sample_list_widget.setCurrentRow(0)
+    editor._worker.wait_until_idle()
+    _pump_until(qapp, lambda: editor.waveform_view.has_header())
+    editor._load_sample_waveform()
+    editor.waveform_view.set_marker("start", 100)
+    monkeypatch.setattr(
+        pew.QMessageBox, "question", lambda *a, **k: pew.QMessageBox.StandardButton.No
+    )
+
+    editor._confirm_trim_sample()
+
+    assert editor._sample_waveform_cache[0]["frame_count"] == 500
+
+
+def test_reverse_sample_in_demo_mode_reverses_the_cached_sample(editor, qapp, monkeypatch):
+    import ui.program_editor_window as pew
+
+    monkeypatch.setenv("AKAISDS_DEMO_SAMPLER", "1")
+    _stub_demo_audio(editor, monkeypatch, list(range(100)))
+    editor.sample_list_widget.setCurrentRow(0)
+    editor._worker.wait_until_idle()
+    _pump_until(qapp, lambda: editor.waveform_view.has_header())
+    editor._load_sample_waveform()
+
+    editor.waveform_view.set_marker("start", 10)
+    editor.waveform_view.set_marker("loop_start", 30)
+    editor.waveform_view.set_marker("loop_end", 60)
+    editor.waveform_view.set_marker("end", 90)
+
+    monkeypatch.setattr(
+        pew.QMessageBox, "question", lambda *a, **k: pew.QMessageBox.StandardButton.Yes
+    )
+    monkeypatch.setattr(pew, "_DEMO_MS_PER_WORD", 0.001)
+
+    editor._confirm_reverse_sample()
+
+    entry = editor._sample_waveform_cache[0]
+    assert entry["samples"] == list(reversed(range(100)))
+    assert entry["frame_count"] == 100
+    # frame i -> 99 - i
+    assert (entry["start"], entry["loop_start"], entry["loop_end"], entry["end"]) == (
+        99 - 90, 99 - 60, 99 - 30, 99 - 10,
+    )
+
+
+def test_trim_sample_real_mode_without_sampler_controller_shows_message(
+    editor, qapp, monkeypatch
+):
+    import ui.program_editor_window as pew
+
+    monkeypatch.delenv("AKAISDS_DEMO_SAMPLER", raising=False)
+    editor.sample_list_widget.setCurrentRow(0)
+    editor._worker.wait_until_idle()
+    _pump_until(qapp, lambda: editor.waveform_view.has_header())
+    # real mode has no sampler_controller on the fixture's bare QWidget
+    # main_window, mirroring _load_sample_waveform's own equivalent guard
+    monkeypatch.setattr(
+        pew.QMessageBox, "question", lambda *a, **k: pew.QMessageBox.StandardButton.Yes
+    )
+    # force has_waveform() true without a real (demo-mode-only) audio
+    # fetch, since this test is specifically about the pre-fetch guard
+    editor.waveform_view.set_waveform([0] * 10, 0, 2, 7, 9)
+    editor._sample_waveform_cache[0] = {
+        "samples": [0] * 10, "framerate": 44100, "frame_count": 10,
+        "start": 0, "loop_start": 2, "loop_end": 7, "end": 9,
+        "sptype": 0, "spitch": 60,
+    }
+
+    editor._confirm_reverse_sample()
+
+    assert "no Transfer Dashboard connection available" in editor.status_bar.currentMessage()
+
+
+def _select_sample_with_full_audio(editor, qapp, sample_index, samples, markers):
+    editor.sample_list_widget.setCurrentRow(sample_index)
+    editor._worker.wait_until_idle()
+    _pump_until(qapp, lambda: editor.waveform_view.has_header())
+    editor.waveform_view.set_waveform(
+        samples, markers["start"], markers["loop_start"], markers["loop_end"],
+        markers["end"],
+    )
+    editor._sample_waveform_cache[sample_index] = {
+        "samples": samples, "framerate": 44100, "frame_count": len(samples),
+        "sptype": 0, "spitch": 60, **markers,
+    }
+
+
+def test_reverse_sample_real_mode_happy_path_sends_deletes_and_renames(
+    editor, qapp, monkeypatch
+):
+    # the real (non-demo) send/delete/rename pipeline - see
+    # _perform_sample_edit_real's own comment for why this exact order
+    # (send under a temp name, confirm, delete original, look up by name,
+    # rename back) was chosen. FakeSamplerController mutates the SAME
+    # FakeBridge the editor's BridgeWorker reads from, mirroring how real
+    # hardware is one shared device behind two connections.
+    import ui.program_editor_window as pew
+
+    monkeypatch.delenv("AKAISDS_DEMO_SAMPLER", raising=False)
+    monkeypatch.setattr(
+        pew.QMessageBox, "question", lambda *a, **k: pew.QMessageBox.StandardButton.Yes
+    )
+    bridge = editor._bridge
+    fake_sampler = FakeSamplerController(bridge)
+    editor._main_window.sampler_controller = fake_sampler
+
+    original_samples = list(range(100))
+    _select_sample_with_full_audio(  # sample 0 == "SQUARE"
+        editor, qapp, 0, original_samples,
+        {"start": 10, "loop_start": 30, "loop_end": 60, "end": 90},
+    )
+
+    editor._confirm_reverse_sample()
+
+    # sent the reversed audio under a distinct temp name first, never the
+    # original's own name (see the ambiguous-name-resolution reasoning in
+    # _perform_sample_edit_real's own comment)
+    assert len(fake_sampler.sent_entries) == 1
+    assert fake_sampler.sent_entries[0]["name"] == "SQUARE-TMP"
+    assert fake_sampler.sent_entries[0]["samples"] == list(reversed(original_samples))
+
+    # original deleted, replacement (now at whatever index the delete
+    # shifted it to) renamed back to the original's own name
+    assert "SQUARE-TMP" not in bridge.sample_list()
+    assert bridge.sample_list().count("SQUARE") == 1
+    rename_calls = [c for c in bridge.set_parameter_calls if c[0] == "SHNAME"]
+    assert len(rename_calls) == 1
+    assert rename_calls[0][2] == "SQUARE"
+
+    assert "complete" in editor.status_bar.currentMessage().lower()
+    # landed on a clean final selection - the renamed sample, not nothing
+    assert editor.sample_list_widget.currentItem() is not None
+    assert editor.sample_list_widget.currentItem().text() == "SQUARE"
+
+
+def test_reverse_sample_real_mode_send_failure_leaves_original_untouched(
+    editor, qapp, monkeypatch
+):
+    # if the send fails, the original must never be deleted - see
+    # _perform_sample_edit_real's own comment on why this ordering
+    # (send-then-delete, not delete-then-send) was chosen specifically to
+    # avoid this failure mode losing the sample outright
+    import ui.program_editor_window as pew
+
+    monkeypatch.delenv("AKAISDS_DEMO_SAMPLER", raising=False)
+    monkeypatch.setattr(
+        pew.QMessageBox, "question", lambda *a, **k: pew.QMessageBox.StandardButton.Yes
+    )
+    bridge = editor._bridge
+    original_samples_before = list(bridge.sample_list())
+    fake_sampler = FakeSamplerController(bridge)
+    fake_sampler.next_result = False  # simulate a failed/incomplete send
+    editor._main_window.sampler_controller = fake_sampler
+
+    _select_sample_with_full_audio(
+        editor, qapp, 0, list(range(50)),
+        {"start": 0, "loop_start": 10, "loop_end": 40, "end": 49},
+    )
+
+    editor._confirm_reverse_sample()
+
+    assert bridge.sample_list() == original_samples_before  # nothing deleted
+    assert not any(c[0] == "SHNAME" for c in bridge.set_parameter_calls)
+    message = editor.status_bar.currentMessage().lower()
+    assert "failed" in message
+    assert "not touched" in message

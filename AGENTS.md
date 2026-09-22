@@ -835,6 +835,121 @@ neither needed the same kind of nominal-placeholder substitution
 above): those markers actively break when collapsed to `(0,0,0,0)`
 (`clamp_marker`'s neighbour bounds collapse too), these two fields don't.
 
+### Trim/Reverse, and duplicate/timestretch/resample (s3k/s3ked capability audit)
+
+Added 2026-09-22. Before building this, checked whether `s3k`/`s3ked`
+already provide any of: sample/program/keygroup duplication, hardware
+time-stretch, or hardware resampling. **None exist.** `s3k/messages.py`'s
+only structural/destructive message classes are `DeleteProgram`/
+`DeleteKeygroup`/`DeleteSample` - no `Copy`/`Duplicate`/`Clone` class
+anywhere, confirmed by grepping both packages for "copy"/"duplicate"/
+"clone" (the only hits are license headers and prose about duplicate
+*names*, an unrelated problem - see `s3k/analysis.py`'s `ambiguous()`).
+`SSRATE` is a plain metadata byte in the sample header (`s3k/params.py`) -
+writing it changes what rate the hardware *declares*, not the actual
+audio data; there is no DSP resample or time-stretch operation anywhere
+in either package. This repo's own `sds_encoder.resample_to_target_rate`
+is the only real resampling in this whole stack, and it's client-side
+(runs before a send, already used for generic-device sends) - if
+duplicate-with-resample or duplicate-plain is ever wanted, it reuses the
+same send pipeline described below; time-stretch (changing speed without
+changing pitch) would need genuinely new DSP work, unrelated to anything
+here.
+
+**Trim** (cut to the current Start/End markers) and **Reverse** both
+needed a way to get modified audio back onto the hardware - something
+neither `s3k` nor `s3ked`'s own TUI app (`s3ked/app.py`, pure
+parameter/header editor, zero sample-audio capability - checked directly)
+has ever done. The only audio-replace mechanism anywhere in this stack is
+this repo's own `SamplerController.send_file_queue` (the Transfer
+Dashboard's real Send path, already tested against hardware) plus
+`BridgeWorker.submit_delete_sample` (added last session).
+
+The math (`core/sample_editing.py`, pure functions, no Qt/MIDI):
+`trim_samples`/`reverse_samples` both take/return the same four markers
+`WaveformView.markers()` already uses. Trim keeps `samples[start:end+1]`
+and re-bases the loop markers into the new, shorter buffer (they're
+always inside `[start, end]` on entry - `clamp_marker` guarantees
+`start <= loop_start <= loop_end <= end` - so a trim never clips into an
+active loop, only shifts it). Reverse mirrors every marker (not just the
+loop ones - Start/End too) around `frame_count - 1 - i`; loop *length*
+(`loop_end - loop_start`) is invariant under this, only its position
+mirrors - a useful self-check, exercised directly in
+`tests/test_sample_editing.py`.
+
+**Why send-then-delete, and why a temp name** (`_perform_sample_edit_real`
+in `program_editor_window.py`): two failure modes had to be designed
+around, not just the "needs a confirmation dialog" the user already knew
+about:
+
+- Deleting the original before confirming the replacement sent
+  successfully would risk losing the sample outright if the send then
+  failed for any reason - unacceptable for what's meant to be a routine
+  edit. So the replacement is sent FIRST, and the original is only
+  deleted once that's confirmed resident.
+- Sending the replacement under the ORIGINAL's own name (skipping a temp
+  name) would risk a subtler, worse failure: verified via `s3k/
+  analysis.py`'s own docstrings (`s3k` trusts these as measured fact, not
+  inferred - see this file's own convention) that **keygroup zones
+  resolve a sample by NAME, live, against whatever resident sample
+  currently carries it** (`s3k/params.py`'s `SBADD1..4` - the field
+  that looks like a stored pointer - is documented as "Calculated ...
+  (internal)", i.e. derived from a name lookup, not authoritative
+  itself) - and that the hardware enforces **no uniqueness** on that name
+  (measured, `analysis.py`'s `ambiguous()`: "renaming one resident sample
+  to another's name left ten resident with two carrying it... cannot be
+  resolved to one of them"). Two samples briefly sharing the original's
+  name during the send/delete window would make every zone using that
+  name genuinely ambiguous for however long that window lasts - a worse,
+  quieter failure than the data-loss one above. `_sample_edit_temp_name`
+  (module-level, `program_editor_window.py`) sidesteps this entirely by
+  never using the original's name until the original is already gone:
+  truncates to leave room for a fixed `"-TMP"` suffix (`AKAI_CHARSET` has
+  no underscore).
+
+So the sequence is: send under `<name>-TMP` -> confirm resident -> delete
+the original -> reload and find `<name>-TMP`'s new index (it shifted once
+the original, at a lower index, was deleted - looked up by name, the same
+way the hardware itself resolves zones, never assumed from the send
+above) -> `SHNAME`-only rename back to the original name (doesn't touch
+audio - see `akai_sysex.build_rename_sample_request`'s own comment) ->
+reload once more and explicitly select the result. Every individual step
+(send, delete, SHNAME write) is a previously-tested primitive; this exact
+sequence is new and has not been exercised against real hardware - watch
+the first real run closely. Demo mode (`_perform_sample_edit_demo`)
+bypasses all of this - `SamplerController` has no demo mode of its own
+(see "Developing without hardware") - mutating the cache/`WaveformView`
+directly instead, paced the same way `_fetch_demo_sample_audio` already
+is so evaluating this without hardware still shows the real time cost of
+a full resend.
+
+**Real bug found and fixed while building this**: `_wait_for_any_signal`
+used to be called as `submit_*(); which, args = self._wait_for_any_signal
+(signals, timeout_ms=...)` - connect-*after*-submitting. Every signal it
+waits on fires from a background thread (`BridgeWorker`) or async MIDI
+callback (`SamplerController`), and nothing guaranteed the GUI thread
+reached the `connect()` calls before that thread finished and emitted.
+Against real hardware this window is normally unhittable (a real SysEx
+round-trip takes real milliseconds-plus); against `tests/test_program_
+editor_window.py`'s `FakeBridge.delete_sample` (a plain dict/list
+operation with none of that latency) it was **reliably lost, every run** -
+found via `test_reverse_sample_real_mode_happy_path_sends_deletes_and_
+renames` hanging for a full 20s timeout despite the delete having
+actually succeeded (confirmed: `bridge.sample_list()` was already
+correct by the time the wait gave up - the emission simply arrived before
+anything was listening for it). `_wait_for_any_signal` now takes a
+required `start` callable, invoked only after every listener is
+connected - every caller (`_fetch_sample_header_blocking`,
+`_fetch_sample_audio_blocking`, and the four new waits in
+`_perform_sample_edit_real`) was updated to move its `submit_*()`/
+`send_*()`/`receive_*()` call into `start=`. A `start()` that returns
+exactly `False` (not `None`, not omitted - `send_file_queue` declining to
+start is the one real case) makes `_wait_for_any_signal` skip its own
+wait outright, rather than hanging until `timeout_ms` - or, for the send
+step's own `timeout_ms=None`, forever - waiting for a signal that will
+now never come. If you add a new blocking wait anywhere on this page,
+this ordering is not optional - see the method's own comment.
+
 ## Testing
 
 `TESTING.md` currently undersells this a little - as of this note there's also
