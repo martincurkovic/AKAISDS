@@ -220,6 +220,10 @@ _SAMPLE_DETAIL_FIELDS = [
     "LLNGTH1",
     "SLNGTH",
     "SSRATE",
+    "SPTYPE",  # playback/loop type - 0..3, see program_editor_window.py's
+    # _SAMPLE_PLAYBACK_TYPE_OPTIONS for the raw-byte-order label/tooltip list
+    "SPITCH",  # original pitch (root note) - 21..127, narrower than the
+    # usual 0..127 MIDI note range (s3k.params: "21 to 127 represents A1 to G8")
 ]
 
 _PROGRAM_LEVEL_FIELDS = [
@@ -346,9 +350,9 @@ class BridgeWorker(QThread):
     write_succeeded = Signal(str, str, object)
     write_failed = Signal(str, str, str)
 
-    # DELP/DELK - S3kBridge.delete_program/delete_keygroup default to
-    # confirm=True, which waits for and raises on the hardware's own
-    # OK/error reply (see s3k.bridge's "_destructive"), so a *_deleted
+    # DELP/DELK/DELS - S3kBridge.delete_program/delete_keygroup/delete_sample
+    # default to confirm=True, which waits for and raises on the hardware's
+    # own OK/error reply (see s3k.bridge's "_destructive"), so a *_deleted
     # signal here means the sampler actually applied the delete, not just
     # that the frame was sent. Like writes, these are never coalesced -
     # every delete the user confirms must reach the hardware.
@@ -357,6 +361,16 @@ class BridgeWorker(QThread):
 
     keygroup_deleted = Signal(int, int)  # program_index, keygroup_index
     keygroup_delete_failed = Signal(int, int, str)
+
+    # unlike DELP, s3k/s3ked document no "last one is silently ignored"
+    # restriction for DELS - S3kBridge.clear_memory empties the sample list
+    # down to zero the same way it does programs down to one, and
+    # DemoBridge.delete_sample has no last-sample special case either. So,
+    # unlike _update_list_context_actions_enabled's program_list.count() > 1
+    # guard, deleting a sample is enabled whenever one is selected, with no
+    # count floor.
+    sample_deleted = Signal(int)  # sample_index
+    sample_delete_failed = Signal(int, str)
 
     # True the moment any job is queued while nothing else is pending, False
     # the moment the queue drains back to empty - one continuous span across
@@ -445,6 +459,9 @@ class BridgeWorker(QThread):
 
     def submit_delete_keygroup(self, program_index, keygroup_index):
         self._submit(("delete_keygroup", program_index, keygroup_index))
+
+    def submit_delete_sample(self, sample_index):
+        self._submit(("delete_sample", sample_index))
 
     def stop(self):
         # lets whatever is already queued (in particular, pending writes)
@@ -714,3 +731,11 @@ class BridgeWorker(QThread):
             self.keygroup_delete_failed.emit(program_index, keygroup_index, str(e))
             return
         self.keygroup_deleted.emit(program_index, keygroup_index)
+
+    def _handle_delete_sample(self, sample_index):
+        try:
+            self._bridge.delete_sample(sample_index)
+        except Exception as e:
+            self.sample_delete_failed.emit(sample_index, str(e))
+            return
+        self.sample_deleted.emit(sample_index)

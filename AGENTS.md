@@ -760,6 +760,81 @@ back to the same physical sample's `SLNGTH` on the same device, so they
 were never expected to disagree the way an arbitrary demo placeholder
 could.
 
+### Sample loop type, root note, and rename/delete
+
+Added 2026-09-22 alongside progressive waveform loading. Three additions to
+the Samples tab, all mirroring existing patterns elsewhere on this page
+rather than inventing new ones:
+
+- **Loop type** (`sample_loop_type_combo`) writes `SPTYPE` (region
+  `"sample"`, raw byte 0-3) - the SAMPLE's own playback/loop type, a
+  *different* hardware field from `ZPLAY` (the per-keygroup-ZONE override
+  of it, built where the Keygroup tab's own loop-type combo is - see
+  `_LOOP_TYPE_OPTIONS`'s own comment). `_SAMPLE_PLAYBACK_TYPE_OPTIONS` is built
+  from `_LOOP_TYPE_OPTIONS`'s own tooltips (indices 1-4, dropping ZPLAY's
+  extra "As sample" choice - meaningless when SPTYPE is the very thing
+  being edited) rather than retyped by hand: s3k.params' own SPTYPE
+  `values=` labels ("Normal looping"/"Loop until release"/"No
+  looping"/"Play to sample end") line up 1:1 with ZPLAY's "Loop in
+  release"/"Loop til release"/"No loops"/"Play to sample end", so this
+  keeps the two comboboxes' explanatory tooltip text identical without
+  retyping it, or letting it silently drift if `_LOOP_TYPE_OPTIONS` is
+  ever revised. `test_sample_playback_type_options_match_s3k_params_sptype`
+  guards the label alignment the same way
+  `test_mod_source_labels_match_s3k_params_minus_env3` guards
+  `_MOD_SOURCE_LABELS`.
+- **Root note** (`sample_root_note_spinbox`) writes `SPITCH` (region
+  `"sample"`) via `NoteSpinBox`, same C3-is-middle-C convention as every
+  other note field on this page (`LONOTE`/`HINOTE` etc. - see "Note
+  names" above) - **but** ranged `21..127`, not the usual `0..127`:
+  s3k.params declares SPITCH's own range that way ("21 to 127 represents
+  A1 to G8" in *its* transcription's octave convention, which is NOT the
+  same convention `midi_note_to_name` uses - note 21 displays as "A-1"
+  here, not "A1"; this is expected, not a bug - see "Note names" above
+  for why this app's own convention is the one to trust). `setRange(21,
+  127)` must be called explicitly after constructing `NoteSpinBox()`,
+  which otherwise defaults to `0..127`.
+- **Rename/delete** on `sample_list_widget` mirror `program_list`'s own
+  `ActionsContextMenu` + `QAction` shape exactly. `_DELETE_SHORTCUTS`
+  is now a module-level constant shared by all three lists' delete
+  actions, hoisted out of `__init__` so `_build_samples_tab` - which runs
+  later and builds `sample_list_widget` itself - can reuse it.
+  `_prompt_program_name`/a new `_prompt_sample_name` both go through a
+  shared `_prompt_akai_name(title, label, current_name)` now (same
+  `QInputDialog` + `AKAI_CHARSET` validator shape, just different title/
+  label text). Rename writes `SHNAME` (region `"sample"`) and also has to
+  push the new name into every zone's sample-choice combo
+  (`_zone_combos`, populated in `_on_samples_loaded`) via
+  `_update_zone_sample_combo_names` - same "a rename leaves a stale copy
+  of the name in some other widget until the next full Refresh" bug class
+  `_update_multi_program_combo_names` already exists to prevent for
+  program renames, same `index + 1` offset for the blank `"-"`
+  placeholder at combo index 0. Delete submits `DELS` via a new
+  `BridgeWorker.submit_delete_sample`/`sample_deleted`/
+  `sample_delete_failed` (mirrors `submit_delete_program`/
+  `submit_delete_keygroup` exactly) and, on success, does a full
+  `submit_sample_list()` reload rather than a targeted removal - indices
+  shift after a delete, same reasoning as program/keygroup delete.
+  **Unlike program delete**, there's no "last one is silently ignored by
+  the hardware" restriction found in `s3k`/`s3ked` for `DELS` (`s3k.
+  bridge.S3kBridge.clear_memory` empties the sample list down to zero the
+  same way it empties programs down to one, and `DemoBridge.delete_sample`
+  has no last-sample special case either) - so `_delete_sample_action`
+  has no `count() > 1` guard the way `_delete_program_action` does. If
+  real hardware is ever found to silently ignore deleting the last
+  sample too, add the same guard back.
+
+Both `SPTYPE` and `SPITCH` are in `_SAMPLE_DETAIL_FIELDS` now, so they
+arrive in the same `sample_detail_loaded` payload every other
+header-only field already does (no extra bridge round trip). `DemoBridge`'s
+own all-zero header means `SPTYPE` reads back `0` ("Normal looping",
+already meaningful) and `SPITCH` reads back `0` (below `21`, silently
+clamped up to `21` by `NoteSpinBox`'s own range) - both benign,
+neither needed the same kind of nominal-placeholder substitution
+`_demo_sample_frame_count` needed for loop-point frame_count (see just
+above): those markers actively break when collapsed to `(0,0,0,0)`
+(`clamp_marker`'s neighbour bounds collapse too), these two fields don't.
+
 ## Testing
 
 `TESTING.md` currently undersells this a little - as of this note there's also

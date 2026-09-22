@@ -540,6 +540,62 @@ def test_worker_writes_are_never_coalesced():
     assert ("PMCHAN", 1, 9, 0) in bridge.calls
 
 
+# --- BridgeWorker: delete sample ---------------------------------------------
+
+
+class _DeleteSampleBridge:
+    def __init__(self, error=None):
+        self.calls = []
+        self._error = error
+
+    def delete_sample(self, sample_index, *, confirm=True):
+        if self._error:
+            raise self._error
+        self.calls.append(sample_index)
+
+
+def test_worker_deletes_sample_and_reports_success():
+    bridge = _DeleteSampleBridge()
+    worker = BridgeWorker(bridge)
+    deleted, failed = [], []
+    worker.sample_deleted.connect(deleted.append)
+    worker.sample_delete_failed.connect(lambda *a: failed.append(a))
+
+    worker.submit_delete_sample(3)
+    worker.process_pending()
+
+    assert bridge.calls == [3]
+    assert deleted == [3]
+    assert failed == []
+
+
+def test_worker_emits_sample_delete_failed_on_error():
+    bridge = _DeleteSampleBridge(error=RuntimeError("device timed out"))
+    worker = BridgeWorker(bridge)
+    deleted, failed = [], []
+    worker.sample_deleted.connect(deleted.append)
+    worker.sample_delete_failed.connect(lambda *a: failed.append(a))
+
+    worker.submit_delete_sample(2)
+    worker.process_pending()
+
+    assert deleted == []
+    assert failed == [(2, "device timed out")]
+
+
+def test_worker_deletes_samples_are_never_coalesced():
+    # same reasoning as writes - every confirmed delete must reach the
+    # hardware, unlike the coalesced "current state of X" read kinds
+    bridge = _DeleteSampleBridge()
+    worker = BridgeWorker(bridge)
+
+    worker.submit_delete_sample(0)
+    worker.submit_delete_sample(1)
+    worker.process_pending()
+
+    assert bridge.calls == [0, 1]
+
+
 # --- BridgeWorker: multi parts ----------------------------------------------------
 
 

@@ -62,6 +62,16 @@ from core import debug_log
 from core.midi_notes import midi_note_to_name
 from core.program_editor_bridge import BridgeWorker, MULTI_PART_COUNT
 
+# shared by every list's "Delete ..." QAction (program/keygroup/sample) -
+# see the construction comment where the program/keygroup ones are built
+# in __init__ for why this needs to be a list of three QKeySequences and
+# WidgetShortcut-scoped.
+_DELETE_SHORTCUTS = [
+    QKeySequence(Qt.Key.Key_Delete),
+    QKeySequence(Qt.Key.Key_Backspace),
+    QKeySequence("Ctrl+Backspace"),
+]
+
 # (label, tooltip) per ZPLAY value, in raw-byte order (0-4) - labels are the
 # abbreviated forms the front panel itself uses; tooltips spell out what
 # each actually does on playback. Module-level (not just __init__-local)
@@ -93,6 +103,27 @@ _LOOP_TYPE_OPTIONS = [
         "Ignores note-off and always plays through to the physical "
         "end of the sample, regardless of when the key is released.",
     ),
+]
+
+# (label, tooltip) per SPTYPE value, in raw-byte order (0-3) - SPTYPE is the
+# SAMPLE's own playback/loop type (Samples tab), a different hardware field
+# from ZPLAY above (a per-KEYGROUP-ZONE override of it), but the same four
+# underlying behaviours: s3k.params' own transcription of SPTYPE's values=
+# ("Normal looping"/"Loop until release"/"No looping"/"Play to sample end")
+# lines up 1:1 with ZPLAY's "Loop in release"/"Loop til release"/"No loops"/
+# "Play to sample end" once ZPLAY's own extra "As sample" choice (index 0
+# there) is dropped - that one means "defer to the sample's own SPTYPE",
+# which is meaningless when SPTYPE is the very thing being edited here.
+# Tooltips are taken directly from _LOOP_TYPE_OPTIONS (indices 1-4) rather
+# than retyped by hand, pairing each with SPTYPE's own label wording -
+# keeps the explanatory text identical between the two comboboxes, and
+# means it can't silently drift if _LOOP_TYPE_OPTIONS's own wording is
+# ever revised.
+_SAMPLE_PLAYBACK_TYPE_OPTIONS = [
+    ("Normal looping", _LOOP_TYPE_OPTIONS[1][1]),  # ZPLAY's "Loop in release"
+    ("Loop until release", _LOOP_TYPE_OPTIONS[2][1]),  # ZPLAY's "Loop til release"
+    ("No looping", _LOOP_TYPE_OPTIONS[3][1]),  # ZPLAY's "No loops"
+    ("Play to sample end", _LOOP_TYPE_OPTIONS[4][1]),  # same label, same tooltip
 ]
 
 # (label, tooltip) per PORTYPE value - s3k.params transcribes this field as
@@ -380,6 +411,10 @@ class ProgramEditorWindow(QMainWindow):
         self._worker.keygroup_delete_failed.connect(
             lambda _p, _k, e: self.status_bar.showMessage(f"Couldn't delete keygroup: {e}")
         )
+        self._worker.sample_deleted.connect(self._on_sample_deleted)
+        self._worker.sample_delete_failed.connect(
+            lambda _index, e: self.status_bar.showMessage(f"Couldn't delete sample: {e}")
+        )
         # automatic, async header-only fetch triggered by plain sample
         # selection (_on_sample_selected) - separate from
         # _fetch_sample_header_blocking's own transient listener on these
@@ -417,13 +452,10 @@ class ProgramEditorWindow(QMainWindow):
         # action to its own list actually having focus - without it, both
         # actions would fire together (an "ambiguous shortcut" warning)
         # whenever the window has focus at all, since they'd otherwise
-        # share the same shortcut at WindowShortcut scope.
-        _delete_shortcuts = [
-            QKeySequence(Qt.Key.Key_Delete),
-            QKeySequence(Qt.Key.Key_Backspace),
-            QKeySequence("Ctrl+Backspace"),
-        ]
-
+        # share the same shortcut at WindowShortcut scope. Module-level
+        # (_DELETE_SHORTCUTS) rather than __init__-local since
+        # _build_samples_tab's own delete-sample action needs the same
+        # list and is built later, outside __init__.
         self.program_list.setContextMenuPolicy(Qt.ContextMenuPolicy.ActionsContextMenu)
         # keygroups have no name field on the hardware at all - PRNAME is a
         # program-level field (s3k.params) - so rename only ever applies to
@@ -438,7 +470,7 @@ class ProgramEditorWindow(QMainWindow):
         self.program_list.addAction(_program_list_separator)
 
         self._delete_program_action = QAction("Delete Program...", self.program_list)
-        self._delete_program_action.setShortcuts(_delete_shortcuts)
+        self._delete_program_action.setShortcuts(_DELETE_SHORTCUTS)
         self._delete_program_action.setShortcutContext(Qt.ShortcutContext.WidgetShortcut)
         self._delete_program_action.triggered.connect(self._confirm_delete_program)
         self._delete_program_action.setEnabled(False)
@@ -446,7 +478,7 @@ class ProgramEditorWindow(QMainWindow):
 
         self.keygroup_list.setContextMenuPolicy(Qt.ContextMenuPolicy.ActionsContextMenu)
         self._delete_keygroup_action = QAction("Delete Keygroup...", self.keygroup_list)
-        self._delete_keygroup_action.setShortcuts(_delete_shortcuts)
+        self._delete_keygroup_action.setShortcuts(_DELETE_SHORTCUTS)
         self._delete_keygroup_action.setShortcutContext(Qt.ShortcutContext.WidgetShortcut)
         self._delete_keygroup_action.triggered.connect(self._confirm_delete_keygroup)
         self._delete_keygroup_action.setEnabled(False)
@@ -1768,6 +1800,9 @@ class ProgramEditorWindow(QMainWindow):
             self._update_list_context_actions_enabled
         )
         self.sample_list_widget.currentItemChanged.connect(self._on_sample_selected)
+        self.sample_list_widget.itemSelectionChanged.connect(
+            self._update_list_context_actions_enabled
+        )
         self.waveform_view.load_requested.connect(self._load_sample_waveform)
         self.waveform_view.marker_committed.connect(self._on_waveform_marker_committed)
         self.waveform_view.markers_changed.connect(self._update_marker_spinboxes)
@@ -2226,10 +2261,21 @@ class ProgramEditorWindow(QMainWindow):
         )
         self._delete_keygroup_action.setEnabled(self.keygroup_list.currentRow() >= 0)
 
-    def _prompt_program_name(self, current_name):
+        # unlike DELP, no "last one is silently ignored" restriction is
+        # documented for DELS (see sample_deleted's own comment in
+        # program_editor_bridge.py) - no count() > 1 guard needed here
+        has_sample = self.sample_list_widget.currentRow() >= 0
+        self._rename_sample_action.setEnabled(has_sample)
+        self._delete_sample_action.setEnabled(has_sample)
+
+    def _prompt_akai_name(self, title, label, current_name):
+        # shared by _prompt_program_name and _prompt_sample_name - PRNAME
+        # and SHNAME are both 12-char AKAI_CHARSET text fields, so the
+        # dialog/validation shape is identical; only the title/label text
+        # and what happens with the result differ per caller
         dialog = QInputDialog(self)
-        dialog.setWindowTitle("Rename Program")
-        dialog.setLabelText("Program name:")
+        dialog.setWindowTitle(title)
+        dialog.setLabelText(label)
         dialog.setTextValue(current_name)
         # same character-set/length constraints as the controls page's own
         # name field (_build_akai_name_edit) - QInputDialog builds its own
@@ -2251,6 +2297,12 @@ class ProgramEditorWindow(QMainWindow):
         # since encode_name would uppercase it on write regardless (see
         # _on_program_name_typed's own comment)
         return dialog.textValue().rstrip().upper()
+
+    def _prompt_program_name(self, current_name):
+        return self._prompt_akai_name("Rename Program", "Program name:", current_name)
+
+    def _prompt_sample_name(self, current_name):
+        return self._prompt_akai_name("Rename Sample", "Sample name:", current_name)
 
     def _confirm_rename_program(self):
         item = self.program_list.currentItem()
@@ -2335,6 +2387,62 @@ class ProgramEditorWindow(QMainWindow):
             "zone_index": self._zone_button_group.checkedId(),
         }
         self._worker.submit_keygroups(program_index)
+
+    def _confirm_rename_sample(self):
+        item = self.sample_list_widget.currentItem()
+        if item is None:
+            return
+        sample_index = self.sample_list_widget.currentRow()
+        current_name = item.text()
+        new_name = self._prompt_sample_name(current_name)
+        if new_name is None or new_name == current_name:
+            return
+        item.setText(new_name)
+        self._update_zone_sample_combo_names(sample_index, new_name)
+        self._write_knob_value(
+            "SHNAME", "sample", new_name, keygroup_index=0, index=sample_index
+        )
+
+    def _update_zone_sample_combo_names(self, sample_index, name):
+        # same reasoning/convention as _update_multi_program_combo_names -
+        # a zone's sample-choice combo (SNAME1..4) shows the assigned
+        # sample's NAME as its current text, not just an index, and a
+        # rename left these showing the old name until the next full
+        # Refresh. combo index is always sample_index + 1 (index 0 is the
+        # blank "-" placeholder - see _on_samples_loaded), same offset as
+        # the multi-part program combos use for the same reason.
+        if sample_index < 0:
+            return
+        for combo in self._zone_combos:
+            combo.setItemText(sample_index + 1, name)
+
+    def _confirm_delete_sample(self):
+        item = self.sample_list_widget.currentItem()
+        if item is None:
+            return
+        sample_index = self.sample_list_widget.currentRow()
+        sample_name = item.text()
+        answer = QMessageBox.question(
+            self,
+            "Delete Sample",
+            f'Delete sample "{sample_name}"?\n\n'
+            "This cannot be undone.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        self.status_bar.showMessage(f'Deleting sample "{sample_name}"…')
+        self._worker.submit_delete_sample(sample_index)
+
+    def _on_sample_deleted(self, sample_index):
+        self.status_bar.showMessage("Sample deleted")
+        # full reload, not a targeted removal - every sample index after
+        # the deleted one shifts down by one, same reasoning as
+        # _on_program_deleted (no PRGNUM-style renumbering concern here,
+        # but the index shift itself is the same problem a targeted
+        # removal would get wrong)
+        self._worker.submit_sample_list()
 
     def _on_keygroup_selected(self, current, previous):
         if current is None:
@@ -2904,6 +3012,34 @@ class ProgramEditorWindow(QMainWindow):
         self.sample_list_widget.setObjectName("sampleList")
         self.sample_list_widget.setFixedWidth(200)
 
+        # rename/delete, same ActionsContextMenu + QAction shape as
+        # program_list's own in __init__ (see its construction comment for
+        # why: DELS has no device-side confirmation, so
+        # _confirm_delete_sample's QMessageBox IS the required arm-then-
+        # fire step, and WidgetShortcut scoping is what lets this list's
+        # own Delete/Backspace not collide with program_list's/keygroup_
+        # list's identical shortcuts). Built here rather than in __init__
+        # since sample_list_widget itself doesn't exist until this method
+        # runs.
+        self.sample_list_widget.setContextMenuPolicy(
+            Qt.ContextMenuPolicy.ActionsContextMenu
+        )
+        self._rename_sample_action = QAction("Rename Sample...", self.sample_list_widget)
+        self._rename_sample_action.triggered.connect(self._confirm_rename_sample)
+        self._rename_sample_action.setEnabled(False)
+        self.sample_list_widget.addAction(self._rename_sample_action)
+
+        _sample_list_separator = QAction(self.sample_list_widget)
+        _sample_list_separator.setSeparator(True)
+        self.sample_list_widget.addAction(_sample_list_separator)
+
+        self._delete_sample_action = QAction("Delete Sample...", self.sample_list_widget)
+        self._delete_sample_action.setShortcuts(_DELETE_SHORTCUTS)
+        self._delete_sample_action.setShortcutContext(Qt.ShortcutContext.WidgetShortcut)
+        self._delete_sample_action.triggered.connect(self._confirm_delete_sample)
+        self._delete_sample_action.setEnabled(False)
+        self.sample_list_widget.addAction(self._delete_sample_action)
+
         samples_column = QVBoxLayout()
         samples_column.setContentsMargins(0, 0, 0, 0)
         samples_column.setSpacing(6)
@@ -3024,6 +3160,50 @@ class ProgramEditorWindow(QMainWindow):
             legend_row.addLayout(marker_field)
         legend_row.addStretch()
 
+        # loop type (SPTYPE) and root note (SPITCH) - two more sample-header
+        # fields alongside the loop-point markers above, same "known from
+        # the header alone, no audio load needed" reasoning as those (both
+        # are in _SAMPLE_DETAIL_FIELDS) - own row rather than folded into
+        # legend_row since these aren't waveform markers
+        sample_meta_row = QHBoxLayout()
+        sample_meta_row.setSpacing(18)
+        loop_type_label = QLabel("Loop Type")
+        loop_type_label.setFixedWidth(70)
+        self.sample_loop_type_combo = QComboBox()
+        self.sample_loop_type_combo.setFixedWidth(160)
+        self.sample_loop_type_combo.setEnabled(False)
+        for option_idx, (option_label, option_tooltip) in enumerate(
+            _SAMPLE_PLAYBACK_TYPE_OPTIONS
+        ):
+            self.sample_loop_type_combo.addItem(option_label)
+            self.sample_loop_type_combo.setItemData(
+                option_idx, option_tooltip, Qt.ItemDataRole.ToolTipRole
+            )
+        self.sample_loop_type_combo.setToolTip(_SAMPLE_PLAYBACK_TYPE_OPTIONS[0][1])
+        self.sample_loop_type_combo.currentIndexChanged.connect(
+            self._on_sample_loop_type_changed
+        )
+        root_note_label = QLabel("Root Note")
+        root_note_label.setFixedWidth(70)
+        self.sample_root_note_spinbox = NoteSpinBox()
+        # SPITCH's own declared range (s3k.params: "21 to 127 represents
+        # A1 to G8") is narrower than NoteSpinBox's default 0-127
+        self.sample_root_note_spinbox.setRange(21, 127)
+        self.sample_root_note_spinbox.setFixedWidth(80)
+        self.sample_root_note_spinbox.setEnabled(False)
+        self.sample_root_note_spinbox.valueChanged.connect(
+            self._on_sample_root_note_changed
+        )
+        self.sample_root_note_spinbox.editingFinished.connect(
+            self._commit_sample_root_note
+        )
+        sample_meta_row.addWidget(loop_type_label)
+        sample_meta_row.addWidget(self.sample_loop_type_combo)
+        sample_meta_row.addSpacing(12)
+        sample_meta_row.addWidget(root_note_label)
+        sample_meta_row.addWidget(self.sample_root_note_spinbox)
+        sample_meta_row.addStretch()
+
         waveform_column = QVBoxLayout()
         waveform_column.setContentsMargins(0, 0, 0, 0)
         waveform_column.setSpacing(6)
@@ -3032,6 +3212,7 @@ class ProgramEditorWindow(QMainWindow):
         waveform_column.addWidget(self.waveform_view)
         waveform_column.addWidget(scrollbar_container)
         waveform_column.addLayout(legend_row)
+        waveform_column.addLayout(sample_meta_row)
         waveform_column.addWidget(self.sample_load_progress)
         waveform_column.addStretch()
         waveform_container = QWidget()
@@ -3595,6 +3776,7 @@ class ProgramEditorWindow(QMainWindow):
                 entry["loop_end"],
                 entry["end"],
             )
+            self._update_sample_meta_controls(entry["sptype"], entry["spitch"])
         elif entry is not None:
             # header known, audio not (yet) - see _on_sample_detail_loaded
             self._set_marker_spinbox_range(entry["frame_count"])
@@ -3605,6 +3787,7 @@ class ProgramEditorWindow(QMainWindow):
                 entry["loop_end"],
                 entry["end"],
             )
+            self._update_sample_meta_controls(entry["sptype"], entry["spitch"])
         else:
             # nothing known about this sample yet - clear to the
             # placeholder and kick off the (fast, async - not the blocking
@@ -3632,11 +3815,14 @@ class ProgramEditorWindow(QMainWindow):
             "loop_start": loop_start,
             "loop_end": loop_end,
             "end": end,
+            "sptype": values["SPTYPE"],
+            "spitch": values["SPITCH"],
         }
         self._sample_waveform_cache[sample_index] = entry
         if sample_index == self.sample_list_widget.currentRow():
             self._set_marker_spinbox_range(frame_count)
             self.waveform_view.set_header(frame_count, start, loop_start, loop_end, end)
+            self._update_sample_meta_controls(values["SPTYPE"], values["SPITCH"])
 
     def _on_sample_detail_load_failed(self, sample_index, error):
         if sample_index != self.sample_list_widget.currentRow():
@@ -3647,6 +3833,57 @@ class ProgramEditorWindow(QMainWindow):
         self.waveform_view.clear()
         self._update_marker_spinboxes(None, None, None, None)
         self._set_marker_spinbox_range(0)
+        self._update_sample_meta_controls(None, None)
+
+    def _update_sample_meta_controls(self, sptype, spitch):
+        # sptype/spitch None means "nothing known about this sample yet" -
+        # mirrors _update_marker_spinboxes' own None convention, disabling
+        # both controls rather than showing a stale or zeroed-out value
+        enabled = sptype is not None
+        self.sample_loop_type_combo.setEnabled(enabled)
+        self.sample_root_note_spinbox.setEnabled(enabled)
+        if sptype is not None:
+            self.sample_loop_type_combo.blockSignals(True)
+            self.sample_loop_type_combo.setCurrentIndex(sptype)
+            self.sample_loop_type_combo.blockSignals(False)
+            self.sample_loop_type_combo.setToolTip(
+                _SAMPLE_PLAYBACK_TYPE_OPTIONS[sptype][1]
+            )
+        if spitch is not None:
+            self.sample_root_note_spinbox.blockSignals(True)
+            self.sample_root_note_spinbox.setValue(spitch)
+            self.sample_root_note_spinbox.blockSignals(False)
+
+    def _on_sample_loop_type_changed(self, combo_index):
+        sample_index = self.sample_list_widget.currentRow()
+        if sample_index < 0:
+            return
+        entry = self._sample_waveform_cache.get(sample_index)
+        if entry is not None:
+            entry["sptype"] = combo_index
+        self.sample_loop_type_combo.setToolTip(
+            _SAMPLE_PLAYBACK_TYPE_OPTIONS[combo_index][1]
+        )
+        # discrete selection change, same as _wire_combo_write's own ZPLAY/
+        # CP writes - no flush wiring needed, it always waits out the
+        # ordinary debounce window
+        self._schedule_write(
+            "SPTYPE", "sample", combo_index, index=sample_index, debounce_key="SPTYPE"
+        )
+
+    def _on_sample_root_note_changed(self, value):
+        sample_index = self.sample_list_widget.currentRow()
+        if sample_index < 0:
+            return
+        entry = self._sample_waveform_cache.get(sample_index)
+        if entry is not None:
+            entry["spitch"] = value
+        self._schedule_write(
+            "SPITCH", "sample", value, index=sample_index, debounce_key="SPITCH"
+        )
+
+    def _commit_sample_root_note(self):
+        self._flush_write("SPITCH")
 
     def _set_marker_spinbox_range(self, frame_count):
         # each spinbox can address any frame in the WHOLE sample (typing an
@@ -4080,6 +4317,8 @@ class ProgramEditorWindow(QMainWindow):
                 loop_start = entry["loop_start"]
                 loop_end = entry["loop_end"]
                 end = entry["end"]
+                sptype = entry["sptype"]
+                spitch = entry["spitch"]
             else:
                 # rare: the automatic on-selection fetch hasn't resolved
                 # yet (the user double-clicked before it landed) - fall
@@ -4097,6 +4336,8 @@ class ProgramEditorWindow(QMainWindow):
                 frame_count, start, loop_start, loop_end, end = self._markers_from_header(
                     sample_index, header
                 )
+                sptype = header["SPTYPE"]
+                spitch = header["SPITCH"]
                 if sample_index == self.sample_list_widget.currentRow():
                     # normally already shown by _on_sample_detail_loaded's
                     # automatic fetch - this branch only runs when that
@@ -4106,6 +4347,7 @@ class ProgramEditorWindow(QMainWindow):
                     self.waveform_view.set_header(
                         frame_count, start, loop_start, loop_end, end
                     )
+                    self._update_sample_meta_controls(sptype, spitch)
 
             if sample_index == self.sample_list_widget.currentRow():
                 # markers/frame_count are known either way by this point
@@ -4140,6 +4382,8 @@ class ProgramEditorWindow(QMainWindow):
                 "loop_start": loop_start,
                 "loop_end": loop_end,
                 "end": end,
+                "sptype": sptype,
+                "spitch": spitch,
             }
             self._sample_waveform_cache[sample_index] = entry
             if sample_index == self.sample_list_widget.currentRow():

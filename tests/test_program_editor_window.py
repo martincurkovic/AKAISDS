@@ -38,12 +38,17 @@ class FakeBridge:
             i: {
                 "SSTART": 100, "SMPEND": 9999, "LOOPAT1": 8000,
                 "LLNGTH1": 3000, "SLNGTH": 10000, "SSRATE": 44100,
+                "SPTYPE": 0, "SPITCH": 60,
             }
             for i in range(len(self._samples))
         }
 
     def sample_list(self):
         return self._samples
+
+    def delete_sample(self, sample_index):
+        del self._samples[sample_index]
+        del self.sample_headers[sample_index]
 
     def program_list(self):
         return self._programs
@@ -237,6 +242,22 @@ def test_mod_source_labels_match_s3k_params_minus_env3():
 
     assert len(_MOD_SOURCE_LABELS) == len(p.MOD_SOURCES) - 1  # env3 excluded
     assert set(p.MOD_SOURCES) - {14} == set(range(len(_MOD_SOURCE_LABELS)))
+
+
+def test_sample_playback_type_options_match_s3k_params_sptype():
+    # _SAMPLE_PLAYBACK_TYPE_OPTIONS is a hand-written parallel list built
+    # from _LOOP_TYPE_OPTIONS's own tooltips (see its own comment for why) -
+    # this guards its LABELS against silently drifting out of sync with
+    # SPTYPE's own raw-byte-order values= dict if the pinned s3k revision
+    # ever changes it, the same way test_mod_source_labels_match_s3k_params
+    # _minus_env3 guards _MOD_SOURCE_LABELS
+    import s3k.params as p
+    from ui.program_editor_window import _SAMPLE_PLAYBACK_TYPE_OPTIONS
+
+    sptype = p.lookup("SPTYPE", "sample")
+    assert len(_SAMPLE_PLAYBACK_TYPE_OPTIONS) == len(sptype.values)
+    for raw_value, label in sptype.values.items():
+        assert _SAMPLE_PLAYBACK_TYPE_OPTIONS[raw_value][0] == label
 
 
 def test_first_program_is_preselected_with_its_keygroups_shown(editor):
@@ -1074,3 +1095,151 @@ def test_progressive_load_never_looks_complete_before_the_last_chunk_in_demo_mod
     assert len(widths) >= 6
     assert all(w < view.width() for w in widths[:-1])
     assert widths[-1] == view.width()
+
+
+# --- Samples tab: loop type (SPTYPE), root note (SPITCH), rename/delete -----
+
+
+def test_selecting_a_sample_shows_loop_type_and_root_note_from_header(editor, qapp):
+    # SPTYPE/SPITCH are in _SAMPLE_DETAIL_FIELDS now, same header-only fetch
+    # every other sample-header field (loop points) already used - see
+    # AGENTS.md's "Editing loop points without audio"
+    editor.sample_list_widget.setCurrentRow(0)
+    editor._worker.wait_until_idle()
+    _pump_until(qapp, lambda: editor.waveform_view.has_header())
+
+    assert editor.sample_loop_type_combo.isEnabled() is True
+    assert editor.sample_loop_type_combo.currentText() == "Normal looping"  # SPTYPE=0
+    assert editor.sample_root_note_spinbox.isEnabled() is True
+    assert editor.sample_root_note_spinbox.value() == 60  # SPITCH=60, FakeBridge
+
+
+def test_nothing_selected_disables_loop_type_and_root_note(editor, qapp):
+    editor.sample_list_widget.setCurrentRow(0)
+    editor._worker.wait_until_idle()
+    _pump_until(qapp, lambda: editor.waveform_view.has_header())
+
+    editor.sample_list_widget.setCurrentRow(-1)
+
+    assert editor.sample_loop_type_combo.isEnabled() is False
+    assert editor.sample_root_note_spinbox.isEnabled() is False
+
+
+def test_changing_sample_loop_type_writes_sptype(editor, qapp):
+    editor.sample_list_widget.setCurrentRow(0)
+    editor._worker.wait_until_idle()
+    _pump_until(qapp, lambda: editor.waveform_view.has_header())
+    bridge = editor._bridge
+
+    editor.sample_loop_type_combo.setCurrentIndex(2)  # "No looping"
+    editor._flush_write("SPTYPE")
+    editor._worker.wait_until_idle()
+    _pump_until(qapp, lambda: bridge.set_parameter_calls)
+
+    assert ("SPTYPE", 0, 2, 0) in bridge.set_parameter_calls
+    assert editor._sample_waveform_cache[0]["sptype"] == 2
+
+
+def test_changing_sample_root_note_writes_spitch(editor, qapp):
+    editor.sample_list_widget.setCurrentRow(0)
+    editor._worker.wait_until_idle()
+    _pump_until(qapp, lambda: editor.waveform_view.has_header())
+    bridge = editor._bridge
+
+    editor.sample_root_note_spinbox.setValue(72)
+    editor.sample_root_note_spinbox.editingFinished.emit()
+    editor._worker.wait_until_idle()
+    _pump_until(qapp, lambda: bridge.set_parameter_calls)
+
+    assert ("SPITCH", 0, 72, 0) in bridge.set_parameter_calls
+    assert editor._sample_waveform_cache[0]["spitch"] == 72
+
+
+def test_confirm_rename_sample_updates_list_zone_combos_and_writes_shname(
+    editor, qapp, monkeypatch
+):
+    editor.sample_list_widget.setCurrentRow(0)
+    editor._worker.wait_until_idle()
+    _pump_until(qapp, lambda: editor.waveform_view.has_header())
+    bridge = editor._bridge
+    monkeypatch.setattr(editor, "_prompt_sample_name", lambda _current: "RENAMED")
+
+    editor._confirm_rename_sample()
+    editor._worker.wait_until_idle()
+    _pump_until(qapp, lambda: bridge.set_parameter_calls)
+
+    assert editor.sample_list_widget.item(0).text() == "RENAMED"
+    assert ("SHNAME", 0, "RENAMED", 0) in bridge.set_parameter_calls
+    # index 0 is the blank "-" placeholder (see _on_samples_loaded) - sample
+    # 0's own entry is index 1, same offset _update_multi_program_combo_names
+    # uses for the Multis tab's program combos
+    for combo in editor._zone_combos:
+        assert combo.itemText(1) == "RENAMED"
+
+
+def test_confirm_rename_sample_does_nothing_when_dialog_cancelled(
+    editor, qapp, monkeypatch
+):
+    editor.sample_list_widget.setCurrentRow(0)
+    editor._worker.wait_until_idle()
+    _pump_until(qapp, lambda: editor.waveform_view.has_header())
+    bridge = editor._bridge
+    monkeypatch.setattr(editor, "_prompt_sample_name", lambda _current: None)
+
+    editor._confirm_rename_sample()
+
+    assert bridge.set_parameter_calls == []
+    assert editor.sample_list_widget.item(0).text() == "SQUARE"
+
+
+def test_confirm_delete_sample_submits_delete_on_confirm(editor, qapp, monkeypatch):
+    import ui.program_editor_window as pew
+
+    editor.sample_list_widget.setCurrentRow(0)
+    editor._worker.wait_until_idle()
+    _pump_until(qapp, lambda: editor.waveform_view.has_header())
+    bridge = editor._bridge
+    monkeypatch.setattr(
+        pew.QMessageBox, "question", lambda *a, **k: pew.QMessageBox.StandardButton.Yes
+    )
+
+    editor._confirm_delete_sample()
+    editor._worker.wait_until_idle()
+    _pump_until(qapp, lambda: editor.sample_list_widget.count() == 3)
+
+    assert bridge.sample_list() == ["SAWTOOTH", "PULSE", "SINE"]
+    # a full reload, not a targeted removal (see _on_sample_deleted) -
+    # the list widget itself should reflect the same shrunk roster
+    assert [
+        editor.sample_list_widget.item(i).text()
+        for i in range(editor.sample_list_widget.count())
+    ] == ["SAWTOOTH", "PULSE", "SINE"]
+
+
+def test_confirm_delete_sample_does_nothing_when_declined(editor, qapp, monkeypatch):
+    import ui.program_editor_window as pew
+
+    editor.sample_list_widget.setCurrentRow(0)
+    editor._worker.wait_until_idle()
+    _pump_until(qapp, lambda: editor.waveform_view.has_header())
+    bridge = editor._bridge
+    monkeypatch.setattr(
+        pew.QMessageBox, "question", lambda *a, **k: pew.QMessageBox.StandardButton.No
+    )
+
+    editor._confirm_delete_sample()
+
+    assert bridge.sample_list() == ["SQUARE", "SAWTOOTH", "PULSE", "SINE"]
+
+
+def test_sample_list_context_actions_disabled_with_nothing_selected(editor, qapp):
+    editor.sample_list_widget.setCurrentRow(0)
+    editor._worker.wait_until_idle()
+    _pump_until(qapp, lambda: editor.waveform_view.has_header())
+    assert editor._rename_sample_action.isEnabled() is True
+    assert editor._delete_sample_action.isEnabled() is True
+
+    editor.sample_list_widget.setCurrentRow(-1)
+
+    assert editor._rename_sample_action.isEnabled() is False
+    assert editor._delete_sample_action.isEnabled() is False
