@@ -825,6 +825,55 @@ def test_checksum_failure_does_not_emit_a_chunk(controller):
     assert chunks == []
 
 
+@pytest.mark.parametrize(
+    "sample_length,bit_depth",
+    [
+        (1, 16),  # shorter than a single packet - all padding but 1 word
+        (40, 16),  # exactly one full 16-bit packet (120 bytes / 3 bytes/word)
+        (41, 16),  # one word into a second packet
+        (127, 12),  # doesn't divide evenly into 12-bit's 60 words/packet
+        (500, 8),  # several full 8-bit packets (60 words/packet)
+        (3000, 16),  # a genuinely large multi-packet transfer
+    ],
+)
+def test_receive_data_packet_chunks_sum_to_the_real_length_at_any_size(
+    controller, tmp_path, sample_length, bit_depth
+):
+    # the progressive-chunk path has no length baked in anywhere - it
+    # decodes whatever arrives, packet by packet, trimming only the very
+    # last packet's own zero padding - this pins that down across sample
+    # lengths from shorter-than-one-packet up to several thousand words,
+    # and across bit depths with differently-sized packet boundaries
+    from core import sds_encoder
+
+    # generate in the full 16-bit range, then reduce to fit bit_depth -
+    # same convention test_sds_encoder.py's own round-trip tests use;
+    # skipping this for bit_depth=8 previously fed the encoder values
+    # outside its valid -128..127 range, which isn't a real-world case
+    samples = [
+        sds_encoder.reduce_bit_depth(((i * 3079) % 65536) - 32768, bit_depth)
+        for i in range(sample_length)
+    ]
+    save_path = str(tmp_path / f"chunked_{sample_length}_{bit_depth}.wav")
+
+    controller.receive_sample_generic(sample_number=1, save_path=save_path, channel=0)
+    header_packet = sds_encoder.build_dump_header(
+        samples, framerate=44100, sample_number=1, channel=0, bit_depth=bit_depth
+    )
+    controller.on_sysex_received(list(header_packet[1:-1]))
+
+    data_packets = sds_encoder.build_data_packets(samples, channel=0, bit_depth=bit_depth)
+
+    chunks = []
+    controller.sample_chunk_received.connect(lambda c: chunks.append(c))
+    for packet in data_packets:
+        controller.on_sysex_received(list(packet[1:-1]))
+
+    expected = [sds_encoder.scale_sample_to_16bit(s, bit_depth) for s in samples]
+    assert [s for chunk in chunks for s in chunk] == expected
+    assert len(chunks) == len(data_packets)  # one chunk per accepted packet, no batching
+
+
 # -----------------------------------------------------------------
 # RECEIVING - AKAI SDATA/RSPACK FLOW
 # -----------------------------------------------------------------

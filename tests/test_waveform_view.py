@@ -403,3 +403,39 @@ def test_set_waveform_preserves_view_after_a_live_capture(qapp):
     view.set_waveform(samples, 0, 2500, 7500, 9999)
     assert view._zoom == zoom_after_zoom_in
     assert view._view_start == 500
+
+
+@pytest.mark.parametrize(
+    "frame_count,chunk_size",
+    [
+        (5, 1),  # shorter than a single pixel column
+        (500, 37),  # short, uneven chunk size relative to canvas width
+        (31169, 5000),  # roughly the demo fixture's own length
+        (2_000_000, 200_000),  # far longer than any real sample, for headroom
+    ],
+)
+def test_progressive_fill_scales_to_any_sample_length(qapp, frame_count, chunk_size):
+    # nothing about begin_live_capture/append_live_samples/_rebuild_envelope
+    # has a length baked in anywhere - this pins that down from shorter
+    # than the canvas is wide up to a couple million frames, checking the
+    # envelope only ever grows (never shrinks or overshoots) and lands on
+    # exactly the full canvas width once everything's arrived
+    view = WaveformView()
+    view.resize(500, 180)
+    view.set_header(
+        frame_count, start=0, loop_start=frame_count // 4,
+        loop_end=(frame_count * 3) // 4, end=max(0, frame_count - 1),
+    )
+    view.begin_live_capture()
+
+    widths = []
+    pushed = 0
+    while pushed < frame_count:
+        n = min(chunk_size, frame_count - pushed)
+        view.append_live_samples([100] * n)
+        pushed += n
+        widths.append(len(view._envelope))
+
+    assert all(w <= view.width() for w in widths)
+    assert all(a <= b for a, b in zip(widths, widths[1:]))  # monotonically grows
+    assert widths[-1] == view.width()
