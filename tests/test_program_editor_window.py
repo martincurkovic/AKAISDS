@@ -1055,6 +1055,75 @@ def test_load_sample_waveform_preserves_header_only_edits(editor, qapp, monkeypa
     assert editor.waveform_view.has_waveform() is True
 
 
+# --- Samples tab: marker push writes every field that actually moved -------
+# WaveformView.push_marker means dragging/typing one marker can shove
+# others out of the way too (see AGENTS.md) - _schedule_marker_write must
+# write every field whose value actually changed, not just the one the
+# user directly touched, and must NOT write fields nothing moved.
+
+
+def test_marker_spinbox_edit_without_a_push_only_writes_its_own_field(editor, qapp):
+    editor.sample_list_widget.setCurrentRow(0)
+    editor._worker.wait_until_idle()
+    _pump_until(qapp, lambda: editor.waveform_view.has_header())
+    bridge = editor._bridge
+    # FakeBridge sample 0: start=100, loop_start=5000, loop_end=8000, end=9999
+
+    editor._on_marker_spinbox_changed("start", 200)  # well short of loop_start
+    editor._flush_marker_write()
+    editor._worker.wait_until_idle()
+    _pump_until(qapp, lambda: bridge.set_parameter_calls)
+
+    assert [c[0] for c in bridge.set_parameter_calls] == ["SSTART"]
+    assert bridge.set_parameter_calls[0][2] == 200
+
+
+def test_marker_spinbox_push_writes_every_field_that_actually_moved(editor, qapp):
+    editor.sample_list_widget.setCurrentRow(0)
+    editor._worker.wait_until_idle()
+    _pump_until(qapp, lambda: editor.waveform_view.has_header())
+    bridge = editor._bridge
+    # start=100, loop_start=5000, loop_end=8000, end=9999 - dragging "end"
+    # to 3000 must push loop_end AND loop_start down with it (both below
+    # 3000), while "start" (100, already below 3000) stays untouched
+
+    editor._on_marker_spinbox_changed("end", 3000)
+    editor._flush_marker_write()
+    editor._worker.wait_until_idle()
+    _pump_until(qapp, lambda: bridge.set_parameter_calls)
+
+    calls = {c[0]: c[2] for c in bridge.set_parameter_calls}
+    assert calls == {"SMPEND": 3000, "LOOPAT1": 3000, "LLNGTH1": 0}
+    assert editor.waveform_view.markers() == {
+        "start": 100, "loop_start": 3000, "loop_end": 3000, "end": 3000,
+    }
+
+
+def test_drag_release_push_writes_every_field_that_actually_moved(editor, qapp):
+    editor.sample_list_widget.setCurrentRow(0)
+    editor._worker.wait_until_idle()
+    _pump_until(qapp, lambda: editor.waveform_view.has_header())
+    bridge = editor._bridge
+
+    # simulate the canvas drag itself (WaveformView.set_marker, same push
+    # math mouseMoveEvent drives) then the release signal exactly as
+    # WaveformView.marker_committed would emit it
+    editor.waveform_view.set_marker("end", 6000)  # pushes loop_end (8000) only
+    m = editor.waveform_view.markers()
+    assert m == {"start": 100, "loop_start": 5000, "loop_end": 6000, "end": 6000}
+
+    editor._on_waveform_marker_committed(
+        "end", m["start"], m["loop_start"], m["loop_end"], m["end"]
+    )
+    editor._worker.wait_until_idle()
+    _pump_until(qapp, lambda: bridge.set_parameter_calls)
+
+    calls = {c[0]: c[2] for c in bridge.set_parameter_calls}
+    # loop_start (5000) never moved - SSTART/loop_start untouched, only
+    # the fields end/loop_end actually changed get written
+    assert calls == {"SMPEND": 6000, "LOOPAT1": 6000, "LLNGTH1": 1000}
+
+
 def test_load_sample_waveform_progressively_fills_the_envelope_in_demo_mode(
     editor, qapp, monkeypatch
 ):

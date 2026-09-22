@@ -13,8 +13,8 @@ from ui.waveform_view import (
     _MARKER_ORDER,
     WaveformView,
     build_envelope,
-    clamp_marker,
     frame_for_x,
+    push_marker,
     x_for_frame,
 )
 
@@ -76,29 +76,72 @@ def test_x_for_frame_and_frame_for_x_round_trip_when_zoomed():
         )
 
 
-# --- clamp_marker ----------------------------------------------------------------
+# --- push_marker ----------------------------------------------------------------
+# unlike a plain "stop at the neighbour" clamp, moving one marker past
+# another pushes that neighbour (and, in turn, whichever one is next
+# along) out of the way instead - see the user-facing request this
+# implements and push_marker's own docstring.
 
 
-def test_clamp_marker_cannot_cross_its_neighbours():
+def test_push_marker_stays_put_when_nothing_is_in_the_way():
+    values = {"start": 0, "loop_start": 100, "loop_end": 500, "end": 999}
+    index = _MARKER_ORDER.index("loop_start")
+    result = push_marker(_MARKER_ORDER, index, 200, values, frame_count=1000)
+    assert result == {"start": 0, "loop_start": 200, "loop_end": 500, "end": 999}
+
+
+def test_push_marker_pushes_the_immediate_neighbour_it_collides_with():
     values = {"start": 0, "loop_start": 100, "loop_end": 500, "end": 999}
 
-    # dragging loop_start past loop_end clamps at loop_end, not past it
+    # dragging loop_start past loop_end pushes loop_end along with it
     index = _MARKER_ORDER.index("loop_start")
-    assert clamp_marker(_MARKER_ORDER, index, 9999, values, frame_count=1000) == 500
+    result = push_marker(_MARKER_ORDER, index, 700, values, frame_count=1000)
+    assert result == {"start": 0, "loop_start": 700, "loop_end": 700, "end": 999}
 
-    # dragging loop_end before loop_start clamps at loop_start, not before it
+    # dragging loop_end before loop_start pushes loop_start along with it
     index = _MARKER_ORDER.index("loop_end")
-    assert clamp_marker(_MARKER_ORDER, index, 0, values, frame_count=1000) == 100
+    result = push_marker(_MARKER_ORDER, index, 50, values, frame_count=1000)
+    assert result == {"start": 0, "loop_start": 50, "loop_end": 50, "end": 999}
 
 
-def test_clamp_marker_stays_within_the_sample_itself_at_the_two_ends():
+def test_push_marker_cascades_through_multiple_neighbours():
+    # dragging "end" far enough left must push loop_end, which in turn
+    # pushes loop_start too - the exact scenario from the user's own
+    # request ("drag the sample end marker to the left... push the loop
+    # end marker to the left as well")
+    values = {"start": 0, "loop_start": 100, "loop_end": 500, "end": 999}
+    index = _MARKER_ORDER.index("end")
+    result = push_marker(_MARKER_ORDER, index, 50, values, frame_count=1000)
+    assert result == {"start": 0, "loop_start": 50, "loop_end": 50, "end": 50}
+
+
+def test_push_marker_can_cascade_all_the_way_to_the_far_end():
+    # dragging "start" past every other marker pushes all three of them
+    values = {"start": 0, "loop_start": 100, "loop_end": 500, "end": 999}
+    index = _MARKER_ORDER.index("start")
+    result = push_marker(_MARKER_ORDER, index, 999, values, frame_count=1000)
+    assert result == {"start": 999, "loop_start": 999, "loop_end": 999, "end": 999}
+
+
+def test_push_marker_only_pushes_whats_actually_in_the_way():
+    # loop_end moving right, well short of "end" - "end" must be left
+    # completely untouched
+    values = {"start": 0, "loop_start": 100, "loop_end": 500, "end": 999}
+    index = _MARKER_ORDER.index("loop_end")
+    result = push_marker(_MARKER_ORDER, index, 700, values, frame_count=1000)
+    assert result == {"start": 0, "loop_start": 100, "loop_end": 700, "end": 999}
+
+
+def test_push_marker_stays_within_the_sample_itself_at_the_two_ends():
     values = {"start": 0, "loop_start": 100, "loop_end": 500, "end": 999}
 
     index = _MARKER_ORDER.index("start")
-    assert clamp_marker(_MARKER_ORDER, index, -50, values, frame_count=1000) == 0
+    result = push_marker(_MARKER_ORDER, index, -50, values, frame_count=1000)
+    assert result["start"] == 0
 
     index = _MARKER_ORDER.index("end")
-    assert clamp_marker(_MARKER_ORDER, index, 5000, values, frame_count=1000) == 999
+    result = push_marker(_MARKER_ORDER, index, 5000, values, frame_count=1000)
+    assert result["end"] == 999
 
 
 # --- WaveformView.wheelEvent: pan axis ----------------------------------------
@@ -271,11 +314,14 @@ def test_set_marker_works_in_header_only_mode(qapp):
     assert view.markers()["loop_start"] == 8000
 
 
-def test_set_marker_still_clamps_in_header_only_mode(qapp):
+def test_set_marker_still_pushes_neighbours_in_header_only_mode(qapp):
     view = WaveformView()
     view.set_header(20000, start=0, loop_start=5000, loop_end=15000, end=19999)
-    clamped = view.set_marker("loop_start", 99999)  # past loop_end
-    assert clamped == 15000
+    moved = view.set_marker("loop_start", 99999)  # past loop_end AND end
+    # clamped to the sample's own bound (19999), pushing loop_end and end
+    # along with it rather than stopping at loop_end's old position
+    assert moved == 19999
+    assert view.markers() == {"start": 0, "loop_start": 19999, "loop_end": 19999, "end": 19999}
 
 
 def test_set_marker_returns_none_with_nothing_loaded_at_all(qapp):

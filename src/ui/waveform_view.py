@@ -14,8 +14,10 @@ _MIN_ZOOM = 1.0  # the whole sample visible at once
 _MAX_ZOOM = 500.0  # view can shrink to roughly 1/500th of the sample
 _ZOOM_STEP = 1.6  # multiplicative factor per wheel notch / zoom button click
 
-# order matters: this is also the neighbour-clamping order - each marker can
-# only move between the ones on either side of it in this list
+# order matters: this is also the order push_marker cascades a push
+# through - moving one marker past its neighbour pushes that neighbour
+# (and, in turn, whichever one is next along) rather than stopping dead
+# at it
 _MARKER_ORDER = ("start", "loop_start", "loop_end", "end")
 
 _PLACEHOLDER_TEXT = (
@@ -76,18 +78,46 @@ def x_for_frame(frame, width, view_start, view_length):
     return ((frame - view_start) / (view_length - 1)) * (width - 1)
 
 
-def clamp_marker(order, index, frame, values, frame_count):
-    """Clamp *frame* between this marker's neighbours (and the sample's own
-    bounds at the two ends) - start <= loop_start <= loop_end <= end always
-    holds, so a drag can never cross a neighbouring marker or the sample's
-    own extent. Whole-sample bounds, independent of the current zoom/pan
-    window - you can still drag a marker toward a position currently
-    scrolled off-screen, same as any timeline editor.
+def push_marker(order, index, frame, values, frame_count):
+    """Moves the marker at order[index] to frame (clamped to the whole
+    sample's own bounds, [0, frame_count - 1] - independent of the current
+    zoom/pan window, same as a timeline editor: you can still drag a
+    marker toward a position currently scrolled off-screen), pushing any
+    neighbour(s) that would otherwise end up on the wrong side of it along
+    too, rather than stopping dead the moment it touches one. Cascades:
+    pushing one marker can in turn push the next one along too, the same
+    as a Newton's cradle - dragging "end" far enough left first pushes
+    loop_end out of the way, which can then push loop_start, which can
+    then push start, all in one call. start <= loop_start <= loop_end <=
+    end always holds in the result, the same invariant a plain "stop at
+    the neighbour" clamp would also have guaranteed, just via shoving
+    neighbours along instead of refusing to cross them - see AGENTS.md's
+    own section on this for why a push, not a stop, is what a trim editor
+    should do here.
+
+    Returns a NEW {name: frame} dict covering every marker in *order* -
+    the caller (WaveformView) is responsible for actually committing it to
+    self._markers and, once the drag/edit is done, telling
+    program_editor_window.py to write every field that actually changed,
+    not just the one the user directly grabbed.
     """
     frame = max(0, min(frame_count - 1, frame))
-    lo_bound = values[order[index - 1]] if index > 0 else 0
-    hi_bound = values[order[index + 1]] if index < len(order) - 1 else frame_count - 1
-    return max(lo_bound, min(hi_bound, frame))
+    new_values = dict(values)
+    new_values[order[index]] = frame
+
+    for i in range(index - 1, -1, -1):
+        if new_values[order[i]] > new_values[order[i + 1]]:
+            new_values[order[i]] = new_values[order[i + 1]]
+        else:
+            break
+
+    for i in range(index + 1, len(order)):
+        if new_values[order[i]] < new_values[order[i - 1]]:
+            new_values[order[i]] = new_values[order[i - 1]]
+        else:
+            break
+
+    return new_values
 
 
 class WaveformView(QWidget):
@@ -287,18 +317,21 @@ class WaveformView(QWidget):
     def set_marker(self, name, frame):
         """Move one marker directly (not via a mouse drag) - what the
         marker spinboxes in program_editor_window.py call as the user
-        types/steps a value. Clamped exactly like a drag; returns the
-        clamped frame so the caller can snap its own displayed value to
-        match (e.g. typing a value past the sample's own end).
+        types/steps a value. Pushes neighbours exactly like a drag (see
+        push_marker); returns the moved marker's own final frame so the
+        caller can snap its own displayed value to match (e.g. typing a
+        value past the sample's own end) - markers_changed (emitted
+        below) is what carries every OTHER marker's possibly-also-changed
+        value back to the caller, since a push can move more than just
+        the one named here.
         """
         if self._frame_count == 0:
             return None
         index = _MARKER_ORDER.index(name)
-        clamped = clamp_marker(_MARKER_ORDER, index, frame, self._markers, self._frame_count)
-        self._markers[name] = clamped
+        self._markers = push_marker(_MARKER_ORDER, index, frame, self._markers, self._frame_count)
         self.update()
         self._emit_markers_changed()
-        return clamped
+        return self._markers[name]
 
     def _emit_markers_changed(self):
         m = self._markers
@@ -582,12 +615,16 @@ class WaveformView(QWidget):
         # motion over a long drag
         self._drag_value += dx * frames_per_px
         frame = int(round(self._drag_value))
-        clamped = clamp_marker(_MARKER_ORDER, index, frame, self._markers, self._frame_count)
-        # resync the accumulator to the clamped result - otherwise dragging
-        # past a neighbour and back would need to "wind back" through
-        # every frame it overshot before the marker starts moving again
-        self._drag_value = clamped
-        self._markers[self._dragging] = clamped
+        self._markers = push_marker(
+            _MARKER_ORDER, index, frame, self._markers, self._frame_count
+        )
+        # resync the accumulator to the actually-applied frame - still
+        # needed for the whole-sample-bounds clamp at the very ends
+        # (push_marker itself never stops this marker short of *frame*
+        # just because a neighbour was in the way - it pushes the
+        # neighbour along instead - so this is only ever a no-op except
+        # at frame 0 / frame_count - 1)
+        self._drag_value = self._markers[self._dragging]
         self.update()
         self._emit_markers_changed()
 

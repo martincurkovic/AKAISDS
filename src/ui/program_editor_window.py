@@ -3168,9 +3168,7 @@ class ProgramEditorWindow(QMainWindow):
             spinbox.valueChanged.connect(
                 lambda v, n=name: self._on_marker_spinbox_changed(n, v)
             )
-            spinbox.editingFinished.connect(
-                lambda n=name: self._flush_marker_write(n)
-            )
+            spinbox.editingFinished.connect(self._flush_marker_write)
             self._marker_spinboxes[name] = (swatch, spinbox)
             marker_field = QHBoxLayout()
             marker_field.setSpacing(4)
@@ -3976,21 +3974,26 @@ class ProgramEditorWindow(QMainWindow):
         # audio ever loading (see WaveformView.set_header)
         if not self.waveform_view.has_header():
             return
-        # set_marker clamps and emits markers_changed synchronously, which
+        # captured before the edit - set_marker can push OTHER markers out
+        # of the way too (see WaveformView.push_marker), not just the one
+        # actually typed into, so this is what _schedule_marker_write
+        # below needs to tell which field(s) actually need writing
+        old_markers = self.waveform_view.markers()
+        # set_marker pushes and emits markers_changed synchronously, which
         # is what actually syncs every spinbox's displayed value (including
-        # this one, if the typed/stepped value got clamped) - see
-        # _update_marker_spinboxes
+        # this one, if the typed/stepped value got pushed back, and any
+        # others a push moved along too) - see _update_marker_spinboxes
         clamped = self.waveform_view.set_marker(name, value)
         if clamped is None:
             return
         sample_index = self.sample_list_widget.currentRow()
         if sample_index < 0:
             return
-        markers = self.waveform_view.markers()
+        new_markers = self.waveform_view.markers()
         entry = self._sample_waveform_cache.get(sample_index)
         if entry is not None:
-            entry.update(markers)
-        self._schedule_marker_write(sample_index, name, markers)
+            entry.update(new_markers)
+        self._schedule_marker_write(sample_index, old_markers, new_markers)
 
     def _wait_for_any_signal(self, signals, start, timeout_ms=None):
         # Blocks the calling (GUI) thread until the first of *signals*
@@ -4848,60 +4851,86 @@ class ProgramEditorWindow(QMainWindow):
         # canvas drag release - see _on_marker_spinbox_changed/
         # _flush_marker_write for the spinbox side of the same editing
         # surface, which goes through the exact same two helpers below so
-        # the "which marker(s) actually need writing" logic lives in
-        # exactly one place regardless of which input drove the change
+        # the "which field(s) actually need writing" logic lives in
+        # exactly one place regardless of which input drove the change.
+        # *which* itself (the marker the user actually grabbed) isn't
+        # enough to decide that alone any more - see _schedule_marker_
+        # write's own comment on why.
         sample_index = self.sample_list_widget.currentRow()
         if sample_index < 0:
             return
-        markers = {
+        new_markers = {
             "start": start, "loop_start": loop_start, "loop_end": loop_end, "end": end,
         }
         entry = self._sample_waveform_cache.get(sample_index)
+        # the cache only ever gets updated on a commit (here, or a spinbox
+        # edit) - never on the live, per-mouse-move markers_changed
+        # emissions a drag fires throughout - so this is exactly the
+        # state as of whenever the drag STARTED, i.e. "old"
+        old_markers = dict(entry) if entry is not None else None
         if entry is not None:
-            entry.update(markers)
+            entry.update(new_markers)
         # a drag-release is already a single, deliberate "I'm done" event
         # (the same reasoning sliderReleased gets elsewhere on this page) -
         # schedule immediately followed by an immediate flush is what
         # turns the normal debounce into an instant write without
         # duplicating _schedule_marker_write's field-pairing logic
-        self._schedule_marker_write(sample_index, which, markers)
-        self._flush_marker_write(which)
+        self._schedule_marker_write(sample_index, old_markers, new_markers)
+        self._flush_marker_write()
 
-    def _schedule_marker_write(self, sample_index, which, markers):
+    def _schedule_marker_write(self, sample_index, old_markers, new_markers):
         # LOOPAT1 (the loop END) and LLNGTH1 (measured backwards from it)
         # jointly encode the loop region - see _SAMPLE_DETAIL_FIELDS's
         # comment on LOOPAT1 - so moving either loop edge means writing
         # both fields, holding the OTHER edge fixed (loop_start moving
         # keeps loop_end/LOOPAT1 fixed and only changes LLNGTH1; loop_end
-        # moving keeps loop_start fixed, so both LOOPAT1 and LLNGTH1 change)
-        if which == "start":
+        # moving keeps loop_start fixed, so both LOOPAT1 and LLNGTH1
+        # change).
+        #
+        # Which field(s) need writing can no longer be inferred from just
+        # "which marker did the user grab" - WaveformView.push_marker
+        # means dragging (or typing into) any ONE marker can shove others
+        # along too, e.g. dragging "end" left far enough pushes loop_end
+        # (and, in turn, loop_start) out of the way. Every marker whose
+        # value actually differs from before this edit gets its field(s)
+        # written, not just the one named *which* - old_markers is None
+        # only when there was never a cached "before" to diff against
+        # (shouldn't normally happen, since a marker can't be edited
+        # before a header/cache entry exists), in which case every field
+        # is written to be safe rather than silently skipping one.
+        def _changed(name):
+            return old_markers is None or new_markers[name] != old_markers[name]
+
+        if _changed("start"):
             self._schedule_write(
-                "SSTART", "sample", markers["start"],
+                "SSTART", "sample", new_markers["start"],
                 index=sample_index, debounce_key="SSTART",
             )
-        elif which == "end":
+        if _changed("end"):
             self._schedule_write(
-                "SMPEND", "sample", markers["end"],
+                "SMPEND", "sample", new_markers["end"],
                 index=sample_index, debounce_key="SMPEND",
             )
-        else:
+        if _changed("loop_start") or _changed("loop_end"):
             self._schedule_write(
-                "LOOPAT1", "sample", markers["loop_end"],
+                "LOOPAT1", "sample", new_markers["loop_end"],
                 index=sample_index, debounce_key="LOOPAT1",
             )
             self._schedule_write(
-                "LLNGTH1", "sample", markers["loop_end"] - markers["loop_start"],
+                "LLNGTH1", "sample", new_markers["loop_end"] - new_markers["loop_start"],
                 index=sample_index, debounce_key="LLNGTH1",
             )
 
-    def _flush_marker_write(self, which):
-        if which == "start":
-            self._flush_write("SSTART")
-        elif which == "end":
-            self._flush_write("SMPEND")
-        else:
-            self._flush_write("LOOPAT1")
-            self._flush_write("LLNGTH1")
+    def _flush_marker_write(self):
+        # unconditionally flushes every marker-related debounce key -
+        # _flush_write is already a no-op for a key with nothing pending,
+        # so this is safe (and simpler than tracking which of the four
+        # _schedule_marker_write actually scheduled) whether a push
+        # touched one field or all four
+        self._flush_write("SSTART")
+        self._flush_write("SMPEND")
+        self._flush_write("LOOPAT1")
+        self._flush_write("LLNGTH1")
 
     def _on_waveform_view_changed(self, view_start, view_length, frame_count):
         # keeps the pan scrollbar in step with WaveformView's own zoom/pan

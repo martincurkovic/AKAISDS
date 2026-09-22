@@ -950,6 +950,55 @@ step's own `timeout_ms=None`, forever - waiting for a signal that will
 now never come. If you add a new blocking wait anywhere on this page,
 this ordering is not optional - see the method's own comment.
 
+### Loop-point markers push each other instead of stopping dead
+
+Added 2026-09-22, per direct user request. `WaveformView` used to have
+`clamp_marker(order, index, frame, values, frame_count)` - moving one
+marker (Start/Loop Start/Loop End/End) could never cross a neighbour,
+just stopped dead at whatever position the neighbour currently held. This
+is now `push_marker`, same file: moving a marker far enough to collide
+with a neighbour pushes that neighbour along instead, cascading - drag
+"end" left far enough and it pushes loop_end, which can in turn push
+loop_start, same as a Newton's cradle. `start <= loop_start <= loop_end
+<= end` is still always the result, just enforced by shoving neighbours
+along rather than refusing to cross them. `clamp_marker` is gone
+entirely, not kept alongside - nothing else used the "stop dead" behaviour
+once both of its call sites (`WaveformView.mouseMoveEvent`'s drag and
+`WaveformView.set_marker`, what the marker spinboxes call on every typed/
+stepped value) switched to `push_marker`, so keeping it around would've
+just been dead code with misleadingly still-passing tests.
+
+**The write side had to change with it.** A push can move up to all four
+markers from ONE user action (one drag, one typed spinbox value), so
+`program_editor_window.py`'s `_schedule_marker_write` can no longer infer
+which SysEx field(s) need writing from *which marker the user directly
+touched* - it now takes the FULL marker dict from both *before* and
+*after* the edit and writes exactly the field(s) whose value actually
+changed (`SSTART` if `start` moved, `SMPEND` if `end` moved, `LOOPAT1`+
+`LLNGTH1` together if EITHER loop edge moved, same pairing reasoning as
+before - they jointly encode the loop region). Getting this wrong doesn't
+crash anything, it silently desyncs the hardware from what's on screen: a
+push that visibly moves `loop_end` right along with `end` but only writes
+`SMPEND` would leave the sampler still looping at its old (or, worse, mid-
+edit garbage) `LOOPAT1`/`LLNGTH1` position while the UI shows it moved.
+`_on_waveform_marker_committed` (drag release) gets "before" from the
+sample's own cache entry (`_sample_waveform_cache[sample_index]`) - it's
+only ever updated on a COMMIT, never on the live per-mouse-move
+`markers_changed` emissions a drag fires continuously throughout, so it's
+exactly the state as of whenever the drag started.
+`_on_marker_spinbox_changed` gets "before" from `WaveformView.markers()`
+read immediately before calling `set_marker`, for the same reason.
+`_flush_marker_write` (the `editingFinished`/drag-release "commit now,
+don't wait out the debounce" path) dropped its `which` parameter entirely
+- it just unconditionally flushes all four marker-related debounce keys
+now (`_flush_write` is already a no-op for a key with nothing pending),
+simpler than threading "which of the four did `_schedule_marker_write`
+actually touch" back out to the caller.
+`tests/test_program_editor_window.py`'s `test_marker_spinbox_push_writes_
+every_field_that_actually_moved`/`test_drag_release_push_writes_every_
+field_that_actually_moved` pin this down directly - both fail if the
+write side falls back to inferring fields from `which` alone.
+
 ## Testing
 
 `TESTING.md` currently undersells this a little - as of this note there's also
