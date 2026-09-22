@@ -45,6 +45,10 @@ class FakeBridge:
                 # 3000 * 65536
                 "LLNGTH1": 3000 * 65536, "SLNGTH": 10000, "SSRATE": 44100,
                 "SPTYPE": 0, "SPITCH": 60, "SHLTO": -12,
+                # STUNO is centered at 32768 (0 semitones), 256 raw units
+                # per semitone - see _sample_tune_offset_to_semitones - so
+                # 33280 is +2.00 semitones
+                "STUNO": 33280,
             }
             for i in range(len(self._samples))
         }
@@ -369,7 +373,7 @@ class FakeSamplerController(QObject):
             self._bridge.sample_headers[new_index] = {
                 "SSTART": 0, "SMPEND": 0, "LOOPAT1": 0, "LLNGTH1": 0,
                 "SLNGTH": 0, "SSRATE": 44100, "SPTYPE": 0, "SPITCH": 60,
-                "SHLTO": 0,
+                "SHLTO": 0, "STUNO": 32768,
             }
         # deferred, not synchronous - _perform_sample_edit_real connects
         # its _wait_for_any_signal listener AFTER calling send_file_queue,
@@ -1495,6 +1499,7 @@ def test_nothing_selected_disables_loop_type_and_root_note(editor, qapp):
     assert editor.sample_loop_type_combo.isEnabled() is False
     assert editor.sample_root_note_spinbox.isEnabled() is False
     assert editor.sample_loop_tune_knob.isEnabled() is False
+    assert editor.sample_tune_spinbox.isEnabled() is False
 
 
 def test_changing_sample_loop_type_writes_sptype(editor, qapp):
@@ -1545,6 +1550,61 @@ def test_changing_sample_loop_tune_writes_shlto(editor, qapp):
 def test_sample_loop_tune_knob_range_is_plus_minus_fifty(editor):
     assert editor.sample_loop_tune_knob.minimum() == -50
     assert editor.sample_loop_tune_knob.maximum() == 50
+
+
+def test_sample_loop_tune_value_label_updates_as_the_knob_turns(editor, qapp):
+    # regression test for a real bug: _build_multi_part_knob (unlike
+    # _build_knob_column) doesn't wire its own value label - the caller
+    # has to connect it by hand (see the Multis tab's own level_knob/
+    # pan_knob), which this knob's own construction was missing, so the
+    # number next to it never changed as you turned it
+    editor.sample_list_widget.setCurrentRow(0)
+    editor._worker.wait_until_idle()
+    _pump_until(qapp, lambda: editor.waveform_view.has_header())
+
+    editor.sample_loop_tune_knob.setValue(33)
+
+    assert editor.sample_loop_tune_value_label.text() == "33"
+
+
+def test_selecting_a_sample_shows_tune_from_header(editor, qapp):
+    # FakeBridge.get_parameter reports raw STUNO=33280 -> +2.00 semitones
+    # (centered at 32768 - see _sample_tune_offset_to_semitones)
+    editor.sample_list_widget.setCurrentRow(0)
+    editor._worker.wait_until_idle()
+    _pump_until(qapp, lambda: editor.waveform_view.has_header())
+
+    assert editor.sample_tune_spinbox.isEnabled() is True
+    assert editor.sample_tune_spinbox.value() == pytest.approx(2.0)
+
+
+def test_changing_sample_tune_writes_stuno_in_raw_units(editor, qapp):
+    # same raw encoding as program_tune_spinbox/the keygroup zone's Tune
+    # spinbox (256 raw units per semitone), but centered at 32768 rather
+    # than 0 - -2.00 semitones is raw 32768 - 512 = 32256
+    editor.sample_list_widget.setCurrentRow(0)
+    editor._worker.wait_until_idle()
+    _pump_until(qapp, lambda: editor.waveform_view.has_header())
+    bridge = editor._bridge
+
+    editor.sample_tune_spinbox.setValue(-2.0)
+    editor.sample_tune_spinbox.editingFinished.emit()
+    editor._worker.wait_until_idle()
+    _pump_until(qapp, lambda: bridge.set_parameter_calls)
+
+    assert ("STUNO", 0, 32256, 0) in bridge.set_parameter_calls
+    assert editor._sample_waveform_cache[0]["stuno"] == pytest.approx(-2.0)
+
+
+def test_sample_tune_spinbox_range_stays_within_stunos_raw_bounds(editor):
+    # STUNO's raw field is unsigned 0..65535 - encode_field rejects
+    # anything outside that, so the spinbox's own range must never let a
+    # typed value round-trip to a raw value past either end (see
+    # _semitones_to_sample_tune_offset)
+    assert editor.sample_tune_spinbox.minimum() == -128.0
+    assert editor.sample_tune_spinbox.maximum() == 127.99
+    assert 0 <= editor._semitones_to_sample_tune_offset(-128.0) <= 65535
+    assert 0 <= editor._semitones_to_sample_tune_offset(127.99) <= 65535
 
 
 def test_confirm_rename_sample_updates_list_zone_combos_and_writes_shname(

@@ -236,6 +236,9 @@ _SAMPLE_DETAIL_FIELDS = [
     # usual 0..127 MIDI note range (s3k.params: "21 to 127 represents A1 to G8")
     "SHLTO",  # loop tune, in cents - -50..50, see program_editor_window.py's
     # sample_loop_tune_knob
+    "STUNO",  # sample's own gross tuning offset, unsigned raw 0..65535
+    # centered at 32768 - see program_editor_window.py's sample_tune_spinbox
+    # and _semitones_to_sample_tune_offset/_sample_tune_offset_to_semitones
 ]
 
 _PROGRAM_LEVEL_FIELDS = [

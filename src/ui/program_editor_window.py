@@ -3474,12 +3474,37 @@ class ProgramEditorWindow(QMainWindow):
             loop_tune_widget,
         ) = self._build_multi_part_knob(-50, 50, default=0)
         self.sample_loop_tune_knob.setEnabled(False)
+        # unlike _build_knob_column, _build_multi_part_knob does NOT wire
+        # the value label itself (see the Multis tab's own level_knob/
+        # pan_knob, which connect this by hand right after calling it too)
+        # - without this the knob turns but the number next to it never
+        # updates
+        self.sample_loop_tune_knob.valueChanged.connect(
+            lambda v: self.sample_loop_tune_value_label.setText(str(v))
+        )
         self.sample_loop_tune_knob.valueChanged.connect(
             self._on_sample_loop_tune_changed
         )
         self.sample_loop_tune_knob.sliderReleased.connect(
             self._commit_sample_loop_tune
         )
+
+        # STUNO - the sample's own gross tuning offset, same widget shape
+        # as program_tune_spinbox/the keygroup zone's Tune spinbox (a
+        # QDoubleSpinBox in semitones, not raw units) but hand-wired like
+        # root note/loop type above rather than through _wire_spinbox_write,
+        # since this targets a sample index, not the selected program
+        sample_tune_label = QLabel("Tune")
+        sample_tune_label.setFixedWidth(70)
+        self.sample_tune_spinbox = QDoubleSpinBox()
+        self.sample_tune_spinbox.setRange(-128.0, 127.99)
+        self.sample_tune_spinbox.setSingleStep(0.01)
+        self.sample_tune_spinbox.setDecimals(2)
+        self.sample_tune_spinbox.setSuffix(" st")
+        self.sample_tune_spinbox.setFixedWidth(90)
+        self.sample_tune_spinbox.setEnabled(False)
+        self.sample_tune_spinbox.valueChanged.connect(self._on_sample_tune_changed)
+        self.sample_tune_spinbox.editingFinished.connect(self._commit_sample_tune)
 
         sample_meta_row.addWidget(loop_type_label)
         sample_meta_row.addWidget(self.sample_loop_type_combo)
@@ -3489,6 +3514,9 @@ class ProgramEditorWindow(QMainWindow):
         sample_meta_row.addSpacing(12)
         sample_meta_row.addWidget(loop_tune_label)
         sample_meta_row.addWidget(loop_tune_widget)
+        sample_meta_row.addSpacing(12)
+        sample_meta_row.addWidget(sample_tune_label)
+        sample_meta_row.addWidget(self.sample_tune_spinbox)
         sample_meta_row.addStretch()
 
         # Trim/Reverse - destructive, hardware-write actions, so both stay
@@ -3735,6 +3763,18 @@ class ProgramEditorWindow(QMainWindow):
 
     def _semitones_to_tune_offset(self, semitones):
         return round(semitones * 100 * 2.56)
+
+    # STUNO ("Sample tuning offset") is the same 1/256-semitone raw scale
+    # as PTUNO/VTUNO/KGTUNO above, but s3k.params documents its raw range
+    # as unsigned 0..65535 rather than signed - confirmed by encode_field
+    # itself rejecting a negative raw value for this field. 32768 (dead
+    # center of that range) is 0 semitones, same convention this app
+    # already uses for MIDI pan/velocity-style centered fields.
+    def _sample_tune_offset_to_semitones(self, raw_value):
+        return round((raw_value - 32768) / 2.56) / 100
+
+    def _semitones_to_sample_tune_offset(self, semitones):
+        return round(semitones * 100 * 2.56) + 32768
 
     # old sampler hardware can't keep up with a write per wheel-notch or
     # per drag-frame - a value is only actually sent once it's held still
@@ -4092,7 +4132,7 @@ class ProgramEditorWindow(QMainWindow):
                 entry["end"],
             )
             self._update_sample_meta_controls(
-                entry["sptype"], entry["spitch"], entry["shlto"]
+                entry["sptype"], entry["spitch"], entry["shlto"], entry["stuno"]
             )
             self._set_sample_edit_buttons_enabled(True)
         elif entry is not None:
@@ -4106,7 +4146,7 @@ class ProgramEditorWindow(QMainWindow):
                 entry["end"],
             )
             self._update_sample_meta_controls(
-                entry["sptype"], entry["spitch"], entry["shlto"]
+                entry["sptype"], entry["spitch"], entry["shlto"], entry["stuno"]
             )
             self._set_sample_edit_buttons_enabled(False)
         else:
@@ -4139,13 +4179,14 @@ class ProgramEditorWindow(QMainWindow):
             "sptype": values["SPTYPE"],
             "spitch": values["SPITCH"],
             "shlto": values["SHLTO"],
+            "stuno": values["STUNO"],
         }
         self._sample_waveform_cache[sample_index] = entry
         if sample_index == self.sample_list_widget.currentRow():
             self._set_marker_spinbox_range(frame_count)
             self.waveform_view.set_header(frame_count, start, loop_start, loop_end, end)
             self._update_sample_meta_controls(
-                values["SPTYPE"], values["SPITCH"], values["SHLTO"]
+                values["SPTYPE"], values["SPITCH"], values["SHLTO"], values["STUNO"]
             )
             self._set_sample_edit_buttons_enabled(False)
 
@@ -4158,7 +4199,7 @@ class ProgramEditorWindow(QMainWindow):
         self.waveform_view.clear()
         self._update_marker_spinboxes(None, None, None, None)
         self._set_marker_spinbox_range(0)
-        self._update_sample_meta_controls(None, None, None)
+        self._update_sample_meta_controls(None, None, None, None)
         self._set_sample_edit_buttons_enabled(False)
 
     def _set_sample_edit_buttons_enabled(self, enabled):
@@ -4169,15 +4210,16 @@ class ProgramEditorWindow(QMainWindow):
         self.trim_sample_button.setEnabled(enabled)
         self.reverse_sample_button.setEnabled(enabled)
 
-    def _update_sample_meta_controls(self, sptype, spitch, shlto=None):
-        # sptype/spitch/shlto None means "nothing known about this sample
-        # yet" - mirrors _update_marker_spinboxes' own None convention,
-        # disabling every control rather than showing a stale or
-        # zeroed-out value
+    def _update_sample_meta_controls(self, sptype, spitch, shlto=None, stuno=None):
+        # sptype/spitch/shlto/stuno None means "nothing known about this
+        # sample yet" - mirrors _update_marker_spinboxes' own None
+        # convention, disabling every control rather than showing a stale
+        # or zeroed-out value
         enabled = sptype is not None
         self.sample_loop_type_combo.setEnabled(enabled)
         self.sample_root_note_spinbox.setEnabled(enabled)
         self.sample_loop_tune_knob.setEnabled(enabled)
+        self.sample_tune_spinbox.setEnabled(enabled)
         if sptype is not None:
             self.sample_loop_type_combo.blockSignals(True)
             self.sample_loop_type_combo.setCurrentIndex(sptype)
@@ -4194,6 +4236,12 @@ class ProgramEditorWindow(QMainWindow):
             self.sample_loop_tune_knob.setValue(shlto)
             self.sample_loop_tune_knob.blockSignals(False)
             self.sample_loop_tune_value_label.setText(str(shlto))
+        if stuno is not None:
+            self.sample_tune_spinbox.blockSignals(True)
+            self.sample_tune_spinbox.setValue(
+                self._sample_tune_offset_to_semitones(stuno)
+            )
+            self.sample_tune_spinbox.blockSignals(False)
 
     def _on_sample_loop_type_changed(self, combo_index):
         sample_index = self.sample_list_widget.currentRow()
@@ -4233,14 +4281,33 @@ class ProgramEditorWindow(QMainWindow):
         entry = self._sample_waveform_cache.get(sample_index)
         if entry is not None:
             entry["shlto"] = value
-        # value_label already kept in sync by _build_knob_column's own
-        # valueChanged connection - nothing extra needed here
+        # value_label already kept in sync by the knob's own separate
+        # valueChanged connection (see its construction) - nothing extra
+        # needed here
         self._schedule_write(
             "SHLTO", "sample", value, index=sample_index, debounce_key="SHLTO"
         )
 
     def _commit_sample_loop_tune(self):
         self._flush_write("SHLTO")
+
+    def _on_sample_tune_changed(self, value):
+        sample_index = self.sample_list_widget.currentRow()
+        if sample_index < 0:
+            return
+        entry = self._sample_waveform_cache.get(sample_index)
+        if entry is not None:
+            entry["stuno"] = value
+        self._schedule_write(
+            "STUNO",
+            "sample",
+            self._semitones_to_sample_tune_offset(value),
+            index=sample_index,
+            debounce_key="STUNO",
+        )
+
+    def _commit_sample_tune(self):
+        self._flush_write("STUNO")
 
     def _set_marker_spinbox_range(self, frame_count):
         # each spinbox can address any frame in the WHOLE sample (typing an
@@ -4727,6 +4794,7 @@ class ProgramEditorWindow(QMainWindow):
                 sptype = entry["sptype"]
                 spitch = entry["spitch"]
                 shlto = entry["shlto"]
+                stuno = entry["stuno"]
             else:
                 # rare: the automatic on-selection fetch hasn't resolved
                 # yet (the user double-clicked before it landed) - fall
@@ -4747,6 +4815,7 @@ class ProgramEditorWindow(QMainWindow):
                 sptype = header["SPTYPE"]
                 spitch = header["SPITCH"]
                 shlto = header["SHLTO"]
+                stuno = header["STUNO"]
                 if sample_index == self.sample_list_widget.currentRow():
                     # normally already shown by _on_sample_detail_loaded's
                     # automatic fetch - this branch only runs when that
@@ -4756,7 +4825,7 @@ class ProgramEditorWindow(QMainWindow):
                     self.waveform_view.set_header(
                         frame_count, start, loop_start, loop_end, end
                     )
-                    self._update_sample_meta_controls(sptype, spitch, shlto)
+                    self._update_sample_meta_controls(sptype, spitch, shlto, stuno)
 
             if sample_index == self.sample_list_widget.currentRow():
                 # markers/frame_count are known either way by this point
@@ -4794,6 +4863,7 @@ class ProgramEditorWindow(QMainWindow):
                 "sptype": sptype,
                 "spitch": spitch,
                 "shlto": shlto,
+                "stuno": stuno,
             }
             self._sample_waveform_cache[sample_index] = entry
             if sample_index == self.sample_list_widget.currentRow():
