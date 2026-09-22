@@ -425,15 +425,21 @@ class ProgramEditorWindow(QMainWindow):
         )
         self._worker.program_deleted.connect(self._on_program_deleted)
         self._worker.program_delete_failed.connect(
-            lambda _index, e: self.status_bar.showMessage(f"Couldn't delete program: {e}")
+            lambda _index, e: self.status_bar.showMessage(
+                f"Couldn't delete program: {e}"
+            )
         )
         self._worker.keygroup_deleted.connect(self._on_keygroup_deleted)
         self._worker.keygroup_delete_failed.connect(
-            lambda _p, _k, e: self.status_bar.showMessage(f"Couldn't delete keygroup: {e}")
+            lambda _p, _k, e: self.status_bar.showMessage(
+                f"Couldn't delete keygroup: {e}"
+            )
         )
         self._worker.sample_deleted.connect(self._on_sample_deleted)
         self._worker.sample_delete_failed.connect(
-            lambda _index, e: self.status_bar.showMessage(f"Couldn't delete sample: {e}")
+            lambda _index, e: self.status_bar.showMessage(
+                f"Couldn't delete sample: {e}"
+            )
         )
         # automatic, async header-only fetch triggered by plain sample
         # selection (_on_sample_selected) - separate from
@@ -441,7 +447,9 @@ class ProgramEditorWindow(QMainWindow):
         # same two signals, used only by _load_sample_waveform's fallback
         # path; both coexisting is fine, Qt signals support multiple slots
         self._worker.sample_detail_loaded.connect(self._on_sample_detail_loaded)
-        self._worker.sample_detail_load_failed.connect(self._on_sample_detail_load_failed)
+        self._worker.sample_detail_load_failed.connect(
+            self._on_sample_detail_load_failed
+        )
         self._worker.start()
 
         # placeholder - real program, keygroup panels come later
@@ -491,7 +499,9 @@ class ProgramEditorWindow(QMainWindow):
 
         self._delete_program_action = QAction("Delete Program...", self.program_list)
         self._delete_program_action.setShortcuts(_DELETE_SHORTCUTS)
-        self._delete_program_action.setShortcutContext(Qt.ShortcutContext.WidgetShortcut)
+        self._delete_program_action.setShortcutContext(
+            Qt.ShortcutContext.WidgetShortcut
+        )
         self._delete_program_action.triggered.connect(self._confirm_delete_program)
         self._delete_program_action.setEnabled(False)
         self.program_list.addAction(self._delete_program_action)
@@ -499,7 +509,9 @@ class ProgramEditorWindow(QMainWindow):
         self.keygroup_list.setContextMenuPolicy(Qt.ContextMenuPolicy.ActionsContextMenu)
         self._delete_keygroup_action = QAction("Delete Keygroup...", self.keygroup_list)
         self._delete_keygroup_action.setShortcuts(_DELETE_SHORTCUTS)
-        self._delete_keygroup_action.setShortcutContext(Qt.ShortcutContext.WidgetShortcut)
+        self._delete_keygroup_action.setShortcutContext(
+            Qt.ShortcutContext.WidgetShortcut
+        )
         self._delete_keygroup_action.triggered.connect(self._confirm_delete_keygroup)
         self._delete_keygroup_action.setEnabled(False)
         self.keygroup_list.addAction(self._delete_keygroup_action)
@@ -1461,7 +1473,7 @@ class ProgramEditorWindow(QMainWindow):
         volume_row.addLayout(loud_column)
         volume_row.addLayout(velocity_column)
         volume_row.addStretch()
-        volume_section = self._build_section_card("Volume, Pan && Velocity", volume_row)
+        volume_section = self._build_section_card("Volume, Pan & Velocity", volume_row)
 
         # LFO1 - every LFO1 control (shape, rate, depth, delay) in one place.
         # Titled "LFO1" now (was just "LFO") now that LFO2 has its own card
@@ -1493,9 +1505,7 @@ class ProgramEditorWindow(QMainWindow):
         lfo2_shape_row.addLayout(lfo2_shape_column)
         lfo2_shape_row.addLayout(lfo2_trig_column)
         lfo2_shape_row.addStretch()
-        lfo2_section = self._build_section_card(
-            "LFO2 (Pan)", lfo2_knobs_row, lfo2_shape_row
-        )
+        lfo2_section = self._build_section_card("LFO2", lfo2_knobs_row, lfo2_shape_row)
 
         # Pitch - tuning offset and pitch-bend range, up and down
         pitch_row = QHBoxLayout()
@@ -1512,7 +1522,7 @@ class ProgramEditorWindow(QMainWindow):
         voice_row.addLayout(polyph_column)
         voice_row.addLayout(note_priority_column)
         voice_row.addStretch()
-        voice_section = self._build_section_card("Voice && MIDI", voice_row)
+        voice_section = self._build_section_card("Voice & MIDI", voice_row)
 
         # Portamento
         portamento_row = QHBoxLayout()
@@ -2445,8 +2455,7 @@ class ProgramEditorWindow(QMainWindow):
         answer = QMessageBox.question(
             self,
             "Delete Sample",
-            f'Delete sample "{sample_name}"?\n\n'
-            "This cannot be undone.",
+            f'Delete sample "{sample_name}"?\n\nThis cannot be undone.',
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,
         )
@@ -3044,7 +3053,9 @@ class ProgramEditorWindow(QMainWindow):
         self.sample_list_widget.setContextMenuPolicy(
             Qt.ContextMenuPolicy.ActionsContextMenu
         )
-        self._rename_sample_action = QAction("Rename Sample...", self.sample_list_widget)
+        self._rename_sample_action = QAction(
+            "Rename Sample...", self.sample_list_widget
+        )
         self._rename_sample_action.triggered.connect(self._confirm_rename_sample)
         self._rename_sample_action.setEnabled(False)
         self.sample_list_widget.addAction(self._rename_sample_action)
@@ -3053,7 +3064,9 @@ class ProgramEditorWindow(QMainWindow):
         _sample_list_separator.setSeparator(True)
         self.sample_list_widget.addAction(_sample_list_separator)
 
-        self._delete_sample_action = QAction("Delete Sample...", self.sample_list_widget)
+        self._delete_sample_action = QAction(
+            "Delete Sample...", self.sample_list_widget
+        )
         self._delete_sample_action.setShortcuts(_DELETE_SHORTCUTS)
         self._delete_sample_action.setShortcutContext(Qt.ShortcutContext.WidgetShortcut)
         self._delete_sample_action.triggered.connect(self._confirm_delete_sample)
@@ -3160,7 +3173,9 @@ class ProgramEditorWindow(QMainWindow):
             )
             swatch = QLabel()
             swatch.setFixedSize(10, 10)
-            swatch.setStyleSheet(f"background-color: {swatch_color}; border-radius: 2px;")
+            swatch.setStyleSheet(
+                f"background-color: {swatch_color}; border-radius: 2px;"
+            )
             spinbox = QSpinBox()
             spinbox.setRange(0, 0)
             spinbox.setEnabled(False)
@@ -3960,7 +3975,12 @@ class ProgramEditorWindow(QMainWindow):
         # kept in sync with the waveform view live in both directions -
         # see WaveformView.markers_changed (drag/set_marker -> here) and
         # _on_marker_spinbox_changed (here -> WaveformView.set_marker)
-        values = {"start": start, "loop_start": loop_start, "loop_end": loop_end, "end": end}
+        values = {
+            "start": start,
+            "loop_start": loop_start,
+            "loop_end": loop_end,
+            "end": end,
+        }
         for name, (_swatch, spinbox) in self._marker_spinboxes.items():
             value = values[name]
             if value is None:
@@ -4090,7 +4110,9 @@ class ProgramEditorWindow(QMainWindow):
             return None
         if which == 1:
             _returned_index, error = args
-            logger.debug(f"_fetch_sample_header_blocking: sample_detail_load_failed: {error}")
+            logger.debug(
+                f"_fetch_sample_header_blocking: sample_detail_load_failed: {error}"
+            )
             self.status_bar.showMessage(f"Couldn't read sample header: {error}")
             return None
         logger.debug(
@@ -4134,8 +4156,13 @@ class ProgramEditorWindow(QMainWindow):
         )
         try:
             which, args = self._wait_for_any_signal(
-                [sampler_controller.sample_received, sampler_controller.receive_finished],
-                start=lambda: sampler_controller.receive_samples([(sample_index, temp_path)]),
+                [
+                    sampler_controller.sample_received,
+                    sampler_controller.receive_finished,
+                ],
+                start=lambda: sampler_controller.receive_samples(
+                    [(sample_index, temp_path)]
+                ),
                 timeout_ms=None,
             )
             if which == 0:
@@ -4424,8 +4451,8 @@ class ProgramEditorWindow(QMainWindow):
                     )
                     return
                 logger.debug(f"_load_sample_waveform: header fetched: {header!r}")
-                frame_count, start, loop_start, loop_end, end = self._markers_from_header(
-                    sample_index, header
+                frame_count, start, loop_start, loop_end, end = (
+                    self._markers_from_header(sample_index, header)
                 )
                 sptype = header["SPTYPE"]
                 spitch = header["SPITCH"]
@@ -4518,7 +4545,7 @@ class ProgramEditorWindow(QMainWindow):
             self,
             "Trim Sample",
             f'Trim "{sample_name}" down to the current Start/End markers '
-            f'({markers["start"]}-{markers["end"]} of {frame_count} frames)?\n\n'
+            f"({markers['start']}-{markers['end']} of {frame_count} frames)?\n\n"
             "This overwrites the sample's audio on the sampler and cannot "
             "be undone.",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
@@ -4549,7 +4576,9 @@ class ProgramEditorWindow(QMainWindow):
         )
         if answer != QMessageBox.StandardButton.Yes:
             return
-        self._perform_sample_edit(sample_index, sample_editing.reverse_samples, "Reverse")
+        self._perform_sample_edit(
+            sample_index, sample_editing.reverse_samples, "Reverse"
+        )
 
     def _perform_sample_edit(self, sample_index, transform, action_label):
         # shared by _confirm_trim_sample/_confirm_reverse_sample - both are
@@ -4669,7 +4698,12 @@ class ProgramEditorWindow(QMainWindow):
         self.status_bar.showMessage(f"{action_label} complete (demo)")
 
     def _perform_sample_edit_real(
-        self, sample_index, sampler_controller, original_name, new_samples, framerate,
+        self,
+        sample_index,
+        sampler_controller,
+        original_name,
+        new_samples,
+        framerate,
         action_label,
     ):
         # The only audio-replace mechanism anywhere in this stack (s3k has
@@ -4860,7 +4894,10 @@ class ProgramEditorWindow(QMainWindow):
         if sample_index < 0:
             return
         new_markers = {
-            "start": start, "loop_start": loop_start, "loop_end": loop_end, "end": end,
+            "start": start,
+            "loop_start": loop_start,
+            "loop_end": loop_end,
+            "end": end,
         }
         entry = self._sample_waveform_cache.get(sample_index)
         # the cache only ever gets updated on a commit (here, or a spinbox
@@ -4903,22 +4940,34 @@ class ProgramEditorWindow(QMainWindow):
 
         if _changed("start"):
             self._schedule_write(
-                "SSTART", "sample", new_markers["start"],
-                index=sample_index, debounce_key="SSTART",
+                "SSTART",
+                "sample",
+                new_markers["start"],
+                index=sample_index,
+                debounce_key="SSTART",
             )
         if _changed("end"):
             self._schedule_write(
-                "SMPEND", "sample", new_markers["end"],
-                index=sample_index, debounce_key="SMPEND",
+                "SMPEND",
+                "sample",
+                new_markers["end"],
+                index=sample_index,
+                debounce_key="SMPEND",
             )
         if _changed("loop_start") or _changed("loop_end"):
             self._schedule_write(
-                "LOOPAT1", "sample", new_markers["loop_end"],
-                index=sample_index, debounce_key="LOOPAT1",
+                "LOOPAT1",
+                "sample",
+                new_markers["loop_end"],
+                index=sample_index,
+                debounce_key="LOOPAT1",
             )
             self._schedule_write(
-                "LLNGTH1", "sample", new_markers["loop_end"] - new_markers["loop_start"],
-                index=sample_index, debounce_key="LLNGTH1",
+                "LLNGTH1",
+                "sample",
+                new_markers["loop_end"] - new_markers["loop_start"],
+                index=sample_index,
+                debounce_key="LLNGTH1",
             )
 
     def _flush_marker_write(self):
