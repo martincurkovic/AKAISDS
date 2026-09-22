@@ -222,6 +222,18 @@ QComboBox:hover, QSpinBox:hover, QDoubleSpinBox:hover {
     border-color: ${border_hover};
 }
 
+/* base rule above sets an explicit background/border/color, which
+   otherwise wins over Fusion's own built-in disabled greying (that only
+   kicks in when nothing more specific already set those properties) - so
+   disabled has to be spelled out here too, same as QPushButton:disabled/
+   QLineEdit:disabled above, or a disabled combo/spinbox reads as fully
+   active. */
+QComboBox:disabled, QSpinBox:disabled, QDoubleSpinBox:disabled {
+    background-color: ${bg_disabled};
+    border-color: ${border_disabled};
+    color: ${text_disabled};
+}
+
 QComboBox QAbstractItemView {
     background-color: ${bg_input};
     color: ${text_bright};

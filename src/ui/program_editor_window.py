@@ -128,6 +128,14 @@ _SAMPLE_PLAYBACK_TYPE_OPTIONS = [
     ("One-shot", _LOOP_TYPE_OPTIONS[4][1]),  # same label, same tooltip
 ]
 
+# SPTYPE values with no loop region at all - "No looping" plays straight
+# through once, "One-shot" ignores note-off and plays to the physical
+# sample end, so LOOPAT1/LLNGTH1 are meaningless in either case. Drives
+# _set_loop_markers_enabled: the loop markers/spinboxes and the waveform's
+# loop-region tint all grey out when SPTYPE is one of these, since editing
+# a loop region the hardware won't use is misleading rather than useful.
+_SPTYPE_VALUES_WITHOUT_LOOP = frozenset({2, 3})
+
 # (label, tooltip) per PORTYPE value - s3k.params transcribes this field as
 # "PORTAMENTO TYPE" with no decoded values={} map (unlike most other
 # program enum fields), so 0="Rate"/1="Time" is inferred from this whole
@@ -377,6 +385,12 @@ class ProgramEditorWindow(QMainWindow):
         # (_on_samples_loaded) - a resident sample's own index can start
         # meaning something else after that.
         self._sample_waveform_cache = {}
+        # whether the current sample's SPTYPE has a loop at all - see
+        # _set_loop_markers_enabled/_SPTYPE_VALUES_WITHOUT_LOOP. Read by
+        # _set_marker_spinbox_range to grey loop_start/loop_end specifically;
+        # defaults enabled so a freshly-constructed window (before any
+        # sample's header has ever loaded) doesn't start in a greyed state.
+        self._loop_markers_enabled = True
 
         self._main_window = main_window
         self._bridge = bridge
@@ -4245,6 +4259,14 @@ class ProgramEditorWindow(QMainWindow):
         self.sample_root_note_spinbox.setEnabled(enabled)
         self.sample_loop_tune_knob.setEnabled(enabled)
         self.sample_tune_spinbox.setEnabled(enabled)
+        # sptype is None ("nothing known yet") defaults to loop-enabled
+        # rather than greyed - _set_marker_spinbox_range's own frame_count
+        # gate already disables everything in that case, this just avoids
+        # a stale greyed-loop state left over from whatever sample was
+        # showing before
+        self._set_loop_markers_enabled(
+            True if sptype is None else sptype not in _SPTYPE_VALUES_WITHOUT_LOOP
+        )
         if sptype is not None:
             self.sample_loop_type_combo.blockSignals(True)
             self.sample_loop_type_combo.setCurrentIndex(sptype)
@@ -4278,6 +4300,7 @@ class ProgramEditorWindow(QMainWindow):
         self.sample_loop_type_combo.setToolTip(
             _SAMPLE_PLAYBACK_TYPE_OPTIONS[combo_index][1]
         )
+        self._set_loop_markers_enabled(combo_index not in _SPTYPE_VALUES_WITHOUT_LOOP)
         # discrete selection change, same as _wire_combo_write's own ZPLAY/
         # CP writes - no flush wiring needed, it always waits out the
         # ordinary debounce window
@@ -4341,11 +4364,63 @@ class ProgramEditorWindow(QMainWindow):
         # loop_start <= loop_end <= end regardless of this range
         enabled = frame_count > 0
         maximum = max(0, frame_count - 1)
-        for _name, (_swatch, spinbox) in self._marker_spinboxes.items():
+        for name, (_swatch, spinbox) in self._marker_spinboxes.items():
+            # loop_start/loop_end additionally need the current sample's
+            # SPTYPE to actually have a loop - see _set_loop_markers_enabled
+            spinbox_enabled = enabled and (
+                self._loop_markers_enabled or name not in ("loop_start", "loop_end")
+            )
             spinbox.blockSignals(True)
-            spinbox.setEnabled(enabled)
+            spinbox.setEnabled(spinbox_enabled)
             spinbox.setRange(0, maximum)
             spinbox.blockSignals(False)
+
+    def _set_loop_markers_enabled(self, enabled):
+        # called whenever the current sample's SPTYPE (loaded or just
+        # edited) changes whether it has a loop at all - greys out the loop
+        # markers/spinboxes and the waveform's loop-region tint together,
+        # since editing a loop region the hardware won't use (SPTYPE "No
+        # looping"/"One-shot") is misleading rather than useful. Re-applies
+        # _set_marker_spinbox_range against the frame count already showing
+        # so the enabled state actually takes effect immediately, not just
+        # on the next unrelated range update.
+        if self._loop_markers_enabled == enabled:
+            return
+        self._loop_markers_enabled = enabled
+        sample_index = self.sample_list_widget.currentRow()
+        # loop_start/loop_end were frozen (not pushed along with Start/End
+        # drags) the whole time the loop was off - see WaveformView.
+        # _push_marker - so re-enabling can snap them back into [start,
+        # end] (WaveformView.set_loop_enabled's own
+        # _reconcile_loop_into_range). Captured before that call so the
+        # write below only covers whatever actually just moved, same
+        # "diff old vs. new" shape as every other marker write on this
+        # page (_on_marker_spinbox_changed/_on_waveform_marker_committed).
+        # Not needed the other direction (enabled -> disabled never moves
+        # a marker, just stops drawing/dragging them).
+        old_markers = self.waveform_view.markers() if enabled else None
+        self.waveform_view.set_loop_enabled(enabled)
+        self._set_marker_spinbox_range(self.waveform_view.frame_count())
+        # the legend swatches are plain QLabels with a hardcoded stylesheet
+        # color (see their construction) - a colored dot next to a greyed,
+        # non-interactive spinbox for a marker that no longer even draws on
+        # the canvas would read as a UI inconsistency, so these follow the
+        # same enabled state
+        palette = theme.current_palette()
+        loop_swatch_color = (
+            palette["keygroup_color_3"] if enabled else palette["text_disabled"]
+        )
+        for name in ("loop_start", "loop_end"):
+            swatch, _spinbox = self._marker_spinboxes[name]
+            swatch.setStyleSheet(
+                f"background-color: {loop_swatch_color}; border-radius: 2px;"
+            )
+        if old_markers is not None and sample_index >= 0:
+            new_markers = self.waveform_view.markers()
+            entry = self._sample_waveform_cache.get(sample_index)
+            if entry is not None:
+                entry.update(new_markers)
+            self._schedule_marker_write(sample_index, old_markers, new_markers)
 
     def _update_marker_spinboxes(self, start, loop_start, loop_end, end):
         # kept in sync with the waveform view live in both directions -
@@ -4976,7 +5051,16 @@ class ProgramEditorWindow(QMainWindow):
             return
         item = self.sample_list_widget.currentItem()
         original_name = item.text() if item is not None else ""
-        markers = self.waveform_view.markers()
+        # not .markers() directly - trim_samples/reverse_samples both
+        # assume loop_start/loop_end already sit within [start, end] (see
+        # their own docstrings in core/sample_editing.py), which can be
+        # false right now if the loop is currently off (Start/End drags
+        # freeze the loop markers out of range rather than dragging them
+        # along - see WaveformView._push_marker/set_loop_enabled). This
+        # clamps just for the transform call, without un-freezing
+        # (permanently moving) the actual stored loop points the way
+        # turning the loop back on does.
+        markers = self.waveform_view.markers_with_loop_in_range()
         new_samples, new_start, new_loop_start, new_loop_end, new_end = transform(
             entry["samples"],
             markers["start"],

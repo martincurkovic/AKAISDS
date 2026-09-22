@@ -1518,6 +1518,160 @@ def test_changing_sample_loop_type_writes_sptype(editor, qapp):
     assert editor._sample_waveform_cache[0]["sptype"] == 2
 
 
+# --- Samples tab: loop markers/spinboxes grey out for SPTYPE with no loop ---
+# "No looping" (index 2) and "One-shot" (index 3) - see
+# _SPTYPE_VALUES_WITHOUT_LOOP/_set_loop_markers_enabled.
+
+
+def test_selecting_a_no_loop_sptype_disables_loop_markers_and_spinboxes(editor, qapp):
+    editor.sample_list_widget.setCurrentRow(0)
+    editor._worker.wait_until_idle()
+    _pump_until(qapp, lambda: editor.waveform_view.has_header())
+
+    editor.sample_loop_type_combo.setCurrentIndex(2)  # "No looping"
+
+    assert editor._marker_spinboxes["loop_start"][1].isEnabled() is False
+    assert editor._marker_spinboxes["loop_end"][1].isEnabled() is False
+    # start/end aren't loop-specific - stay enabled regardless of SPTYPE
+    assert editor._marker_spinboxes["start"][1].isEnabled() is True
+    assert editor._marker_spinboxes["end"][1].isEnabled() is True
+    assert editor.waveform_view._loop_enabled is False
+
+
+def test_one_shot_sptype_also_disables_loop_markers(editor, qapp):
+    editor.sample_list_widget.setCurrentRow(0)
+    editor._worker.wait_until_idle()
+    _pump_until(qapp, lambda: editor.waveform_view.has_header())
+
+    editor.sample_loop_type_combo.setCurrentIndex(3)  # "One-shot"
+
+    assert editor._marker_spinboxes["loop_start"][1].isEnabled() is False
+    assert editor._marker_spinboxes["loop_end"][1].isEnabled() is False
+    assert editor.waveform_view._loop_enabled is False
+
+
+def test_switching_back_to_a_looping_sptype_re_enables_loop_markers(editor, qapp):
+    editor.sample_list_widget.setCurrentRow(0)
+    editor._worker.wait_until_idle()
+    _pump_until(qapp, lambda: editor.waveform_view.has_header())
+
+    editor.sample_loop_type_combo.setCurrentIndex(2)  # "No looping"
+    editor.sample_loop_type_combo.setCurrentIndex(0)  # back to "Loop in release"
+
+    assert editor._marker_spinboxes["loop_start"][1].isEnabled() is True
+    assert editor._marker_spinboxes["loop_end"][1].isEnabled() is True
+    assert editor.waveform_view._loop_enabled is True
+
+
+def test_no_loop_sptype_greys_the_loop_legend_swatches_too(editor, qapp):
+    # a colored swatch next to a greyed, non-interactive spinbox for a
+    # marker that no longer even draws on the canvas would read as a UI
+    # inconsistency - see _set_loop_markers_enabled
+    editor.sample_list_widget.setCurrentRow(0)
+    editor._worker.wait_until_idle()
+    _pump_until(qapp, lambda: editor.waveform_view.has_header())
+    from ui import theme
+
+    palette = theme.current_palette()
+    loop_swatch = editor._marker_spinboxes["loop_start"][0]
+    boundary_style = f"background-color: {palette['text_disabled']}"
+    loop_style = f"background-color: {palette['keygroup_color_3']}"
+    assert loop_style in loop_swatch.styleSheet()
+
+    editor.sample_loop_type_combo.setCurrentIndex(2)  # "No looping"
+    assert boundary_style in loop_swatch.styleSheet()
+
+    editor.sample_loop_type_combo.setCurrentIndex(0)  # back to "Loop in release"
+    assert loop_style in loop_swatch.styleSheet()
+
+
+# --- Samples tab: loop markers freeze while the loop is off, and reconcile --
+# back into range when it's turned back on. Per direct user request: a
+# Start/End trim taken while the loop is off shouldn't silently reshape a
+# loop region the user isn't even looking at - see WaveformView._push_marker/
+# set_loop_enabled.
+
+
+def test_dragging_start_while_loop_is_off_does_not_touch_or_write_loop_fields(
+    editor, qapp
+):
+    editor.sample_list_widget.setCurrentRow(0)
+    editor._worker.wait_until_idle()
+    _pump_until(qapp, lambda: editor.waveform_view.has_header())
+    bridge = editor._bridge
+    # FakeBridge sample 0: start=100, loop_start=5000, loop_end=8000, end=9999
+
+    editor.sample_loop_type_combo.setCurrentIndex(2)  # "No looping"
+    editor._flush_write("SPTYPE")
+    editor._worker.wait_until_idle()
+    bridge.set_parameter_calls.clear()
+
+    editor._on_marker_spinbox_changed("start", 6000)  # past the frozen loop_start
+    editor._flush_marker_write()
+    editor._worker.wait_until_idle()
+    _pump_until(qapp, lambda: bridge.set_parameter_calls)
+
+    assert [c[0] for c in bridge.set_parameter_calls] == ["SSTART"]
+    assert editor.waveform_view.markers() == {
+        "start": 6000, "loop_start": 5000, "loop_end": 8000, "end": 9999,
+    }
+
+
+def test_re_enabling_the_loop_snaps_frozen_markers_into_range_and_writes_it(
+    editor, qapp
+):
+    editor.sample_list_widget.setCurrentRow(0)
+    editor._worker.wait_until_idle()
+    _pump_until(qapp, lambda: editor.waveform_view.has_header())
+    bridge = editor._bridge
+
+    editor.sample_loop_type_combo.setCurrentIndex(2)  # "No looping"
+    editor._flush_write("SPTYPE")
+    editor._worker.wait_until_idle()
+    editor._on_marker_spinbox_changed("start", 6000)  # past the frozen loop_start
+    editor._flush_marker_write()
+    editor._worker.wait_until_idle()
+    bridge.set_parameter_calls.clear()
+
+    editor.sample_loop_type_combo.setCurrentIndex(0)  # back to "Loop in release"
+    editor._flush_write("SPTYPE")
+    editor._flush_marker_write()
+    editor._worker.wait_until_idle()
+    _pump_until(qapp, lambda: bridge.set_parameter_calls)
+
+    calls = {c[0]: c[2] for c in bridge.set_parameter_calls}
+    # loop_start snaps up to the new start (6000); loop_end (8000) was
+    # already inside [6000, 9999], so it's untouched
+    assert calls["LOOPAT1"] == 8000
+    assert calls["LLNGTH1"] == 2000 * 65536
+    assert editor.waveform_view.markers() == {
+        "start": 6000, "loop_start": 6000, "loop_end": 8000, "end": 9999,
+    }
+    assert editor._marker_spinboxes["loop_start"][1].value() == 6000
+
+
+def test_re_enabling_the_loop_with_nothing_to_reconcile_writes_nothing(editor, qapp):
+    editor.sample_list_widget.setCurrentRow(0)
+    editor._worker.wait_until_idle()
+    _pump_until(qapp, lambda: editor.waveform_view.has_header())
+    bridge = editor._bridge
+
+    editor.sample_loop_type_combo.setCurrentIndex(2)  # "No looping"
+    editor._flush_write("SPTYPE")
+    editor._worker.wait_until_idle()
+    bridge.set_parameter_calls.clear()
+
+    # start/end never moved while the loop was off - nothing for
+    # re-enabling to reconcile
+    editor.sample_loop_type_combo.setCurrentIndex(0)  # back to "Loop in release"
+    editor._flush_write("SPTYPE")
+    editor._flush_marker_write()
+    editor._worker.wait_until_idle()
+    _pump_until(qapp, lambda: bridge.set_parameter_calls)
+
+    assert [c[0] for c in bridge.set_parameter_calls] == ["SPTYPE"]
+
+
 def test_changing_sample_root_note_writes_spitch(editor, qapp):
     editor.sample_list_widget.setCurrentRow(0)
     editor._worker.wait_until_idle()
@@ -1828,6 +1982,61 @@ def test_trim_sample_in_demo_mode_shrinks_the_cached_sample_and_waveform(
     assert editor.waveform_view.markers() == {
         "start": 0, "loop_start": 50, "loop_end": 200, "end": 300,
     }
+
+
+def test_trim_sample_while_loop_is_off_clamps_the_frozen_loop_first(
+    editor, qapp, monkeypatch
+):
+    # trim_samples' own docstring (core/sample_editing.py) assumes
+    # loop_start/loop_end are already within [start, end] - normally
+    # guaranteed by push_marker, but loop_start/loop_end are deliberately
+    # frozen (not pushed) while the loop is off (see WaveformView.
+    # _push_marker/set_loop_enabled), so WaveformView.markers() can
+    # legitimately report them OUTSIDE [start, end] at trim time.
+    # _perform_sample_edit must read markers_with_loop_in_range() instead
+    # of markers() so Trim still gets sane input rather than producing a
+    # negative/out-of-bounds loop in the result.
+    import ui.program_editor_window as pew
+
+    monkeypatch.setenv("AKAISDS_DEMO_SAMPLER", "1")
+    _stub_demo_audio(editor, monkeypatch, list(range(500)))
+    editor.sample_list_widget.setCurrentRow(0)
+    editor._worker.wait_until_idle()
+    _pump_until(qapp, lambda: editor.waveform_view.has_header())
+    editor._load_sample_waveform()
+
+    # a real loop region, set while the loop is still on
+    editor.waveform_view.set_marker("start", 0)
+    editor.waveform_view.set_marker("loop_start", 150)
+    editor.waveform_view.set_marker("loop_end", 300)
+    editor.waveform_view.set_marker("end", 400)
+
+    editor.sample_loop_type_combo.setCurrentIndex(2)  # "No looping"
+    editor._flush_write("SPTYPE")
+    editor._worker.wait_until_idle()
+
+    # start dragged past the now-frozen, invisible loop region entirely
+    editor.waveform_view.set_marker("start", 350)
+    assert editor.waveform_view.markers() == {
+        "start": 350, "loop_start": 150, "loop_end": 300, "end": 400,
+    }  # the exact "invalid" state trim_samples' own docstring rules out
+
+    monkeypatch.setattr(
+        pew.QMessageBox, "question", lambda *a, **k: pew.QMessageBox.StandardButton.Yes
+    )
+    monkeypatch.setattr(pew, "_DEMO_MS_PER_WORD", 0.001)
+
+    editor._confirm_trim_sample()
+
+    entry = editor._sample_waveform_cache[0]
+    assert entry["samples"] == list(range(350, 401))
+    # loop_start/loop_end both clamped up to 350 (the trim's own new
+    # start) before trimming, then re-based to 0 by trim_samples itself -
+    # a zero-length loop at the new buffer's own start, not a crash or a
+    # negative/out-of-bounds one
+    assert (entry["start"], entry["loop_start"], entry["loop_end"], entry["end"]) == (
+        0, 0, 0, 50,
+    )
 
 
 def test_trim_sample_does_nothing_when_declined(editor, qapp, monkeypatch):

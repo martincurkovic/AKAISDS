@@ -511,6 +511,160 @@ def test_waveform_zone_color_between_start_and_loop_is_the_ordinary_accent(qapp)
     assert view._waveform_zone_color(900, palette) == QColor(palette["accent"])
 
 
+# --- WaveformView.set_loop_enabled: SPTYPE with no loop hides the loop ------
+# region entirely - the waveform's loop tint reverts to plain accent, the
+# loop_start/loop_end markers stop being drawn at all (not just greyed),
+# and hit-testing excludes them so they can't be dragged either. See
+# program_editor_window.py's _set_loop_markers_enabled, which calls this
+# whenever the current sample's SPTYPE is "No looping"/"One-shot".
+
+
+def test_loop_disabled_greys_the_loop_region_tint_to_the_boundary_colour(qapp):
+    view = WaveformView()
+    view.resize(400, 180)
+    view.set_header(1000, start=100, loop_start=300, loop_end=700, end=900)
+    view.set_loop_enabled(False)
+    palette = theme.current_palette()
+    # would be loop-tinted with a loop, but there's no loop on this SPTYPE -
+    # reads as the ordinary accent colour, same as the rest of [start, end]
+    for frame in (300, 500, 700):
+        assert view._waveform_zone_color(frame, palette) == QColor(palette["accent"])
+
+
+def test_loop_disabled_does_not_affect_the_greyed_out_region_outside_start_end(qapp):
+    view = WaveformView()
+    view.resize(400, 180)
+    view.set_header(1000, start=100, loop_start=300, loop_end=700, end=900)
+    view.set_loop_enabled(False)
+    palette = theme.current_palette()
+    assert view._waveform_zone_color(50, palette) == QColor(palette["text_disabled"])
+    assert view._waveform_zone_color(950, palette) == QColor(palette["text_disabled"])
+
+
+def test_marker_colors_are_not_affected_by_loop_enabled(qapp):
+    # paintEvent itself skips drawing loop_start/loop_end entirely when
+    # disabled (see the crash-guard test below) rather than drawing them
+    # greyed - _marker_colors doesn't need its own loop_enabled branching
+    view = WaveformView()
+    palette = theme.current_palette()
+    enabled_colors = view._marker_colors(palette)
+    view.set_loop_enabled(False)
+    disabled_colors = view._marker_colors(palette)
+    assert enabled_colors == disabled_colors
+    assert enabled_colors["loop_start"] == QColor(palette["keygroup_color_3"])
+
+
+def test_paint_does_not_crash_with_loop_disabled(qapp):
+    # crash-guard for paintEvent's loop_start/loop_end skip in the marker-
+    # drawing loop - grab() forces a real offscreen paint cycle, same
+    # convention as the other paint crash-guards below
+    view = WaveformView()
+    view.resize(400, 180)
+    view.set_header(1000, start=100, loop_start=300, loop_end=700, end=900)
+    view.set_loop_enabled(False)
+    view.grab()
+
+
+def test_loop_disabled_excludes_loop_markers_from_hit_testing(qapp):
+    view = WaveformView()
+    view.resize(400, 180)
+    view.set_header(1000, start=0, loop_start=300, loop_end=305, end=999)
+    view.set_loop_enabled(False)
+    x = view._x_for("loop_start")
+    assert view._markers_within_hit_radius(x) == []
+    # start/end are still draggable
+    assert "start" in view._markers_within_hit_radius(view._x_for("start"))
+
+
+def test_set_loop_enabled_false_then_true_restores_hit_testing(qapp):
+    view = WaveformView()
+    view.resize(400, 180)
+    view.set_header(1000, start=0, loop_start=300, loop_end=305, end=999)
+    view.set_loop_enabled(False)
+    view.set_loop_enabled(True)
+    x = view._x_for("loop_start")
+    assert "loop_start" in view._markers_within_hit_radius(x)
+
+
+# --- WaveformView: loop_start/loop_end are frozen while the loop is off -----
+# (not pushed along with a Start/End drag - see _push_marker), then
+# reconciled back into [start, end] only once the loop comes back on (see
+# set_loop_enabled/_reconcile_loop_into_range) - per direct user request:
+# a Start/End trim taken while the loop is off shouldn't silently reshape
+# a loop region the user isn't even looking at.
+
+
+def test_dragging_start_past_a_frozen_loop_start_does_not_move_it(qapp):
+    view = WaveformView()
+    view.set_header(1000, start=100, loop_start=300, loop_end=700, end=900)
+    view.set_loop_enabled(False)
+    view.set_marker("start", 500)  # past the frozen loop_start
+    m = view.markers()
+    assert m["start"] == 500
+    assert m["loop_start"] == 300  # untouched, even though start moved past it
+    assert m["loop_end"] == 700
+
+
+def test_dragging_end_past_a_frozen_loop_end_does_not_move_it(qapp):
+    view = WaveformView()
+    view.set_header(1000, start=100, loop_start=300, loop_end=700, end=900)
+    view.set_loop_enabled(False)
+    view.set_marker("end", 400)  # past the frozen loop_end
+    m = view.markers()
+    assert m["end"] == 400
+    assert m["loop_start"] == 300
+    assert m["loop_end"] == 700  # untouched, even though end moved past it
+
+
+def test_start_and_end_still_push_each_other_while_the_loop_is_off(qapp):
+    # freezing only excludes the LOOP markers from the cascade - start and
+    # end still collide with each other exactly like an ordinary push
+    view = WaveformView()
+    view.set_header(1000, start=100, loop_start=300, loop_end=700, end=900)
+    view.set_loop_enabled(False)
+    view.set_marker("start", 950)  # past the current end (900)
+    m = view.markers()
+    assert m["start"] == 950
+    assert m["end"] == 950  # pushed along, same as with the loop on
+
+
+def test_loop_re_enabled_after_being_frozen_out_of_range_snaps_into_start_end(qapp):
+    view = WaveformView()
+    view.set_header(1000, start=100, loop_start=300, loop_end=700, end=900)
+    view.set_loop_enabled(False)
+    view.set_marker("start", 800)  # now past the frozen loop region entirely
+    view.set_loop_enabled(True)
+    m = view.markers()
+    assert m["start"] <= m["loop_start"] <= m["loop_end"] <= m["end"]
+    # both loop edges were below the new start - both clamp up to it
+    assert m["loop_start"] == 800
+    assert m["loop_end"] == 800
+
+
+def test_loop_re_enabled_with_no_change_needed_does_not_touch_the_loop(qapp):
+    view = WaveformView()
+    view.set_header(1000, start=100, loop_start=300, loop_end=700, end=900)
+    view.set_loop_enabled(False)
+    # start/end never moved past the loop region - nothing to reconcile
+    view.set_loop_enabled(True)
+    m = view.markers()
+    assert m["loop_start"] == 300
+    assert m["loop_end"] == 700
+
+
+def test_markers_with_loop_in_range_clamps_without_mutating_state(qapp):
+    view = WaveformView()
+    view.set_header(1000, start=100, loop_start=300, loop_end=700, end=900)
+    view.set_loop_enabled(False)
+    view.set_marker("start", 800)
+    clamped = view.markers_with_loop_in_range()
+    assert clamped["loop_start"] == 800
+    assert clamped["loop_end"] == 800
+    # the real (frozen) state is untouched - only the returned dict clamps
+    assert view.markers()["loop_start"] == 300
+    assert view.markers()["loop_end"] == 700
+
+
 # --- WaveformView.paintEvent: zero-crossing line / connected samples ---------
 # No pixel-level assertions here (nothing else in this file does either -
 # there's no infrastructure for it) - these are crash-guards for the two

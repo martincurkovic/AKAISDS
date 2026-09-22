@@ -196,6 +196,12 @@ class WaveformView(QWidget):
         self._loading = False
         self._zoom = _MIN_ZOOM
         self._view_start = 0
+        # whether the current sample's SPTYPE actually has a loop - see
+        # set_loop_enabled/program_editor_window.py's
+        # _set_loop_markers_enabled. Greys the loop markers and the
+        # waveform's loop-region tint, and excludes loop_start/loop_end from
+        # hit-testing so they can't be dragged, when False.
+        self._loop_enabled = True
 
     def has_waveform(self):
         return self._samples is not None
@@ -206,9 +212,79 @@ class WaveformView(QWidget):
     def markers(self):
         return dict(self._markers)
 
+    def markers_with_loop_in_range(self):
+        """Same as markers(), except loop_start/loop_end are clamped into
+        [start, end] rather than returned as-is.
+
+        While the loop is off, Start/End drags freeze loop_start/loop_end
+        out of their push cascade instead of dragging them along (see
+        _push_marker/set_loop_enabled) - deliberately, so an unrelated
+        trim of Start/End doesn't silently reshape the loop the user
+        isn't even looking at. But that means markers() can hand back a
+        loop_start/loop_end sitting outside [start, end] while frozen,
+        which core/sample_editing.py's trim_samples/reverse_samples both
+        explicitly document assuming never happens (see their own
+        docstrings) - this is what _perform_sample_edit in
+        program_editor_window.py reads instead, so Trim/Reverse always
+        gets sane input regardless of whether the loop happens to be on
+        right now, without that read itself un-freezing (permanently
+        moving) the actual stored loop points the way re-enabling the
+        loop does.
+        """
+        m = self._markers
+        start, end = m["start"], m["end"]
+        return dict(
+            m,
+            loop_start=min(max(m["loop_start"], start), end),
+            loop_end=min(max(m["loop_end"], start), end),
+        )
+
     def set_loading(self, loading):
         self._loading = loading
         self.update()
+
+    def set_loop_enabled(self, enabled):
+        if self._loop_enabled == enabled:
+            return
+        self._loop_enabled = enabled
+        # a stale drag/press-cycle onto a marker that just became
+        # non-interactive shouldn't linger - matches clear()/set_header()'s
+        # own reset of these
+        if not enabled and self._dragging in ("loop_start", "loop_end"):
+            self._dragging = None
+        self._press_cycle_candidates = []
+        self._press_cycle_index = 0
+        if enabled:
+            # loop_start/loop_end were frozen out of every Start/End push
+            # while disabled (see _push_marker) rather than cascaded along
+            # with them, so they can be sitting outside [start, end] by
+            # now - the ordinary "there's a loop" invariant every other
+            # consumer (rendering, Trim, the hardware write below) assumes
+            # only actually needs to hold again from this point on, not
+            # throughout the whole time the loop was off. Emits
+            # markers_changed itself (only if this actually moved
+            # anything) so program_editor_window.py's spinboxes AND its
+            # hardware write both pick up the change the same way any
+            # other push does - see _reconcile_loop_into_range.
+            self._reconcile_loop_into_range()
+        self.update()
+
+    def _reconcile_loop_into_range(self):
+        # markers_with_loop_in_range's clamp is monotonic non-decreasing,
+        # and loop_start <= loop_end already held the last time the loop
+        # was actually active (nothing else can have changed that
+        # ordering while frozen - see _push_marker) - so clamping each one
+        # independently into [start, end] can't flip that ordering either,
+        # no separate cascade/collision logic needed here the way
+        # push_marker itself needs for a live drag.
+        clamped = self.markers_with_loop_in_range()
+        if (
+            clamped["loop_start"] == self._markers["loop_start"]
+            and clamped["loop_end"] == self._markers["loop_end"]
+        ):
+            return
+        self._markers = clamped
+        self._emit_markers_changed()
 
     def has_header(self):
         # markers are known (from the sample's header) and draggable, even
@@ -338,13 +414,41 @@ class WaveformView(QWidget):
         """
         if self._frame_count == 0:
             return None
-        index = _MARKER_ORDER.index(name)
-        self._markers = push_marker(
-            _MARKER_ORDER, index, frame, self._markers, self._frame_count
-        )
+        self._markers = self._push_marker(name, frame)
         self.update()
         self._emit_markers_changed()
         return self._markers[name]
+
+    def _push_marker(self, name, frame):
+        """push_marker (the module-level function), but loop_start/
+        loop_end are frozen out of the cascade while the current sample's
+        SPTYPE has no loop (self._loop_enabled False - see
+        set_loop_enabled): dragging or typing Start/End then can't drag
+        the (already invisible, non-interactive) loop markers along with
+        it the way the ordinary Newton's-cradle push would. They stay
+        exactly where they were - even if that leaves them outside the
+        new [start, end], which push_marker's own invariant would
+        otherwise never allow - reconciled back into range only once the
+        loop is turned back on (see set_loop_enabled/
+        _reconcile_loop_into_range), not on every intervening drag.
+
+        Dragging loop_start/loop_end THEMSELVES always uses the full
+        cascade regardless of _loop_enabled - they're excluded from hit-
+        testing and their spinboxes are disabled whenever there's no
+        loop, so in practice that path is never reachable while disabled,
+        but falling back to the ordinary/safe cascade rather than an
+        undefined one-marker "order" costs nothing if it ever is.
+        """
+        if not self._loop_enabled and name in ("start", "end"):
+            order = ("start", "end")
+        else:
+            order = _MARKER_ORDER
+        index = order.index(name)
+        values = {n: self._markers[n] for n in order}
+        pushed = push_marker(order, index, frame, values, self._frame_count)
+        new_markers = dict(self._markers)
+        new_markers.update(pushed)
+        return new_markers
 
     def _emit_markers_changed(self):
         m = self._markers
@@ -471,6 +575,10 @@ class WaveformView(QWidget):
         # things - reuses the keygroup range bar's teal rather than
         # inventing a new theme token for it (see keygroup_range_bar.py's
         # own keygroup_color(2), a validated categorical teal in both themes)
+        # No loop_enabled branching needed here - when there's no loop on
+        # the current sample's SPTYPE, paintEvent skips drawing loop_start/
+        # loop_end entirely (see set_loop_enabled) rather than drawing them
+        # in a greyed color, so this dict's loop entries just go unused.
         boundary = QColor(palette["text_disabled"])
         loop = QColor(palette["keygroup_color_3"])
         return {
@@ -544,7 +652,11 @@ class WaveformView(QWidget):
         m = self._markers
         if frame < m["start"] or frame > m["end"]:
             return QColor(palette["text_disabled"])
-        if m["loop_start"] <= frame <= m["loop_end"]:
+        # no loop-region tint at all when the current sample's SPTYPE has
+        # no loop - see set_loop_enabled - the whole [start, end] span just
+        # reads as ordinary accent-coloured playback instead of implying a
+        # loop region the hardware won't actually use
+        if self._loop_enabled and m["loop_start"] <= frame <= m["loop_end"]:
             return QColor(palette["keygroup_color_3"])
         return QColor(palette["accent"])
 
@@ -609,6 +721,12 @@ class WaveformView(QWidget):
         view_start = self._view_start
         view_length = self._view_length()
         for name in _MARKER_ORDER:
+            # no loop on the current sample's SPTYPE - see set_loop_enabled
+            # - the loop markers don't just grey out, they don't draw at
+            # all, same as they can't be dragged (_markers_within_hit_
+            # radius already excludes them for the same reason)
+            if not self._loop_enabled and name in ("loop_start", "loop_end"):
+                continue
             frame = self._markers[name]
             # off the visible edge in either direction - draw nothing
             # rather than a marker pinned to x=0/width that looks real
@@ -664,6 +782,8 @@ class WaveformView(QWidget):
         view_length = self._view_length()
         candidates = []
         for name in _MARKER_ORDER:
+            if not self._loop_enabled and name in ("loop_start", "loop_end"):
+                continue  # no loop on this sample's SPTYPE - not draggable
             frame = self._markers[name]
             if frame < view_start or frame > view_start + view_length - 1:
                 continue  # not visible - can't be clicked
@@ -721,7 +841,6 @@ class WaveformView(QWidget):
     def mouseMoveEvent(self, event):
         if self._dragging is None:
             return
-        index = _MARKER_ORDER.index(self._dragging)
         fine = bool(event.modifiers() & Qt.KeyboardModifier.ShiftModifier)
 
         if fine and not self._fine_active:
@@ -760,9 +879,7 @@ class WaveformView(QWidget):
         # motion over a long drag
         self._drag_value += dx * frames_per_px
         frame = int(round(self._drag_value))
-        self._markers = push_marker(
-            _MARKER_ORDER, index, frame, self._markers, self._frame_count
-        )
+        self._markers = self._push_marker(self._dragging, frame)
         # ONLY resync the accumulator when *frame* itself just got clamped
         # to the whole-sample bounds (push_marker's own first line) -
         # never unconditionally. push_marker itself never stops this
