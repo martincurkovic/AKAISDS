@@ -748,6 +748,83 @@ def test_receive_data_packet_checksum_failure_sends_nak_and_holds_the_packet(con
     assert nak_msg[2] == sds_encoder.NAK
 
 
+def test_receive_data_packet_emits_decoded_chunks_progressively(controller, tmp_path):
+    # sample_chunk_received - purely additive, but the actual point of the
+    # feature (program_editor_window.py's progressive waveform): a
+    # listener should see the same words _finish_receiving's own one-shot
+    # decode would produce, in order, packet by packet as they arrive -
+    # not just at the very end
+    from core import sds_encoder
+
+    samples = list(range(-45, 45))  # 90 words -> spans 3 packets at 40 words/packet (16-bit)
+    save_path = str(tmp_path / "chunked.wav")
+
+    controller.receive_sample_generic(sample_number=1, save_path=save_path, channel=0)
+    header_packet = sds_encoder.build_dump_header(
+        samples, framerate=44100, sample_number=1, channel=0, bit_depth=16
+    )
+    controller.on_sysex_received(list(header_packet[1:-1]))
+
+    data_packets = sds_encoder.build_data_packets(samples, channel=0, bit_depth=16)
+    assert len(data_packets) == 3  # otherwise this isn't actually exercising multiple chunks
+
+    chunks = []
+    controller.sample_chunk_received.connect(lambda c: chunks.append(c))
+
+    for packet in data_packets:
+        controller.on_sysex_received(list(packet[1:-1]))
+
+    # one chunk per accepted packet, the last one trimmed to the real
+    # remainder rather than including that packet's zero padding
+    assert [len(c) for c in chunks] == [40, 40, 10]
+    assert [s for chunk in chunks for s in chunk] == samples
+
+
+def test_receive_data_packet_chunk_is_scaled_to_16bit_for_non_16bit_depths(controller, tmp_path):
+    from core import sds_encoder
+
+    samples = list(range(-10, 10))  # fits in a single 8-bit packet
+    save_path = str(tmp_path / "chunked8.wav")
+
+    controller.receive_sample_generic(sample_number=1, save_path=save_path, channel=0)
+    header_packet = sds_encoder.build_dump_header(
+        samples, framerate=44100, sample_number=1, channel=0, bit_depth=8
+    )
+    controller.on_sysex_received(list(header_packet[1:-1]))
+
+    data_packets = sds_encoder.build_data_packets(samples, channel=0, bit_depth=8)
+
+    chunks = []
+    controller.sample_chunk_received.connect(lambda c: chunks.append(c))
+    for packet in data_packets:
+        controller.on_sysex_received(list(packet[1:-1]))
+
+    assert len(chunks) == 1
+    assert chunks[0] == [s << 8 for s in samples]
+
+
+def test_checksum_failure_does_not_emit_a_chunk(controller):
+    from core import sds_encoder
+
+    controller._receiving = True
+    controller._receive_channel = 0
+    controller._receive_header_info = {
+        "bit_depth": 16, "sample_length": 5, "sample_number": 1, "sample_rate": 44100,
+    }
+    controller._receive_expected_packets = 1
+    controller._receive_packets = []
+
+    packets = sds_encoder.build_data_packets([1, 2, 3], channel=0, bit_depth=16)
+    corrupted = bytearray(packets[0][1:-1])
+    corrupted[5] ^= 0x7F
+
+    chunks = []
+    controller.sample_chunk_received.connect(lambda c: chunks.append(c))
+    controller.on_sysex_received(list(corrupted))
+
+    assert chunks == []
+
+
 # -----------------------------------------------------------------
 # RECEIVING - AKAI SDATA/RSPACK FLOW
 # -----------------------------------------------------------------

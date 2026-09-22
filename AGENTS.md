@@ -654,6 +654,112 @@ pattern again, check this log line first - it now names which job and
 carries the actual traceback, rather than needing to be re-diagnosed from
 scratch.
 
+### Progressive waveform loading during a live SDS dump
+
+The audio envelope used to only ever appear once, fully formed, the
+instant a whole multi-minute SDS transfer finished - `set_waveform` was
+the only way anything landed in `WaveformView._samples`. As of 2026-09-22
+it fills in live instead, left-to-right, in step with the transfer that's
+still in progress (real hardware or demo mode's own simulated one), not
+just a progress bar moving.
+
+`WaveformView.begin_live_capture()` switches from header-only
+(`_samples is None`) to an empty, growing list right before a fetch
+starts (`ProgramEditorWindow._load_sample_waveform`, called once
+regardless of demo/real mode, requires `set_header` to have already run -
+see the fallback header-fetch branch there, which now calls `set_header`
+itself for the rare case `_on_sample_detail_loaded` hasn't beaten it to
+it). `append_live_samples(chunk)` then extends that list and repaints on
+every call. `WaveformView._rebuild_envelope` clips to
+`min(view_start + view_length, len(self._samples))` and sizes the
+envelope's pixel width proportionally to how much of the current view is
+actually loaded - **not** the view's full width fed a short sample list,
+which would stretch a half-loaded prefix to fill the whole canvas instead
+of visibly occupying only its own left fraction. Once a sample is fully
+loaded this clip is a no-op (`len(self._samples) == frame_count` is
+always `>= view_start + view_length`), so this is the exact same
+envelope math the fully-loaded case always had.
+
+Two independent producers feed `append_live_samples`, both driven from
+`ProgramEditorWindow`:
+
+- **Real hardware**: `SamplerController.sample_chunk_received` (new
+  `Signal(list)`) - `_on_receive_data_packet` decodes each just-accepted
+  SDS data packet's own words immediately (rather than waiting for
+  `_finish_receiving`'s one all-at-once decode of everything) and emits
+  them, scaled to the same 16-bit-equivalent range every other sample
+  value on this page uses via `sds_encoder.scale_sample_to_16bit`
+  (matches `write_wav_file`'s WAV-round-trip scaling exactly - see its
+  own comment for the 8-bit case's algebra). This is purely additive -
+  `receive_progress`/`sample_received`/`receive_finished` are emitted
+  exactly as before, at the same points, with the same payloads. The
+  Transfer Dashboard's own bulk-receive flow (`dashboard.py`) never
+  connects to `sample_chunk_received` and is completely unaffected;
+  `_fetch_sample_audio_blocking` connects/disconnects it the same
+  transient way it already did for `receive_progress`.
+- **Demo mode**: `_fetch_demo_sample_audio` has no packets of its own (the
+  whole fixture file is already in hand from the read at the top of the
+  function) - it just calls `append_live_samples` with the newly-revealed
+  slice on the same ~200ms-tick cadence its progress bar already ticks
+  on, so evaluating this feature without hardware shows the real thing,
+  not just its progress bar.
+
+`WaveformView.set_waveform`'s own `preserve_view` check used to require
+`self._samples is None` (proof nothing had been drawn yet) - that's no
+longer true the moment `begin_live_capture` runs, so the check is just
+`self._frame_count == len(samples)` now (frame_count equality alone was
+always the real proof of "still the same sample"; a clear()/set_header()
+call for a genuinely different sample resets `_zoom`/`_view_start` to
+defaults before `set_waveform` ever runs, so a coincidental frame_count
+match there is harmless, not stale).
+
+`WaveformView.paintEvent`'s bottom hint text ("Double-click to load
+waveform audio (slow)" / "Loading…") used to sit pinned to the bottom
+edge specifically to avoid the big centered placeholder text overlapping
+the markers - it's vertically centered now (a user found bottom-alignment
+looked wrong once the markers were the only other thing on the canvas);
+this was never actually a collision risk since the markers' own triangle
+handles only occupy the very top few px. The condition for showing it
+also changed from `self._samples is None` to `not self._envelope`, so it
+correctly keeps showing "Loading…" through the (typically brief) gap
+between `begin_live_capture` running and the first chunk actually
+landing, instead of going blank the instant `_samples` becomes `[]`.
+
+**Follow-up bug, caught by a user's screen recording the same day**: the
+envelope visibly finished loading well before the progress bar did, then
+the whole waveform snapped/rescaled (markers included) the moment the
+"real" audio landed. Root cause: `_markers_from_header`'s demo branch
+substituted an arbitrary nominal placeholder (`values["SLNGTH"] or
+20000`) for `frame_count` whenever `DemoBridge`'s own all-zero header
+came back - fine as a placeholder right up until progressive loading gave
+it a job to do (`begin_live_capture`'s envelope-proportion math treats it
+as the live-capture *total*). `tests/test_audio.wav` (the demo audio
+fixture `_fetch_demo_sample_audio` actually loads) is ~31000 frames, not
+20000, so the envelope reached "loaded_end >= view_start + view_length"
+(i.e. visually 100% full) at roughly 20000/31000 ≈ 64% of the way through
+the real transfer, then `set_waveform` replaced everything with the real
+31000-frame total once the transfer actually finished, and since
+`preserve_view`'s frame_count check no longer matched, every marker's
+on-screen x-position recalculated against the new (larger) denominator
+mid-view - read as a sudden jump/redraw. Fixed by
+`ProgramEditorWindow._demo_sample_frame_count(sample_index)`, which
+predicts the REAL length `_fetch_demo_sample_audio` will load (a cheap
+`wave.open(...).getnframes()` header peek, or - fixture missing -
+`_synthesized_demo_frame_count`, split out of
+`_synthesize_demo_sample_audio` specifically so the two can't drift
+apart) and is now what `_markers_from_header`'s demo branch uses instead
+of the old placeholder. `_markers_from_header` takes `sample_index` now
+(both call sites pass it) - it didn't need it before this fix.
+`test_demo_header_frame_count_matches_the_eventual_loaded_audio_length`
+and `test_progressive_load_never_looks_complete_before_the_last_chunk_in_demo_mode`
+in `tests/test_program_editor_window.py` pin this down directly (both
+fail against the old placeholder - verified by temporarily reverting the
+fix and re-running them). This was demo-mode-only: on real hardware
+`_frame_count` and the live transfer's own reported length both trace
+back to the same physical sample's `SLNGTH` on the same device, so they
+were never expected to disagree the way an arbitrary demo placeholder
+could.
+
 ## Testing
 
 `TESTING.md` currently undersells this a little - as of this note there's also

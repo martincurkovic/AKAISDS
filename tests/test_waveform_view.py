@@ -333,3 +333,73 @@ def test_set_waveform_resets_the_view_for_a_genuinely_new_sample(qapp):
     view.set_waveform(samples, 0, 1000, 3000, 4999)
     assert view._zoom == pytest.approx(1.0)
     assert view._view_start == 0
+
+
+# --- WaveformView.begin_live_capture/append_live_samples: progressive fill --
+# A live SDS dump (real hardware or demo mode's own simulated one - see
+# program_editor_window.py's _fetch_sample_audio_blocking/
+# _fetch_demo_sample_audio) can take minutes; these let the waveform grow
+# in step with it instead of only appearing once the whole transfer is
+# done.
+
+
+def test_begin_live_capture_without_a_header_is_a_noop(qapp):
+    view = WaveformView()
+    view.begin_live_capture()
+    assert view.has_waveform() is False
+
+
+def test_begin_live_capture_starts_an_empty_growing_waveform(qapp):
+    view = WaveformView()
+    view.set_header(10000, start=0, loop_start=2500, loop_end=7500, end=9999)
+    view.begin_live_capture()
+    assert view.has_waveform() is True
+    assert view.frame_count() == 10000
+    assert view._envelope == []
+
+
+def test_append_live_samples_before_begin_live_capture_is_a_noop(qapp):
+    view = WaveformView()
+    view.set_header(10000, start=0, loop_start=2500, loop_end=7500, end=9999)
+    view.append_live_samples([100, 200, 300])
+    assert view.has_waveform() is False
+
+
+def test_append_live_samples_grows_the_envelope_left_to_right(qapp):
+    # the whole point: a half-loaded sample should look like a waveform
+    # occupying the left half of the canvas, not a fully-stretched
+    # waveform squeezed from half the real data
+    view = WaveformView()
+    view.resize(400, 180)
+    frame_count = 10000
+    view.set_header(frame_count, start=0, loop_start=2500, loop_end=7500, end=9999)
+    view.begin_live_capture()
+
+    view.append_live_samples([100] * (frame_count // 2))
+    half_width = len(view._envelope)
+    assert 0 < half_width < view.width()
+
+    view.append_live_samples([100] * (frame_count - frame_count // 2))
+    assert len(view._envelope) == view.width()
+
+
+def test_set_waveform_preserves_view_after_a_live_capture(qapp):
+    # regression test: preserve_view used to also require self._samples
+    # is None, which stopped being true the moment begin_live_capture ran
+    # (a real, growing list, not None) - a live capture must still count
+    # as "the same sample" for view-preservation purposes, same as plain
+    # header-only mode already did
+    view = WaveformView()
+    view.resize(400, 180)
+    frame_count = 10000
+    view.set_header(frame_count, start=0, loop_start=2500, loop_end=7500, end=9999)
+    view.begin_live_capture()
+    view.append_live_samples([0] * 1000)
+    view.zoom_in()
+    zoom_after_zoom_in = view._zoom
+    view.set_view_start(500)
+
+    samples = [0] * frame_count
+    view.set_waveform(samples, 0, 2500, 7500, 9999)
+    assert view._zoom == zoom_after_zoom_in
+    assert view._view_start == 500

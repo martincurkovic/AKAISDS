@@ -962,3 +962,115 @@ def test_load_sample_waveform_preserves_header_only_edits(editor, qapp, monkeypa
     assert editor._sample_waveform_cache[0]["loop_start"] == 4000
     assert editor.waveform_view.markers()["loop_start"] == 4000
     assert editor.waveform_view.has_waveform() is True
+
+
+def test_load_sample_waveform_progressively_fills_the_envelope_in_demo_mode(
+    editor, qapp, monkeypatch
+):
+    # the actual point of begin_live_capture/append_live_samples (see
+    # AGENTS.md's Samples tab section and waveform_view.py) - a demo-mode
+    # load should visibly grow the waveform across several calls while
+    # it's still "in flight", not just show it all at once at the end.
+    # Unlike test_load_sample_waveform_preserves_header_only_edits above,
+    # this lets _fetch_demo_sample_audio's real pacing loop run (with
+    # _DEMO_MS_PER_WORD cut way down so the test doesn't take real
+    # wall-clock seconds) since that loop is the thing under test here.
+    import ui.program_editor_window as pew
+
+    monkeypatch.setenv("AKAISDS_DEMO_SAMPLER", "1")
+    monkeypatch.setattr(pew, "_DEMO_MS_PER_WORD", 0.001)
+
+    editor.sample_list_widget.setCurrentRow(0)
+    editor._worker.wait_until_idle()
+    _pump_until(qapp, lambda: editor.waveform_view.has_header())
+
+    calls = []
+    real_append = editor.waveform_view.append_live_samples
+
+    def _recording_append(chunk):
+        calls.append(len(chunk))
+        real_append(chunk)
+
+    monkeypatch.setattr(editor.waveform_view, "append_live_samples", _recording_append)
+
+    editor._load_sample_waveform()
+
+    # _fetch_demo_sample_audio's own "never fewer than 6 ticks" floor -
+    # pinning this down catches a regression back to "load everything at
+    # once and call append_live_samples (if at all) exactly once"
+    assert len(calls) >= 6
+    assert sum(calls) == len(editor._sample_waveform_cache[0]["samples"])
+    assert editor.waveform_view.has_waveform() is True
+
+
+def test_demo_sample_frame_count_matches_the_real_fixture_length(editor):
+    # _demo_sample_frame_count is the fix for a real bug a screen
+    # recording caught (see the two tests below and AGENTS.md's
+    # "Progressive waveform loading" section) - it must predict exactly
+    # what _fetch_demo_sample_audio will actually load, or header-only
+    # mode/begin_live_capture's total drifts from reality all over again
+    import ui.program_editor_window as pew
+
+    real_samples, _framerate = editor._read_wav_samples(pew._DEMO_TEST_AUDIO_PATH)
+    assert editor._demo_sample_frame_count(0) == len(real_samples)
+
+
+def test_demo_header_frame_count_matches_the_eventual_loaded_audio_length(
+    editor, qapp, monkeypatch
+):
+    # regression test for the exact bug the screen recording caught:
+    # header-only mode's frame_count (shown the moment a sample is
+    # selected, and what begin_live_capture's live-capture total is based
+    # on) used to be an arbitrary nominal placeholder unrelated to the
+    # real fixture's length, so the envelope would visibly finish loading
+    # early and then the whole waveform would snap/rescale (markers
+    # included) once the real total replaced it via set_waveform. The two
+    # must always agree - no jump at the end.
+    monkeypatch.setenv("AKAISDS_DEMO_SAMPLER", "1")
+    import ui.program_editor_window as pew
+
+    monkeypatch.setattr(pew, "_DEMO_MS_PER_WORD", 0.001)
+
+    editor.sample_list_widget.setCurrentRow(0)
+    editor._worker.wait_until_idle()
+    _pump_until(qapp, lambda: editor.waveform_view.has_header())
+    header_only_frame_count = editor.waveform_view.frame_count()
+
+    editor._load_sample_waveform()
+
+    assert editor.waveform_view.frame_count() == header_only_frame_count
+
+
+def test_progressive_load_never_looks_complete_before_the_last_chunk_in_demo_mode(
+    editor, qapp, monkeypatch
+):
+    # the other half of the same regression: with a correct frame_count
+    # from the start, the envelope's on-screen width should only ever be
+    # proportional to how much of the REAL total has actually loaded - it
+    # must never reach full canvas width before the transfer is actually
+    # done (that's what "visually finishes early, then snaps" looked
+    # like)
+    monkeypatch.setenv("AKAISDS_DEMO_SAMPLER", "1")
+    import ui.program_editor_window as pew
+
+    monkeypatch.setattr(pew, "_DEMO_MS_PER_WORD", 0.001)
+
+    editor.sample_list_widget.setCurrentRow(0)
+    editor._worker.wait_until_idle()
+    _pump_until(qapp, lambda: editor.waveform_view.has_header())
+
+    view = editor.waveform_view
+    widths = []
+    real_append = view.append_live_samples
+
+    def _recording_append(chunk):
+        real_append(chunk)
+        widths.append(len(view._envelope))
+
+    monkeypatch.setattr(view, "append_live_samples", _recording_append)
+
+    editor._load_sample_waveform()
+
+    assert len(widths) >= 6
+    assert all(w < view.width() for w in widths[:-1])
+    assert widths[-1] == view.width()

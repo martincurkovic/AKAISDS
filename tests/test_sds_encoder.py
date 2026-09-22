@@ -276,6 +276,26 @@ def test_write_wav_file_non_16bit_upscales_to_fit_16bit_container(tmp_path):
     assert list(read_back) == [s << 4 for s in samples]  # left-shifted by (16 - 12)
 
 
+def test_scale_sample_to_16bit_matches_the_write_wav_file_round_trip(tmp_path):
+    # scale_sample_to_16bit exists so a live SDS receive (sampler_
+    # controller.py's sample_chunk_received) can hand a listener 16-bit-
+    # equivalent sample words directly, with no WAV file round trip to do
+    # this implicitly the way write_wav_file/read_wav_samples normally
+    # would - it has to produce the exact same numbers that round trip
+    # would, for every bit depth, or a live-loading waveform would jump/
+    # rescale the moment the final (WAV-file-backed) read replaces it
+    for bit_depth, samples in [
+        (16, [0, 1000, -1000, 32767, -32768]),
+        (12, [1, -1, 100, -100]),
+        (8, [-128, -1, 0, 1, 127]),
+    ]:
+        path = tmp_path / f"scale_check_{bit_depth}.wav"
+        sds_encoder.write_wav_file(str(path), samples, framerate=44100, bit_depth=bit_depth)
+        expected, _rate = sds_encoder.read_wav_samples(str(path))
+        scaled = [sds_encoder.scale_sample_to_16bit(s, bit_depth) for s in samples]
+        assert scaled == list(expected)
+
+
 # -----------------------
 # MISC HEADER/PACKET HELPERS
 # -----------------------
