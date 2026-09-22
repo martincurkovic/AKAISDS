@@ -39,8 +39,12 @@ class FakeBridge:
         self.sample_headers = {
             i: {
                 "SSTART": 100, "SMPEND": 9999, "LOOPAT1": 8000,
-                "LLNGTH1": 3000, "SLNGTH": 10000, "SSRATE": 44100,
-                "SPTYPE": 0, "SPITCH": 60,
+                # LLNGTH1's raw value is 32.16 fixed point, not a plain
+                # frame count - see program_editor_window.py's
+                # _LOOP_LENGTH_FIXED_POINT_SCALE - so 3000 FRAMES is raw
+                # 3000 * 65536
+                "LLNGTH1": 3000 * 65536, "SLNGTH": 10000, "SSRATE": 44100,
+                "SPTYPE": 0, "SPITCH": 60, "SHLTO": -12,
             }
             for i in range(len(self._samples))
         }
@@ -177,6 +181,8 @@ class FakeBridge:
             return self.sample_headers[program_index][param.name]
         if param.region == "multi" and param.name == "MULTINAME":
             return self.multi_name
+        if param.name == "PRGNUM":
+            return 42
         if param.name == "PANPOS":
             return self._pan[program_index]
         if param.name == "PRLOUD":
@@ -363,6 +369,7 @@ class FakeSamplerController(QObject):
             self._bridge.sample_headers[new_index] = {
                 "SSTART": 0, "SMPEND": 0, "LOOPAT1": 0, "LLNGTH1": 0,
                 "SLNGTH": 0, "SSRATE": 44100, "SPTYPE": 0, "SPITCH": 60,
+                "SHLTO": 0,
             }
         # deferred, not synchronous - _perform_sample_edit_real connects
         # its _wait_for_any_signal listener AFTER calling send_file_queue,
@@ -598,6 +605,31 @@ def test_program_tab_loads_channel_tune_and_priority_from_hardware(editor):
     assert editor.midi_channel_combo.currentText() == "4"
     assert editor.program_tune_spinbox.value() == pytest.approx(1.0)
     assert editor.note_priority_combo.currentText() == "High"
+
+
+def test_program_number_spinbox_loads_prgnum_from_hardware(editor):
+    # FakeBridge.get_parameter reports raw PRGNUM=42 - the panel/spinbox
+    # shows 43 (confirmed against real hardware: raw N shows up as N+1)
+    assert editor.program_number_spinbox.value() == 43
+
+
+def test_changing_program_number_writes_prgnum(editor, qapp):
+    bridge = editor._bridge
+
+    # setting the spinbox (panel numbering) to 7 must write raw 6
+    editor.program_number_spinbox.setValue(7)
+    editor._flush_write("PRGNUM")
+    editor._worker.wait_until_idle()
+    _pump_until(qapp, lambda: bridge.set_parameter_calls)
+
+    assert bridge.set_parameter_calls[-1] == ("PRGNUM", 0, 6, 0)
+
+
+def test_program_number_spinbox_range_is_one_to_one_twenty_eight(editor):
+    # the S3000XL's own front panel numbers programs 1-128, not the raw
+    # field's documented 0-128 (see program_number_spinbox's own comment)
+    assert editor.program_number_spinbox.minimum() == 1
+    assert editor.program_number_spinbox.maximum() == 128
 
 
 def test_changing_midi_channel_writes_pmchan(editor, qapp):
@@ -1289,7 +1321,7 @@ def test_marker_spinbox_push_writes_every_field_that_actually_moved(editor, qapp
     _pump_until(qapp, lambda: bridge.set_parameter_calls)
 
     calls = {c[0]: c[2] for c in bridge.set_parameter_calls}
-    assert calls == {"SMPEND": 3000, "LOOPAT1": 3000, "LLNGTH1": 0}
+    assert calls == {"SMPEND": 3000, "LOOPAT1": 3000, "LLNGTH1": 0}  # 0 frames * scale
     assert editor.waveform_view.markers() == {
         "start": 100, "loop_start": 3000, "loop_end": 3000, "end": 3000,
     }
@@ -1316,8 +1348,10 @@ def test_drag_release_push_writes_every_field_that_actually_moved(editor, qapp):
 
     calls = {c[0]: c[2] for c in bridge.set_parameter_calls}
     # loop_start (5000) never moved - SSTART/loop_start untouched, only
-    # the fields end/loop_end actually changed get written
-    assert calls == {"SMPEND": 6000, "LOOPAT1": 6000, "LLNGTH1": 1000}
+    # the fields end/loop_end actually changed get written. LLNGTH1 is
+    # 1000 frames (6000 - 5000) * the fixed-point scale, not plain 1000 -
+    # see _LOOP_LENGTH_FIXED_POINT_SCALE
+    assert calls == {"SMPEND": 6000, "LOOPAT1": 6000, "LLNGTH1": 1000 * 65536}
 
 
 def test_load_sample_waveform_progressively_fills_the_envelope_in_demo_mode(
@@ -1447,6 +1481,8 @@ def test_selecting_a_sample_shows_loop_type_and_root_note_from_header(editor, qa
     assert editor.sample_loop_type_combo.currentText() == "Normal looping"  # SPTYPE=0
     assert editor.sample_root_note_spinbox.isEnabled() is True
     assert editor.sample_root_note_spinbox.value() == 60  # SPITCH=60, FakeBridge
+    assert editor.sample_loop_tune_knob.isEnabled() is True
+    assert editor.sample_loop_tune_knob.value() == -12  # SHLTO=-12, FakeBridge
 
 
 def test_nothing_selected_disables_loop_type_and_root_note(editor, qapp):
@@ -1458,6 +1494,7 @@ def test_nothing_selected_disables_loop_type_and_root_note(editor, qapp):
 
     assert editor.sample_loop_type_combo.isEnabled() is False
     assert editor.sample_root_note_spinbox.isEnabled() is False
+    assert editor.sample_loop_tune_knob.isEnabled() is False
 
 
 def test_changing_sample_loop_type_writes_sptype(editor, qapp):
@@ -1488,6 +1525,26 @@ def test_changing_sample_root_note_writes_spitch(editor, qapp):
 
     assert ("SPITCH", 0, 72, 0) in bridge.set_parameter_calls
     assert editor._sample_waveform_cache[0]["spitch"] == 72
+
+
+def test_changing_sample_loop_tune_writes_shlto(editor, qapp):
+    editor.sample_list_widget.setCurrentRow(0)
+    editor._worker.wait_until_idle()
+    _pump_until(qapp, lambda: editor.waveform_view.has_header())
+    bridge = editor._bridge
+
+    editor.sample_loop_tune_knob.setValue(25)
+    editor.sample_loop_tune_knob.sliderReleased.emit()
+    editor._worker.wait_until_idle()
+    _pump_until(qapp, lambda: bridge.set_parameter_calls)
+
+    assert ("SHLTO", 0, 25, 0) in bridge.set_parameter_calls
+    assert editor._sample_waveform_cache[0]["shlto"] == 25
+
+
+def test_sample_loop_tune_knob_range_is_plus_minus_fifty(editor):
+    assert editor.sample_loop_tune_knob.minimum() == -50
+    assert editor.sample_loop_tune_knob.maximum() == 50
 
 
 def test_confirm_rename_sample_updates_list_zone_combos_and_writes_shname(

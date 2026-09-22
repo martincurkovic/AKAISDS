@@ -191,6 +191,23 @@ _NAME_INPUT_PATTERN = (
     "[" + AKAI_CHARSET.replace("-", "\\-") + "]{0," + str(NAME_LENGTH) + "}"
 )
 
+# LLNGTH1's raw 48-bit value is NOT a plain frame count, unlike LOOPAT1 -
+# s3k.params has no special-casing for it (decode_field/encode_field treat
+# every "num" field as a plain unsigned integer, full stop), but the real
+# field is a 32.16 fixed-point value: the low 16 bits are a sub-frame
+# fraction (always 0 for the whole-frame lengths this app deals in), the
+# high 32 bits are the actual frame count. Two independent sources agree:
+# the s3000editor reference implementation's own encoder writes LLNGTH via
+# a dedicated writeFixed32_16() (raw = round(length * 65536)), and s3ked's
+# own RESOLUTION_NOTES.md independently derives the same 12-byte loop
+# record layout from akaiutil ("loop_start at +0, a length fraction at +4,
+# loop_len at +6" - the fraction/length pair together occupy exactly where
+# params.py's own LLNGTH1 sits). Getting this wrong doesn't fail loudly -
+# the loop still gets committed, just ~65536x too short (a real regression:
+# dragging the loop start marker wrote a loop length the hardware read back
+# as a few milliseconds, not the intended few hundred frames).
+_LOOP_LENGTH_FIXED_POINT_SCALE = 65536
+
 # real audio for AKAISDS_DEMO_SAMPLER's fake sample-audio path (see
 # _fetch_demo_sample_audio) - the same fixture the test suite uses, not
 # anything under WaveformRenderer/ (that folder is the user's own separate
@@ -1229,8 +1246,27 @@ class ProgramEditorWindow(QMainWindow):
         # SysEx. A name commits once, on editingFinished (Enter or focus
         # loss), like note_lo_spinbox/note_hi_spinbox's _commit_note_range.
         self.program_name_edit.editingFinished.connect(self._commit_program_name)
+
+        # PRGNUM - the program's own assignable MIDI program number, not
+        # its position in the program list (that's what Program Change
+        # actually addresses - see AGENTS.md's "PRGNUM and Program Change"
+        # section). The S3000XL's own front panel numbers programs 1..128,
+        # but is off by one from the raw PRGNUM byte - confirmed against
+        # real hardware: writing raw 8 shows up as program 9 on the panel.
+        # This spinbox shows the panel's own 1..128 numbering; the +1/-1
+        # conversion to/from the raw byte lives in _wire_spinbox_write's
+        # value_converter below and program_values["PRGNUM"] + 1 where it
+        # loads from hardware.
+        self.program_number_spinbox = QSpinBox()
+        self.program_number_spinbox.setRange(1, 128)
+        self.program_number_spinbox.setFixedWidth(70)
+        self.program_number_spinbox.setEnabled(False)
+        program_number_label = QLabel("Prg #")
         name_row = QHBoxLayout()
         name_row.addWidget(self.program_name_edit)
+        name_row.addSpacing(12)
+        name_row.addWidget(program_number_label)
+        name_row.addWidget(self.program_number_spinbox)
         name_row.addStretch()
         name_section = self._build_section_card("Program Name", name_row)
 
@@ -1941,6 +1977,13 @@ class ProgramEditorWindow(QMainWindow):
         self.note_hi_spinbox.setEnabled(True)
         self.note_hi_spinbox.valueChanged.connect(self._on_note_range_changed)
         self.note_hi_spinbox.editingFinished.connect(self._commit_note_range)
+        self.program_number_spinbox.setEnabled(True)
+        self._wire_spinbox_write(
+            self.program_number_spinbox,
+            "PRGNUM",
+            "program",
+            value_converter=lambda v: v - 1,
+        )
         self.pan_knob.setEnabled(True)
         self._wire_knob_write(self.pan_knob, "PANPOS", "program")
         self.loud_knob.setEnabled(True)
@@ -2192,6 +2235,9 @@ class ProgramEditorWindow(QMainWindow):
         # to the hardware a moment later. The value label and graph/other
         # side effects are set explicitly right here instead of relying on
         # the (now blocked) valueChanged connections.
+        self.program_number_spinbox.blockSignals(True)
+        self.program_number_spinbox.setValue(program_values["PRGNUM"] + 1)
+        self.program_number_spinbox.blockSignals(False)
         self.pan_knob.blockSignals(True)
         self.pan_knob.setValue(program_values["PANPOS"])
         self.pan_knob.blockSignals(False)
@@ -3406,11 +3452,43 @@ class ProgramEditorWindow(QMainWindow):
         self.sample_root_note_spinbox.editingFinished.connect(
             self._commit_sample_root_note
         )
+
+        # SHLTO ("Tuning offset of hold loop") - the only sample-region
+        # field matching a +/-50 cents range, so this is what "loop tune"
+        # maps to. A knob (not a spinbox) to match this page's other fine-
+        # adjustment controls, committed on release like every other knob
+        # (see _wire_knob_write) rather than continuously - this can't
+        # reuse that helper directly since it targets a sample index, not
+        # the currently selected program (same reason
+        # _on_sample_root_note_changed is hand-wired instead of going
+        # through _wire_spinbox_write). Compact knob-plus-value-to-the-
+        # right shape (_build_multi_part_knob) rather than
+        # _build_knob_column's taller label-above/value-below layout - same
+        # reasoning as the Multis tab's own knobs: this sits inline in a
+        # single-row group of controls, not on a page of its own.
+        loop_tune_label = QLabel("Loop Tune")
+        loop_tune_label.setFixedWidth(70)
+        (
+            self.sample_loop_tune_knob,
+            self.sample_loop_tune_value_label,
+            loop_tune_widget,
+        ) = self._build_multi_part_knob(-50, 50, default=0)
+        self.sample_loop_tune_knob.setEnabled(False)
+        self.sample_loop_tune_knob.valueChanged.connect(
+            self._on_sample_loop_tune_changed
+        )
+        self.sample_loop_tune_knob.sliderReleased.connect(
+            self._commit_sample_loop_tune
+        )
+
         sample_meta_row.addWidget(loop_type_label)
         sample_meta_row.addWidget(self.sample_loop_type_combo)
         sample_meta_row.addSpacing(12)
         sample_meta_row.addWidget(root_note_label)
         sample_meta_row.addWidget(self.sample_root_note_spinbox)
+        sample_meta_row.addSpacing(12)
+        sample_meta_row.addWidget(loop_tune_label)
+        sample_meta_row.addWidget(loop_tune_widget)
         sample_meta_row.addStretch()
 
         # Trim/Reverse - destructive, hardware-write actions, so both stay
@@ -4013,7 +4091,9 @@ class ProgramEditorWindow(QMainWindow):
                 entry["loop_end"],
                 entry["end"],
             )
-            self._update_sample_meta_controls(entry["sptype"], entry["spitch"])
+            self._update_sample_meta_controls(
+                entry["sptype"], entry["spitch"], entry["shlto"]
+            )
             self._set_sample_edit_buttons_enabled(True)
         elif entry is not None:
             # header known, audio not (yet) - see _on_sample_detail_loaded
@@ -4025,7 +4105,9 @@ class ProgramEditorWindow(QMainWindow):
                 entry["loop_end"],
                 entry["end"],
             )
-            self._update_sample_meta_controls(entry["sptype"], entry["spitch"])
+            self._update_sample_meta_controls(
+                entry["sptype"], entry["spitch"], entry["shlto"]
+            )
             self._set_sample_edit_buttons_enabled(False)
         else:
             # nothing known about this sample yet - clear to the
@@ -4056,12 +4138,15 @@ class ProgramEditorWindow(QMainWindow):
             "end": end,
             "sptype": values["SPTYPE"],
             "spitch": values["SPITCH"],
+            "shlto": values["SHLTO"],
         }
         self._sample_waveform_cache[sample_index] = entry
         if sample_index == self.sample_list_widget.currentRow():
             self._set_marker_spinbox_range(frame_count)
             self.waveform_view.set_header(frame_count, start, loop_start, loop_end, end)
-            self._update_sample_meta_controls(values["SPTYPE"], values["SPITCH"])
+            self._update_sample_meta_controls(
+                values["SPTYPE"], values["SPITCH"], values["SHLTO"]
+            )
             self._set_sample_edit_buttons_enabled(False)
 
     def _on_sample_detail_load_failed(self, sample_index, error):
@@ -4073,7 +4158,7 @@ class ProgramEditorWindow(QMainWindow):
         self.waveform_view.clear()
         self._update_marker_spinboxes(None, None, None, None)
         self._set_marker_spinbox_range(0)
-        self._update_sample_meta_controls(None, None)
+        self._update_sample_meta_controls(None, None, None)
         self._set_sample_edit_buttons_enabled(False)
 
     def _set_sample_edit_buttons_enabled(self, enabled):
@@ -4084,13 +4169,15 @@ class ProgramEditorWindow(QMainWindow):
         self.trim_sample_button.setEnabled(enabled)
         self.reverse_sample_button.setEnabled(enabled)
 
-    def _update_sample_meta_controls(self, sptype, spitch):
-        # sptype/spitch None means "nothing known about this sample yet" -
-        # mirrors _update_marker_spinboxes' own None convention, disabling
-        # both controls rather than showing a stale or zeroed-out value
+    def _update_sample_meta_controls(self, sptype, spitch, shlto=None):
+        # sptype/spitch/shlto None means "nothing known about this sample
+        # yet" - mirrors _update_marker_spinboxes' own None convention,
+        # disabling every control rather than showing a stale or
+        # zeroed-out value
         enabled = sptype is not None
         self.sample_loop_type_combo.setEnabled(enabled)
         self.sample_root_note_spinbox.setEnabled(enabled)
+        self.sample_loop_tune_knob.setEnabled(enabled)
         if sptype is not None:
             self.sample_loop_type_combo.blockSignals(True)
             self.sample_loop_type_combo.setCurrentIndex(sptype)
@@ -4102,6 +4189,11 @@ class ProgramEditorWindow(QMainWindow):
             self.sample_root_note_spinbox.blockSignals(True)
             self.sample_root_note_spinbox.setValue(spitch)
             self.sample_root_note_spinbox.blockSignals(False)
+        if shlto is not None:
+            self.sample_loop_tune_knob.blockSignals(True)
+            self.sample_loop_tune_knob.setValue(shlto)
+            self.sample_loop_tune_knob.blockSignals(False)
+            self.sample_loop_tune_value_label.setText(str(shlto))
 
     def _on_sample_loop_type_changed(self, combo_index):
         sample_index = self.sample_list_widget.currentRow()
@@ -4133,6 +4225,22 @@ class ProgramEditorWindow(QMainWindow):
 
     def _commit_sample_root_note(self):
         self._flush_write("SPITCH")
+
+    def _on_sample_loop_tune_changed(self, value):
+        sample_index = self.sample_list_widget.currentRow()
+        if sample_index < 0:
+            return
+        entry = self._sample_waveform_cache.get(sample_index)
+        if entry is not None:
+            entry["shlto"] = value
+        # value_label already kept in sync by _build_knob_column's own
+        # valueChanged connection - nothing extra needed here
+        self._schedule_write(
+            "SHLTO", "sample", value, index=sample_index, debounce_key="SHLTO"
+        )
+
+    def _commit_sample_loop_tune(self):
+        self._flush_write("SHLTO")
 
     def _set_marker_spinbox_range(self, frame_count):
         # each spinbox can address any frame in the WHOLE sample (typing an
@@ -4505,8 +4613,13 @@ class ProgramEditorWindow(QMainWindow):
             start = values["SSTART"]
             # LOOPAT1 is the loop END, not the start (see
             # _SAMPLE_DETAIL_FIELDS's comment) - loop_start is derived,
-            # never read directly
-            loop_start = max(0, values["LOOPAT1"] - values["LLNGTH1"])
+            # never read directly. LLNGTH1's raw value is also not a plain
+            # frame count - see _LOOP_LENGTH_FIXED_POINT_SCALE's own comment
+            loop_start = max(
+                0,
+                values["LOOPAT1"]
+                - values["LLNGTH1"] // _LOOP_LENGTH_FIXED_POINT_SCALE,
+            )
             loop_end = values["LOOPAT1"]
             end = values["SMPEND"]
         return frame_count, start, loop_start, loop_end, end
@@ -4613,6 +4726,7 @@ class ProgramEditorWindow(QMainWindow):
                 end = entry["end"]
                 sptype = entry["sptype"]
                 spitch = entry["spitch"]
+                shlto = entry["shlto"]
             else:
                 # rare: the automatic on-selection fetch hasn't resolved
                 # yet (the user double-clicked before it landed) - fall
@@ -4632,6 +4746,7 @@ class ProgramEditorWindow(QMainWindow):
                 )
                 sptype = header["SPTYPE"]
                 spitch = header["SPITCH"]
+                shlto = header["SHLTO"]
                 if sample_index == self.sample_list_widget.currentRow():
                     # normally already shown by _on_sample_detail_loaded's
                     # automatic fetch - this branch only runs when that
@@ -4641,7 +4756,7 @@ class ProgramEditorWindow(QMainWindow):
                     self.waveform_view.set_header(
                         frame_count, start, loop_start, loop_end, end
                     )
-                    self._update_sample_meta_controls(sptype, spitch)
+                    self._update_sample_meta_controls(sptype, spitch, shlto)
 
             if sample_index == self.sample_list_widget.currentRow():
                 # markers/frame_count are known either way by this point
@@ -4678,6 +4793,7 @@ class ProgramEditorWindow(QMainWindow):
                 "end": end,
                 "sptype": sptype,
                 "spitch": spitch,
+                "shlto": shlto,
             }
             self._sample_waveform_cache[sample_index] = entry
             if sample_index == self.sample_list_widget.currentRow():
@@ -5138,10 +5254,11 @@ class ProgramEditorWindow(QMainWindow):
                 index=sample_index,
                 debounce_key="LOOPAT1",
             )
+            loop_length_frames = new_markers["loop_end"] - new_markers["loop_start"]
             self._schedule_write(
                 "LLNGTH1",
                 "sample",
-                new_markers["loop_end"] - new_markers["loop_start"],
+                loop_length_frames * _LOOP_LENGTH_FIXED_POINT_SCALE,
                 index=sample_index,
                 debounce_key="LLNGTH1",
             )

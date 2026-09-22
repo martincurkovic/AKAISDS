@@ -234,9 +234,15 @@ _SAMPLE_DETAIL_FIELDS = [
     # _SAMPLE_PLAYBACK_TYPE_OPTIONS for the raw-byte-order label/tooltip list
     "SPITCH",  # original pitch (root note) - 21..127, narrower than the
     # usual 0..127 MIDI note range (s3k.params: "21 to 127 represents A1 to G8")
+    "SHLTO",  # loop tune, in cents - -50..50, see program_editor_window.py's
+    # sample_loop_tune_knob
 ]
 
 _PROGRAM_LEVEL_FIELDS = [
+    "PRGNUM",  # the program's own assignable MIDI program number - see
+    # program_editor_window.py's program_number_spinbox and AGENTS.md's
+    # "PRGNUM and Program Change" section for the renumber_programs()
+    # interaction this can run into
     "PANPOS",
     "PRLOUD",
     "V_LOUD",

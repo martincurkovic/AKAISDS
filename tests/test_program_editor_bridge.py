@@ -214,6 +214,7 @@ class _KeygroupFakeBridge:
         if param.name in self._program_values:
             return self._program_values[param.name]
         if param.name in (
+            "PRGNUM",
             "PANPOS",
             "PRLOUD",
             "V_LOUD",
@@ -297,6 +298,7 @@ def test_worker_handles_a_program_with_no_keygroups():
 
 def test_worker_reports_program_level_values():
     values = {
+        "PRGNUM": 12,
         "PANPOS": -5,
         "PRLOUD": 80,
         "V_LOUD": 20,
