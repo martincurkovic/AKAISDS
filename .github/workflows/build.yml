@@ -42,9 +42,9 @@ jobs:
       - name: Build DMG
         run: |
           mkdir -p dmg-staging
-          cp -r src/AKAISDS.app dmg-stating/
+          cp -r src/AKAISDS.app dmg-staging/
           ln -s /Applications dmg-staging/Applications
-          hdiutil create -volname "AKAISDS" -srcfolder dmg-stating -ov -format UDZO AKAISDS-macos-arm.dmg
+          hdiutil create -volname "AKAISDS" -srcfolder dmg-staging -ov -format UDZO AKAISDS-macos-arm.dmg
       - uses: actions/upload-artifact@v4
         with:
           name: AKAISDS-macos-arm
@@ -70,9 +70,9 @@ jobs:
       - name: Build DMG
         run: |
           mkdir -p dmg-staging
-          cp -r src/AKAISDS.app dmg-stating/
+          cp -r src/AKAISDS.app dmg-staging/
           ln -s /Applications dmg-staging/Applications
-          hdiutil create -volname "AKAISDS" -srcfolder dmg-stating -ov -format UDZO AKAISDS-macos-intel.dmg
+          hdiutil create -volname "AKAISDS" -srcfolder dmg-staging -ov -format UDZO AKAISDS-macos-intel.dmg
       - uses: actions/upload-artifact@v4
         with:
           name: AKAISDS-macos-intel
