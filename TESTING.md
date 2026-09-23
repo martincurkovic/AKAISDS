@@ -13,8 +13,7 @@ uv sync
 uv run pytest tests/ -v
 ```
 
-This is the same command that the CI pipeline runs. The whole suite runs in
-well under a second.
+This is the same command that the CI pipeline runs. Running the whole suite takes about 10 seconds.
 
 ## What's actually tested and why
 
@@ -41,6 +40,10 @@ well under a second.
 `tests/test_program_editor_window_demo_bridge.py` drives the same window against the REAL `s3ked.demo.DemoBridge` instead of `FakeBridge` - see its own module docstring. `FakeBridge` duck-types whatever the app currently expects from s3k/s3ked, so it can never catch the pinned dependency (see `pyproject.toml`'s `s3ked` rev) renaming/removing a parameter, moving it to a different region, or narrowing a declared min/max - none of that touches a single `p.lookup()`/`encode_field()`/`decode_field()` call when the bridge underneath is hand-authored. This file is the actual safety net for bumping the `s3ked` pin: run it (and the two range-mismatch tests inside it, see below) before and after any pin bump.
 
 `tests/test_dashboard_helpers.py`, `tests/test_knob.py`, `tests/test_keygroup_range_bar.py`, `tests/test_sample_info_dialog.py`, `tests/test_sample_settings_dialog.py`, `tests/test_qt_helpers.py` and `tests/test_envelope_graph.py` are pure logic pulled out of otherwise UI-heavy files - see "Pulling logic out of widgets" below.
+
+`tests/test_dashboard.py` is `TransferDashboard` itself (widget-level, a real `MidiManager`/`SamplerController` pair, never a full `ApplicationWindow` since that touches the user's real `~/.akaisds/config.json`) - the Open Editor enabled-state logic and the dropped-file stable-copy fix below both live here.
+
+`tests/test_dropped_files.py` is `core/dropped_files.py` in isolation (`tmp_path`-scoped, never the real `~/.akaisds/dropped_files`) - the session-scoped copy/cleanup mechanism a dropped or opened file goes through so a later Send doesn't lose it to some other app's own temp-file cleanup.
 
 #### Why several tests exist
 

@@ -43,11 +43,11 @@ You can set quality globally via the Transmission Settings button or individuall
 
 ![Transmission Settings](screenshots/transmission-settings.png)
 
+![Sample Info](screenshots/sample-info.png)
+
 **3. Hit Send!**
 
 If you've never used MIDI sample dumps before, expect them to be slow. Very slow. Reducing bit depth or sample rate will help speed up the transfer, at the expense of sound quality.
-
-![Sample Info](screenshots/sample-info.png)
 
 **Receiving Samples**
 
@@ -110,7 +110,9 @@ To load the sample's waveform, double click on the placeholder window. Loading o
 
 Loop points and sample start/edit markers can be edited visually without needing to load the sample's waveform. Hold down *Shift* when dragging sample markers around for more precision. Alternatively you can type a value in to the boxes below the waveform.
 
-Trimming a sample, reversing a sample, fading in and out of a sample, normalising the gain of a sample and duplicating a sample is done by the host computer. The waveform must be loaded to the computer and then the edited sample will be sent back in place to the Sampler via SDS (slow). It will overwrite the sample you are editing. There is no undo button, you have been warned.
+Trimming, reversing, fading in and out, and normalising a sample are all done by the host computer. The waveform must be loaded to the computer, and the edited sample is then sent back to the Sampler via SDS (slow) *in place* - it overwrites the sample you are editing, and there is no undo button, you have been warned.
+
+Duplicating a sample also happens on the host computer and goes over SDS the same way, but it's not destructive - it sends the loaded audio to the sampler under a new name of your choosing, leaving the original completely untouched.
 
 ### Refreshing Sampler Data
 

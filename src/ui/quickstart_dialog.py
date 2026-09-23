@@ -1,6 +1,7 @@
 import os
 import re
 
+from PySide6.QtCore import QTimer
 from PySide6.QtGui import (
     QColor,
     QKeySequence,
@@ -24,12 +25,20 @@ from PySide6.QtWidgets import (
 _HELP_DIR = os.path.join(os.path.dirname(__file__), "help")
 _QUICKSTART_PATH = os.path.join(_HELP_DIR, "quickstart.md")
 
-# screenshots ship at their native resolution (up to 1370px wide - see
-# src/ui/help/screenshots/) since that's what the README wants on GitHub;
-# QTextDocument doesn't auto-fit images to the viewport, so this dialog
-# caps each one down after render rather than shipping separately-resized
-# copies just for the in-app view - one set of source images either way
-_MAX_IMAGE_WIDTH = 640
+# screenshots ship at their native resolution (up to ~2700px wide - see
+# src/ui/help/screenshots/) since that's what the README wants on GitHub.
+# QTextDocument doesn't auto-fit images to the viewport the way a browser's
+# `max-width: 100%` does, so this dialog recomputes each image's width
+# itself: shrink to fit a narrow window, but never enlarge past the
+# screenshot's own real pixel width - upscaling would just blur it without
+# making it more readable, and every one of these is already a high-DPI
+# capture with plenty of real detail to shrink into.
+_IMAGE_WIDTH_MARGIN = 24
+# only re-measure/relayout once resizing has paused this long, rather than
+# on every intermediate size during a live drag-resize - each pass reloads
+# every screenshot off disk to read its natural size (see
+# _constrain_image_widths), which is wasted work mid-drag
+_RESIZE_DEBOUNCE_MS = 150
 
 # fixed (not theme-derived) highlight colors, same idea as a browser's
 # find-in-page: a plain QTextCursor selection was tried first and was
@@ -79,10 +88,12 @@ class QuickStartDialog(QDialog):
         # resolves the markdown's relative image paths (screenshots/*.png)
         # against help/, the directory quickstart.md itself lives in
         self.viewer.setSearchPaths([_HELP_DIR])
+        self._markdown_loaded = False
         try:
             with open(_QUICKSTART_PATH, "r", encoding="utf-8") as f:
                 self.viewer.setMarkdown(f.read())
-            self._constrain_image_widths()
+            self._markdown_loaded = True
+            self._constrain_image_widths(self._target_image_width())
             self._add_heading_anchors()
         except OSError as e:
             self.viewer.setPlainText(f"Couldn't load the Quick Start guide: {e}")
@@ -94,6 +105,13 @@ class QuickStartDialog(QDialog):
         layout.addWidget(self.search_bar)
         layout.addWidget(self.viewer)
 
+        # responsive images (see _IMAGE_WIDTH_MARGIN's own comment) -
+        # debounced rather than reacting to every intermediate resize event
+        self._image_resize_timer = QTimer(self)
+        self._image_resize_timer.setSingleShot(True)
+        self._image_resize_timer.timeout.connect(self._on_image_resize_timeout)
+        self.viewer.viewport().installEventFilter(self)
+
         # StandardKey.Find resolves to the platform convention (Cmd+F on
         # macOS, Ctrl+F elsewhere) rather than hardcoding one or the other
         find_shortcut = QShortcut(QKeySequence(QKeySequence.StandardKey.Find), self)
@@ -101,13 +119,22 @@ class QuickStartDialog(QDialog):
         close_search_shortcut = QShortcut(QKeySequence("Escape"), self)
         close_search_shortcut.activated.connect(self._close_search_bar)
 
-    def _constrain_image_widths(self):
+    def _target_image_width(self):
+        # never above each image's own natural width (checked again, per
+        # image, inside _constrain_image_widths - this is only the upper
+        # bound the viewport currently allows)
+        return max(1, self.viewer.viewport().width() - _IMAGE_WIDTH_MARGIN)
+
+    def _constrain_image_widths(self, max_width):
         # QTextImageFormat renders at the image's native pixel size unless
         # a width/height is set explicitly - walk every image fragment
-        # markdown produced and cap the oversized ones, preserving aspect
-        # ratio. Loads each pixmap directly off disk (not via
-        # document.resource(), which may not have populated its cache yet
-        # at this point) purely to read its natural size.
+        # markdown produced and resize each one against its OWN natural
+        # size (loaded fresh off disk every call, not read back from
+        # whatever width a previous call left it at - document.resource()
+        # isn't used either, since it may not have populated its cache yet
+        # on the very first call), so this is safe to re-run on every
+        # resize: an image already shrunk down can grow back on a later,
+        # wider call, not just shrink monotonically.
         document = self.viewer.document()
         block = document.begin()
         while block.isValid():
@@ -118,9 +145,10 @@ class QuickStartDialog(QDialog):
                 if fragment.isValid() and char_format.isImageFormat():
                     image_format = char_format.toImageFormat()
                     pixmap = QPixmap(os.path.join(_HELP_DIR, image_format.name()))
-                    if not pixmap.isNull() and pixmap.width() > _MAX_IMAGE_WIDTH:
-                        scale = _MAX_IMAGE_WIDTH / pixmap.width()
-                        image_format.setWidth(_MAX_IMAGE_WIDTH)
+                    if not pixmap.isNull():
+                        target_width = min(max_width, pixmap.width())
+                        scale = target_width / pixmap.width()
+                        image_format.setWidth(target_width)
                         image_format.setHeight(pixmap.height() * scale)
                         cursor = QTextCursor(document)
                         cursor.setPosition(fragment.position())
@@ -131,6 +159,20 @@ class QuickStartDialog(QDialog):
                         cursor.setCharFormat(image_format)
                 it += 1
             block = block.next()
+
+    def eventFilter(self, watched, event):
+        if (
+            watched is self.viewer.viewport()
+            and event.type() == event.Type.Resize
+            and self._markdown_loaded
+        ):
+            # restarts on every resize event during a live drag - only the
+            # last one (150ms after resizing actually stops) does anything
+            self._image_resize_timer.start(_RESIZE_DEBOUNCE_MS)
+        return super().eventFilter(watched, event)
+
+    def _on_image_resize_timeout(self):
+        self._constrain_image_widths(self._target_image_width())
 
     def _add_heading_anchors(self):
         # `[link](#some-heading)` renders fine out of setMarkdown() (Qt
