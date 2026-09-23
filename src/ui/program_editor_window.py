@@ -1622,6 +1622,16 @@ class ProgramEditorWindow(QMainWindow):
         )
         portamento_type_column.addWidget(self.portamento_type_combo)
 
+        # Mono Legato mode (LEGATO) - boolean, default OFF (s3k.params has
+        # no decoded values={} map for this one either - same "0=OFF/1=ON"
+        # convention as portamento_enable_combo above)
+        self.mono_legato_combo = QComboBox()
+        self.mono_legato_combo.addItems(["Off", "On"])
+        self.mono_legato_combo.setMaximumWidth(70)
+        mono_legato_column = self._build_labeled_combo_column(
+            "Mono Legato", self.mono_legato_combo
+        )
+
         # constrained widths for the combo-only rows below
         self.lfo_shape_combo.setMaximumWidth(180)
         self.lfo1_sync_combo.setMaximumWidth(80)
@@ -1643,16 +1653,21 @@ class ProgramEditorWindow(QMainWindow):
         # Titled "LFO1" now (was just "LFO") now that LFO2 has its own card
         # below - keeping the old bare title once there were two would read
         # as which one is "the" LFO.
-        lfo_knobs_row = QHBoxLayout()
-        lfo_knobs_row.addLayout(lfo_rate_column)
-        lfo_knobs_row.addLayout(lfo_depth_column)
-        lfo_knobs_row.addLayout(lfo_delay_column)
-        lfo_knobs_row.addStretch()
-        lfo_shape_row = QHBoxLayout()
-        lfo_shape_row.addLayout(lfo_shape_column)
-        lfo_shape_row.addLayout(lfo1_sync_column)
-        lfo_shape_row.addStretch()
-        lfo_section = self._build_section_card("LFO1", lfo_knobs_row, lfo_shape_row)
+        # shape + sync stacked vertically, to the RIGHT of the 3 knobs -
+        # per direct user request (was two separate rows, knobs then
+        # shape/sync side by side, below)
+        lfo_shape_sync_column = QVBoxLayout()
+        lfo_shape_sync_column.setSpacing(6)
+        lfo_shape_sync_column.addLayout(lfo_shape_column)
+        lfo_shape_sync_column.addLayout(lfo1_sync_column)
+        lfo_row = QHBoxLayout()
+        lfo_row.addLayout(lfo_rate_column)
+        lfo_row.addLayout(lfo_depth_column)
+        lfo_row.addLayout(lfo_delay_column)
+        lfo_row.addSpacing(12)
+        lfo_row.addLayout(lfo_shape_sync_column)
+        lfo_row.addStretch()
+        lfo_section = self._build_section_card("LFO1", lfo_row)
 
         # LFO2 - same shape as LFO1's card above. Unlike LFO1 (which
         # primarily drives pitch - see LFO1WAVE's notes), this hardware
@@ -1660,16 +1675,19 @@ class ProgramEditorWindow(QMainWindow):
         # auto-pan effect) - see the PANRAT/PANDEP/PANDEL comment above.
         # LFO2 remains selectable as a source anywhere else in the
         # Modulation card below, same as any other source.
-        lfo2_knobs_row = QHBoxLayout()
-        lfo2_knobs_row.addLayout(lfo2_rate_column)
-        lfo2_knobs_row.addLayout(lfo2_depth_column)
-        lfo2_knobs_row.addLayout(lfo2_delay_column)
-        lfo2_knobs_row.addStretch()
-        lfo2_shape_row = QHBoxLayout()
-        lfo2_shape_row.addLayout(lfo2_shape_column)
-        lfo2_shape_row.addLayout(lfo2_trig_column)
-        lfo2_shape_row.addStretch()
-        lfo2_section = self._build_section_card("LFO2", lfo2_knobs_row, lfo2_shape_row)
+        # same shape+sync-to-the-right layout as LFO1's own card above
+        lfo2_shape_sync_column = QVBoxLayout()
+        lfo2_shape_sync_column.setSpacing(6)
+        lfo2_shape_sync_column.addLayout(lfo2_shape_column)
+        lfo2_shape_sync_column.addLayout(lfo2_trig_column)
+        lfo2_row = QHBoxLayout()
+        lfo2_row.addLayout(lfo2_rate_column)
+        lfo2_row.addLayout(lfo2_depth_column)
+        lfo2_row.addLayout(lfo2_delay_column)
+        lfo2_row.addSpacing(12)
+        lfo2_row.addLayout(lfo2_shape_sync_column)
+        lfo2_row.addStretch()
+        lfo2_section = self._build_section_card("LFO2", lfo2_row)
 
         # Pitch - tuning offset and pitch-bend range, up and down
         pitch_row = QHBoxLayout()
@@ -1693,6 +1711,8 @@ class ProgramEditorWindow(QMainWindow):
         portamento_row.addLayout(portamento_enable_column)
         portamento_row.addLayout(portamento_rate_column)
         portamento_row.addLayout(portamento_type_column)
+        portamento_row.addSpacing(12)
+        portamento_row.addLayout(mono_legato_column)
         portamento_row.addStretch()
         portamento_section = self._build_section_card("Portamento", portamento_row)
 
@@ -1749,7 +1769,7 @@ class ProgramEditorWindow(QMainWindow):
         self._build_mod_matrix_row(
             mod_grid,
             header_rows + 1,
-            "Loudness",
+            "Amplitude",
             (amp1_combo, amp1_amount),
             (amp2_combo, amp2_amount),
             (self.mod_amp3_combo, None),
@@ -1845,7 +1865,7 @@ class ProgramEditorWindow(QMainWindow):
         )
 
         mod_footnote = QLabel(
-            "Loudness slot 3, Filter Freq. and Pitch amounts are set "
+            "Amplitude slot 3, Filter Freq. and Pitch amounts are set "
             "per keygroup, on the Keygroup tab's own Modulation card."
         )
         mod_footnote.setWordWrap(True)
@@ -2103,6 +2123,8 @@ class ProgramEditorWindow(QMainWindow):
         self._wire_knob_write(self.portamento_rate_knob, "PORTIME", "program")
         self.portamento_type_combo.setEnabled(True)
         self._wire_combo_write(self.portamento_type_combo, "PORTYPE", "program")
+        self.mono_legato_combo.setEnabled(True)
+        self._wire_combo_write(self.mono_legato_combo, "LEGATO", "program")
         for knob in (
             self.attack1_knob,
             self.decay1_knob,
@@ -2467,6 +2489,9 @@ class ProgramEditorWindow(QMainWindow):
         self.portamento_type_combo.setToolTip(
             _PORTAMENTO_TYPE_OPTIONS[self.portamento_type_combo.currentIndex()][1]
         )
+        self.mono_legato_combo.blockSignals(True)
+        self.mono_legato_combo.setCurrentIndex(program_values["LEGATO"])
+        self.mono_legato_combo.blockSignals(False)
 
         # set by _refresh_from_hardware() and _on_keygroup_deleted() -
         # restores whatever the user was looking at before the reload (a

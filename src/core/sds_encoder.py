@@ -1,6 +1,7 @@
 import struct
 import wave
 import os
+import numpy as np
 import soundfile as sf
 
 DATA_BYTES_PER_PACKET = 120  # fixed by SDS spec
@@ -50,15 +51,33 @@ _SOUNDFILE_SUBTYPE_TO_BIT_DEPTH = {
 }
 
 
+def _read_float_scaled_to_int16(path):
+    # sf.read(path, dtype="int16") silently produces near-silence for at
+    # least some 32-bit float WAVs - confirmed directly against a real
+    # Sononym "drag a cropped sample out" export: read as int16 it peaked
+    # at 1 (of a possible 32767), but the same file read as float first
+    # and scaled by hand peaked at 22724, matching its real content.
+    # libsndfile's own direct float->int16 coercion isn't reliable for
+    # every source, so this always reads as float (which IS reliable -
+    # libsndfile normalizes any subtype, PCM or float, to [-1.0, 1.0]
+    # using its full native range) and does the int16 scaling itself
+    # instead of trusting dtype="int16" to do it.
+    try:
+        data, samplerate = sf.read(path, dtype="float64", always_2d=True)
+    except Exception as e:
+        raise ValueError(f"Couldn't read {os.path.basename(path)}: {e}") from e
+    # standard float-PCM scaling: -1.0 -> -32768, +1.0 -> 32767 (clipped,
+    # not wrapped, in case a source is hot enough to hit exactly 1.0 or a
+    # hair over from lossy processing upstream)
+    scaled = np.clip(np.round(data * 32768.0), -32768, 32767).astype(np.int16)
+    return scaled, samplerate
+
+
 def read_wav_samples(path):
     # reads audio file and returns (samples, framerate)
     # samples: tuple of signed ints, one per mono channel (stereo files are down-mixed to just left channel)
     # framerate: samples per second (ie, 44100)
-    try:
-        data, samplerate = sf.read(path, dtype="int16", always_2d=True)
-    except Exception as e:
-        raise ValueError(f"Couldn't read {os.path.basename(path)}: {e}") from e
-
+    data, samplerate = _read_float_scaled_to_int16(path)
     samples = data[:, 0].tolist()  # left channel only
     return samples, samplerate
 
@@ -91,11 +110,7 @@ def read_wav_channels(path):
     # .aif, .aiff, .flac goes thru soundfile module
     # channels: list with one tuple per channel - [samples] for mono, [left_samples, right_samples] for stereo
     # framerate = samples per second (ie, 44100 or whaterver)
-    try:
-        data, samplerate = sf.read(path, dtype="int16", always_2d=True)
-    except Exception as e:
-        raise ValueError(f"Couldn't read {os.path.basename(path)}: {e}") from e
-
+    data, samplerate = _read_float_scaled_to_int16(path)
     n_channels = data.shape[1]
     if n_channels == 1:
         return [data[:, 0].tolist()], samplerate

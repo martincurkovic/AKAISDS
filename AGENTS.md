@@ -326,6 +326,31 @@ patching `_BASE_DIR`/`_session_dir` the same way for every test).
 the actual regression - dropping a file, deleting the ORIGINAL, and
 confirming the queued copy is still there and still readable.
 
+### Follow-up bug found via the above: 32-bit float WAVs read as silence
+
+Found 2026-09-23, same day, once the stable-copy fix above let a real
+Sononym "drag a cropped sample out" export actually survive long enough
+to get sent - it played as silence on the hardware. Root cause:
+`sds_encoder.read_wav_samples`/`read_wav_channels` called `sf.read(path,
+dtype="int16", always_2d=True)` - `soundfile`'s own direct float->int16
+coercion is NOT reliable for every source. Confirmed directly against the
+user's actual file: read as `dtype="int16"` it peaked at 1 (of a possible
+32767 - effectively silent); the exact same file read as `dtype="float64"`
+first and scaled by hand (`round(x * 32768)`, clipped to [-32768, 32767])
+peaked at 22724, matching its real content. This wasn't Sononym-specific -
+it's a `libsndfile` behavior that can affect any 32-bit float WAV, from
+any source.
+
+Fixed by `_read_float_scaled_to_int16` (new, both `read_wav_samples` and
+`read_wav_channels` now funnel through it) - always reads as float
+(`libsndfile` normalizing any subtype, PCM or float, to `[-1.0, 1.0]`
+using its own full native range IS reliable) and does the int16 scaling
+itself rather than trusting `dtype="int16"` to do it.
+`test_read_wav_samples_32bit_float_scales_to_real_int16_values` in
+`tests/test_sds_encoder.py` asserts actual scaled VALUES now, not just
+"didn't crash" - the pre-existing float test only checked length/rate,
+which is exactly the gap that let this ship unnoticed the first time.
+
 ## Debug logging for real-hardware issues
 
 `core/debug_log.py` sets up a rotating log at `~/.akaisds/editor_debug.log`.

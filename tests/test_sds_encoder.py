@@ -126,21 +126,31 @@ def test_read_wav_channels_32bit_stereo_scales_and_deinterleaves(tmp_path):
     assert rate == 44100
 
 
-def test_read_wav_samples_32bit_float_reads_successfully(tmp_path):
-    # unlike stdlib 'wave', soundfile can read FLOAT wav data directly and
-    # convert it to int16 via the dtype argument - this is a real capability
-    # gain from moving off stdlib wave, not something to guard against
+def test_read_wav_samples_32bit_float_scales_to_real_int16_values(tmp_path):
+    # regression test for a real bug: sf.read(path, dtype="int16") on a
+    # 32-bit float WAV silently produced near-silence for at least some
+    # real-world files (confirmed against an actual Sononym "drag a
+    # cropped sample out" export - it read back with a peak of 1 out of
+    # 32767, i.e. effectively silent, despite genuinely having audio in
+    # it at around 0.69 full scale). read_wav_samples/read_wav_channels
+    # now always read as float and scale to int16 by hand instead of
+    # trusting dtype="int16" to do it - this asserts actual VALUES, not
+    # just "didn't crash", so a regression back to trusting dtype="int16"
+    # would be caught here.
     float_wav_path = tmp_path / "float32.wav"
     sf.write(
         str(float_wav_path),
-        np.array([0.0, 0.5, -0.5], dtype=np.float32),
+        np.array([0.0, 0.5, -0.5, 0.99997], dtype=np.float32),
         44100,
         subtype="FLOAT",
     )
 
     samples, rate = sds_encoder.read_wav_samples(str(float_wav_path))
     assert rate == 44100
-    assert len(samples) == 3
+    assert samples[0] == 0
+    assert samples[1] == pytest.approx(16384, abs=2)
+    assert samples[2] == pytest.approx(-16384, abs=2)
+    assert samples[3] == pytest.approx(32767, abs=2)  # never overflows past int16
 
 
 def test_read_wav_samples_8bit_recentres_unsigned_to_signed(tmp_path):

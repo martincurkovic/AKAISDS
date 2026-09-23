@@ -262,6 +262,7 @@ _PROGRAM_LEVEL_FIELDS = [
     "PORTEN",
     "PORTIME",
     "PORTYPE",
+    "LEGATO",
     # LFO2 - hardwired to Pan on this hardware (PANRAT/PANDEP/PANDEL are
     # LFO2's own rate/depth/delay despite the field names), plus its own
     # waveform/retrigger. See program_editor_window.py's LFO2 card comment.
