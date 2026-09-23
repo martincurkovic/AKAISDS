@@ -1,17 +1,26 @@
 # Pure, Qt/MIDI-independent sample-buffer transforms for the Samples tab's
-# Trim/Reverse/Fade actions (see program_editor_window.py's
-# _confirm_trim_sample/_confirm_reverse_sample/_confirm_fade_sample). No
-# hardware or bridge code here at all - just the sample-list + marker-field
-# math, kept separate so it's trivially unit-testable without a
-# QApplication, a bridge, or real audio.
+# Trim/Reverse/Fade/Normalise actions (see program_editor_window.py's
+# _confirm_trim_sample/_confirm_reverse_sample/_confirm_fade_sample/
+# _confirm_normalize_sample). No hardware or bridge code here at all - just
+# the sample-list + marker-field math, kept separate so it's trivially
+# unit-testable without a QApplication, a bridge, or real audio.
 #
-# All three functions take/return the same four markers WaveformView.markers()
+# All four functions take/return the same four markers WaveformView.markers()
 # already uses (start, loop_start, loop_end, end) - the caller is
 # responsible for actually sending the result to the hardware and updating
 # the sample header fields (SSTART/SMPEND/LOOPAT1/LLNGTH1/SLNGTH) from
 # them; LOOPAT1 is always loop_end and LLNGTH1 is always
 # loop_end - loop_start, same convention documented in AGENTS.md and used
 # throughout program_editor_bridge.py/program_editor_window.py.
+
+# every sample value on this page is a plain signed 16-bit int (see
+# sds_encoder.scale_sample_to_16bit/write_wav_file's own WAV round trip,
+# and waveform_view.py's own /32768 scaling) - -32768..32767. 32767, not
+# 32768, is normalize_samples' own ceiling in BOTH directions (even though
+# -32768 is technically representable) - the conventional "safe" full-
+# scale digital ceiling, so the loudest sample never lands on the one
+# value with no positive counterpart.
+_MAX_AMPLITUDE = 32767
 
 
 def trim_samples(samples, start, loop_start, loop_end, end):
@@ -90,4 +99,34 @@ def fade_in_out_samples(samples, start, loop_start, loop_end, end):
             gain = (frame_count - 1 - i) / tail_length
             new_samples[i] = int(round(new_samples[i] * gain))
 
+    return new_samples, start, loop_start, loop_end, end
+
+
+def normalize_samples(samples, start, loop_start, loop_end, end):
+    """Applies a single uniform gain to the WHOLE buffer - not just
+    [start, end] - so the loudest sample anywhere in it hits
+    _MAX_AMPLITUDE exactly, every other sample scaled by that same
+    factor. Unlike trim_samples/fade_in_out_samples, this isn't scoped to
+    the marked playback region: normalizing is a global level change
+    (matches reverse_samples' own "whole buffer" scope, not Trim/Fade's
+    [start, end]-relative one). Returns (new_samples, start, loop_start,
+    loop_end, end) - same 5-tuple shape as the other three; markers are
+    always unchanged, only levels change.
+
+    A silent buffer (every sample already 0) is returned unchanged rather
+    than dividing by zero - there's no gain that makes silence louder.
+    Clamped defensively to [-_MAX_AMPLITUDE - 1, _MAX_AMPLITUDE] (the
+    full int16 range) even though the gain is derived FROM the buffer's
+    own peak so no sample can mathematically exceed _MAX_AMPLITUDE after
+    scaling - only float rounding at the very peak sample could ever push
+    it out by one, and this costs nothing to guard against anyway.
+    """
+    peak = max((abs(v) for v in samples), default=0)
+    if peak == 0:
+        return list(samples), start, loop_start, loop_end, end
+    gain = _MAX_AMPLITUDE / peak
+    new_samples = [
+        max(-_MAX_AMPLITUDE - 1, min(_MAX_AMPLITUDE, int(round(v * gain))))
+        for v in samples
+    ]
     return new_samples, start, loop_start, loop_end, end

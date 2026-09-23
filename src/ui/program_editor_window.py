@@ -1136,27 +1136,42 @@ class ProgramEditorWindow(QMainWindow):
         # is stored per-keygroup rather than per-program (see that card's
         # own comment for why). Sources for every row here are chosen on
         # the Program tab instead - shared by every keygroup in this
-        # program, so there's nothing to pick per-keygroup.
-        kg_filt1_col, self.mod_filt1_amount_knob, self.mod_filt1_amount_value_label = (
-            self._build_mod_amount_only_column(
-                "MODVFILT1",
-                "keygroup",
-                keygroup_index_getter=self.keygroup_list.currentRow,
-            )
+        # program, so there's nothing to pick per-keygroup - but each
+        # still shows a disabled, read-only mirror of that source (see
+        # _build_mod_amount_column_with_source_mirror), kept in sync with
+        # the real combo by __init__'s own mirror-wiring block further
+        # down (the Program tab's source combos don't exist yet here) -
+        # per direct user request, so checking/remembering the source
+        # doesn't require flipping to the Program tab.
+        (
+            kg_filt1_col,
+            self.mod_filt1_amount_knob,
+            self.mod_filt1_amount_value_label,
+            self.mod_filt1_source_mirror,
+        ) = self._build_mod_amount_column_with_source_mirror(
+            "MODVFILT1",
+            "keygroup",
+            keygroup_index_getter=self.keygroup_list.currentRow,
         )
-        kg_filt2_col, self.mod_filt2_amount_knob, self.mod_filt2_amount_value_label = (
-            self._build_mod_amount_only_column(
-                "MODVFILT2",
-                "keygroup",
-                keygroup_index_getter=self.keygroup_list.currentRow,
-            )
+        (
+            kg_filt2_col,
+            self.mod_filt2_amount_knob,
+            self.mod_filt2_amount_value_label,
+            self.mod_filt2_source_mirror,
+        ) = self._build_mod_amount_column_with_source_mirror(
+            "MODVFILT2",
+            "keygroup",
+            keygroup_index_getter=self.keygroup_list.currentRow,
         )
-        kg_filt3_col, self.mod_filt3_amount_knob, self.mod_filt3_amount_value_label = (
-            self._build_mod_amount_only_column(
-                "MODVFILT3",
-                "keygroup",
-                keygroup_index_getter=self.keygroup_list.currentRow,
-            )
+        (
+            kg_filt3_col,
+            self.mod_filt3_amount_knob,
+            self.mod_filt3_amount_value_label,
+            self.mod_filt3_source_mirror,
+        ) = self._build_mod_amount_column_with_source_mirror(
+            "MODVFILT3",
+            "keygroup",
+            keygroup_index_getter=self.keygroup_list.currentRow,
         )
         kg_mod_grid = QGridLayout()
         kg_mod_grid.setHorizontalSpacing(14)
@@ -1173,23 +1188,29 @@ class ProgramEditorWindow(QMainWindow):
             kg_filt3_col,
         )
 
-        kg_pitch_col, self.mod_pitch_amount_knob, self.mod_pitch_amount_value_label = (
-            self._build_mod_amount_only_column(
-                "MODVPITCH",
-                "keygroup",
-                keygroup_index_getter=self.keygroup_list.currentRow,
-            )
+        (
+            kg_pitch_col,
+            self.mod_pitch_amount_knob,
+            self.mod_pitch_amount_value_label,
+            self.mod_pitch_source_mirror,
+        ) = self._build_mod_amount_column_with_source_mirror(
+            "MODVPITCH",
+            "keygroup",
+            keygroup_index_getter=self.keygroup_list.currentRow,
         )
         self._build_mod_matrix_amount_row(
             kg_mod_grid, kg_header_rows + 1, "Pitch (assignable)", kg_pitch_col
         )
 
-        kg_amp3_col, self.mod_amp3_amount_knob, self.mod_amp3_amount_value_label = (
-            self._build_mod_amount_only_column(
-                "MODVAMP3",
-                "keygroup",
-                keygroup_index_getter=self.keygroup_list.currentRow,
-            )
+        (
+            kg_amp3_col,
+            self.mod_amp3_amount_knob,
+            self.mod_amp3_amount_value_label,
+            self.mod_amp3_source_mirror,
+        ) = self._build_mod_amount_column_with_source_mirror(
+            "MODVAMP3",
+            "keygroup",
+            keygroup_index_getter=self.keygroup_list.currentRow,
         )
         self._build_mod_matrix_amount_row(
             kg_mod_grid, kg_header_rows + 2, "Loudness (slot 3)", kg_amp3_col
@@ -1215,8 +1236,9 @@ class ProgramEditorWindow(QMainWindow):
         )
 
         kg_mod_footnote = QLabel(
-            "Sources for these are chosen on the Program tab's Modulation "
-            "card, shared by every keygroup in this program."
+            "Sources for these (shown above, read-only) are chosen on the "
+            "Program tab's Modulation card, shared by every keygroup in "
+            "this program."
         )
         kg_mod_footnote.setWordWrap(True)
         kg_mod_footnote.setObjectName("modFootnote")
@@ -1778,6 +1800,31 @@ class ProgramEditorWindow(QMainWindow):
             mod_grid, header_rows + 6, "Pitch", (self.mod_pitch_combo, None)
         )
 
+        # keeps each Keygroup-tab source-mirror combo (built earlier, well
+        # before these real ones existed - see
+        # _build_mod_amount_column_with_source_mirror's own comment) in
+        # step with the real one live, for direct edits. Loading a program
+        # blockSignals()s these real combos (see _on_program_detail_loaded)
+        # specifically to avoid firing a write-back through
+        # _wire_combo_write, which would also skip this connection - that
+        # path syncs the mirrors explicitly instead, alongside setting the
+        # real combos' own values.
+        self.mod_filt1_combo.currentIndexChanged.connect(
+            self.mod_filt1_source_mirror.setCurrentIndex
+        )
+        self.mod_filt2_combo.currentIndexChanged.connect(
+            self.mod_filt2_source_mirror.setCurrentIndex
+        )
+        self.mod_filt3_combo.currentIndexChanged.connect(
+            self.mod_filt3_source_mirror.setCurrentIndex
+        )
+        self.mod_pitch_combo.currentIndexChanged.connect(
+            self.mod_pitch_source_mirror.setCurrentIndex
+        )
+        self.mod_amp3_combo.currentIndexChanged.connect(
+            self.mod_amp3_source_mirror.setCurrentIndex
+        )
+
         mod_footnote = QLabel(
             "Loudness slot 3, Filter Frequency and Pitch amounts are set "
             "per keygroup, on the Keygroup tab's own Modulation card."
@@ -2329,10 +2376,24 @@ class ProgramEditorWindow(QMainWindow):
             (self.mod_filt3_combo, "MODSFILT3"),
             (self.mod_pitch_combo, "MODSPITCH"),
         ]
+        # source combos with a Keygroup-tab mirror (see
+        # _build_mod_amount_column_with_source_mirror) - the loop below
+        # sets these explicitly too, since blockSignals above means the
+        # live currentIndexChanged -> mirror connection never fires here
+        mod_source_mirrors = {
+            self.mod_filt1_combo: self.mod_filt1_source_mirror,
+            self.mod_filt2_combo: self.mod_filt2_source_mirror,
+            self.mod_filt3_combo: self.mod_filt3_source_mirror,
+            self.mod_pitch_combo: self.mod_pitch_source_mirror,
+            self.mod_amp3_combo: self.mod_amp3_source_mirror,
+        }
         for combo, field in program_mod_combos:
             combo.blockSignals(True)
             combo.setCurrentIndex(program_values[field])
             combo.blockSignals(False)
+            mirror = mod_source_mirrors.get(combo)
+            if mirror is not None:
+                mirror.setCurrentIndex(program_values[field])
 
         program_mod_knobs = [
             (self.mod_pan1_knob, self.mod_pan1_value_label, "MODVPAN1"),
@@ -3088,6 +3149,53 @@ class ProgramEditorWindow(QMainWindow):
         )
         return column, knob, value_label
 
+    def _build_mod_source_mirror_combo(self):
+        # a read-only VISUAL ECHO of a source combo that actually lives on
+        # the Program tab - per direct user request, so a destination
+        # whose source is only choosable there (see the Keygroup tab's own
+        # Modulation card footnote) doesn't require flipping tabs just to
+        # remember what's currently assigned. Same populated items as the
+        # real thing (_build_mod_source_combo) so the displayed text
+        # matches exactly, but disabled (never a write target) - the
+        # caller is responsible for keeping its selection in sync with the
+        # real combo (see __init__'s own mirror-wiring block, added once
+        # BOTH halves of the page exist - the Keygroup tab is built before
+        # the Program tab's own source combos in __init__, so that syncing
+        # can't happen at construction time here).
+        combo = self._build_mod_source_combo()
+        combo.setEnabled(False)
+        return combo
+
+    def _build_mod_amount_column_with_source_mirror(
+        self, amount_param, amount_region, *, keygroup_index_getter=None
+    ):
+        # like _build_mod_amount_only_column, but puts a disabled
+        # source-mirror combo (see _build_mod_source_mirror_combo) to the
+        # LEFT of the amount knob instead of showing the amount alone -
+        # for the subset of Keygroup-tab destinations that DO have an
+        # assignable (if program-wide) source, unlike the fixed-source
+        # Pitch (LFO1) row. Side by side, same (source, amount) reading
+        # order as the Program tab's own real slots - per direct user
+        # request, after an initial vertically-stacked version (avoiding
+        # widening each slot column) read wrong compared to that
+        # convention. Re-measured the same way this file's "section
+        # cards, scroll areas" note describes - still fits without a
+        # horizontal scrollbar at this page's own minimum width.
+        source_mirror = self._build_mod_source_mirror_combo()
+        knob = self._build_mod_amount_knob()
+        knob_row, value_label = self._build_knob_value_row(knob)
+        self._wire_knob_write(
+            knob,
+            amount_param,
+            amount_region,
+            keygroup_index_getter=keygroup_index_getter,
+        )
+        row = QHBoxLayout()
+        row.setSpacing(6)
+        row.addWidget(source_mirror)
+        row.addLayout(knob_row)
+        return row, knob, value_label, source_mirror
+
     def _build_mod_matrix_header(self, grid, slot_count):
         # 2-row header for a Source+Amount card (Program tab): "Slot N"
         # spans both of that slot's sub-columns, then "Source"/"Amount"
@@ -3564,14 +3672,14 @@ class ProgramEditorWindow(QMainWindow):
         tune_meta_row.addWidget(self.sample_tune_spinbox)
         tune_meta_row.addStretch()
 
-        # Trim/Reverse/Fade - destructive, hardware-write actions, so all
-        # three stay disabled until has_waveform() is true (real audio
-        # actually in memory to transform, not just header-only markers) -
-        # see _set_sample_edit_buttons_enabled. See _confirm_trim_sample/
-        # _confirm_reverse_sample/_confirm_fade_sample for the confirmation
-        # dialogs and _perform_sample_edit_real for why this is a real,
-        # multi-step send/delete/rename pipeline rather than a simple
-        # in-place write.
+        # Trim/Reverse/Fade/Normalise - destructive, hardware-write
+        # actions, so all four stay disabled until has_waveform() is true
+        # (real audio actually in memory to transform, not just
+        # header-only markers) - see _set_sample_edit_buttons_enabled. See
+        # _confirm_trim_sample/_confirm_reverse_sample/_confirm_fade_sample/
+        # _confirm_normalize_sample for the confirmation dialogs and
+        # _perform_sample_edit_real for why this is a real, multi-step
+        # send/delete/rename pipeline rather than a simple in-place write.
         sample_edit_row = QHBoxLayout()
         sample_edit_row.setSpacing(8)
         self.trim_sample_button = QPushButton("Trim to Markers")
@@ -3596,9 +3704,17 @@ class ProgramEditorWindow(QMainWindow):
         )
         self.fade_sample_button.setEnabled(False)
         self.fade_sample_button.clicked.connect(self._confirm_fade_sample)
+        self.normalize_sample_button = QPushButton("Normalise Sample")
+        self.normalize_sample_button.setToolTip(
+            "Gain up the whole sample until its loudest point hits maximum "
+            "amplitude, overwriting it on the sampler. Cannot be undone."
+        )
+        self.normalize_sample_button.setEnabled(False)
+        self.normalize_sample_button.clicked.connect(self._confirm_normalize_sample)
         sample_edit_row.addWidget(self.trim_sample_button)
         sample_edit_row.addWidget(self.reverse_sample_button)
         sample_edit_row.addWidget(self.fade_sample_button)
+        sample_edit_row.addWidget(self.normalize_sample_button)
         sample_edit_row.addStretch()
 
         # two section cards, same style as the Programs tab's own (see
@@ -4277,13 +4393,14 @@ class ProgramEditorWindow(QMainWindow):
         self._set_sample_edit_buttons_enabled(False)
 
     def _set_sample_edit_buttons_enabled(self, enabled):
-        # Trim/Reverse/Fade need real audio in memory to transform, not
-        # just header-only markers - has_waveform(), same gate
-        # mouseDoubleClickEvent uses to decide whether a double-click
+        # Trim/Reverse/Fade/Normalise need real audio in memory to
+        # transform, not just header-only markers - has_waveform(), same
+        # gate mouseDoubleClickEvent uses to decide whether a double-click
         # should even try loading audio again
         self.trim_sample_button.setEnabled(enabled)
         self.reverse_sample_button.setEnabled(enabled)
         self.fade_sample_button.setEnabled(enabled)
+        self.normalize_sample_button.setEnabled(enabled)
 
     def _update_sample_meta_controls(self, sptype, spitch, shlto=None, stuno=None):
         # sptype/spitch/shlto/stuno None means "nothing known about this
@@ -5140,12 +5257,49 @@ class ProgramEditorWindow(QMainWindow):
             sample_index, sample_editing.fade_in_out_samples, "Fade In/Out"
         )
 
+    def _confirm_normalize_sample(self):
+        sample_index = self.sample_list_widget.currentRow()
+        if sample_index < 0 or not self.waveform_view.has_waveform():
+            return
+        entry = self._sample_waveform_cache.get(sample_index)
+        if entry is None or entry["samples"] is None:
+            return
+        # normalize_samples operates on the WHOLE buffer, not just
+        # [start, end] (see its own docstring) - the "nothing to do"
+        # guards mirror that scope: a silent sample has no gain that
+        # would make it louder, and one already at peak has nothing left
+        # to gain up
+        peak = max((abs(v) for v in entry["samples"]), default=0)
+        if peak == 0:
+            self.status_bar.showMessage("Nothing to normalise - sample is silent")
+            return
+        if peak >= sample_editing._MAX_AMPLITUDE:
+            self.status_bar.showMessage("Sample is already normalised")
+            return
+        item = self.sample_list_widget.currentItem()
+        sample_name = item.text() if item is not None else ""
+        answer = QMessageBox.question(
+            self,
+            "Normalise Sample",
+            f'Gain up "{sample_name}" so its loudest point hits maximum '
+            "amplitude?\n\n"
+            "This overwrites the sample's audio on the sampler and cannot "
+            "be undone.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        self._perform_sample_edit(
+            sample_index, sample_editing.normalize_samples, "Normalise"
+        )
+
     def _perform_sample_edit(self, sample_index, transform, action_label):
         # shared by _confirm_trim_sample/_confirm_reverse_sample/
-        # _confirm_fade_sample - all three are "take the samples already in
-        # memory, transform them with a pure function from
-        # core/sample_editing.py, then get the result onto the hardware"
-        # with nothing else actually different between them
+        # _confirm_fade_sample/_confirm_normalize_sample - all four are
+        # "take the samples already in memory, transform them with a pure
+        # function from core/sample_editing.py, then get the result onto
+        # the hardware" with nothing else actually different between them
         entry = self._sample_waveform_cache.get(sample_index)
         if entry is None or entry["samples"] is None:
             return

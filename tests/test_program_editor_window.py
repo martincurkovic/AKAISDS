@@ -845,6 +845,60 @@ def test_keygroup_modulation_filter_amount_loads_and_writes(editor, qapp):
     assert bridge.set_parameter_calls[-1] == ("MODVFILT1", 0, 19, 1)
 
 
+# --- Keygroup tab: read-only source mirrors next to the amount knobs -------
+# Per direct user request: a disabled combo on the Keygroup tab's own
+# Modulation card, mirroring what's actually selected on the Program tab's
+# source combo for the same destination - see
+# _build_mod_amount_column_with_source_mirror.
+
+
+def test_keygroup_mod_source_mirrors_match_program_tab_after_load(editor, qapp):
+    pairs = [
+        (editor.mod_filt1_combo, editor.mod_filt1_source_mirror),
+        (editor.mod_filt2_combo, editor.mod_filt2_source_mirror),
+        (editor.mod_filt3_combo, editor.mod_filt3_source_mirror),
+        (editor.mod_pitch_combo, editor.mod_pitch_source_mirror),
+        (editor.mod_amp3_combo, editor.mod_amp3_source_mirror),
+    ]
+    for real, mirror in pairs:
+        assert mirror.currentIndex() == real.currentIndex()
+        assert mirror.currentText() == real.currentText()
+        assert mirror.isEnabled() is False  # read-only - never a write target
+
+
+def test_keygroup_mod_source_mirror_follows_a_live_program_tab_edit(editor, qapp):
+    assert editor.mod_filt2_combo.currentIndex() != 9
+    editor.mod_filt2_combo.setCurrentIndex(9)  # no flush/write needed - a
+    # plain signal connection, not routed through the bridge at all
+    assert editor.mod_filt2_source_mirror.currentIndex() == 9
+    assert editor.mod_filt2_source_mirror.currentText() == editor.mod_filt2_combo.currentText()
+
+
+def test_keygroup_mod_source_mirror_updates_on_the_next_program_load_too(
+    editor, qapp
+):
+    # not just the live-edit signal connection - _on_program_detail_loaded's
+    # own loop (which blockSignals()s the real combo, so the live
+    # connection alone wouldn't catch this) must sync it explicitly too
+    editor.program_list.setCurrentRow(1)
+    _wait_for_keygroup_load(editor, qapp, expected_count=1)  # program 1 has 1
+
+    assert (
+        editor.mod_pitch_source_mirror.currentIndex()
+        == editor.mod_pitch_combo.currentIndex()
+    )
+
+
+def test_keygroup_mod_source_mirror_is_never_a_write_target(editor, qapp):
+    # setting the mirror directly must never schedule a hardware write -
+    # it's a pure visual echo, not wired through _wire_combo_write at all
+    bridge = editor._bridge
+    calls_before = len(bridge.set_parameter_calls)
+    editor.mod_amp3_source_mirror.setCurrentIndex(2)
+    editor._worker.wait_until_idle()
+    assert len(bridge.set_parameter_calls) == calls_before
+
+
 def test_refresh_picks_up_a_program_created_on_the_hardware(editor, qapp):
     # regression test for a real bug: Refresh re-loaded the current
     # program's keygroups but never re-fetched the program list itself, so
@@ -1945,7 +1999,7 @@ def _stub_demo_audio(editor, monkeypatch, samples, framerate=44100):
     )
 
 
-def test_trim_reverse_and_fade_buttons_disabled_until_audio_loaded(
+def test_trim_reverse_fade_and_normalize_buttons_disabled_until_audio_loaded(
     editor, qapp, monkeypatch
 ):
     editor.sample_list_widget.setCurrentRow(0)
@@ -1955,6 +2009,7 @@ def test_trim_reverse_and_fade_buttons_disabled_until_audio_loaded(
     assert editor.trim_sample_button.isEnabled() is False
     assert editor.reverse_sample_button.isEnabled() is False
     assert editor.fade_sample_button.isEnabled() is False
+    assert editor.normalize_sample_button.isEnabled() is False
 
     monkeypatch.setenv("AKAISDS_DEMO_SAMPLER", "1")
     _stub_demo_audio(editor, monkeypatch, [0] * 500)
@@ -1963,12 +2018,14 @@ def test_trim_reverse_and_fade_buttons_disabled_until_audio_loaded(
     assert editor.trim_sample_button.isEnabled() is True
     assert editor.reverse_sample_button.isEnabled() is True
     assert editor.fade_sample_button.isEnabled() is True
+    assert editor.normalize_sample_button.isEnabled() is True
 
     editor.sample_list_widget.setCurrentRow(-1)
 
     assert editor.trim_sample_button.isEnabled() is False
     assert editor.reverse_sample_button.isEnabled() is False
     assert editor.fade_sample_button.isEnabled() is False
+    assert editor.normalize_sample_button.isEnabled() is False
 
 
 def test_confirm_trim_sample_does_nothing_when_markers_cover_whole_sample(
@@ -2212,6 +2269,86 @@ def test_fade_sample_does_nothing_when_declined(editor, qapp, monkeypatch):
         pew.QMessageBox, "question", lambda *a, **k: pew.QMessageBox.StandardButton.No
     )
     editor._confirm_fade_sample()
+
+    assert editor._sample_waveform_cache[0] == before
+
+
+# --- Samples tab: Normalise Sample button ------------------------------------
+# Mirrors Trim/Reverse/Fade's own shape exactly (confirmation dialog ->
+# _perform_sample_edit -> core.sample_editing.normalize_samples) - unlike
+# Trim/Fade, normalize_samples scales the WHOLE buffer, not just [start,
+# end] - see its own docstring in core/sample_editing.py.
+
+
+def test_normalize_sample_in_demo_mode_gains_up_the_whole_buffer(
+    editor, qapp, monkeypatch
+):
+    import ui.program_editor_window as pew
+
+    monkeypatch.setenv("AKAISDS_DEMO_SAMPLER", "1")
+    _stub_demo_audio(editor, monkeypatch, [100, -200, 50] * 100)  # peak=200
+    editor.sample_list_widget.setCurrentRow(0)
+    editor._worker.wait_until_idle()
+    _pump_until(qapp, lambda: editor.waveform_view.has_header())
+    editor._load_sample_waveform()
+
+    monkeypatch.setattr(
+        pew.QMessageBox, "question", lambda *a, **k: pew.QMessageBox.StandardButton.Yes
+    )
+    monkeypatch.setattr(pew, "_DEMO_MS_PER_WORD", 0.001)
+
+    editor._confirm_normalize_sample()
+
+    entry = editor._sample_waveform_cache[0]
+    assert max(abs(v) for v in entry["samples"]) == 32767
+    assert len(entry["samples"]) == 300  # never resized, unlike Trim
+
+
+def test_confirm_normalize_sample_does_nothing_when_silent(editor, qapp, monkeypatch):
+    monkeypatch.setenv("AKAISDS_DEMO_SAMPLER", "1")
+    _stub_demo_audio(editor, monkeypatch, [0] * 500)
+    editor.sample_list_widget.setCurrentRow(0)
+    editor._worker.wait_until_idle()
+    _pump_until(qapp, lambda: editor.waveform_view.has_header())
+    editor._load_sample_waveform()
+    before = dict(editor._sample_waveform_cache[0])
+
+    editor._confirm_normalize_sample()
+
+    assert editor._sample_waveform_cache[0] == before
+
+
+def test_confirm_normalize_sample_does_nothing_when_already_at_peak(
+    editor, qapp, monkeypatch
+):
+    monkeypatch.setenv("AKAISDS_DEMO_SAMPLER", "1")
+    _stub_demo_audio(editor, monkeypatch, [32767, -1000, 500] + [0] * 497)
+    editor.sample_list_widget.setCurrentRow(0)
+    editor._worker.wait_until_idle()
+    _pump_until(qapp, lambda: editor.waveform_view.has_header())
+    editor._load_sample_waveform()
+    before = dict(editor._sample_waveform_cache[0])
+
+    editor._confirm_normalize_sample()
+
+    assert editor._sample_waveform_cache[0] == before
+
+
+def test_normalize_sample_does_nothing_when_declined(editor, qapp, monkeypatch):
+    import ui.program_editor_window as pew
+
+    monkeypatch.setenv("AKAISDS_DEMO_SAMPLER", "1")
+    _stub_demo_audio(editor, monkeypatch, [100, -200, 50] * 100)
+    editor.sample_list_widget.setCurrentRow(0)
+    editor._worker.wait_until_idle()
+    _pump_until(qapp, lambda: editor.waveform_view.has_header())
+    editor._load_sample_waveform()
+    before = dict(editor._sample_waveform_cache[0])
+
+    monkeypatch.setattr(
+        pew.QMessageBox, "question", lambda *a, **k: pew.QMessageBox.StandardButton.No
+    )
+    editor._confirm_normalize_sample()
 
     assert editor._sample_waveform_cache[0] == before
 

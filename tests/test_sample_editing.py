@@ -1,7 +1,13 @@
 # tests for core/sample_editing.py - pure sample-buffer math, no Qt/MIDI/
 # hardware needed, should be instant
 
-from core.sample_editing import fade_in_out_samples, trim_samples, reverse_samples
+from core.sample_editing import (
+    _MAX_AMPLITUDE,
+    fade_in_out_samples,
+    normalize_samples,
+    trim_samples,
+    reverse_samples,
+)
 
 
 def test_trim_keeps_only_the_marked_region():
@@ -188,3 +194,78 @@ def test_fade_in_and_out_can_both_apply_at_once():
     assert new_samples[5:16] == [1000] * 11
     assert new_samples[15] == 1000
     assert new_samples[19] == 0
+
+
+# --- normalize_samples -------------------------------------------------------
+# a single uniform gain over the WHOLE buffer (not just [start, end] -
+# unlike trim/fade, matches reverse_samples' own whole-buffer scope) so the
+# loudest sample hits _MAX_AMPLITUDE exactly.
+
+
+def test_normalize_scales_the_peak_to_max_amplitude():
+    samples = [1000, -2000, 500, -1500]
+    new_samples, *_ = normalize_samples(
+        samples, start=0, loop_start=0, loop_end=0, end=3
+    )
+    assert max(abs(v) for v in new_samples) == _MAX_AMPLITUDE
+    # the loudest original sample (-2000) is what actually hits the ceiling
+    assert new_samples[1] == -_MAX_AMPLITUDE
+
+
+def test_normalize_preserves_every_samples_relative_ratio_and_sign():
+    samples = [1000, -2000, 500, -1500, 0]
+    new_samples, *_ = normalize_samples(
+        samples, start=0, loop_start=0, loop_end=0, end=4
+    )
+    gain = _MAX_AMPLITUDE / 2000
+    assert new_samples == [
+        round(1000 * gain), round(-2000 * gain), round(500 * gain),
+        round(-1500 * gain), 0,
+    ]
+
+
+def test_normalize_never_exceeds_int16_range_either_direction():
+    samples = [32767, -32768, 100, -50]
+    new_samples, *_ = normalize_samples(
+        samples, start=0, loop_start=0, loop_end=0, end=3
+    )
+    assert all(-32768 <= v <= 32767 for v in new_samples)
+
+
+def test_normalize_a_silent_sample_is_a_no_op():
+    samples = [0, 0, 0, 0]
+    new_samples, start, loop_start, loop_end, end = normalize_samples(
+        samples, start=0, loop_start=1, loop_end=2, end=3
+    )
+    assert new_samples == samples
+    assert (start, loop_start, loop_end, end) == (0, 1, 2, 3)
+
+
+def test_normalize_already_at_peak_is_a_no_op_on_content():
+    samples = [_MAX_AMPLITUDE, -1000, 200]
+    new_samples, *_ = normalize_samples(
+        samples, start=0, loop_start=0, loop_end=0, end=2
+    )
+    assert new_samples == samples
+
+
+def test_normalize_touches_the_whole_buffer_not_just_start_end():
+    # unlike trim_samples/fade_in_out_samples, normalize_samples has no
+    # [start, end]-relative behaviour at all - everything scales, including
+    # material outside the marked region
+    samples = [100] * 5 + [2000] * 5 + [100] * 5
+    new_samples, *_ = normalize_samples(
+        samples, start=5, loop_start=5, loop_end=5, end=9
+    )
+    gain = _MAX_AMPLITUDE / 2000
+    assert new_samples[0] == round(100 * gain)  # before start - still scaled
+    assert new_samples[14] == round(100 * gain)  # after end - still scaled
+    assert new_samples[5] == _MAX_AMPLITUDE  # the peak itself
+
+
+def test_normalize_keeps_every_marker_unchanged():
+    samples = [100, -5000, 300]
+    _new_samples, start, loop_start, loop_end, end = normalize_samples(
+        samples, start=0, loop_start=1, loop_end=2, end=2
+    )
+    assert (start, loop_start, loop_end, end) == (0, 1, 2, 2)

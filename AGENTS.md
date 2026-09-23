@@ -1306,6 +1306,98 @@ If you're reading this while auditing the fade math and it looks
 backwards from what you'd expect a "fade in the marked region" feature to
 do, it isn't backwards - re-read this section before "fixing" it.
 
+### Normalise Sample: whole-buffer gain, not [start, end]-scoped
+
+Added 2026-09-23, per direct user request. `core/sample_editing.py`'s
+`normalize_samples(samples, start, loop_start, loop_end, end)` - same
+5-arg-in/5-tuple-out shape as the other three transforms, so
+`_perform_sample_edit` needed zero changes to support it - applies ONE
+uniform gain to the ENTIRE buffer so its loudest sample (by absolute
+value, whichever sign) hits `_MAX_AMPLITUDE` (32767, not 32768 - the
+conventional safe full-scale ceiling in both directions even though
+-32768 is technically representable) exactly, every other sample scaled
+by that same factor. This is a deliberate scope choice, not an oversight:
+unlike Trim/Fade (both `[start, end]`-relative), Normalise matches
+Reverse's own whole-buffer scope - "the loudest point of the sample" was
+read as the whole buffer, not just the marked playback region, since
+normalizing is conventionally a global level operation in every audio
+tool this app's UI patterns are modeled on. If a user ever wants this
+scoped to `[start, end]` instead (mirroring Trim/Fade rather than
+Reverse), that's a one-line change to what `peak`/the scaling loop
+iterate over in `normalize_samples`, not a rewrite - re-check with the
+user before assuming which scope they actually want, the same way Fade's
+own region got corrected above after first guessing wrong.
+
+`_confirm_normalize_sample`'s two "nothing to do" guards read the actual
+loaded sample buffer's peak (not just markers, unlike Trim/Fade's own
+guards) - a silent buffer (peak == 0) has no gain that could make it
+louder, and a buffer already at `_MAX_AMPLITUDE` has nothing left to gain
+up.
+
+### Keygroup tab's Modulation card: read-only source mirrors
+
+Added 2026-09-23, per direct user request. The Keygroup tab's Modulation
+card is Amount-only (see "LFO2 and the modulation matrix" above) -
+Filter Frequency/Pitch (assignable)/Loudness (slot 3)'s actual SOURCE is
+chosen program-wide, on the Program tab's own card, so previously the
+Keygroup tab gave no hint at all which source was currently assigned;
+checking meant flipping tabs. `_build_mod_amount_column_with_source_mirror`
+(new, alongside the existing `_build_mod_amount_only_column`) places a
+disabled, read-only combo (`_build_mod_source_mirror_combo` - same
+populated items as the real thing, via `_build_mod_source_combo`) to the
+LEFT of the amount knob for those three rows specifically -
+`self.mod_filt1_source_mirror`/`mod_filt2_source_mirror`/
+`mod_filt3_source_mirror`/`mod_pitch_source_mirror`/`mod_amp3_source_mirror`.
+**Pitch (LFO1)** (`L_PTCH`) still gets no mirror - its source is always
+LFO1, never assignable, so there's nothing to mirror (same reasoning the
+card's own footnote already carved out for it).
+
+Side by side (mirror combo, then knob), matching the Program tab's own
+(source, amount) reading order left to right - a first version stacked
+the mirror above the knob instead, specifically to avoid widening each
+slot column (the mirror combo is 130px wide, same as the real one, vs.
+the amount knob's own ~60px, and Filter Frequency has 3 of these side by
+side in one row), but the user asked for side-by-side directly after
+seeing the stacked version. Re-measured the same way this file's "section
+cards, scroll areas" note describes (`horizontalScrollBar().maximum()`
+stayed 0 on both tabs at this page's own minimum width) rather than
+assuming the width concern was unfounded - it was, at this page's actual
+`setMinimumSize`, so nothing else needed adjusting.
+
+**Keeping the mirror in sync needed two separate mechanisms, not one**,
+because of where each half of the page is built and how program loads
+already avoid write-back loops:
+
+- **Construction order**: the Keygroup tab (where the mirrors live) is
+  built well before the Program tab's own source combos exist in
+  `__init__` - `self.mod_filt1_combo` etc. don't exist yet at the point
+  `_build_mod_amount_column_with_source_mirror` runs. The actual
+  `combo.currentIndexChanged.connect(mirror.setCurrentIndex)` wiring is
+  added later, right after the Program tab's own 5 source combos are
+  constructed (still in `__init__`) - this covers live edits.
+- **Loading a program** sets every `MODS*` combo via `blockSignals(True)`
+  (see `_on_program_detail_loaded`'s `program_mod_combos` loop) -
+  deliberately, to avoid `_wire_combo_write` firing a redundant write-back
+  of the value that was just read. That also means the live-edit
+  connection above never fires during a load. The loop now carries a
+  `mod_source_mirrors` dict and sets each mirror's `currentIndex`
+  explicitly right alongside the real combo's, inside the same
+  blockSignals-guarded block - not relying on the signal connection at
+  all for this path.
+
+Get either half wrong and the mirror silently drifts out of sync with the
+real combo - the live connection alone misses every program load, and the
+explicit load-time sync alone misses live edits made without reloading.
+`test_keygroup_mod_source_mirrors_match_program_tab_after_load`/
+`test_keygroup_mod_source_mirror_follows_a_live_program_tab_edit`/
+`test_keygroup_mod_source_mirror_updates_on_the_next_program_load_too` in
+`tests/test_program_editor_window.py` each pin down one of these paths
+separately, plus `test_keygroup_mod_source_mirror_is_never_a_write_target`
+confirming the mirror combo is a pure visual echo (never wired through
+`_wire_combo_write`, so editing it directly - which nothing in the UI
+actually lets a user do, since it's disabled - schedules no hardware
+write).
+
 ## Testing
 
 `TESTING.md` currently undersells this a little - as of this note there's also
