@@ -51,19 +51,19 @@ but on these three, this project's own hardware measurement (confirmed
 in front of the user) overrides it:
 
 - **`K_FREQ`** (keygroup filter key-tracking): `s3k.params` says `-30..99`.
-  Re-measured on hardware (2026-09-20): real range is `-24..+24`.
-  `key_filter_track_knob` uses `-24..24` - a narrower subset, so it already
-  passes `encode_field`'s own range check, no override machinery needed.
+  Re-measured: real range is `-24..+24`. `key_filter_track_knob` uses
+  `-24..24` - narrower, so it already passes `encode_field`'s own range
+  check, no override machinery needed.
 - **`B_PTCHD`** (pitch-bend-down range): `s3k.params` says `0..12`
-  (asymmetric with bend-up's `0..24`). Re-measured (2026-09-21): actually
-  `0..24`, symmetric. Unlike `K_FREQ` this is WIDER than the declared range,
-  so a raw write above 12 fails `encode_field`'s check against the pinned
+  (asymmetric with bend-up's `0..24`). Re-measured: actually `0..24`,
+  symmetric. Unlike `K_FREQ` this is WIDER than the declared range, so a
+  raw write above 12 fails `encode_field`'s check against the pinned
   `s3ked` rev - `core/program_editor_bridge.py`'s
   `_HARDWARE_RANGE_OVERRIDES`/`_lookup_for_write` patches a corrected
   `dataclasses.replace` copy of the `Parameter` in front of every write.
   See `tests/test_program_editor_window_demo_bridge.py`'s bend-down tests.
 - **`LFO2TRIG`** (LFO2 retrigger mode): `s3k.params` declares raw `0..255`
-  with no enum/notes at all. Measured (2026-09-21): it's a plain boolean.
+  with no enum/notes at all. Measured: it's a plain boolean.
   `lfo2_trig_combo` offers only Off/On - UI-only narrowing, same shape as
   `K_FREQ`, no override needed (0/1 always fits 0..255).
 
@@ -135,11 +135,11 @@ whose Python wrapper is GC'd while the OS thread still runs).
 `dashboard.py`'s `open_program_editor()` replaces `self.editor_window` on
 every click.
 
-## Transfer Dashboard: "Open Editor" only enabled with a real connection
+## Transfer Dashboard: window/tab shortcuts and "Open Editor" gating
 
-Added 2026-09-23. `btn_open_editor` and the `&Window > Program Editor`
-menu action are only enabled when BOTH a MIDI input and output port are
-selected AND the sampler type is "Akai Sampler" (`device_type == "akai"` -
+`btn_open_editor` and the `&Window > Program Editor` menu action are only
+enabled when BOTH a MIDI input and output port are selected AND the
+sampler type is "Akai Sampler" (`device_type == "akai"` -
 `program_editor_bridge.connect()` needs Akai-specific SysEx extensions
 Generic SDS lacks). `_update_open_editor_enabled` computes this (with a
 tooltip explaining what's missing) at construction and after the MIDI
@@ -168,34 +168,30 @@ before assuming the spacing value is wrong.
 `ApplicationWindow` (which reads/writes the user's real
 `~/.akaisds/config.json`).
 
-**Window/tab shortcuts** (added 2026-09-23): `Ctrl+T` (⌘T on macOS)
-switches to the Transfer Dashboard, `Ctrl+E` opens/switches to the
-Program Editor - both live in each window's own `&Window` menu, mirrored
-so the same shortcut works regardless of which window has focus (see
-`main_window.py`/`program_editor_window.py`'s own comments). `Ctrl+1/2/3`
-used to be the window-switch shortcuts but are now the Program Editor's
-OWN tab shortcuts instead (Multi/Programs/Samples) - the two numbering
-schemes are independent, not a shared 1/2/3/4 sequence across both
-windows, so don't assume `Ctrl+1` means the same thing in both places.
+**Shortcuts**: `Ctrl+T` (⌘T) switches to the Transfer Dashboard, `Ctrl+E`
+opens/switches to the Program Editor - both live in each window's own
+`&Window` menu, mirrored so the same shortcut works regardless of which
+window has focus. `Ctrl+1/2/3` are NOT window-switch shortcuts - they're
+the Program Editor's own tab shortcuts (Multi/Programs/Samples), a
+separate numbering scheme scoped to that window only.
 
 ## Transfer Dashboard: dropped/opened files get a stable local copy
 
-Added 2026-09-23. Dragging a "cropped" region out of a sample browser
-into the queue added the row fine, but Send later
-failed with "No such file or directory". Root cause: `create_local_row`
-only stored the dropped file's PATH; the actual read happens later, at
-send time. Sample editors render the crop to a real OS temp file for the drag
-and deletes it shortly after drop - well before Send is clicked. Qt's
-cross-platform `QMimeData.urls()` can't distinguish "temporary" from
-"permanent" paths (that's an AppKit-level file-promise protocol), so the
-row appeared to add fine (it reads fine at drop time) and only the later,
-lazy read lost the race.
+Dragging a "cropped" region out of a sample browser into the queue added
+the row fine, but Send later failed with "No such file or directory".
+Root cause: `create_local_row` only stored the dropped file's PATH; the
+actual read happens later, at send time. Sample editors render the crop
+to a real OS temp file for the drag and delete it shortly after drop -
+well before Send is clicked, and Qt's cross-platform `QMimeData.urls()`
+has no way to tell "temporary" from "permanent" paths (that's an
+AppKit-level file-promise protocol), so the row added fine and only the
+later, lazy read lost the race.
 
-**Fix**: `core/dropped_files.py` (new, pure filesystem logic, no Qt)
-copies every dropped/opened file into a stable, app-owned location right
-where `create_local_row` already opens it once for its bit-depth probe -
-the queue row is built around THAT copy's path from then on. Applies
-uniformly to drag-and-drop and File > Open (both already funnel through
+**Fix**: `core/dropped_files.py` (pure filesystem logic, no Qt) copies
+every dropped/opened file into a stable, app-owned location right where
+`create_local_row` already opens it once for its bit-depth probe - the
+queue row is built around THAT copy's path from then on. Applies
+uniformly to drag-and-drop and File > Open (both funnel through
 `on_files_dropped` → `create_local_row`).
 
 Copies live under `~/.akaisds/dropped_files/<pid>/`. Three points already
@@ -219,52 +215,45 @@ queued copy still reads.
 
 ### Follow-up: 32-bit float WAVs read as silence
 
-Found 2026-09-23, once the stable-copy fix let a real sample editor export
-survive long enough to actually send - it played as silence. Root cause:
+Once the stable-copy fix let a real sample-editor export survive long
+enough to actually send, it played as silence. Root cause:
 `sds_encoder.read_wav_samples`/`read_wav_channels` called `sf.read(path,
 dtype="int16", always_2d=True)` - `soundfile`'s direct float→int16
-coercion is not reliable for every source. Confirmed against the user's
-actual file: read as `int16` it peaked at 1 (of 32767); the same file
+coercion is not reliable for every source. Confirmed against a real
+affected file: read as `int16` it peaked at 1 (of 32767); the same file
 read as `float64` and scaled by hand (`round(x * 32768)`, clipped to
 `[-32768, 32767]`) peaked at 22724, matching its real content. Not
-sample editor-specific - a `libsndfile` behavior that can affect any 32-bit
+source-specific - a `libsndfile` behavior that can affect any 32-bit
 float WAV.
 
-Fixed by `_read_float_scaled_to_int16` (new; both functions funnel
-through it) - always reads as float (reliable, since `libsndfile`
-normalizes any subtype to `[-1.0, 1.0]`) and scales to int16 by hand.
-`test_read_wav_samples_32bit_float_scales_to_real_int16_values` in
-`tests/test_sds_encoder.py` now asserts actual scaled values, not just
-"didn't crash" - the old float test only checked length/rate, which is
-why this shipped unnoticed.
+Fixed by `_read_float_scaled_to_int16` (both functions funnel through
+it) - always reads as float (reliable, since `libsndfile` normalizes any
+subtype to `[-1.0, 1.0]`) and scales to int16 by hand.
+`test_read_wav_samples_32bit_float_scales_to_real_int16_values` now
+asserts actual scaled values, not just "didn't crash" - the old test
+only checked length/rate, which is why this shipped unnoticed.
 
-### Renaming a queued file to something long didn't scroll the field to the start
+### Follow-up: renaming a queued file to something long didn't scroll the field to the start
 
-Fixed 2026-09-23, per a long-standing user report. `open_edit_dialog`
-calls `edit_field.setText(new_name)` then `setCursorPosition(0)`, meant
-to leave a long filename showing its START rather than Qt's own default
-(scrolled to the END, where `setText()` puts the cursor). Extensive
-reproduction attempts - a bare `QLineEdit`, one embedded via
-`setItemWidget` in a `QListWidget`, a simulated dialog stealing focus in
-between, and finally the real `TransferDashboard.open_edit_dialog` flow
-end to end - could NOT reproduce a failure with the synchronous call:
-`cursorRect()` (the actual visible scroll position, not just the logical
-`cursorPosition()`) consistently showed the field correctly scrolled to
-the start in every attempt. Rather than claim a root cause that couldn't
-actually be confirmed, this was fixed with the standard, low-risk Qt
-workaround for this exact class of timing bug regardless: `QLineEdit`
-only recomputes its horizontal scroll offset lazily, inside its own
-`paintEvent`, based on whatever the cursor position is *at paint time* -
-nothing guarantees a repaint happens before something else in the same
-call stack touches the field again first. `QTimer.singleShot(0, lambda:
-edit_field.setCursorPosition(0))` defers the call to a fresh event-loop
-turn, after everything from `setText()`'s own pending updates has
-already settled - can't make a working case worse, and directly targets
-the specific race class this almost certainly was.
+`open_edit_dialog` calls `setText(new_name)` then `setCursorPosition(0)`,
+meant to show a long filename's START rather than Qt's own end-of-text
+default. Extensive reproduction (bare `QLineEdit`, one embedded via
+`setItemWidget`, a simulated dialog stealing focus, the real
+`open_edit_dialog` flow end to end) could not reproduce a failure -
+`cursorRect()` (the real visible scroll position, not just the logical
+`cursorPosition()`) consistently showed it correctly scrolled every time.
+Rather than claim an unconfirmed root cause, fixed with the standard,
+low-risk Qt workaround for this class of bug regardless: `QLineEdit`
+only recomputes its scroll offset lazily, inside its own `paintEvent`,
+based on the cursor position *at paint time* - nothing guarantees a
+repaint happens before something else in the same call stack touches the
+field again first. `QTimer.singleShot(0, lambda: edit_field.setCursorPosition(0))`
+defers the call to a fresh event-loop turn instead. If this resurfaces,
+it's a genuinely different bug - this fix was verified as a correct
+mitigation for the suspected race, not a confirmed root-cause fix.
 `test_renaming_to_a_long_name_scrolls_the_field_back_to_the_start` in
 `tests/test_dashboard.py` asserts on `cursorRect().x()`, not just
-`cursorPosition()` - the logical index alone wouldn't have caught this
-bug class, since it was never wrong, only the visible scroll was.
+`cursorPosition()`, since the logical index was never actually wrong.
 
 ## Debug logging for real-hardware issues
 
@@ -277,15 +266,13 @@ errors or a crash against real hardware, ask for this log (and the macOS
 `repr()` of `Parameter` objects) - grep/tail rather than reading whole.
 
 Despite the module's own name/docstring being written for the Program
-Editor's bridge layer specifically, it's app-wide infrastructure - as of
-2026-09-23 `controller/sampler_controller.py`'s two top-level unhandled-
-exception backstops (`on_sysex_received`, `_send_next_queued_file`) also
-log here (`debug_log.get_logger().error(msg, exc_info=True)`) instead of
-`print()` + `traceback.print_exc()`, which used to be their only trace -
-invisible in a packaged GUI app with no attached console. Same file,
-same convention, whichever window/code path actually failed. If you add
-a new unhandled-exception backstop anywhere in this app, log it here too
-rather than reaching for `print()`.
+Editor's bridge layer, it's app-wide infrastructure: `sampler_controller.py`'s
+two top-level unhandled-exception backstops (`on_sysex_received`,
+`_send_next_queued_file`) also log here (`debug_log.get_logger().error(msg,
+exc_info=True)`) rather than `print()`/`traceback.print_exc()`, which used
+to be their only trace - invisible in a packaged GUI app with no attached
+console. If you add a new unhandled-exception backstop anywhere in this
+app, log it here too rather than reaching for `print()`.
 
 ## Program Editor UI: section cards, scroll areas, and the busy indicator
 
@@ -310,37 +297,26 @@ This page's `setMinimumSize(...)` was tuned by hand, not a round number:
 - `_build_section_card`'s layout ends with `addStretch()` - without it, a
   card shorter than its row partner gets slack space split before the
   header too (reads as vertically centered instead of top-aligned).
-- **Cards used to grow taller than their content when the window grew
-  vertically** (found 2026-09-23, on the Program tab specifically but not
-  reliably reproducible on the others at every window size - the
-  underlying cause applies everywhere, though). A bare `QWidget`'s
-  default vertical size policy is `Preferred`, which CAN grow past its
-  own `sizeHint()` when a layout has surplus space - a trailing
-  `addStretch()` (both inside `_build_section_card` and in each tab's own
-  outer page layout) is supposed to claim that surplus instead, but
-  `addStretch()`'s own default stretch factor is 0, same as every
-  sibling widget's - it doesn't actually outrank them, so Qt's layout
-  could still split the extra space across the cards themselves rather
-  than routing all of it into the stretch. Fixed by giving every card
-  `setSizePolicy(Preferred, Fixed)` vertically in `_build_section_card` -
-  pins each one to its `sizeHint()`, can't grow OR compress below it
-  (compressing below `sizeHint()` is the earlier, already-documented
-  overlap bug above) - rather than relying on winning a stretch-factor
-  tie against its own siblings.
-- **Paired cards' heights are pinned equal, not just their widths.**
-  Once cards stopped auto-stretching (above), a pair whose content
-  naturally differs in size - Range/Filter, Envelope 1/Envelope 2,
-  Volume Pan & Velocity/Pitch, LFO1/LFO2, Voice & MIDI/Portamento - reads
-  oddly side by side with one visibly taller than the other.
-  `_equalize_card_heights(*cards)` (right after `_build_section_card`)
-  takes `max(card.sizeHint().height() for card in cards)` and
-  `setFixedHeight`s every one of them to it, called once per pair right
-  after both are built (needs their real final content to measure
-  sizeHint() correctly). LFO1/LFO2 happen to already match today, but are
-  still equalized explicitly rather than left as an accident of current
-  content - add a control to just one side later and it'd otherwise throw
-  the two out of sync silently. If you add a new paired row, call this
-  for it too rather than assuming matching content sizes will coincide.
+- **Cards used to grow taller than their content as the window grew
+  vertically.** A bare `QWidget`'s default vertical size policy
+  (`Preferred`) can grow past its own `sizeHint()` when a layout has
+  surplus space - the trailing `addStretch()`s above are supposed to
+  claim that surplus instead, but `addStretch()`'s own default stretch
+  factor (0) doesn't actually outrank a sibling widget's willingness to
+  grow (also 0), so Qt's layout could still split extra space across the
+  cards themselves. Fixed by `setSizePolicy(Preferred, Fixed)` vertically
+  in `_build_section_card` - pins each card to its `sizeHint()`, can't
+  grow OR compress below it (compressing is the earlier overlap bug
+  above), rather than relying on winning a stretch-factor tie.
+- **Paired cards' heights are pinned equal, not just their widths**, via
+  `_equalize_card_heights(*cards)` - `setFixedHeight`s every card in a
+  pair to `max(sizeHint().height() for card in pair)`, called once both
+  are fully built (needs real final content to measure correctly).
+  Applied to every paired row on both tabs (Range/Filter, Envelope 1/2,
+  Volume Pan & Velocity/Pitch, LFO1/LFO2, Voice & MIDI/Portamento) even
+  where two cards already happen to match today, so a later edit to just
+  one side can't silently throw them out of sync. Call this for any new
+  paired row too.
 
 `BridgeWorker.busy_changed` drives the indeterminate progress bar next to
 Refresh - `True` from the moment any job queues while nothing else is
@@ -506,7 +482,17 @@ both naively wrong the same direction) but the hardware reads a loop
   but `s3k.params` declares it unsigned `0..65535`, so `encode_field`
   rejects a negative raw value. `_sample_tune_offset_to_semitones`/
   `_semitones_to_sample_tune_offset` manually sign-extend on read and wrap
-  to unsigned two's-complement on write. Range is ±50.00st.
+  to unsigned two's-complement on write. Range is ±50.00st. **The
+  in-memory cache (`_sample_waveform_cache[i]["stuno"]`) must always hold
+  the RAW value, never the display semitones** - a live tune edit used to
+  store the raw spinbox value (semitones) into that key while a header
+  load stored the true raw byte, so reselecting a previously-edited
+  sample fed semitones back through the raw→semitones converter a second
+  time and redisplayed garbage (`+40.00st` came back as `+0.16st`,
+  confirmed on hardware - the actual hardware write was always correct,
+  this was display-only). `_on_sample_tune_changed` now stores
+  `_semitones_to_sample_tune_offset(value)`, matching the load path.
+  `test_sample_tune_survives_a_reselect_after_a_live_edit` guards this.
 - `PRGNUM`'s raw value is off by one from the panel's own numbering (raw
   8 shows as program 9) - `program_number_spinbox` displays `raw + 1`,
   writes `displayed - 1`.
@@ -541,21 +527,17 @@ this gesture).
 **Panning**: a trackpad reports pan motion through `angleDelta().x()` or
 `.y()` depending on swipe direction, and naive handling either drops an
 axis or picks the wrong one momentarily before "bouncing" onto the right
-one. Went through several designs (preferring the larger-magnitude axis
-per-event, then locking the winning axis once per gesture via
-`QWheelEvent.phase()`) that each fixed one symptom but left another (slow
-swipes bouncing from hand tremor, or a tremor-dominated first event
-locking the wrong axis for a whole gesture). **What shipped**: stop
-inferring intent from an ambiguous signal at all - `angle.x() != 0`
-always wins for pan, unconditionally; nothing produces nonzero `.x()`
-except a genuine horizontal swipe or a mouse's own horizontal wheel, so
-there's nothing to disambiguate. A vertical-only mouse wheel has no `.x()`
-at all, so Shift+scroll explicitly repurposes its `.y()` for pan (the
-usual "hold Shift to scroll sideways" convention) - unmodified vertical
-scroll does nothing on purpose, since repurposing it for pan (nothing to
-scroll vertically) was the root of every earlier version of this bug.
-Zoom (Ctrl+scroll) keeps a simple `x if nonzero else y`, since zoom has no
-left/right ambiguity.
+one. What shipped, after a couple of per-event/per-gesture heuristics
+each fixed one symptom but left another: stop inferring intent from an
+ambiguous signal at all - `angle.x() != 0` always wins for pan,
+unconditionally; nothing produces nonzero `.x()` except a genuine
+horizontal swipe or a mouse's own horizontal wheel, so there's nothing to
+disambiguate. A vertical-only mouse wheel has no `.x()` at all, so
+Shift+scroll explicitly repurposes its `.y()` for pan (the usual "hold
+Shift to scroll sideways" convention) - unmodified vertical scroll does
+nothing on purpose, since repurposing it for pan was the root of every
+earlier version of this bug. Zoom (Ctrl+scroll) keeps a simple `x if
+nonzero else y`, since zoom has no left/right ambiguity.
 
 The Zoom +/-/Fit buttons and the horizontal `QScrollBar` are the
 discoverable/no-modifier equivalents, synced via `WaveformView.view_changed`
@@ -620,16 +602,15 @@ log lines" again, check this log line first.
 
 ### Progressive waveform loading during a live SDS dump
 
-As of 2026-09-22 the envelope fills in live, left-to-right, in step with
-an in-progress transfer, instead of appearing all at once when it
-finishes. `WaveformView.begin_live_capture()` switches from header-only
-to an empty growing list right before a fetch starts;
-`append_live_samples(chunk)` extends it and repaints each call.
-`_rebuild_envelope` clips to `min(view_start + view_length,
-len(self._samples))` and sizes the envelope's pixel width proportionally
-to how much of the current view is actually loaded, so a half-loaded
-prefix occupies only its own left fraction rather than stretching to fill
-the canvas.
+The envelope fills in live, left-to-right, in step with an in-progress
+transfer, instead of appearing all at once when it finishes.
+`WaveformView.begin_live_capture()` switches from header-only to an
+empty growing list right before a fetch starts; `append_live_samples(chunk)`
+extends it and repaints each call. `_rebuild_envelope` clips to
+`min(view_start + view_length, len(self._samples))` and sizes the
+envelope's pixel width proportionally to how much of the current view is
+actually loaded, so a half-loaded prefix occupies only its own left
+fraction rather than stretching to fill the canvas.
 
 Two producers feed `append_live_samples`: real hardware via
 `SamplerController.sample_chunk_received` (decodes each accepted SDS
@@ -645,8 +626,8 @@ arbitrary placeholder (`values["SLNGTH"] or 20000`) for `frame_count`
 against `DemoBridge`'s all-zero header - harmless before progressive
 loading needed it as the live-capture *total*, but `tests/test_audio.wav`
 is ~31000 frames, so the envelope read "100% loaded" at ~64% of the real
-transfer, then jumped when the real 31000-frame total replaced it mid-
-view. Fixed by `_demo_sample_frame_count(sample_index)` (predicts the
+transfer, then jumped when the real 31000-frame total replaced it
+mid-view. Fixed by `_demo_sample_frame_count(sample_index)` (predicts the
 real length via a cheap `wave.open().getnframes()` header peek, or
 `_synthesized_demo_frame_count` if the fixture is missing) replacing the
 placeholder. Demo-mode-only: on real hardware both values trace back to
@@ -654,7 +635,7 @@ the same physical sample's `SLNGTH`, so they can't disagree.
 
 ### Sample loop type, root note, and rename/delete
 
-Added 2026-09-22. Three additions, all mirroring existing patterns:
+Three additions, all mirroring existing patterns:
 
 - **Loop type** (`sample_loop_type_combo`) writes `SPTYPE` (sample
   region) - the SAMPLE's own type, distinct from `ZPLAY` (the
@@ -687,16 +668,15 @@ benign defaults (0 → "Normal looping"; 0 → clamped up to 21 by
 `_demo_sample_frame_count` needed, since neither collapses markers the
 way `(0,0,0,0)` does.
 
-### Trim/Reverse, and duplicate/timestretch/resample (capability audit)
+### Trim/Reverse/Duplicate, and timestretch/resample (capability audit)
 
-Added 2026-09-22. Checked first whether `s3k`/`s3ked` already provide
-sample/program/keygroup duplication, hardware time-stretch, or hardware
-resampling - **none exist** (grepped both packages; only structural
-messages are Delete*, no Copy/Duplicate/Clone anywhere). `SSRATE` is a
-plain metadata byte - writing it changes the declared rate, not the
-audio. This repo's own `sds_encoder.resample_to_target_rate` is the only
-real resampling in the stack, client-side; time-stretch would need new
-DSP work.
+Checked first whether `s3k`/`s3ked` already provide sample/program/keygroup
+duplication, hardware time-stretch, or hardware resampling - **none
+exist** (grepped both packages; only structural messages are Delete*, no
+Copy/Duplicate/Clone anywhere). `SSRATE` is a plain metadata byte -
+writing it changes the declared rate, not the audio. This repo's own
+`sds_encoder.resample_to_target_rate` is the only real resampling in the
+stack, client-side; time-stretch would need new DSP work.
 
 **Trim**/**Reverse** needed a way to get modified audio back onto the
 hardware - something neither `s3k` nor `s3ked`'s own TUI app has ever
@@ -712,8 +692,8 @@ guarantees `start <= loop_start <= loop_end <= end` on entry). Reverse
 mirrors every marker around `frame_count - 1 - i`; loop length is
 invariant under this.
 
-**Why send-then-delete under a temp name** (`_perform_sample_edit_real`):
-two failure modes to design around:
+**Why Trim/Reverse send-then-delete under a temp name**
+(`_perform_sample_edit_real`): two failure modes to design around:
 
 - Deleting the original before confirming the replacement sent would risk
   losing the sample if the send then failed - so replacement sends FIRST,
@@ -730,8 +710,6 @@ two failure modes to design around:
 Sequence: send under `<name>-TMP` → confirm resident → delete original →
 reload, find `<name>-TMP`'s new index by name (indices shift after
 delete) → `SHNAME`-only rename back → reload once more, select result.
-Every step is a previously-tested primitive; this exact sequence hasn't
-been exercised against real hardware - watch the first real run closely.
 Demo mode (`_perform_sample_edit_demo`) bypasses all of this, mutating
 the cache/`WaveformView` directly, paced the same way
 `_fetch_demo_sample_audio` is.
@@ -751,165 +729,99 @@ start) rather than hanging until timeout (or forever, for the send step's
 `timeout_ms=None`). Any new blocking wait added to this page must follow
 this ordering.
 
-### Duplicate Sample: adds a new sample, reuses the send pipeline above
+**Duplicate Sample** (button, right-aligned on `sample_edit_row` next to
+Trim/Reverse/Fade/Normalise) reuses this same send pipeline but is
+simpler: nothing is deleted or renamed, so no temp-name step - the new
+name is confirmed distinct from every resident sample up front (same
+name-collision hazard as above), then sent directly.
+`_perform_duplicate_sample_real` looks up the new sample's index by name
+once resident, then copies every header field `send_file_queue` doesn't
+set (`SPTYPE`/`SPITCH`/`SHLTO`/`STUNO` and the four loop/start/end
+fields) across from the source - otherwise "duplicate" would silently
+mean "audio copy with default metadata." Unlike Trim/Reverse/Fade/
+Normalise, it never touches the source's own audio, so it isn't
+"destructive" in the same sense - no "cannot be undone" warning needed,
+just the name prompt. **Demo-mode-disabled**, same reasoning as Duplicate
+Program/Duplicate Keygroup (`DemoBridge` has no add-sample primitive
+either) - gated through `_set_sample_edit_buttons_enabled` (which already
+reacts to `has_waveform()`, which this button also needs), not the list
+context-menu's own enable method.
 
-Added 2026-09-23, initially as a right-click context menu item to match
-Duplicate Program/Duplicate Keygroup - moved to a button on the same row
-as Trim/Reverse/Fade/Normalise the same day, per direct user follow-up
-(a disabled context menu item reads as "nothing happened" when clicked
-before audio is loaded; a visibly-disabled button next to the other four
-sample-edit buttons doesn't). Right-aligned on `sample_edit_row` (its own
-`addStretch()` before it, not grouped with the destructive four -
-Duplicate never touches the source's own audio, it only ever ADDS a new
-sample, so it isn't "cannot be undone" in the same sense they are).
+### Loop-point markers push each other, and click-to-cycle when stacked
 
-The mechanism is a different one from Duplicate Program/Duplicate
-Keygroup, though: those two build a PDATA/KDATA header directly (a
-"create" primitive `DemoBridge` doesn't have either, so both are
-`not demo_mode`-gated); samples have no header-only duplicate (no bulk
-sample-audio transfer of any kind exists in `s3k` - see the capability
-audit above), so `_perform_duplicate_sample_real` sends the already-loaded
-audio under a brand new, collision-checked name via
-`SamplerController.send_file_queue` - the same mechanism Trim/Reverse/
-Fade/Normalise use, not a new one. **Simpler than their replace-in-place
-dance**: nothing is deleted or renamed, so there's no temp-name step -
-`new_name` is confirmed distinct from every resident sample up front (same
-hazard as the temp-name comment above: two samples sharing a name makes
-keygroup zone resolution ambiguous), so it's safe to send under directly.
-After the send confirms resident, the new sample's index is looked up by
-name (same convention, not assumed) and every header field
-`send_file_queue` doesn't set - `SPTYPE`/`SPITCH`/`SHLTO`/`STUNO` and the
-four loop/start/end fields - is copied across from the source, since
-otherwise "duplicate" would silently mean "audio copy with default
-metadata," not a real duplicate. **Demo-mode-gated the same way as
-Duplicate Program/Keygroup**, just through `_set_sample_edit_buttons_enabled`
-rather than `_update_list_context_actions_enabled` - this button needs
-`has_waveform()` too, which only that method already reacts to.
-
-### Sample tune redisplaying wrong after a reselect: `entry["stuno"]` wasn't consistently raw
-
-Found while building Duplicate Sample above, and **confirmed on real
-hardware the same day**: `entry["stuno"]` in `_sample_waveform_cache` was
-NOT consistently raw. `_on_sample_detail_loaded` stores the raw `STUNO`
-byte; `_on_sample_tune_changed` (a live tune edit) overwrote the same key
-with the spinbox's SEMITONES value instead. Reselecting a previously-
-tune-edited sample (`_on_sample_selected`'s cache-restore branch) fed that
-semitones value back into `_update_sample_meta_controls`, which
-unconditionally treats it as raw and re-converts it through
-`_sample_tune_offset_to_semitones` a second time. Reproduced on hardware
-exactly as predicted: set Tune to `+40.00st`, click a different sample
-then back, and it redisplayed as `+0.16st` - the actual hardware write was
-always correct (`_schedule_write` never used the cache), this was a
-display-only bug. `SPTYPE`/`SPITCH`/`SHLTO` never had this problem (their
-live-edit handlers already stored the same raw representation the load
-handler does - only `STUNO` has an actual unit conversion in between).
-
-**Fixed** by making `_on_sample_tune_changed` store the raw encoded value
-(`_semitones_to_sample_tune_offset(value)`) into `entry["stuno"]` instead
-of the bare spinbox value - same representation the header-load path
-already used, so the cache key means one thing everywhere now.
-`_perform_duplicate_sample_real`'s own `STUNO` read went back to
-`entry["stuno"]` directly (matching `SPTYPE`/`SPITCH`/`SHLTO`) now that
-it's trustworthy - no longer needs its own special-cased live-widget
-workaround. `test_sample_tune_survives_a_reselect_after_a_live_edit`
-reproduces the exact hardware repro (edit -> reselect away -> reselect
-back -> still correct) as a regression test;
-`test_changing_sample_tune_writes_stuno_in_raw_units` was also updated -
-it used to assert the OLD (buggy) semitones-in-the-cache behavior as if
-it were correct.
-
-### Loop-point markers push each other instead of stopping dead
-
-Added 2026-09-22. `WaveformView`'s old `clamp_marker` stopped a dragged
-marker dead at its neighbour. Now `push_marker`: moving a marker far
-enough pushes the neighbour along instead, cascading (Newton's cradle).
-`start <= loop_start <= loop_end <= end` still always holds, just
-enforced by shoving rather than refusing to cross. `clamp_marker` is gone
-entirely (no remaining callers once drag + `set_marker` both switched).
+`WaveformView`'s old `clamp_marker` stopped a dragged marker dead at its
+neighbour. Now `push_marker`: moving a marker far enough pushes the
+neighbour along instead, cascading (Newton's cradle). `start <=
+loop_start <= loop_end <= end` still always holds, just enforced by
+shoving rather than refusing to cross. `clamp_marker` is gone entirely.
 
 **The write side had to change with it**: a push can move up to all four
-markers from one action, so `_schedule_marker_write` now takes the FULL
+markers from one action, so `_schedule_marker_write` takes the FULL
 marker dict from both before and after the edit and writes exactly the
 field(s) whose value actually changed (`SSTART` if start moved, `SMPEND`
-if end moved, `LOOPAT1`+`LLNGTH1` together if either loop edge moved).
-Getting this wrong silently desyncs the hardware from what's on screen -
-e.g. a push that visibly moves `loop_end` but only writes `SMPEND` leaves
-the sampler looping at its old position while the UI shows it moved.
-`_on_waveform_marker_committed` (drag release) gets "before" from the
-cache entry (only updated on commit, not on live per-move
-`markers_changed`); `_on_marker_spinbox_changed` gets "before" from
-`WaveformView.markers()` read immediately before `set_marker`.
-`_flush_marker_write` dropped its `which` parameter - it unconditionally
-flushes all four marker debounce keys now (`_flush_write` no-ops for
-nothing pending).
+if end moved, `LOOPAT1`+`LLNGTH1` together if either loop edge moved) -
+get this wrong and the hardware silently desyncs from what's on screen
+(e.g. a push that visibly moves `loop_end` but only writes `SMPEND`
+leaves the sampler looping at its old position). `_on_waveform_marker_committed`
+(drag release) gets "before" from the cache entry (only updated on
+commit); `_on_marker_spinbox_changed` gets it from `WaveformView.markers()`
+read immediately before `set_marker`. `_flush_marker_write` unconditionally
+flushes all four marker debounce keys now, no `which` parameter needed.
 
-### Click-to-cycle for markers stacked on the same frame
+**Follow-up**: once a push lands several markers on the same frame, they
+sit at the same pixel column - the first version's `_marker_near(x)`
+always broke ties the same way (effectively always "start"), so only the
+frontmost marker could ever be grabbed again. Fixed the usual way
+overlapping-selection is solved: `_markers_within_hit_radius(x)` (every
+visible marker within `_HIT_RADIUS_PX`, closest first) replaces
+`_marker_near`, and `mousePressEvent` cycles through the candidate list
+on repeated clicks at the same spot (compared by the actual sorted name
+list, not just pixel proximity) rather than always grabbing the closest.
+Marker spinboxes need none of this - each is directly clickable
+regardless of canvas position, an unambiguous fallback for separating a
+stack.
 
-Added 2026-09-22, follow-up to push. Once several markers land on the
-same frame (easy with push), they sit at the same pixel column - and the
-first push version's `_marker_near(x)` always broke ties in
-`_MARKER_ORDER`'s order (effectively always "start"), so only the
-frontmost marker could ever be grabbed again.
+### Waveform rendering details: zone tint, zero-crossing, high-zoom, gap-bridging
 
-Fixed the usual way overlapping-selection is solved: repeated clicks
-cycle through every marker in the stack. `_marker_near` is replaced by
-`_markers_within_hit_radius(x)` (every visible marker within
-`_HIT_RADIUS_PX`, closest first, stable-sorted). `mousePressEvent`
-remembers the candidate list + a rotating index - a press whose candidate
-list is *exactly* the same as last press's (compared by actual sorted
-name list, not just "near the same pixel") advances to the next
-candidate; anything else resets to closest. Reset explicitly in
-`clear()`/`set_header()` too. Marker spinboxes need none of this - each
-is directly clickable regardless of canvas position, an unambiguous
-fallback for separating a stack.
+`_waveform_zone_color(frame, palette)` picks a color per envelope column:
+`text_disabled` (greyed) outside `[start, end]` (resident but never
+plays), `keygroup_color_3` (the same teal the loop markers use) inside
+`[loop_start, loop_end]` inclusive, plain `accent` elsewhere within
+`[start, end]`. Frame comes from `frame_for_x`, the same mapping marker
+positioning uses, so boundaries line up with the markers pixel for pixel.
 
-### Waveform trace tinted by region
-
-Added 2026-09-22. `_waveform_zone_color(frame, palette)` picks a color
-per envelope column: `text_disabled` (greyed) outside `[start, end]`
-(resident but never plays), `keygroup_color_3` (the same teal the loop
-markers themselves use) inside `[loop_start, loop_end]` inclusive, plain
-`accent` elsewhere within `[start, end]`. Each column's frame comes from
-`frame_for_x` - the same mapping `x_for_frame` (marker positioning)
-inverts, so boundaries line up with the markers pixel for pixel. Color
-can be briefly, harmlessly approximate while a sample is still
-progressively loading (`frame_for_x` uses the full canvas width
-regardless of how much has loaded) - accepted, not a bug.
-
-### Zero-crossing line, and connected samples at high zoom
-
-Added 2026-09-22, screenshot-driven: zoomed in far enough that
-`build_envelope`'s one-min/max-pair-per-column approach produced
-disconnected dashes, with nothing marking zero amplitude.
-
-`_draw_zero_crossing_line` is a plain horizontal guide at `mid_y` in
-`palette["border"]`, drawn even in header-only mode.
-
-`_draw_connected_samples` fixes the dashes: the per-column min/max bar
-degenerates once zoomed in past 1:1 (each column maps to ≤1 sample, so
-min == max, every bar collapses to a dot). `paintEvent` switches to an
+`_draw_zero_crossing_line` is a plain horizontal guide at `mid_y`, drawn
+even in header-only mode. `_draw_connected_samples` fixes a real bug at
+high zoom: the per-column min/max bar mode degenerates once zoomed past
+1:1 (each column maps to ≤1 sample, so min == max, every bar collapses to
+a dot, reading as disconnected dashes). `paintEvent` switches to an
 actual point-to-point polyline whenever `view_length <= self.width()` -
-cheap because that condition bounds sample count by canvas width, same
-order of work as the bar loop it replaces. Below that threshold, the
-existing bar rendering is unchanged; both paths share
-`_waveform_zone_color` per segment.
+cheap, since that condition bounds sample count by canvas width. Below
+that threshold the bar rendering is unchanged; both paths share
+`_waveform_zone_color`. Crash-guarded by
+`test_paint_does_not_crash_at_high_zoom_in_connected_sample_mode`, since
+the progressive-loading interaction (`self._samples` still filling in,
+shorter than the zoomed-in view) is easy to get wrong here.
 
-`test_paint_does_not_crash_at_high_zoom_in_connected_sample_mode`/
-`test_paint_does_not_crash_at_high_zoom_with_only_one_sample_loaded` in
-`tests/test_waveform_view.py` are crash-guards for this path, especially
-the progressive-loading interaction where `self._samples` is still
-filling in and shorter than the zoomed-in view.
+The bar mode itself also used to leave real gaps between adjacent
+columns whose samples all sit in a narrow, low-variance range (a quiet
+passage) even though the audio is continuous - the classic min/max-bar
+artifact. `_bridge_envelope_gaps` (`build_envelope` always runs output
+through it) walks the envelope once and nudges the nearer edge of any
+two non-overlapping adjacent columns just far enough to touch - never
+shrinks a genuine peak/trough, no-op once already overlapping. Operates
+on amplitude `(lo, hi)` pairs, not pixels (the y-mapping is strictly
+monotonic linear, so amplitude-space gaps are y-space gaps).
 
 ### Zoom ceiling: a flat 500x could never reach single-sample resolution
 
-Added 2026-09-22: dragging a marker "as zoomed in as possible" still
-wasn't sample-accurate. Root cause: `_MAX_ZOOM = 500.0` was a flat
-ceiling, but `_view_length()` is `round(frame_count / zoom)` - for any
-sample bigger than roughly `500 * canvas_width_px` frames, max zoom still
-left more samples visible than canvas pixels, so every pixel of mouse
-movement skipped several frames permanently on larger samples (real
-S3000-series samples can be several hundred thousand to a few million
-frames).
+Dragging a marker "as zoomed in as possible" still wasn't sample-accurate.
+Root cause: `_MAX_ZOOM = 500.0` was a flat ceiling, but `_view_length()`
+is `round(frame_count / zoom)` - for any sample bigger than roughly
+`500 * canvas_width_px` frames, max zoom still left more samples visible
+than canvas pixels, so every pixel of mouse movement skipped several
+frames permanently on larger samples (real S3000-series samples can be
+several hundred thousand to a few million frames).
 
 Fixed by `WaveformView._max_zoom()` returning `max(_MIN_ZOOM,
 float(self._frame_count))` - the exact zoom at which `_view_length()`
@@ -922,18 +834,17 @@ See `test_max_zoom_reaches_single_sample_resolution_for_a_huge_sample`.
 
 ### Loop type gating: markers/spinboxes/tint disappear, don't just grey out
 
-Added 2026-09-23. When `SPTYPE` is "No looping"/"One-shot"
-(`_SPTYPE_VALUES_WITHOUT_LOOP = {2, 3}`), the loop has no meaning:
-`_set_loop_markers_enabled(enabled)` greys the loop spinboxes + legend
-swatches and calls `WaveformView.set_loop_enabled(enabled)`, which makes
-`loop_start`/`loop_end` **not draw at all** (paintEvent skips them
-outright) and excludes them from `_markers_within_hit_radius`. The
-loop-region teal tint reverts to plain accent. Getting the disabled
-*look* right needed its own fix: `style.qss.template`'s
-`QComboBox, QSpinBox, QDoubleSpinBox` rule hardcodes colors, silently
-defeating Fusion's automatic disabled-greying unless `:disabled` is
-spelled out too - added alongside the existing `QPushButton:disabled`/
-`QLineEdit:disabled` rules, app-wide.
+When `SPTYPE` is "No looping"/"One-shot" (`_SPTYPE_VALUES_WITHOUT_LOOP =
+{2, 3}`), the loop has no meaning: `_set_loop_markers_enabled(enabled)`
+greys the loop spinboxes + legend swatches and calls
+`WaveformView.set_loop_enabled(enabled)`, which makes `loop_start`/
+`loop_end` **not draw at all** (paintEvent skips them outright) and
+excludes them from `_markers_within_hit_radius`. The loop-region teal
+tint reverts to plain accent. Getting the disabled *look* right needed
+its own fix: `style.qss.template`'s `QComboBox, QSpinBox, QDoubleSpinBox`
+rule hardcodes colors, silently defeating Fusion's automatic
+disabled-greying unless `:disabled` is spelled out too - added alongside
+the existing `QPushButton:disabled`/`QLineEdit:disabled` rules, app-wide.
 
 **Dragging Start/End while the loop is off freezes `loop_start`/
 `loop_end` instead of pushing them.** `WaveformView._push_marker` wraps
@@ -960,47 +871,27 @@ input without permanently un-freezing the actual stored loop points.
 ### Sample-load progress: removed, then partly brought back
 
 The full-width `sample_load_progress` bar under Trim/Reverse was removed
-2026-09-23 for ordinary sample *loading* - redundant with the waveform's
-own progressive fill and the status bar (which already showed frame
-counts). `_on_sample_receive_progress` now takes a `label` and writes
+for ordinary sample *loading* - redundant with the waveform's own
+progressive fill and the status bar (which already showed frame counts).
+`_on_sample_receive_progress` now takes a `label` and writes
 `"{label} - {percentage}% ({current}/{total} frames)"` to the status bar
 instead of driving a bar.
 
-**Trim/Reverse/Fade got a small bar back**, per follow-up request: unlike
-loading, sending already-loaded audio back out has no progressively-
-filling waveform of its own - the audio sits static until send/delete/
-rename finishes. `sample_edit_progress` (140px, hidden by default) lives
-next to the Zoom controls, driven by `_on_sample_edit_progress` (which
-also calls `_on_sample_receive_progress` for the shared status-bar text)
-
-- ordinary loading never calls this, so the bar stays hidden for a plain
+**Trim/Reverse/Fade got a small bar back**: unlike loading, sending
+already-loaded audio back out has no progressively-filling waveform of
+its own - the audio sits static until send/delete/rename finishes.
+`sample_edit_progress` (140px, hidden by default) lives next to the Zoom
+controls, driven by `_on_sample_edit_progress` (which also calls
+`_on_sample_receive_progress` for the shared status-bar text) - ordinary
+loading never calls this, so the bar stays hidden for a plain
 double-click load.
-
-### Waveform bar rendering: bridging gaps between low-variance columns
-
-Added 2026-09-23: a decaying/quiet tail rendered as disconnected dashes.
-`paintEvent`'s min/max bar mode (`view_length > width`) draws only a
-single vertical line per column with nothing connecting columns - a
-column whose samples all sit in a narrow, low-variance range (a quiet
-passage) can leave real daylight to the next column's bar even though
-the audio is continuous.
-
-Fixed by `_bridge_envelope_gaps` (plain function, `build_envelope` always
-runs output through it): walks the envelope once, and whenever a column's
-range doesn't overlap the *previous* column's, nudges the one edge nearer
-the gap just far enough to touch it. Operates on amplitude `(lo, hi)`
-pairs, not pixels (`paintEvent`'s y-mapping is strictly monotonic linear,
-so amplitude-space gaps are y-space gaps). Never shrinks a genuine
-peak/trough, no-op for anything already overlapping.
-`_draw_connected_samples` (the other rendering path) is unaffected since
-it never reads `self._envelope`.
 
 ### Fade In/Out: fades the lead-in/lead-out AROUND [start, end], not inside it
 
-Added 2026-09-23. One "Fade In/Out" button (next to Trim/Reverse) applies
-both directions in one pass. `core/sample_editing.py`'s
-`fade_in_out_samples(samples, start, loop_start, loop_end, end)` - same
-5-arg-in/5-tuple-out shape as `trim_samples`/`reverse_samples`.
+One "Fade In/Out" button (next to Trim/Reverse) applies both directions
+in one pass. `core/sample_editing.py`'s `fade_in_out_samples(samples,
+start, loop_start, loop_end, end)` - same 5-arg-in/5-tuple-out shape as
+`trim_samples`/`reverse_samples`.
 
 **First version faded the first/last 10% of `[start, end]` itself** (a
 trapezoid inside the marked region) - wrong; corrected after real use.
@@ -1018,7 +909,7 @@ should do, it isn't - re-read this section before "fixing" it.**
 
 ### Normalise Sample: whole-buffer gain, not [start, end]-scoped
 
-Added 2026-09-23. `normalize_samples(samples, start, loop_start,
+`core/sample_editing.py`'s `normalize_samples(samples, start, loop_start,
 loop_end, end)` - same 5-arg shape as the other three transforms -
 applies ONE uniform gain to the ENTIRE buffer so its loudest sample hits
 `_MAX_AMPLITUDE` (32767, the conventional safe ceiling; -32768 is
@@ -1037,9 +928,9 @@ gain up) or already at `_MAX_AMPLITUDE`.
 
 ### Keygroup tab's Modulation card: read-only source mirrors
 
-**Confirmed on real hardware, 2026-09-23**: the S2000 manual's prose
-("Each keygroup has these modulation facilities separately available")
-raised the question of whether Filter Mod/Pitch Mod/Amp Mod 3's SOURCE is
+**Confirmed on real hardware**: the S2000 manual's prose ("Each keygroup
+has these modulation facilities separately available") raised the
+question of whether Filter Mod/Pitch Mod/Amp Mod 3's SOURCE is
 per-keygroup rather than program-wide as implemented. A read-only
 diagnostic script (`test_scripts/keygroup_mod_source_diagnostic.py` -
 gitignored) read a program's header and two keygroups' headers before/
@@ -1050,9 +941,9 @@ program-wide, as implemented. See
 writeup if this question resurfaces - don't re-litigate from the manual's
 prose alone without reading that first.
 
-Added 2026-09-23. The Keygroup tab's Modulation card is Amount-only (see
-"LFO2 and the modulation matrix" above); previously it gave no hint which
-source was assigned program-wide. `_build_mod_amount_column_with_source_mirror`
+The Keygroup tab's Modulation card is Amount-only (see "LFO2 and the
+modulation matrix" above); previously it gave no hint which source was
+assigned program-wide. `_build_mod_amount_column_with_source_mirror`
 places a disabled, read-only combo (`_build_mod_source_mirror_combo`,
 same items as the real one) to the LEFT of the amount knob, for Filter
 Freq (all 3 slots), Pitch slot 2, and Amplitude slot 3 -
@@ -1060,11 +951,9 @@ Freq (all 3 slots), Pitch slot 2, and Amplitude slot 3 -
 never assignable) gets no mirror combo - see below.
 
 Side by side (mirror, then knob), matching the Program tab's own
-(source, amount) left-to-right order - a first version stacked the
-mirror above the knob to avoid widening the slot column, but the user
-asked for side-by-side after seeing it; re-measured via
-`horizontalScrollBar().maximum()` staying 0 on both tabs, so nothing else
-needed adjusting.
+(source, amount) left-to-right order - re-measured via
+`horizontalScrollBar().maximum()` staying 0 on both tabs after switching
+from an earlier stacked layout.
 
 **Keeping the mirror in sync needs two mechanisms**, because of build
 order and how program loads avoid write-back loops:
@@ -1086,7 +975,7 @@ alone misses every load, the load-time sync alone misses live edits.
 `test_keygroup_mod_source_mirror_is_never_a_write_target` (the mirror is
 never wired through `_wire_combo_write`).
 
-**Row labels/slots, tightened 2026-09-23** - now 3 rows, not 4:
+**Row labels/slots** - 3 rows, not 4:
 
 - "Filter Frequency" → **"Filter Freq."**, matching the Program tab's own
   label for the same destination.
@@ -1121,4 +1010,4 @@ offscreen `QApplication`, actual widgets). Stated philosophy (from the
 user): don't test the UI exhaustively, but cover core functionality and
 any bug you fix - see `TESTING.md`'s "why several tests exist" section.
 
-`uv run pytest tests/ -v` runs everything in well under a second.
+`uv run pytest tests/ -v` runs everything in well under 10 seconds.
