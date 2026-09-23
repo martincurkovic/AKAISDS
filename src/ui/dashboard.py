@@ -524,9 +524,17 @@ class TransferDashboard(QWidget):
         if dialog.exec():
             settings = dialog.get_settings()
             edit_field.setText(settings["name"])
-            edit_field.setCursorPosition(0)
-            # trying to setCursorPosition to 0 so the start of long file names appears, but
-            # i dont actually think this works, oh well. TODO: figure this out later
+            # QLineEdit only recomputes its horizontal scroll offset lazily,
+            # inside its own paintEvent, based on the cursor position AT
+            # THAT MOMENT - calling setCursorPosition(0) synchronously right
+            # after setText() sets the logical cursor correctly, but nothing
+            # guarantees a repaint happens before something else (a focus
+            # change, another update in this same call stack) touches the
+            # field again first. Deferring to the next event-loop turn via
+            # singleShot(0, ...) runs this once everything from setText()'s
+            # own pending updates has already settled, which is the
+            # standard workaround for this exact class of Qt timing quirk.
+            QTimer.singleShot(0, lambda ef=edit_field: ef.setCursorPosition(0))
             new_settings = {
                 "bit_depth": settings["bit_depth"],
                 "sample_rate": settings["sample_rate"],

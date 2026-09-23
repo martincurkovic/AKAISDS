@@ -1,4 +1,10 @@
-"""File-based debug logging for core/program_editor_bridge.py.
+"""File-based debug logging, originally for core/program_editor_bridge.py
+specifically (see below) but now the app-wide catch-all: anything that
+needs to leave a trace of an unexpected failure writes here too (e.g.
+controller/sampler_controller.py's own unhandled-exception backstops) -
+print()/traceback.print_exc() has nowhere to go in a packaged GUI app
+with no attached console, so this rotating file is the only place a user
+could actually find and hand over such an error.
 
 S3kBridge documents itself as NOT safe for two concurrent requests on one
 connection - "callers with a UI thread should serialise every call through

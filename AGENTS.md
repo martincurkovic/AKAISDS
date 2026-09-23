@@ -238,6 +238,34 @@ normalizes any subtype to `[-1.0, 1.0]`) and scales to int16 by hand.
 "didn't crash" - the old float test only checked length/rate, which is
 why this shipped unnoticed.
 
+### Renaming a queued file to something long didn't scroll the field to the start
+
+Fixed 2026-09-23, per a long-standing user report. `open_edit_dialog`
+calls `edit_field.setText(new_name)` then `setCursorPosition(0)`, meant
+to leave a long filename showing its START rather than Qt's own default
+(scrolled to the END, where `setText()` puts the cursor). Extensive
+reproduction attempts - a bare `QLineEdit`, one embedded via
+`setItemWidget` in a `QListWidget`, a simulated dialog stealing focus in
+between, and finally the real `TransferDashboard.open_edit_dialog` flow
+end to end - could NOT reproduce a failure with the synchronous call:
+`cursorRect()` (the actual visible scroll position, not just the logical
+`cursorPosition()`) consistently showed the field correctly scrolled to
+the start in every attempt. Rather than claim a root cause that couldn't
+actually be confirmed, this was fixed with the standard, low-risk Qt
+workaround for this exact class of timing bug regardless: `QLineEdit`
+only recomputes its horizontal scroll offset lazily, inside its own
+`paintEvent`, based on whatever the cursor position is *at paint time* -
+nothing guarantees a repaint happens before something else in the same
+call stack touches the field again first. `QTimer.singleShot(0, lambda:
+edit_field.setCursorPosition(0))` defers the call to a fresh event-loop
+turn, after everything from `setText()`'s own pending updates has
+already settled - can't make a working case worse, and directly targets
+the specific race class this almost certainly was.
+`test_renaming_to_a_long_name_scrolls_the_field_back_to_the_start` in
+`tests/test_dashboard.py` asserts on `cursorRect().x()`, not just
+`cursorPosition()` - the logical index alone wouldn't have caught this
+bug class, since it was never wrong, only the visible scroll was.
+
 ## Debug logging for real-hardware issues
 
 `core/debug_log.py` sets up a rotating log at `~/.akaisds/editor_debug.log`.
@@ -247,6 +275,17 @@ identity, timing, and a traceback on failure. If a user reports frequent
 errors or a crash against real hardware, ask for this log (and the macOS
 `.crash` report if it aborted) before guessing. Lines are long (full
 `repr()` of `Parameter` objects) - grep/tail rather than reading whole.
+
+Despite the module's own name/docstring being written for the Program
+Editor's bridge layer specifically, it's app-wide infrastructure - as of
+2026-09-23 `controller/sampler_controller.py`'s two top-level unhandled-
+exception backstops (`on_sysex_received`, `_send_next_queued_file`) also
+log here (`debug_log.get_logger().error(msg, exc_info=True)`) instead of
+`print()` + `traceback.print_exc()`, which used to be their only trace -
+invisible in a packaged GUI app with no attached console. Same file,
+same convention, whichever window/code path actually failed. If you add
+a new unhandled-exception backstop anywhere in this app, log it here too
+rather than reaching for `print()`.
 
 ## Program Editor UI: section cards, scroll areas, and the busy indicator
 

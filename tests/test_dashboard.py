@@ -210,6 +210,61 @@ def test_dropping_a_file_that_vanishes_before_it_can_be_copied_adds_no_row(
     assert "Couldn't add" in dashboard.status_bar.currentMessage()
 
 
+# --- Editing a queued file's name scrolls the field back to the start -----
+# Per direct user report: renaming a queued file to something long left the
+# field showing its END, not the start, even though open_edit_dialog always
+# called setCursorPosition(0) right after setText(). QLineEdit only
+# recomputes its horizontal scroll offset lazily, inside its own
+# paintEvent, based on whatever the cursor position is AT THAT MOMENT - a
+# synchronous setCursorPosition() call in the same stack as setText() isn't
+# guaranteed to still be in effect by the time the next paint actually
+# happens. Deferred via QTimer.singleShot(0, ...) instead - see
+# open_edit_dialog's own comment.
+
+
+def test_renaming_to_a_long_name_scrolls_the_field_back_to_the_start(
+    dashboard, tmp_path, qapp, monkeypatch
+):
+    import ui.dashboard as dashboard_module
+
+    source = tmp_path / "short.wav"
+    _write_wav(source)
+    dashboard.on_files_dropped([str(source)])
+    item = dashboard.list_local.item(0)
+    row_widget = dashboard.list_local.itemWidget(item)
+    edit_field = row_widget.findChild(QLineEdit)
+
+    long_name = "A_VERY_LONG_SAMPLE_FILENAME_THAT_OVERFLOWS_THE_FIELD"
+
+    class _FakeSettingsDialog:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def exec(self):
+            return True
+
+        def get_settings(self):
+            return {
+                "name": long_name,
+                "bit_depth": 16,
+                "sample_rate": None,
+                "mono": False,
+            }
+
+    monkeypatch.setattr(dashboard_module, "SampleSettingsDialog", _FakeSettingsDialog)
+
+    dashboard.open_edit_dialog(item, edit_field)
+    assert edit_field.text() == long_name
+
+    qapp.processEvents()  # lets the deferred setCursorPosition(0) fire
+
+    assert edit_field.cursorPosition() == 0
+    # the real regression: not just the logical cursor index, but whether
+    # the field actually scrolled to show it - a cursor rect with a
+    # negative/way-off x means the display is still showing the tail end
+    assert edit_field.cursorRect().x() >= -5
+
+
 def test_removing_a_row_deletes_its_copy(dashboard, tmp_path):
     source = tmp_path / "cropped.wav"
     _write_wav(source)

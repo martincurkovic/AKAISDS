@@ -1,5 +1,5 @@
 from PySide6.QtCore import QObject, Signal, QTimer
-from core import akai_sysex, sds_encoder, midi_identity
+from core import akai_sysex, sds_encoder, midi_identity, debug_log
 import os
 
 
@@ -165,14 +165,19 @@ class SamplerController(QObject):
         self.midi_manager.send_sysex(request)
 
     def on_sysex_received(self, data_bytes):
-        # entry point for catching any unexpected eception from handling logic
+        # entry point for catching any unexpected eception from handling logic -
+        # print()+traceback.print_exc() used to be the only record of this,
+        # invisible in a packaged GUI app with no attached console. Goes to
+        # the same rotating file program_editor_bridge.py's own unhandled-
+        # exception backstop uses (core/debug_log.py) - one log to ask a
+        # user for regardless of which window/code path actually failed.
         try:
             self._on_sysex_received_impl(data_bytes)
         except Exception as e:
-            print(f"[ERROR] Unhandled exception in on_sysex_received: {e!r}")
-            import traceback
-
-            traceback.print_exc()
+            debug_log.get_logger().error(
+                "SamplerController: unhandled exception in on_sysex_received",
+                exc_info=True,
+            )
             self._recover_from_error(f"Unexpected error: {e}")
 
     def _recover_from_error(self, message):
@@ -633,13 +638,14 @@ class SamplerController(QObject):
         return True
 
     def _send_next_queued_file(self):
+        # same reasoning as on_sysex_received's own backstop above
         try:
             self._send_next_queued_file_impl()
         except Exception as e:
-            print(f"[ERROR] Unhandled exception in _send_next_queued_file: {e!r}")
-            import traceback
-
-            traceback.print_exc()
+            debug_log.get_logger().error(
+                "SamplerController: unhandled exception in _send_next_queued_file",
+                exc_info=True,
+            )
             self._recover_from_error(f"Error sending file: {e}")
 
     def _send_next_queued_file_impl(self):
