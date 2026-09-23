@@ -671,6 +671,57 @@ start) rather than hanging until timeout (or forever, for the send step's
 `timeout_ms=None`). Any new blocking wait added to this page must follow
 this ordering.
 
+### Duplicate Sample: adds a new sample, reuses the send pipeline above
+
+Added 2026-09-23, initially as a right-click context menu item to match
+Duplicate Program/Duplicate Keygroup - moved to a button on the same row
+as Trim/Reverse/Fade/Normalise the same day, per direct user follow-up
+(a disabled context menu item reads as "nothing happened" when clicked
+before audio is loaded; a visibly-disabled button next to the other four
+sample-edit buttons doesn't). Right-aligned on `sample_edit_row` (its own
+`addStretch()` before it, not grouped with the destructive four -
+Duplicate never touches the source's own audio, it only ever ADDS a new
+sample, so it isn't "cannot be undone" in the same sense they are).
+
+The mechanism is a different one from Duplicate Program/Duplicate
+Keygroup, though: those two build a PDATA/KDATA header directly (a
+"create" primitive `DemoBridge` doesn't have either, so both are
+`not demo_mode`-gated); samples have no header-only duplicate (no bulk
+sample-audio transfer of any kind exists in `s3k` - see the capability
+audit above), so `_perform_duplicate_sample_real` sends the already-loaded
+audio under a brand new, collision-checked name via
+`SamplerController.send_file_queue` - the same mechanism Trim/Reverse/
+Fade/Normalise use, not a new one. **Simpler than their replace-in-place
+dance**: nothing is deleted or renamed, so there's no temp-name step -
+`new_name` is confirmed distinct from every resident sample up front (same
+hazard as the temp-name comment above: two samples sharing a name makes
+keygroup zone resolution ambiguous), so it's safe to send under directly.
+After the send confirms resident, the new sample's index is looked up by
+name (same convention, not assumed) and every header field
+`send_file_queue` doesn't set - `SPTYPE`/`SPITCH`/`SHLTO`/`STUNO` and the
+four loop/start/end fields - is copied across from the source, since
+otherwise "duplicate" would silently mean "audio copy with default
+metadata," not a real duplicate. **Demo-mode-gated the same way as
+Duplicate Program/Keygroup**, just through `_set_sample_edit_buttons_enabled`
+rather than `_update_list_context_actions_enabled` - this button needs
+`has_waveform()` too, which only that method already reacts to.
+
+**Found, not fixed, while building this**: `entry["stuno"]` in
+`_sample_waveform_cache` is NOT consistently raw. `_on_sample_detail_loaded`
+stores the raw `STUNO` byte; `_on_sample_tune_changed` (a live tune edit)
+overwrites the same key with the spinbox's SEMITONES value instead. Reselecting
+a previously-tune-edited sample (`_on_sample_selected`'s cache-restore
+branch) feeds that semitones value back into `_update_sample_meta_controls`,
+which unconditionally treats it as raw and re-converts it - a real,
+reachable display bug, not just theoretical. `SPTYPE`/`SPITCH`/`SHLTO`
+don't have this problem (their live-edit handlers store the same raw
+representation the load handler does - only `STUNO` has an actual unit
+conversion in between). Worked around here by reading
+`sample_tune_spinbox.value()` directly instead of `entry["stuno"]` (see
+`_perform_duplicate_sample_real`'s own comment) - the underlying cache
+inconsistency is still there and would bite the next thing that trusts
+`entry["stuno"]` blindly.
+
 ### Loop-point markers push each other instead of stopping dead
 
 Added 2026-09-22. `WaveformView`'s old `clamp_marker` stopped a dragged

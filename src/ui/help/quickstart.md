@@ -43,7 +43,7 @@ If you've never used MIDI sample dumps before, expect them to be slow. Very slow
 
 **Receiving Samples**
 
-In the right hand list of _Currently Loaded Samples_, select which samples you would like to receive from the sampler. Then click the _Receive Samples_ button, which will then ask where you want to save the samples. Transmission will commence once you have selected a location to save the received samples.
+In the right hand list of *Currently Loaded Samples*, select which samples you would like to receive from the sampler. Then click the *Receive Samples* button, which will then ask where you want to save the samples. Transmission will commence once you have selected a location to save the received samples.
 
 **Approximate transfer times for a 5-second sample:**
 
@@ -62,9 +62,9 @@ These are theoretical best-case figures based on MIDI's fixed wire speed of 31,2
 
 ## Program & Keygroup Editor
 
-**IMPORTANT!** The editor function is quite new and may have unexpected bugs. It is _strongly_ recommended to back up your data before use.
+**IMPORTANT!** The editor function is quite new and may have unexpected bugs. It is *strongly* recommended to back up your data before use.
 
-The editor is powered under the hood by _s3ked_. It offers control over the most commonly used functions in an Akai S2000 and S3000 series samplers. Not all functions have controls (yet). The intention was to keep the interface as easy to understand as possible at first glance.
+The editor is powered under the hood by *s3ked*. It offers control over the most commonly used functions in an Akai S2000 and S3000 series samplers. Not all functions have controls (yet). The intention was to keep the interface as easy to understand as possible at first glance.
 
 Akai S1000 series samplers will likely work for most controls too, with the obvious exception of the Multi tab.
 
@@ -74,7 +74,7 @@ This is not an extensive deep dive into the editing functions of an Akai sampler
 
 ### Programs Tab
 
-To create new Programs or Keygroups, right click on an existing Program or Keygroup, then click _Duplicate Program..._ or _Duplicate Keygroup..._
+To create new Programs or Keygroups, right click on an existing Program or Keygroup, then click *Duplicate Program...* or *Duplicate Keygroup...*
 
 To open the Keygroup settings, select a Keygroup in the list. To go back to the Program settings page, select a Program in the list.
 
@@ -90,13 +90,13 @@ The list of samples will appear on the left. You can right click a sample to del
 
 To load the sample's waveform, double click on the placeholder window. Loading of a sample's waveform is very slow (same speed as sending and receiving samples over SDS). It will also freeze the interface until loading is complete.
 
-Loop points and sample start/edit markers can be edited visually without needing to load the sample's waveform. Hold down _Shift_ when dragging sample markers around for more precision. Alternatively you can type a value in to the boxes below the waveform.
+Loop points and sample start/edit markers can be edited visually without needing to load the sample's waveform. Hold down *Shift* when dragging sample markers around for more precision. Alternatively you can type a value in to the boxes below the waveform.
 
 Trimming a sample, reversing a sample, fading in and out of a sample and normalising the gain of a sample is done by the host computer. The waveform must be loaded to the computer and then the edited sample will be sent back in place to the Sampler via SDS (slow). It will overwrite the sample you are editing. There is no undo button, you have been warned.
 
 ### Refreshing Sampler Data
 
-If you edit a parameter on the front display of your sampler, the edit is unlikely to be picked up by AKAISDS automatically. To get around this, you can use the _Refresh_ button on the bottom left of the window (or by pressing Command + R or Ctrl + R depending on your platform).
+If you edit a parameter on the front display of your sampler, the edit is unlikely to be picked up by AKAISDS automatically. To get around this, you can use the *Refresh* button on the bottom left of the window (or by pressing Command + R or Ctrl + R depending on your platform).
 
 ## MIDI Troubleshooting & Diagnostics
 
@@ -111,13 +111,13 @@ Use the Hardware test to check if your MIDI sampler is detected by your interfac
 
 To use the hardware test, connect a MIDI cable from your MIDI interface's output to the sampler's input, and vice versa. Both input and output connections are required for this test.
 
-Click the _Run Hardware Test_ button and if successful, your sampler's details should appear in the window.
+Click the *Run Hardware Test* button and if successful, your sampler's details should appear in the window.
 
 ### MIDI Loopback Test
 
 Use the Loopback Test to check if your MIDI interface can support MIDI SysEx traffic. Not all interfaces have full SysEx support.
 
-To use the loopback test, take a MIDI cable and connect one end to the MIDI input of your interface, and the other end to the MIDI output of the same interface (ie, back into itself). Then click the _Run Loopback Test_ button. The test may take up to 30 seconds depending on your hardware.
+To use the loopback test, take a MIDI cable and connect one end to the MIDI input of your interface, and the other end to the MIDI output of the same interface (ie, back into itself). Then click the *Run Loopback Test* button. The test may take up to 30 seconds depending on your hardware.
 
 Loopback test results will be shown in a dialog box.
 
