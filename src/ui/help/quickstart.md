@@ -1,11 +1,15 @@
 # AKAISDS Help
 
-**Contents:**
+---
+
+## Contents
 
 - [MIDI Setup](#midi-setup)
 - [Sending & Receiving Samples](#sending--receiving-samples)
 - [Program & Keygroup Editor](#program--keygroup-editor)
 - [MIDI Troubleshooting & Diagnostics](#midi-troubleshooting--diagnostics)
+
+---
 
 ## MIDI Setup
 
@@ -21,7 +25,11 @@ You can test your MIDI setup in the **MIDI Hardware Test** tab. If you're having
 
 ![MIDI Settings](screenshots/midi-settings.png "MIDI Settings")
 
+---
+
 ## Sending & Receiving Samples
+
+![Main Window Dark Mode](screenshots/main-window-dark.png)
 
 **1. Drag audio files into the queue**
 
@@ -39,7 +47,7 @@ You can set quality globally via the Transmission Settings button or individuall
 
 If you've never used MIDI sample dumps before, expect them to be slow. Very slow. Reducing bit depth or sample rate will help speed up the transfer, at the expense of sound quality.
 
-![Main Window Dark Mode](screenshots/main-window-dark.png)
+![Sample Info](screenshots/sample-info.png)
 
 **Receiving Samples**
 
@@ -60,6 +68,8 @@ Note that **bit depth** is a two-tier step, not a smooth scale. An 8-bit sample 
 
 These are theoretical best-case figures based on MIDI's fixed wire speed of 31,250 baud. Real world transfers may be slower, depending on how quickly your specific sampler responds to each data packet.
 
+---
+
 ## Program & Keygroup Editor
 
 **IMPORTANT!** The editor function is quite new and may have unexpected bugs. It is *strongly* recommended to back up your data before use.
@@ -74,15 +84,23 @@ This is not an extensive deep dive into the editing functions of an Akai sampler
 
 ### Programs Tab
 
+![Programs Tab](screenshots/editor-program-page.png)
+
 To create new Programs or Keygroups, right click on an existing Program or Keygroup, then click *Duplicate Program...* or *Duplicate Keygroup...*
 
 To open the Keygroup settings, select a Keygroup in the list. To go back to the Program settings page, select a Program in the list.
+
+![Keygroup Page](screenshots/editor-keygroup-page.png)
 
 ### Multi Tab
 
 The Multi tab is where you can assign Programs to various parts of a Multi. You can also rename your Multi if desired.
 
+![Multi Tab](screenshots/editor-multi-page.png)
+
 ### Samples Tab
+
+![Samples Tab](screenshots/editor-sample-page.png)
 
 The Samples tab is where you can edit loop points, trim samples, rename samples, fade samples in and out, normalise samples and reverse samples.
 
@@ -92,11 +110,13 @@ To load the sample's waveform, double click on the placeholder window. Loading o
 
 Loop points and sample start/edit markers can be edited visually without needing to load the sample's waveform. Hold down *Shift* when dragging sample markers around for more precision. Alternatively you can type a value in to the boxes below the waveform.
 
-Trimming a sample, reversing a sample, fading in and out of a sample and normalising the gain of a sample is done by the host computer. The waveform must be loaded to the computer and then the edited sample will be sent back in place to the Sampler via SDS (slow). It will overwrite the sample you are editing. There is no undo button, you have been warned.
+Trimming a sample, reversing a sample, fading in and out of a sample, normalising the gain of a sample and duplicating a sample is done by the host computer. The waveform must be loaded to the computer and then the edited sample will be sent back in place to the Sampler via SDS (slow). It will overwrite the sample you are editing. There is no undo button, you have been warned.
 
 ### Refreshing Sampler Data
 
 If you edit a parameter on the front display of your sampler, the edit is unlikely to be picked up by AKAISDS automatically. To get around this, you can use the *Refresh* button on the bottom left of the window (or by pressing Command + R or Ctrl + R depending on your platform).
+
+---
 
 ## MIDI Troubleshooting & Diagnostics
 
@@ -107,6 +127,8 @@ There are 2 MIDI tests in the AKAISDS Settings window.
 
 ### MIDI Hardware Test
 
+![MIDI Hardware Test](screenshots/midi-hardware-test.png)
+
 Use the Hardware test to check if your MIDI sampler is detected by your interface.
 
 To use the hardware test, connect a MIDI cable from your MIDI interface's output to the sampler's input, and vice versa. Both input and output connections are required for this test.
@@ -115,11 +137,15 @@ Click the *Run Hardware Test* button and if successful, your sampler's details s
 
 ### MIDI Loopback Test
 
+![MIDI Loopback Test](screenshots/midi-interface-test-running.png)
+
 Use the Loopback Test to check if your MIDI interface can support MIDI SysEx traffic. Not all interfaces have full SysEx support.
 
-To use the loopback test, take a MIDI cable and connect one end to the MIDI input of your interface, and the other end to the MIDI output of the same interface (ie, back into itself). Then click the *Run Loopback Test* button. The test may take up to 30 seconds depending on your hardware.
+To use the loopback test, take a MIDI cable and connect one end to the MIDI input of your interface, and the other end to the MIDI output of the same interface (ie, back into itself). Then click the *Run Loopback Test* button. The test may take up to 20 seconds depending on your hardware.
 
 Loopback test results will be shown in a dialog box.
+
+![MIDI Interface Test Results](screenshots/midi-interface-test-results.png)
 
 There is a table in the README of the GitHub repository of interfaces that have been tested using this method. If your interface isn't listed there, I encourage you to help out the community by uploading your results (either by submitting a Pull Request or by getting in touch directly).
 
