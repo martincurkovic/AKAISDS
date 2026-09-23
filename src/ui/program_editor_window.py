@@ -1115,6 +1115,14 @@ class ProgramEditorWindow(QMainWindow):
         )
         env2_section = self._build_section_card("Envelope 2", env2_graph_row, env2_grid)
 
+        # matches height, not just width (range_filter_row/envelopes_row's
+        # own 1:1 stretch below already does width) - Range/Envelope 1 are
+        # each naturally shorter than their paired Filter/Envelope 2, which
+        # reads oddly side by side once cards no longer auto-stretch to
+        # fill the row (see _build_section_card's own Fixed-policy comment)
+        self._equalize_card_heights(range_section, filter_section)
+        self._equalize_card_heights(env1_section, env2_section)
+
         # Range is a single short row and Filter is comparable in height -
         # side by side halves the vertical space these two cost together.
         # Same idea for the two envelope cards, which were side by side
@@ -1689,6 +1697,12 @@ class ProgramEditorWindow(QMainWindow):
         lfo2_row.addLayout(lfo2_shape_sync_column)
         lfo2_row.addStretch()
         lfo2_section = self._build_section_card("LFO2", lfo2_row)
+        # same reasoning as Range/Filter and Envelope 1/2 on the Keygroup
+        # tab - see _equalize_card_heights' own comment. Already equal in
+        # practice (LFO1/LFO2 are symmetric), but pin it explicitly rather
+        # than leaving it an accident of current content - a future layout
+        # tweak to just one of the two shouldn't silently throw this off.
+        self._equalize_card_heights(lfo_section, lfo2_section)
 
         # Pitch - tuning offset and pitch-bend range, up and down
         pitch_row = QHBoxLayout()
@@ -1697,6 +1711,9 @@ class ProgramEditorWindow(QMainWindow):
         pitch_row.addLayout(bend_down_column)
         pitch_row.addStretch()
         pitch_section = self._build_section_card("Pitch", pitch_row)
+        # same reasoning as Range/Filter and Envelope 1/2 on the Keygroup
+        # tab - see _equalize_card_heights' own comment
+        self._equalize_card_heights(volume_section, pitch_section)
 
         # Voice & MIDI - how the program responds to incoming MIDI and
         # allocates/steals voices
@@ -1716,6 +1733,9 @@ class ProgramEditorWindow(QMainWindow):
         portamento_row.addLayout(mono_legato_column)
         portamento_row.addStretch()
         portamento_section = self._build_section_card("Portamento", portamento_row)
+        # same reasoning as Range/Filter and Envelope 1/2 on the Keygroup
+        # tab - see _equalize_card_heights' own comment
+        self._equalize_card_heights(voice_section, portamento_section)
 
         # Modulation - the assignable modulation matrix (MODS*/MODV*
         # fields). Every destination's SOURCE choice is a program-wide
@@ -1978,21 +1998,45 @@ class ProgramEditorWindow(QMainWindow):
         # only one of {dashboard, program editor} is ever open at a time -
         # two simultaneous MIDI connections to the hardware is untested and
         # may not be safe - mirrors the dashboard's own "&Window" menu
-        # (main_window.py) so the same Ctrl+1/Ctrl+2 shortcuts work no
-        # matter which window currently has focus
+        # (main_window.py) so the same Ctrl+T/Ctrl+E shortcuts work no
+        # matter which window currently has focus. Ctrl+1/2/3 are this
+        # window's own tab shortcuts (below), not window-switching ones -
+        # numbering the two schemes independently rather than trying to
+        # share one 1/2/3/4 sequence across both windows.
         window_menu = self.menuBar().addMenu("&Window")
 
         dashboard_action = QAction("Transfer Dashboard", self)
-        dashboard_action.setShortcut("Ctrl+1")
+        dashboard_action.setShortcut("Ctrl+T")
         # closing (rather than hiding outright) reuses closeEvent()'s
         # existing "show the main window again" cleanup below
         dashboard_action.triggered.connect(self.close)
         window_menu.addAction(dashboard_action)
 
         editor_action = QAction("Program Editor", self)
-        editor_action.setShortcut("Ctrl+2")
+        editor_action.setShortcut("Ctrl+E")
         editor_action.setEnabled(False)  # this window IS the program editor
         window_menu.addAction(editor_action)
+
+        window_menu.addSeparator()
+
+        multi_tab_action = QAction("Multi Tab", self)
+        multi_tab_action.setShortcut("Ctrl+1")
+        multi_tab_action.triggered.connect(lambda: self.main_tabs.setCurrentIndex(0))
+        window_menu.addAction(multi_tab_action)
+
+        programs_tab_action = QAction("Programs Tab", self)
+        programs_tab_action.setShortcut("Ctrl+2")
+        programs_tab_action.triggered.connect(
+            lambda: self.main_tabs.setCurrentIndex(1)
+        )
+        window_menu.addAction(programs_tab_action)
+
+        samples_tab_action = QAction("Samples Tab", self)
+        samples_tab_action.setShortcut("Ctrl+3")
+        samples_tab_action.triggered.connect(
+            lambda: self.main_tabs.setCurrentIndex(self._samples_tab_index)
+        )
+        window_menu.addAction(samples_tab_action)
 
         # Qt has no MenuRole for "check for updates" (only About/Preferences/
         # Quit get auto-relocated into the native app menu on macOS - see
@@ -3622,7 +3666,40 @@ class ProgramEditorWindow(QMainWindow):
         card = QWidget()
         card.setObjectName("sectionCard")
         card.setLayout(section_layout)
+        # a bare QWidget defaults to Preferred vertically, which CAN grow
+        # past its own sizeHint when the surrounding layout has surplus
+        # space to hand out - normally a trailing addStretch() (see e.g.
+        # program_page_layout) is enough to claim that surplus instead,
+        # but addStretch()'s own default stretch factor (0) doesn't
+        # actually outrank a sibling Preferred-policy widget's willingness
+        # to grow (both are stretch 0), so Qt's layout can still split the
+        # extra space across the CARDS themselves rather than routing all
+        # of it into the stretch at the end - visible as every card
+        # growing taller (and its own internal addStretch() padding out
+        # further) as the window grows, on every tab. Fixed vertically
+        # pins each card to its sizeHint - can't grow OR compress below it
+        # (the latter is what caused cards to visibly overlap during
+        # development - see this file's own "section cards" notes) -
+        # regardless of how any particular tab's surrounding layout
+        # resolves its own stretch distribution.
+        card.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
         return card
+
+    def _equalize_card_heights(self, *cards):
+        # pairs like Range+Filter or the two Envelope cards read oddly
+        # when one is visibly taller than its neighbor sitting right next
+        # to it - now that _build_section_card pins every card to its OWN
+        # sizeHint (see its own comment), nothing does that matching
+        # automatically the way the horizontal 1:1 stretch on their shared
+        # row already equalizes WIDTH. setFixedHeight (not just a min/max)
+        # since these cards' own vertical policy is already Fixed - this
+        # is that same fixed value, just the larger of the two rather than
+        # each one's own independently measured sizeHint. Call this after
+        # every row/widget has already been added to each card, since
+        # sizeHint() needs the real final content to measure correctly.
+        target_height = max(card.sizeHint().height() for card in cards)
+        for card in cards:
+            card.setFixedHeight(target_height)
 
     def _build_scroll_area(self, page):
         # both detail_stack pages (Program, Keygroup) are wrapped in one of

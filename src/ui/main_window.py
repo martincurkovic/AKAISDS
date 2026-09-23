@@ -139,12 +139,12 @@ class ApplicationWindow(QMainWindow):
         window_menu = self.menuBar().addMenu("&Window")
 
         dashboard_action = QAction("Transfer Dashboard", self)
-        dashboard_action.setShortcut("Ctrl+1")
+        dashboard_action.setShortcut("Ctrl+T")
         dashboard_action.setEnabled(False)  # this window IS the dashboard
         window_menu.addAction(dashboard_action)
 
         editor_action = QAction("Program Editor", self)
-        editor_action.setShortcut("Ctrl+2")
+        editor_action.setShortcut("Ctrl+E")
         editor_action.triggered.connect(self.dashboard_view.open_program_editor)
         window_menu.addAction(editor_action)
 

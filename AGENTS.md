@@ -168,6 +168,16 @@ before assuming the spacing value is wrong.
 `ApplicationWindow` (which reads/writes the user's real
 `~/.akaisds/config.json`).
 
+**Window/tab shortcuts** (added 2026-09-23): `Ctrl+T` (⌘T on macOS)
+switches to the Transfer Dashboard, `Ctrl+E` opens/switches to the
+Program Editor - both live in each window's own `&Window` menu, mirrored
+so the same shortcut works regardless of which window has focus (see
+`main_window.py`/`program_editor_window.py`'s own comments). `Ctrl+1/2/3`
+used to be the window-switch shortcuts but are now the Program Editor's
+OWN tab shortcuts instead (Multi/Programs/Samples) - the two numbering
+schemes are independent, not a shared 1/2/3/4 sequence across both
+windows, so don't assume `Ctrl+1` means the same thing in both places.
+
 ## Transfer Dashboard: dropped/opened files get a stable local copy
 
 Added 2026-09-23. Dragging a "cropped" region out of a sample browser
@@ -261,6 +271,37 @@ This page's `setMinimumSize(...)` was tuned by hand, not a round number:
 - `_build_section_card`'s layout ends with `addStretch()` - without it, a
   card shorter than its row partner gets slack space split before the
   header too (reads as vertically centered instead of top-aligned).
+- **Cards used to grow taller than their content when the window grew
+  vertically** (found 2026-09-23, on the Program tab specifically but not
+  reliably reproducible on the others at every window size - the
+  underlying cause applies everywhere, though). A bare `QWidget`'s
+  default vertical size policy is `Preferred`, which CAN grow past its
+  own `sizeHint()` when a layout has surplus space - a trailing
+  `addStretch()` (both inside `_build_section_card` and in each tab's own
+  outer page layout) is supposed to claim that surplus instead, but
+  `addStretch()`'s own default stretch factor is 0, same as every
+  sibling widget's - it doesn't actually outrank them, so Qt's layout
+  could still split the extra space across the cards themselves rather
+  than routing all of it into the stretch. Fixed by giving every card
+  `setSizePolicy(Preferred, Fixed)` vertically in `_build_section_card` -
+  pins each one to its `sizeHint()`, can't grow OR compress below it
+  (compressing below `sizeHint()` is the earlier, already-documented
+  overlap bug above) - rather than relying on winning a stretch-factor
+  tie against its own siblings.
+- **Paired cards' heights are pinned equal, not just their widths.**
+  Once cards stopped auto-stretching (above), a pair whose content
+  naturally differs in size - Range/Filter, Envelope 1/Envelope 2,
+  Volume Pan & Velocity/Pitch, LFO1/LFO2, Voice & MIDI/Portamento - reads
+  oddly side by side with one visibly taller than the other.
+  `_equalize_card_heights(*cards)` (right after `_build_section_card`)
+  takes `max(card.sizeHint().height() for card in cards)` and
+  `setFixedHeight`s every one of them to it, called once per pair right
+  after both are built (needs their real final content to measure
+  sizeHint() correctly). LFO1/LFO2 happen to already match today, but are
+  still equalized explicitly rather than left as an accident of current
+  content - add a control to just one side later and it'd otherwise throw
+  the two out of sync silently. If you add a new paired row, call this
+  for it too rather than assuming matching content sizes will coincide.
 
 `BridgeWorker.busy_changed` drives the indeterminate progress bar next to
 Refresh - `True` from the moment any job queues while nothing else is
