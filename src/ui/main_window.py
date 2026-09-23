@@ -6,6 +6,7 @@ import time
 from PySide6.QtGui import QAction, QKeySequence
 from ui.dashboard import TransferDashboard
 from ui.about_dialog import AboutDialog
+from ui.quickstart_dialog import show_quickstart_dialog
 from ui.update_helper import UpdateCheckRunner
 from core.midi_manager import MidiManager
 from core import app_config, dropped_files, sds_encoder
@@ -152,6 +153,11 @@ class ApplicationWindow(QMainWindow):
         # macOS - see QAction.MenuRole), so this stays a plain Help menu on
         # every platform rather than trying to fake native placement
         help_menu = self.menuBar().addMenu("&Help")
+
+        quickstart_action = QAction("Quick Start Guide...", self)
+        quickstart_action.triggered.connect(lambda: show_quickstart_dialog(self))
+        help_menu.addAction(quickstart_action)
+        help_menu.addSeparator()
 
         about_action = QAction("About AKAISDS...", self)
         about_action.setMenuRole(QAction.MenuRole.AboutRole)

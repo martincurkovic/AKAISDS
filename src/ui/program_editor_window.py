@@ -57,6 +57,7 @@ from ui.keygroup_range_bar import KeygroupRangeBar, keygroup_color
 from ui.waveform_view import WaveformView
 from ui import theme
 from ui.about_dialog import AboutDialog
+from ui.quickstart_dialog import show_quickstart_dialog
 from ui.update_helper import UpdateCheckRunner
 from core import debug_log
 from core import sample_editing
@@ -1998,6 +1999,11 @@ class ProgramEditorWindow(QMainWindow):
         # QAction.MenuRole), so this stays a plain Help menu on every
         # platform, same as main_window.py's own
         help_menu = self.menuBar().addMenu("&Help")
+
+        quickstart_action = QAction("Quick Start Guide...", self)
+        quickstart_action.triggered.connect(lambda: show_quickstart_dialog(self))
+        help_menu.addAction(quickstart_action)
+        help_menu.addSeparator()
 
         about_action = QAction("About AKAISDS...", self)
         about_action.setMenuRole(QAction.MenuRole.AboutRole)
