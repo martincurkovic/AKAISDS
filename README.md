@@ -10,13 +10,15 @@ A simple way to send and receive audio samples (WAV, AIFF, FLAC) to an Akai S100
 ## Features
 
 - Akai-native sample browsing & management (list, rename, delete) as well as universal generic SDS support for non-Akai hardware
-- WAV/AIFF/FLAC support up to signed 32 bit. Support for 32 bit float files is not fully tested at this time.
+- Program, Keygroup and Sample editor for Akai S2000/S3000 series samplers
+- WAV/AIFF/FLAC support
 - Drag-and-drop support for adding samples
 - Batch transmission queue for sending and receiving samples
 - Sampler memory status bar to display how much RAM is free (Akai sampler specific only)
 - Open-loop fallback for one-way MIDI cable setups, including timeout detection if a cable is unplugged mid-transfer
-- Built in MIDI loopback diagnostics, for testing whether your MIDI interface can support MIDI SysEx traffic
-- Built in MIDI hardware diagnostics, for testing whether your MIDI sampler is connected and configured correctly
+- Built in MIDI diagnostic tests
+  - MIDI interface test to check if your interface can support MIDI SysEx traffic
+  - Hardware connection test to check if your MIDI sampler is connected correctly
 - Native builds for macOS (Apple Silicon & Intel), Linux and Windows (note that Windows support has not been thoroughly tested yet)
 
 ## Quick Start & Screenshots
