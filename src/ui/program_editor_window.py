@@ -1945,7 +1945,7 @@ class ProgramEditorWindow(QMainWindow):
         # same full-width tab bar as the MIDI Settings dialog - must be
         # installed before any tabs are added, or they'd be dropped
         self.main_tabs.setTabBar(FullWidthTabBar(self.main_tabs))
-        self.main_tabs.addTab(multis_tab_page, "Multis")
+        self.main_tabs.addTab(multis_tab_page, "Multi")
         self.main_tabs.addTab(programs_tab_page, "Programs")
         self._samples_tab_index = self.main_tabs.addTab(samples_tab_page, "Samples")
         # Multis stays the first tab, but isn't fully working yet - open on

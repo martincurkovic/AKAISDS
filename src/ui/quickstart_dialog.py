@@ -1,4 +1,5 @@
 import os
+import re
 
 from PySide6.QtGui import (
     QColor,
@@ -44,6 +45,19 @@ _CURRENT_MATCH_BACKGROUND = QColor("#ff8f00")
 _CURRENT_MATCH_FOREGROUND = QColor("#1a1a1a")
 
 
+def _github_heading_slug(text):
+    # matches GitHub's own auto-generated heading anchors exactly (lower-
+    # case, non-word/non-space/non-hyphen characters dropped rather than
+    # replaced with anything, THEN spaces -> hyphens) - deliberately not
+    # collapsing runs of hyphens: "Sending & Receiving" drops the "&" but
+    # keeps both spaces around where it was, giving "sending--receiving"
+    # (double hyphen), same as GitHub's own renderer would produce, and
+    # same as quickstart.md's own internal links are already written
+    # against - so the same `#some-heading` syntax works unmodified both
+    # on GitHub and in this dialog.
+    return re.sub(r"[^\w\s-]", "", text.lower()).replace(" ", "-")
+
+
 class QuickStartDialog(QDialog):
     """Renders help/quickstart.md - the same file linked from the README's
     own Quick Start section (see README.md), so there is exactly one copy
@@ -69,6 +83,7 @@ class QuickStartDialog(QDialog):
             with open(_QUICKSTART_PATH, "r", encoding="utf-8") as f:
                 self.viewer.setMarkdown(f.read())
             self._constrain_image_widths()
+            self._add_heading_anchors()
         except OSError as e:
             self.viewer.setPlainText(f"Couldn't load the Quick Start guide: {e}")
 
@@ -115,6 +130,35 @@ class QuickStartDialog(QDialog):
                         )
                         cursor.setCharFormat(image_format)
                 it += 1
+            block = block.next()
+
+    def _add_heading_anchors(self):
+        # `[link](#some-heading)` renders fine out of setMarkdown() (Qt
+        # does create the <a href="#..."> fragment), but nothing on the
+        # HEADING side matches it - Qt's own Markdown importer never
+        # assigns an id/name to headings the way GitHub's renderer does,
+        # confirmed by inspecting toHtml() after setMarkdown(): no id/name
+        # attribute anywhere near a heading block. QTextBrowser.
+        # scrollToAnchor()/its own click handling both work fine once a
+        # matching named anchor actually exists (verified directly) - so
+        # this backfills exactly that, using the same slug GitHub would
+        # generate for each heading, rather than inventing a different
+        # convention that would only work in this dialog.
+        document = self.viewer.document()
+        block = document.begin()
+        while block.isValid():
+            if block.blockFormat().headingLevel() > 0 and block.text():
+                slug = _github_heading_slug(block.text())
+                cursor = QTextCursor(document)
+                cursor.setPosition(block.position())
+                cursor.setPosition(
+                    block.position() + len(block.text()),
+                    QTextCursor.MoveMode.KeepAnchor,
+                )
+                anchor_format = QTextCharFormat()
+                anchor_format.setAnchor(True)
+                anchor_format.setAnchorNames([slug])
+                cursor.mergeCharFormat(anchor_format)
             block = block.next()
 
     def _build_search_bar(self):
