@@ -6,6 +6,7 @@
 # never read/write the user's real ~/.akaisds/config.json.
 
 import os
+import time
 import wave
 from pathlib import Path
 
@@ -256,7 +257,16 @@ def test_renaming_to_a_long_name_scrolls_the_field_back_to_the_start(
     dashboard.open_edit_dialog(item, edit_field)
     assert edit_field.text() == long_name
 
-    qapp.processEvents()  # lets the deferred setCursorPosition(0) fire
+    # lets the deferred setCursorPosition(0) fire - a zero-delay QTimer
+    # armed during a processEvents() call isn't always dispatched within
+    # that same call (measured: one pass is enough on macOS, but a second
+    # pass is needed on Linux's xcb/wayland dispatcher), so poll instead
+    # of assuming a single pump is enough
+    deadline = time.monotonic() + 2.0
+    while edit_field.cursorPosition() != 0:
+        qapp.processEvents()
+        if time.monotonic() > deadline:
+            break
 
     assert edit_field.cursorPosition() == 0
     # the real regression: not just the logical cursor index, but whether
