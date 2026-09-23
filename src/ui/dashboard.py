@@ -16,7 +16,7 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QFont, QFontMetrics
-from core import sds_encoder, program_editor_bridge
+from core import dropped_files, sds_encoder, program_editor_bridge
 from ui.qt_helpers import load_colored_pixmap
 from ui.settings_dialog import MidiSettingsDialog
 from ui.drop_list_widget import DropListWidget
@@ -31,6 +31,17 @@ SETTINGS_ROLE = Qt.ItemDataRole.UserRole + 1
 class TransferDashboard(QWidget):
     def __init__(self, sampler_controller, midi_manager, parent=None):
         super().__init__(parent)
+
+        # crash-safety backstop for the stable local copies dropped/opened
+        # files get (see create_local_row and core/dropped_files.py's own
+        # module docstring) - a session that never reaches
+        # dropped_files.cleanup_session() (main_window.py's closeEvent)
+        # leaves its own PID-named directory behind forever otherwise.
+        # Self-healing at the next normal launch, before this session's
+        # own directory is ever created, rather than a background
+        # watchdog - there's no reason to notice a crash while this app
+        # isn't even running.
+        dropped_files.sweep_orphaned_sessions()
 
         # single MidiManager instance is owwned by the main window
         # and handed down here - everything MIDI related goes thru it
@@ -348,8 +359,12 @@ class TransferDashboard(QWidget):
                 os.path.splitext(path)[1].lower()
                 in sds_encoder.SUPPORTED_AUDIO_EXTENSIONS
             ):
-                self.create_local_row(path)
-                added += 1
+                # False means create_local_row already showed its own
+                # "couldn't add" status message (the file was gone before
+                # it could even be copied - see its own comment) - don't
+                # let the "Added N file(s)" message below stomp on that
+                if self.create_local_row(path):
+                    added += 1
             else:
                 self.status_bar.showMessage(
                     f"Skipped non-WAV file: {os.path.basename(path)}"
@@ -767,6 +782,11 @@ class TransferDashboard(QWidget):
                 self.list_local.takeItem(i)
                 break
 
+        # filepath is this row's own stable copy (see create_local_row) -
+        # sent, skipped, or cancelled, there's no reason to keep it around
+        # for the rest of the session once its row is gone
+        dropped_files.remove_copy(filepath)
+
         self._update_queue_buttons_state()
         self._update_empty_queue_placeholder()
 
@@ -793,6 +813,9 @@ class TransferDashboard(QWidget):
     def _remove_local_row(self, item, edit_field):
         if self._active_edit_field is edit_field:
             self._active_edit_field = None
+        # this row's own stable copy (see create_local_row) - no reason to
+        # keep it around once the row itself is gone
+        dropped_files.remove_copy(item.data(Qt.ItemDataRole.UserRole))
         self.list_local.takeItem(self.list_local.row(item))
         self._update_queue_buttons_state()
         self._update_empty_queue_placeholder()
@@ -830,14 +853,37 @@ class TransferDashboard(QWidget):
             )
 
     def create_local_row(self, filepath):
+        # copy into a stable, app-owned location FIRST, before building
+        # anything - see core/dropped_files.py's own module docstring for
+        # why: some sample-browser apps (Sononym, dragging a "cropped"
+        # preview out) hand this app a path to a file THEY own and expect
+        # to clean up shortly after the drop, which this app would
+        # otherwise only discover much later, whenever Send actually gets
+        # around to this file - too late to do anything but skip it.
+        # Reading it now, right where it's still guaranteed to exist,
+        # sidesteps that race entirely. Every consumer below (and every
+        # other place this row's stored path gets read - the Send queue
+        # included, via item.data(Qt.ItemDataRole.UserRole)) uses the
+        # COPY, not the original, from this point on; `filepath` itself
+        # is still used for the row's initial DISPLAY name below, so a
+        # uniquifying suffix the copy's own filename might have needed
+        # (see dropped_files._unique_name) never shows up in the UI.
+        try:
+            stable_path = dropped_files.copy_into_session(filepath)
+        except OSError as e:
+            self.status_bar.showMessage(
+                f"Couldn't add {os.path.basename(filepath)}: {e}"
+            )
+            return False
+
         # build an editable, drag-swappable row with action buttons pinned to right side
 
         # create blank structural placeholder item inside real list
         item = QListWidgetItem(self.list_local)
-        item.setData(Qt.ItemDataRole.UserRole, filepath)
+        item.setData(Qt.ItemDataRole.UserRole, stable_path)
 
         try:
-            native_bit_depth = sds_encoder.read_wav_native_bit_depth(filepath)
+            native_bit_depth = sds_encoder.read_wav_native_bit_depth(stable_path)
         except (OSError, ValueError):
             native_bit_depth = 16  # cant tell, fall back to safe default
 
@@ -936,11 +982,12 @@ class TransferDashboard(QWidget):
         row_layout.addWidget(lbl_channels)
         row_layout.addWidget(btn_edit)
         row_layout.addWidget(btn_del)
-        self._refresh_row_indicators(row_widget, filepath, item.data(SETTINGS_ROLE))
+        self._refresh_row_indicators(row_widget, stable_path, item.data(SETTINGS_ROLE))
 
         # inject custom canvas widget directly into list row framework
         item.setSizeHint(row_widget.sizeHint())
         self.list_local.setItemWidget(item, row_widget)
+        return True
 
     def register_menu_actions(self, enabled_sync_map, text_sync_map=None):
         # keeps the menu options in sync with the button states
@@ -1063,6 +1110,13 @@ class TransferDashboard(QWidget):
             self.sampler_controller.delete_sample(sample_number)
 
     def clear_local_queue(self):
+        # each row's own stable copy (see create_local_row) - list_local.
+        # clear() below doesn't go through _remove_local_row/
+        # on_file_transferred (the two other places this cleanup happens),
+        # so it needs its own pass first
+        for i in range(self.list_local.count()):
+            item = self.list_local.item(i)
+            dropped_files.remove_copy(item.data(Qt.ItemDataRole.UserRole))
         self.list_local.clear()
         self._active_edit_field = None
         self._update_empty_queue_placeholder()

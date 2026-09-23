@@ -8,7 +8,7 @@ from ui.dashboard import TransferDashboard
 from ui.about_dialog import AboutDialog
 from ui.update_helper import UpdateCheckRunner
 from core.midi_manager import MidiManager
-from core import app_config, sds_encoder
+from core import app_config, dropped_files, sds_encoder
 from controller.sampler_controller import SamplerController
 
 # don't hit the GitHub API on every single launch
@@ -241,6 +241,15 @@ class ApplicationWindow(QMainWindow):
         # the worker with it) can be garbage collected - see
         # UpdateCheckRunner.wait()'s docstring
         self._update_runner.wait()
+
+        # this session's own stable copies of dropped/opened queue files
+        # (see dashboard.py's create_local_row / core/dropped_files.py) -
+        # a normal quit means every one of them is done being useful,
+        # whether or not their rows individually got cleaned up already.
+        # The crash-safety backstop for when this DOESN'T run
+        # (sweep_orphaned_sessions) lives at the next launch instead, not
+        # here.
+        dropped_files.cleanup_session()
 
         super().closeEvent(event)
 

@@ -256,6 +256,76 @@ rather than a full `ApplicationWindow` - deliberately, since
 `ApplicationWindow.__init__` reads/writes the user's actual
 `~/.akaisds/config.json` via `app_config`, which a test must never touch.
 
+## Transfer Dashboard: dropped/opened files get a stable local copy
+
+Added 2026-09-23, per direct user report: dragging a "cropped" region out
+of a sample browser (Sononym on macOS, at least) into the File Transfer
+Queue added the row fine, but Send later failed on it with "Skipping
+X.wav: [Errno 2] No such file or directory". Root cause confirmed, not
+just suspected: `on_files_dropped`/`create_local_row` used to store only
+the dropped file's PATH (`item.setData(Qt.ItemDataRole.UserRole,
+filepath)`) - the actual `wave.open()` read happens much later, whenever
+that file's turn in the send queue comes up
+(`SamplerController._send_next_queued_file_impl`). Sononym's "drag a
+cropped region out" renders that crop to a real temp file for the OS drag
+and cleans it up shortly after the drop completes - well before the user
+gets around to clicking Send. Qt's cross-platform `QMimeData.urls()` has
+no way to participate in macOS's own file-promise drag negotiation for
+this (that's an AppKit-level protocol), so by the time this app sees the
+path there's no way to distinguish "temporary, about to be deleted" from
+"this is exactly where the file lives forever" - it reads the same either
+way, and DOES successfully read at drop time (which is why the row
+appeared to add fine) - only the LATER, lazy read at Send time loses the
+race.
+
+**Fix**: `core/dropped_files.py` (new module, pure filesystem logic, no
+Qt) copies every dropped/opened file into a stable, app-owned location
+immediately - right where `create_local_row` already opens the file once
+anyway, for its bit-depth probe - and the queue row is built around THAT
+copy's path from then on, not the original. Whatever the source app does
+to its own temp file afterward stops mattering. This applies uniformly to
+drag-and-drop AND the File menu's "Open Files.../Open Folder..." (both
+funnel through the same `on_files_dropped` → `create_local_row` path
+already), not just the drag case the bug was reported against - simpler
+than trying to special-case which entry point needs it, and harmless for
+files that were already stable (a little extra disk I/O, once, for a
+typical sample-sized WAV).
+
+**Copies live under `~/.akaisds/dropped_files/<pid>/`** - one
+subdirectory per process, never reused across restarts. Three things
+delete a copy, each already the natural point in `dashboard.py` where a
+queue row stops existing: `on_file_transferred` (sent or skipped),
+`_remove_local_row` (the per-row Delete button), and `clear_local_queue`
+(which has to loop and remove each copy itself first, since
+`QListWidget.clear()` doesn't go through either of the other two).
+`dropped_files.remove_copy` only ever deletes a path actually resolving
+under its own base directory - the one function in the module that takes
+a path from outside it, so it's the one place that has to guard against
+ever being pointed at a file it didn't create.
+
+**Crash-safety fallback** (the user asked for one, implementation left to
+judgement): a session that never reaches `dropped_files.cleanup_session()`
+(wired into `ApplicationWindow.closeEvent`, alongside its other end-of-
+life cleanup like closing the MIDI ports) - a crash, a force-quit, `kill
+-9` - leaves its own PID-named directory behind forever otherwise, slowly
+accumulating stale copies. Rather than a background watchdog (there's no
+reason to notice a crash while this desktop app isn't even running),
+`dropped_files.sweep_orphaned_sessions()` runs once, early, in
+`TransferDashboard.__init__` (before this session's own directory is ever
+created) and removes every OTHER PID-named subdirectory whose PID is no
+longer a running process (`os.kill(pid, 0)`, the standard POSIX liveness
+check - any ambiguous result defaults to "still running", i.e. don't
+delete, since an orphaned directory surviving one more launch costs
+nothing but wrongly deleting a live session's files would). Self-healing
+at the next normal launch, not real-time.
+
+`tests/test_dropped_files.py` covers the module directly (isolated to a
+pytest `tmp_path` - never the real `~/.akaisds/dropped_files`, monkey-
+patching `_BASE_DIR`/`_session_dir` the same way for every test).
+`tests/test_dashboard.py` covers the integration end to end, including
+the actual regression - dropping a file, deleting the ORIGINAL, and
+confirming the queued copy is still there and still readable.
+
 ## Debug logging for real-hardware issues
 
 `core/debug_log.py` sets up a rotating log at `~/.akaisds/editor_debug.log`.
