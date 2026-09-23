@@ -359,7 +359,7 @@ class ProgramEditorWindow(QMainWindow):
         # Grew once more, 1200 -> 1220, once the theme's actual stylesheet
         # (fonts/padding via Fusion) was applied rather than measured with
         # no theme at all - 1200 was 1px short with it on.
-        self.setMinimumSize(1220, 800)
+        self.setMinimumSize(1250, 800)
         self._sample_list = []
         self._keygroup_ranges = []  # [lo, hi] per keygroup - mirrors keygroup_range_bar
         self._pending_restore_state = None  # set only by _refresh_from_hardware()
@@ -1275,7 +1275,7 @@ class ProgramEditorWindow(QMainWindow):
         self.program_number_spinbox.setRange(1, 128)
         self.program_number_spinbox.setFixedWidth(70)
         self.program_number_spinbox.setEnabled(False)
-        program_number_label = QLabel("Prg #")
+        program_number_label = QLabel("Program number")
         name_row = QHBoxLayout()
         name_row.addWidget(self.program_name_edit)
         name_row.addSpacing(12)
@@ -5128,7 +5128,7 @@ class ProgramEditorWindow(QMainWindow):
             self,
             "Fade Sample",
             f'Fade in "{sample_name}" from frame 0 up to Start ({markers["start"]}), '
-            f'and fade out from End ({markers["end"]}) to the last frame?\n\n'
+            f"and fade out from End ({markers['end']}) to the last frame?\n\n"
             "This overwrites the sample's audio on the sampler and cannot "
             "be undone.",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
