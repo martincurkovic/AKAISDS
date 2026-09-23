@@ -98,11 +98,42 @@ class TransferDashboard(QWidget):
         top_bar.addStretch()
         self.btn_settings = QPushButton("\u2699 MIDI Settings")
         self.btn_settings.clicked.connect(self.open_settings_dialog)
-        top_bar.addWidget(self.btn_settings)
 
         self.btn_open_editor = QPushButton("Open Editor")
         self.btn_open_editor.clicked.connect(self.open_program_editor)
-        top_bar.addWidget(self.btn_open_editor)
+        # only enabled once there's actually somewhere for the editor to
+        # connect TO - both a MIDI input and output port selected, and the
+        # sampler type set to "Akai Sampler" (program_editor_bridge.connect()
+        # needs Akai-specific SysEx extensions the Generic SDS protocol
+        # family doesn't have) - see _update_open_editor_enabled, called
+        # here and after the MIDI Settings dialog closes (open_settings_
+        # dialog), the same two points _update_device_type_ui already
+        # hooks for its own device-type-driven enabling.
+        settings_editor_column = QVBoxLayout()
+        settings_editor_column.setSpacing(6)
+        settings_editor_column.addWidget(self.btn_settings)
+        settings_editor_column.addWidget(self.btn_open_editor)
+        # same width, stacked - both requested directly rather than the
+        # original side-by-side layout; sized to whichever button's own
+        # text is wider ("MIDI Settings", not "Open Editor") so neither
+        # one gets clipped
+        button_width = max(
+            self.btn_settings.sizeHint().width(),
+            self.btn_open_editor.sizeHint().width(),
+        )
+        self.btn_settings.setFixedWidth(button_width)
+        self.btn_open_editor.setFixedWidth(button_width)
+        top_bar.addLayout(settings_editor_column)
+        # without this, top_bar (a QHBoxLayout) stretches this nested
+        # column to the row's full height - set by the tall multi-line
+        # logo beside it - and with nothing in the column claiming that
+        # slack itself, QBoxLayout dumps ALL of it into the one gap
+        # between the two buttons (see _build_section_card's own comment
+        # on this exact behaviour), which read as a much bigger gap than
+        # the 2px spacing actually asked for. This tells top_bar to give
+        # the column its own natural (sizeHint) height instead and center
+        # it vertically, so the buttons sit their own 2px apart.
+        top_bar.setAlignment(settings_editor_column, Qt.AlignmentFlag.AlignVCenter)
 
         # TWIN PANELS BABYYYY (horizontal layout nesting)
         panel_layout = QHBoxLayout()
@@ -265,6 +296,7 @@ class TransferDashboard(QWidget):
         # reflect whatever device type was ALREADY restored before the dashboard was constructed
         self._update_device_type_ui()
         self._update_queue_buttons_state()
+        self._update_open_editor_enabled()
 
     def open_program_editor(self):
         # public (no leading underscore) since main_window.py's "Program
@@ -286,6 +318,7 @@ class TransferDashboard(QWidget):
         dialog = MidiSettingsDialog(self.midi_manager, self.sampler_controller, self)
         dialog.exec()
         self._update_device_type_ui()
+        self._update_open_editor_enabled()
 
     def request_sample_list(self):
         self.sampler_controller.refresh_sample_list()
@@ -341,6 +374,39 @@ class TransferDashboard(QWidget):
                     "No samples loaded - click Refresh to check"
                 )
             self.empty_hardware_label.setVisible(self.list_hardware.count() == 0)
+
+    def _update_open_editor_enabled(self):
+        # Program Editor needs a real, fully-configured connection to talk
+        # to - both a MIDI input AND output port actually selected (not
+        # "(None)" - see MidiSettingsDialog._populate_ports/_apply_and_close,
+        # which is the only place that ever changes midi_manager.input_name/
+        # output_name), and the sampler type set to Akai (not Generic SDS -
+        # program_editor_bridge.connect() talks the Akai-specific SysEx
+        # extensions this whole window is built on, which Generic SDS
+        # doesn't have at all). Called at the two points the dashboard's
+        # own knowledge of this state can change: construction (whatever
+        # was restored from app_config before this widget was built - see
+        # __init__'s own comment) and after the MIDI Settings dialog closes
+        # (open_settings_dialog) - same two hooks _update_device_type_ui
+        # already uses for its own device-type-driven enabling.
+        # register_menu_actions' polling timer mirrors this onto the
+        # Window menu's "Program Editor" action automatically - no direct
+        # wiring to it needed here.
+        has_ports = bool(self.midi_manager.input_name) and bool(
+            self.midi_manager.output_name
+        )
+        is_akai = self.sampler_controller.device_type == "akai"
+        self.btn_open_editor.setEnabled(has_ports and is_akai)
+        if has_ports and is_akai:
+            self.btn_open_editor.setToolTip("")
+        elif not has_ports:
+            self.btn_open_editor.setToolTip(
+                "Select both a MIDI Input and MIDI Output in MIDI Settings first"
+            )
+        else:
+            self.btn_open_editor.setToolTip(
+                'Set Sampler Type to "Akai Sampler" in MIDI Settings first'
+            )
 
     def _update_device_type_ui(self):
         is_generic = self.sampler_controller.device_type == "generic"  # True or False

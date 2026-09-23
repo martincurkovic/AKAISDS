@@ -173,6 +173,12 @@ class ApplicationWindow(QMainWindow):
                 self.dashboard_view.btn_delete_selected: delete_selected_action,
                 self.dashboard_view.btn_clear_queue: clear_queue_action,
                 self.dashboard_view.btn_cancel: cancel_action,
+                # mirrors btn_open_editor's own enabled state (both MIDI
+                # ports selected AND sampler type set to Akai - see
+                # TransferDashboard._update_open_editor_enabled), same
+                # "button is the source of truth, menu action just follows
+                # it" pattern as every other entry here
+                self.dashboard_view.btn_open_editor: editor_action,
             },
             text_sync_map={
                 self.dashboard_view.btn_select_all: select_all_action,

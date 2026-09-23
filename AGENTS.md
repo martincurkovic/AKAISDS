@@ -191,6 +191,71 @@ every click, so a just-closed editor with a check still in flight can lose
 its last Python reference well before that check (bounded by a 5s network
 timeout) actually finishes.
 
+## Transfer Dashboard: "Open Editor" only enabled with a real connection
+
+Added 2026-09-23, per direct user request. `TransferDashboard.btn_open_editor`
+("Open Editor", top bar) and the `&Window > Program Editor` menu action
+(`main_window.py`) are only enabled when BOTH a MIDI input and output port
+are actually selected (not "(None)" - `midi_manager.input_name`/
+`output_name`, the same state `MidiSettingsDialog._apply_and_close` is the
+only thing that ever changes) AND the sampler type is set to "Akai Sampler"
+(`sampler_controller.device_type == "akai"`, not `"generic"` -
+`program_editor_bridge.connect()` needs the Akai-specific SysEx extensions
+Generic SDS doesn't have). `TransferDashboard._update_open_editor_enabled`
+computes this and sets `btn_open_editor`'s enabled state (and a tooltip
+explaining whichever half is missing); it's called at the same two points
+`_update_device_type_ui` already hooks for its own device-type-driven
+enabling - construction (whatever ports/device type `main_window.py`
+already restored from `app_config` before building the dashboard - see
+that method's own comment) and right after the MIDI Settings dialog closes
+(`open_settings_dialog`).
+
+**The menu action needs no direct wiring of its own** -
+`register_menu_actions` (`dashboard.py`, called from `main_window.py`) is
+a pre-existing generic mechanism that polls every registered button's
+`isEnabled()` on a 150ms `QTimer` and mirrors it onto the paired menu
+action (already used for Settings/Refresh/Send/Receive/etc - see its own
+"i know, i KNOWWWWWW....." comment). Adding
+`self.dashboard_view.btn_open_editor: editor_action` to that map in
+`main_window.py` was the only change needed there - don't add a second,
+bespoke sync path for this one action.
+
+`btn_open_editor` and `btn_settings` are also stacked vertically now (a
+`QVBoxLayout` inside the top bar's own `QHBoxLayout`, replacing two
+side-by-side `addWidget` calls) and sized to the same fixed width - the
+wider of the two buttons' own `sizeHint().width()` ("⚙ MIDI Settings", not
+"Open Editor") - per the same request. If a future button joins this
+column, re-measure `button_width` against its own `sizeHint()` too rather
+than assuming the existing constant still fits.
+
+**The column's own `setSpacing(2)` alone wasn't enough to keep the two
+buttons close together** - a user caught this immediately (the two
+buttons rendered ~30px apart despite the small explicit spacing).
+Root cause: `top_bar` (the outer `QHBoxLayout`) stretches a nested child
+layout to the row's own full height by default, and that row's height is
+set by the tall multi-line ASCII logo sitting beside it - `QBoxLayout`
+dumps all of that unclaimed vertical slack into whichever gap(s) exist
+inside the child layout when nothing there claims it as a stretch (same
+underlying behaviour `_build_section_card`'s own `addStretch()` comment
+documents, just manifesting as one gap growing instead of a whole card
+reading as vertically centered). Fixed with
+`top_bar.setAlignment(settings_editor_column, Qt.AlignmentFlag.AlignVCenter)`
+right after `addLayout` - tells `top_bar` to give the column its own
+natural (sizeHint) height and center it in the row instead of stretching
+it, so the buttons' own spacing is what actually renders. If another
+short child layout/widget ever gets added directly into a `QHBoxLayout`
+alongside something much taller, check for this same symptom (children
+spread apart more than their own spacing says) before assuming the
+spacing value itself is wrong.
+
+`tests/test_dashboard.py` (new - `test_dashboard_helpers.py` already
+existed for `TransferDashboard`'s pure staticmethods, but nothing
+widget-level) covers the enabled-state logic directly, constructing a
+real `TransferDashboard` off a real `MidiManager`/`SamplerController` pair
+rather than a full `ApplicationWindow` - deliberately, since
+`ApplicationWindow.__init__` reads/writes the user's actual
+`~/.akaisds/config.json` via `app_config`, which a test must never touch.
+
 ## Debug logging for real-hardware issues
 
 `core/debug_log.py` sets up a rotating log at `~/.akaisds/editor_debug.log`.
