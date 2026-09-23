@@ -55,7 +55,7 @@ if (-not (Test-Path "pysidedeploy.spec")) {
 
 # extra_args is regenerated on EVERY run (not just first-time setup),
 # specifically so the version stays current even on an existing spec
-(Get-Content pysidedeploy.spec) -replace '^extra_args = .*', "extra_args = --quiet --noinclude-qt-translations --assume-yes-for-downloads --windows-console-mode=disable --windows-product-name=AKAISDS --product-version=$ProductVersion --include-module=mido.backends.rtmidi --include-data-dir=ui/icons=ui/icons --include-data-files=ui/style.qss.template=ui/style.qss.template" | Set-Content pysidedeploy.spec
+(Get-Content pysidedeploy.spec) -replace '^extra_args = .*', "extra_args = --quiet --noinclude-qt-translations --assume-yes-for-downloads --windows-console-mode=disable --windows-product-name=AKAISDS --product-version=$ProductVersion --include-module=mido.backends.rtmidi --include-data-dir=ui/icons=ui/icons --include-data-files=ui/style.qss.template=ui/style.qss.template --include-data-dir=ui/help=ui/help" | Set-Content pysidedeploy.spec
 
 Write-Host "Building AKAISDS..."
 uv run pyside6-deploy -c pysidedeploy.spec
