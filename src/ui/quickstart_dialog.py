@@ -34,11 +34,20 @@ _QUICKSTART_PATH = os.path.join(_HELP_DIR, "quickstart.md")
 # making it more readable, and every one of these is already a high-DPI
 # capture with plenty of real detail to shrink into.
 _IMAGE_WIDTH_MARGIN = 24
+# these screenshots were all captured on a Retina (2x) display, so their
+# raw pixel dimensions are 2x what the window actually measured in points
+# at the time - capping "natural width" at the raw pixel count (as if it
+# were a normal 1x capture) let images render up to twice their intended
+# on-screen size. Dividing by this brings the ceiling back down to what
+# the window actually looked like, and QTextImageFormat's width/height are
+# themselves device-independent (logical) pixels, same unit as everything
+# else in the layout, so this is the only adjustment needed - nothing
+# about QPixmap's own devicePixelRatio comes into it, since the format's
+# explicit width/height wins regardless of what the pixmap object reports.
+_SCREENSHOT_PIXEL_RATIO = 2.0
 # only re-measure/relayout once resizing has paused this long, rather than
-# on every intermediate size during a live drag-resize - each pass reloads
-# every screenshot off disk to read its natural size (see
-# _constrain_image_widths), which is wasted work mid-drag
-_RESIZE_DEBOUNCE_MS = 150
+# on every intermediate size during a live drag-resize
+_RESIZE_DEBOUNCE_MS = 60
 
 # fixed (not theme-derived) highlight colors, same idea as a browser's
 # find-in-page: a plain QTextCursor selection was tried first and was
@@ -88,6 +97,10 @@ class QuickStartDialog(QDialog):
         # resolves the markdown's relative image paths (screenshots/*.png)
         # against help/, the directory quickstart.md itself lives in
         self.viewer.setSearchPaths([_HELP_DIR])
+        # name -> (natural_width, natural_height), already divided down by
+        # _SCREENSHOT_PIXEL_RATIO - read off disk once per image, ever
+        # (see _constrain_image_widths), not on every resize
+        self._image_natural_sizes = {}
         self._markdown_loaded = False
         try:
             with open(_QUICKSTART_PATH, "r", encoding="utf-8") as f:
@@ -125,40 +138,67 @@ class QuickStartDialog(QDialog):
         # bound the viewport currently allows)
         return max(1, self.viewer.viewport().width() - _IMAGE_WIDTH_MARGIN)
 
+    def _natural_image_size(self, name):
+        # cached after the first lookup - decoding a multi-megapixel PNG
+        # off disk on every single resize tick is the main reason this
+        # used to visibly lag (see this class's own module docstring
+        # comment history / AGENTS.md); the natural size never changes
+        # once the file is loaded, so there's nothing to gain by re-
+        # reading it on every call the way the image FORMAT genuinely
+        # does need recomputing (that depends on the current viewport)
+        cached = self._image_natural_sizes.get(name)
+        if cached is not None:
+            return cached
+        pixmap = QPixmap(os.path.join(_HELP_DIR, name))
+        if pixmap.isNull():
+            return None
+        size = (
+            pixmap.width() / _SCREENSHOT_PIXEL_RATIO,
+            pixmap.height() / _SCREENSHOT_PIXEL_RATIO,
+        )
+        self._image_natural_sizes[name] = size
+        return size
+
     def _constrain_image_widths(self, max_width):
         # QTextImageFormat renders at the image's native pixel size unless
         # a width/height is set explicitly - walk every image fragment
-        # markdown produced and resize each one against its OWN natural
-        # size (loaded fresh off disk every call, not read back from
-        # whatever width a previous call left it at - document.resource()
-        # isn't used either, since it may not have populated its cache yet
-        # on the very first call), so this is safe to re-run on every
-        # resize: an image already shrunk down can grow back on a later,
-        # wider call, not just shrink monotonically.
+        # markdown produced and resize each one against its own (cached,
+        # retina-adjusted) natural size, so this is safe to re-run on
+        # every resize: an image already shrunk down can grow back on a
+        # later, wider call, not just shrink monotonically. Every edit
+        # goes through ONE shared cursor inside a single begin/endEditBlock
+        # pair rather than a fresh cursor + implicit relayout per image -
+        # with ~12 images that was the other big chunk of the visible lag,
+        # not just the disk reads _natural_image_size now avoids.
         document = self.viewer.document()
-        block = document.begin()
-        while block.isValid():
-            it = block.begin()
-            while not it.atEnd():
-                fragment = it.fragment()
-                char_format = fragment.charFormat()
-                if fragment.isValid() and char_format.isImageFormat():
-                    image_format = char_format.toImageFormat()
-                    pixmap = QPixmap(os.path.join(_HELP_DIR, image_format.name()))
-                    if not pixmap.isNull():
-                        target_width = min(max_width, pixmap.width())
-                        scale = target_width / pixmap.width()
-                        image_format.setWidth(target_width)
-                        image_format.setHeight(pixmap.height() * scale)
-                        cursor = QTextCursor(document)
-                        cursor.setPosition(fragment.position())
-                        cursor.setPosition(
-                            fragment.position() + fragment.length(),
-                            QTextCursor.MoveMode.KeepAnchor,
-                        )
-                        cursor.setCharFormat(image_format)
-                it += 1
-            block = block.next()
+        cursor = QTextCursor(document)
+        cursor.beginEditBlock()
+        try:
+            block = document.begin()
+            while block.isValid():
+                it = block.begin()
+                while not it.atEnd():
+                    fragment = it.fragment()
+                    char_format = fragment.charFormat()
+                    if fragment.isValid() and char_format.isImageFormat():
+                        image_format = char_format.toImageFormat()
+                        natural_size = self._natural_image_size(image_format.name())
+                        if natural_size is not None:
+                            natural_width, natural_height = natural_size
+                            target_width = min(max_width, natural_width)
+                            scale = target_width / natural_width
+                            image_format.setWidth(target_width)
+                            image_format.setHeight(natural_height * scale)
+                            cursor.setPosition(fragment.position())
+                            cursor.setPosition(
+                                fragment.position() + fragment.length(),
+                                QTextCursor.MoveMode.KeepAnchor,
+                            )
+                            cursor.setCharFormat(image_format)
+                    it += 1
+                block = block.next()
+        finally:
+            cursor.endEditBlock()
 
     def eventFilter(self, watched, event):
         if (
@@ -167,7 +207,10 @@ class QuickStartDialog(QDialog):
             and self._markdown_loaded
         ):
             # restarts on every resize event during a live drag - only the
-            # last one (150ms after resizing actually stops) does anything
+            # last one (_RESIZE_DEBOUNCE_MS after resizing actually stops,
+            # or after the last event Qt happens to deliver mid-drag) does
+            # anything. Cheap enough now (see _natural_image_size/
+            # _constrain_image_widths) that this can afford to be short.
             self._image_resize_timer.start(_RESIZE_DEBOUNCE_MS)
         return super().eventFilter(watched, event)
 
