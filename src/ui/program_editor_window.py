@@ -3352,12 +3352,31 @@ class ProgramEditorWindow(QMainWindow):
         zoom_fit_button = QPushButton("Fit")
         zoom_fit_button.setToolTip("Reset zoom to show the whole sample")
         zoom_fit_button.clicked.connect(self.waveform_view.reset_zoom)
+        # small, unobtrusive progress indicator for Trim/Reverse/Fade
+        # specifically (see _perform_sample_edit/_on_sample_edit_progress) -
+        # NOT shown for ordinary sample-audio loading, which already has
+        # the progressively-filling waveform itself as its own visual
+        # progress (see AGENTS.md's "Progressive waveform loading" - the
+        # full-width bar that used to live here for that case was removed
+        # 2026-09-23 as redundant). Trim/Reverse/Fade have no equivalent -
+        # they SEND the already-loaded audio back out, so the waveform
+        # stays static the whole time - hence still wanting a visual here,
+        # per direct user request. Placed next to the zoom controls (the
+        # user's own suggested spot) rather than full-width, since it's
+        # supplementary to the live percentage _on_sample_receive_progress
+        # already puts in the status bar, not the primary indicator.
+        self.sample_edit_progress = QProgressBar()
+        self.sample_edit_progress.setFixedWidth(140)
+        self.sample_edit_progress.setVisible(False)
+
         zoom_row = QHBoxLayout()
         zoom_row.setSpacing(6)
         zoom_row.addWidget(QLabel("Zoom"))
         zoom_row.addWidget(zoom_out_button)
         zoom_row.addWidget(zoom_in_button)
         zoom_row.addWidget(zoom_fit_button)
+        zoom_row.addSpacing(12)
+        zoom_row.addWidget(self.sample_edit_progress)
         zoom_row.addStretch()
 
         self.waveform_scrollbar = QScrollBar(Qt.Orientation.Horizontal)
@@ -3545,13 +3564,14 @@ class ProgramEditorWindow(QMainWindow):
         tune_meta_row.addWidget(self.sample_tune_spinbox)
         tune_meta_row.addStretch()
 
-        # Trim/Reverse - destructive, hardware-write actions, so both stay
-        # disabled until has_waveform() is true (real audio actually in
-        # memory to transform, not just header-only markers) - see
-        # _set_sample_edit_buttons_enabled. See _confirm_trim_sample/
-        # _confirm_reverse_sample for the confirmation dialogs and
-        # _perform_sample_edit_real for why this is a real, multi-step
-        # send/delete/rename pipeline rather than a simple in-place write.
+        # Trim/Reverse/Fade - destructive, hardware-write actions, so all
+        # three stay disabled until has_waveform() is true (real audio
+        # actually in memory to transform, not just header-only markers) -
+        # see _set_sample_edit_buttons_enabled. See _confirm_trim_sample/
+        # _confirm_reverse_sample/_confirm_fade_sample for the confirmation
+        # dialogs and _perform_sample_edit_real for why this is a real,
+        # multi-step send/delete/rename pipeline rather than a simple
+        # in-place write.
         sample_edit_row = QHBoxLayout()
         sample_edit_row.setSpacing(8)
         self.trim_sample_button = QPushButton("Trim to Markers")
@@ -3568,8 +3588,17 @@ class ProgramEditorWindow(QMainWindow):
         )
         self.reverse_sample_button.setEnabled(False)
         self.reverse_sample_button.clicked.connect(self._confirm_reverse_sample)
+        self.fade_sample_button = QPushButton("Fade In/Out")
+        self.fade_sample_button.setToolTip(
+            "Linearly fade in from frame 0 up to the Start marker, and "
+            "fade out from the End marker to the last frame, overwriting "
+            "the sample on the sampler. Cannot be undone."
+        )
+        self.fade_sample_button.setEnabled(False)
+        self.fade_sample_button.clicked.connect(self._confirm_fade_sample)
         sample_edit_row.addWidget(self.trim_sample_button)
         sample_edit_row.addWidget(self.reverse_sample_button)
+        sample_edit_row.addWidget(self.fade_sample_button)
         sample_edit_row.addStretch()
 
         # two section cards, same style as the Programs tab's own (see
@@ -4248,12 +4277,13 @@ class ProgramEditorWindow(QMainWindow):
         self._set_sample_edit_buttons_enabled(False)
 
     def _set_sample_edit_buttons_enabled(self, enabled):
-        # Trim/Reverse need real audio in memory to transform, not just
-        # header-only markers - has_waveform(), same gate
+        # Trim/Reverse/Fade need real audio in memory to transform, not
+        # just header-only markers - has_waveform(), same gate
         # mouseDoubleClickEvent uses to decide whether a double-click
         # should even try loading audio again
         self.trim_sample_button.setEnabled(enabled)
         self.reverse_sample_button.setEnabled(enabled)
+        self.fade_sample_button.setEnabled(enabled)
 
     def _update_sample_meta_controls(self, sptype, spitch, shlto=None, stuno=None):
         # sptype/spitch/shlto/stuno None means "nothing known about this
@@ -4641,8 +4671,9 @@ class ProgramEditorWindow(QMainWindow):
                 pass
 
     def _on_sample_receive_progress(self, current, total, label):
-        # replaces the progress bar that used to live under Trim/Reverse
-        # (removed 2026-09-23) - redundant once the waveform itself
+        # replaces the full-width progress bar that used to live under
+        # Trim/Reverse for ordinary sample-audio LOADING specifically
+        # (removed 2026-09-23) - redundant there once the waveform itself
         # progressively fills in during the same transfer (see AGENTS.md's
         # "Progressive waveform loading") and the status bar already
         # carried the raw frame count on every tick anyway (demo mode's
@@ -4653,10 +4684,26 @@ class ProgramEditorWindow(QMainWindow):
         # site (see _load_sample_waveform/_perform_sample_edit) - this
         # replaces it with a live, ticking one for the rest of the
         # operation instead of leaving it static the whole time.
+        #
+        # Trim/Reverse/Fade route through _on_sample_edit_progress below
+        # instead of calling this directly - they still want a small
+        # visual bar (see sample_edit_progress's own comment), since
+        # unlike loading, sending already-loaded audio back out has no
+        # progressively-filling waveform of its own to reassure the user.
         percentage = int(current * 100 / total) if total else 0
         self.status_bar.showMessage(
             f"{label} - {percentage}% ({current}/{total} frames)"
         )
+
+    def _on_sample_edit_progress(self, current, total, label):
+        # Trim/Reverse/Fade's own progress callback - the small bar next
+        # to the zoom controls (sample_edit_progress) plus the same live
+        # status-bar percentage every progress source gets (see
+        # _on_sample_receive_progress above).
+        self._on_sample_receive_progress(current, total, label)
+        self.sample_edit_progress.setRange(0, max(total, 1))
+        self.sample_edit_progress.setValue(current)
+        self.sample_edit_progress.setVisible(True)
 
     def _on_sample_chunk_received(self, chunk):
         # SamplerController.sample_chunk_received - see
@@ -5059,11 +5106,46 @@ class ProgramEditorWindow(QMainWindow):
             sample_index, sample_editing.reverse_samples, "Reverse"
         )
 
+    def _confirm_fade_sample(self):
+        sample_index = self.sample_list_widget.currentRow()
+        if sample_index < 0 or not self.waveform_view.has_waveform():
+            return
+        markers = self.waveform_view.markers()
+        frame_count = self.waveform_view.frame_count()
+        # fades the LEAD-IN/LEAD-OUT around [start, end], not the region
+        # itself (see fade_in_out_samples) - same "nothing meaningful to
+        # do" shape as _confirm_trim_sample's own guard: Start already at
+        # frame 0 means no lead-in to fade, End already at the last frame
+        # means no lead-out either
+        if markers["start"] == 0 and markers["end"] == frame_count - 1:
+            self.status_bar.showMessage(
+                "Nothing to fade - Start/End already cover the whole sample"
+            )
+            return
+        item = self.sample_list_widget.currentItem()
+        sample_name = item.text() if item is not None else ""
+        answer = QMessageBox.question(
+            self,
+            "Fade Sample",
+            f'Fade in "{sample_name}" from frame 0 up to Start ({markers["start"]}), '
+            f'and fade out from End ({markers["end"]}) to the last frame?\n\n'
+            "This overwrites the sample's audio on the sampler and cannot "
+            "be undone.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        self._perform_sample_edit(
+            sample_index, sample_editing.fade_in_out_samples, "Fade In/Out"
+        )
+
     def _perform_sample_edit(self, sample_index, transform, action_label):
-        # shared by _confirm_trim_sample/_confirm_reverse_sample - both are
-        # "take the samples already in memory, transform them with a pure
-        # function from core/sample_editing.py, then get the result onto
-        # the hardware" with nothing else actually different between them
+        # shared by _confirm_trim_sample/_confirm_reverse_sample/
+        # _confirm_fade_sample - all three are "take the samples already in
+        # memory, transform them with a pure function from
+        # core/sample_editing.py, then get the result onto the hardware"
+        # with nothing else actually different between them
         entry = self._sample_waveform_cache.get(sample_index)
         if entry is None or entry["samples"] is None:
             return
@@ -5137,6 +5219,7 @@ class ProgramEditorWindow(QMainWindow):
         finally:
             self.main_tabs.setEnabled(True)
             self.waveform_view.set_loading(False)
+            self.sample_edit_progress.setVisible(False)
 
     def _perform_sample_edit_demo(
         self,
@@ -5163,7 +5246,7 @@ class ProgramEditorWindow(QMainWindow):
         step_seconds = total_seconds / steps
         for step in range(1, steps + 1):
             current = total * step // steps
-            self._on_sample_receive_progress(
+            self._on_sample_edit_progress(
                 current, total, f"{action_label} sample (demo)"
             )
             QApplication.processEvents()
@@ -5235,7 +5318,7 @@ class ProgramEditorWindow(QMainWindow):
             sds_encoder.write_wav_file(temp_path, new_samples, framerate, bit_depth=16)
 
             progress_connection = sampler_controller.transfer_progress.connect(
-                lambda current, total: self._on_sample_receive_progress(
+                lambda current, total: self._on_sample_edit_progress(
                     current, total, f'{action_label} "{original_name}"'
                 )
             )

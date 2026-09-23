@@ -1945,13 +1945,16 @@ def _stub_demo_audio(editor, monkeypatch, samples, framerate=44100):
     )
 
 
-def test_trim_and_reverse_buttons_disabled_until_audio_loaded(editor, qapp, monkeypatch):
+def test_trim_reverse_and_fade_buttons_disabled_until_audio_loaded(
+    editor, qapp, monkeypatch
+):
     editor.sample_list_widget.setCurrentRow(0)
     editor._worker.wait_until_idle()
     _pump_until(qapp, lambda: editor.waveform_view.has_header())
 
     assert editor.trim_sample_button.isEnabled() is False
     assert editor.reverse_sample_button.isEnabled() is False
+    assert editor.fade_sample_button.isEnabled() is False
 
     monkeypatch.setenv("AKAISDS_DEMO_SAMPLER", "1")
     _stub_demo_audio(editor, monkeypatch, [0] * 500)
@@ -1959,11 +1962,13 @@ def test_trim_and_reverse_buttons_disabled_until_audio_loaded(editor, qapp, monk
 
     assert editor.trim_sample_button.isEnabled() is True
     assert editor.reverse_sample_button.isEnabled() is True
+    assert editor.fade_sample_button.isEnabled() is True
 
     editor.sample_list_widget.setCurrentRow(-1)
 
     assert editor.trim_sample_button.isEnabled() is False
     assert editor.reverse_sample_button.isEnabled() is False
+    assert editor.fade_sample_button.isEnabled() is False
 
 
 def test_confirm_trim_sample_does_nothing_when_markers_cover_whole_sample(
@@ -2128,6 +2133,151 @@ def test_trim_sample_while_loop_is_off_clamps_the_frozen_loop_first(
     assert (entry["start"], entry["loop_start"], entry["loop_end"], entry["end"]) == (
         0, 0, 0, 50,
     )
+
+
+# --- Samples tab: Fade In/Out button -----------------------------------------
+# Mirrors Trim/Reverse's own shape exactly (confirmation dialog ->
+# _perform_sample_edit -> core.sample_editing.fade_in_out_samples) - see
+# AGENTS.md for the trapezoid design discussion.
+
+
+def test_fade_sample_in_demo_mode_fades_the_lead_in_out_and_keeps_markers(
+    editor, qapp, monkeypatch
+):
+    # fades the LEAD-IN/LEAD-OUT around [start, end], not the region
+    # itself - see fade_in_out_samples' own corrected (2026-09-23)
+    # docstring and the AGENTS.md design discussion
+    import ui.program_editor_window as pew
+
+    monkeypatch.setenv("AKAISDS_DEMO_SAMPLER", "1")
+    _stub_demo_audio(editor, monkeypatch, [1000] * 500)
+    editor.sample_list_widget.setCurrentRow(0)
+    editor._worker.wait_until_idle()
+    _pump_until(qapp, lambda: editor.waveform_view.has_header())
+    editor._load_sample_waveform()
+
+    editor.waveform_view.set_marker("start", 50)
+    editor.waveform_view.set_marker("loop_start", 100)
+    editor.waveform_view.set_marker("loop_end", 200)
+    editor.waveform_view.set_marker("end", 450)
+
+    monkeypatch.setattr(
+        pew.QMessageBox, "question", lambda *a, **k: pew.QMessageBox.StandardButton.Yes
+    )
+    monkeypatch.setattr(pew, "_DEMO_MS_PER_WORD", 0.001)
+
+    editor._confirm_fade_sample()
+
+    entry = editor._sample_waveform_cache[0]
+    assert entry["samples"][0] == 0  # silence at frame 0 (lead-in start)
+    assert entry["samples"][50] == 1000  # full volume exactly at Start
+    assert entry["samples"][250] == 1000  # [start, end] itself - untouched
+    assert entry["samples"][450] == 1000  # full volume exactly at End
+    assert entry["samples"][499] == 0  # silence at the last frame (lead-out end)
+    # unlike Trim/Reverse, Fade never resizes the buffer or moves a marker
+    assert len(entry["samples"]) == 500
+    assert (entry["start"], entry["loop_start"], entry["loop_end"], entry["end"]) == (
+        50, 100, 200, 450,
+    )
+
+
+def test_confirm_fade_sample_does_nothing_when_start_end_cover_whole_sample(
+    editor, qapp, monkeypatch
+):
+    monkeypatch.setenv("AKAISDS_DEMO_SAMPLER", "1")
+    _stub_demo_audio(editor, monkeypatch, list(range(500)))
+    editor.sample_list_widget.setCurrentRow(0)
+    editor._worker.wait_until_idle()
+    _pump_until(qapp, lambda: editor.waveform_view.has_header())
+    editor._load_sample_waveform()  # Start/End already default to 0/frame_count-1
+    before = dict(editor._sample_waveform_cache[0])
+
+    editor._confirm_fade_sample()  # nothing to fade - no lead-in or lead-out
+
+    assert editor._sample_waveform_cache[0] == before
+
+
+def test_fade_sample_does_nothing_when_declined(editor, qapp, monkeypatch):
+    import ui.program_editor_window as pew
+
+    monkeypatch.setenv("AKAISDS_DEMO_SAMPLER", "1")
+    _stub_demo_audio(editor, monkeypatch, list(range(500)))
+    editor.sample_list_widget.setCurrentRow(0)
+    editor._worker.wait_until_idle()
+    _pump_until(qapp, lambda: editor.waveform_view.has_header())
+    editor._load_sample_waveform()
+    before = dict(editor._sample_waveform_cache[0])
+
+    monkeypatch.setattr(
+        pew.QMessageBox, "question", lambda *a, **k: pew.QMessageBox.StandardButton.No
+    )
+    editor._confirm_fade_sample()
+
+    assert editor._sample_waveform_cache[0] == before
+
+
+# --- Samples tab: small Trim/Reverse/Fade progress bar next to Zoom --------
+# The full-width bar under Trim/Reverse was removed for ordinary sample
+# loading (redundant with the progressively-filling waveform - see
+# AGENTS.md), but Trim/Reverse/Fade SEND already-loaded audio back out with
+# no such visual of their own, so a small one lives next to the zoom
+# controls just for these three - per direct user request.
+
+
+def test_sample_edit_progress_bar_shows_during_trim_and_hides_after(
+    editor, qapp, monkeypatch
+):
+    import ui.program_editor_window as pew
+
+    monkeypatch.setenv("AKAISDS_DEMO_SAMPLER", "1")
+    _stub_demo_audio(editor, monkeypatch, list(range(500)))
+    editor.sample_list_widget.setCurrentRow(0)
+    editor._worker.wait_until_idle()
+    _pump_until(qapp, lambda: editor.waveform_view.has_header())
+    editor._load_sample_waveform()
+
+    editor.waveform_view.set_marker("start", 0)
+    editor.waveform_view.set_marker("end", 400)
+
+    assert editor.sample_edit_progress.isHidden() is True
+
+    monkeypatch.setattr(
+        pew.QMessageBox, "question", lambda *a, **k: pew.QMessageBox.StandardButton.Yes
+    )
+    monkeypatch.setattr(pew, "_DEMO_MS_PER_WORD", 0.001)
+
+    shown_during = []
+    real_edit_progress = editor._on_sample_edit_progress
+
+    def _recording(current, total, label):
+        real_edit_progress(current, total, label)
+        # .isHidden(), not .isVisible() - the editor fixture never calls
+        # .show(), so .isVisible() is unconditionally False regardless of
+        # setVisible() - see AGENTS.md
+        shown_during.append(not editor.sample_edit_progress.isHidden())
+
+    monkeypatch.setattr(editor, "_on_sample_edit_progress", _recording)
+
+    editor._confirm_trim_sample()
+
+    assert shown_during and all(shown_during)  # visible on every tick
+    assert editor.sample_edit_progress.isHidden() is True  # hidden again after
+
+
+def test_sample_edit_progress_bar_stays_hidden_during_ordinary_sample_load(
+    editor, qapp, monkeypatch
+):
+    import ui.program_editor_window as pew
+
+    monkeypatch.setenv("AKAISDS_DEMO_SAMPLER", "1")
+    monkeypatch.setattr(pew, "_DEMO_MS_PER_WORD", 0.001)
+    editor.sample_list_widget.setCurrentRow(0)
+    editor._worker.wait_until_idle()
+    _pump_until(qapp, lambda: editor.waveform_view.has_header())
+
+    editor._load_sample_waveform()
+
+    assert editor.sample_edit_progress.isHidden() is True
 
 
 def test_trim_sample_does_nothing_when_declined(editor, qapp, monkeypatch):

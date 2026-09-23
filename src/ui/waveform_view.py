@@ -56,7 +56,46 @@ def build_envelope(samples, width):
         hi_i = max(lo_i + 1, ((x + 1) * n) // width)
         chunk = samples[lo_i:hi_i]
         envelope.append((min(chunk), max(chunk)))
-    return envelope
+    return _bridge_envelope_gaps(envelope)
+
+
+def _bridge_envelope_gaps(envelope):
+    """Extends each column's (lo, hi) range just enough to touch its
+    immediate neighbour's, closing the visual gap paintEvent's bar-drawing
+    loop otherwise leaves whenever two adjacent columns' ranges don't
+    overlap.
+
+    Each column only draws a single VERTICAL line (lo to hi) - nothing
+    connects one column to the next - so this only ever looked continuous
+    because a typical loud/busy waveform's adjacent columns happen to
+    overlap in range. A column whose few samples all sit in a narrow, LOW-
+    variance range (a decaying tail, a quiet passage - exactly what a user
+    zooming in on one showed via screenshots) can leave real daylight
+    between its own bar and the next one's on screen even though the
+    underlying waveform is perfectly continuous - the classic "dashed,
+    disconnected-looking" min/max bar chart artifact.
+
+    Only ever nudges the edge nearer the gap on the CURRENT column, never
+    the previous one (already drawn) and never both edges of the same
+    column - genuine overlap needs no bridging at all, so every column
+    whose range already touches its neighbour's is returned unchanged.
+    Operates on amplitude pairs, not y-pixel coordinates - paintEvent's
+    y = mid_y - amplitude * scale mapping is a strictly decreasing LINEAR
+    function of amplitude, so a gap (or its absence) in amplitude space is
+    the exact same gap (or its absence) in y-space, no separate pixel-
+    space version of this needed.
+    """
+    bridged = []
+    prev_lo = prev_hi = None
+    for lo, hi in envelope:
+        if prev_hi is not None:
+            if lo > prev_hi:
+                lo = prev_hi
+            elif hi < prev_lo:
+                hi = prev_lo
+        bridged.append((lo, hi))
+        prev_lo, prev_hi = lo, hi
+    return bridged
 
 
 def frame_for_x(x, width, view_start, view_length):

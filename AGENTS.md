@@ -1162,6 +1162,150 @@ worth trading off against the step size used for everyday zoom levels.
 flat constant - verified directly by reverting the fix and re-running
 them).
 
+### Loop type gating: markers/spinboxes/tint disappear, don't just grey out
+
+Added 2026-09-23, per direct user request. When the current sample's
+`SPTYPE` is "No looping" or "One-shot" (`_SPTYPE_VALUES_WITHOUT_LOOP =
+{2, 3}` in `program_editor_window.py`), the loop has no meaning, so
+`_set_loop_markers_enabled(enabled)` greys the `loop_start`/`loop_end`
+spinboxes AND their legend swatches, and calls
+`WaveformView.set_loop_enabled(enabled)`, which makes `loop_start`/
+`loop_end` **not draw at all** on the canvas (not just greyed -
+`paintEvent`'s marker loop skips them outright) and excludes them from
+`_markers_within_hit_radius` so they can't be dragged either. The
+loop-region teal tint in the waveform trace itself
+(`_waveform_zone_color`) also reverts to plain accent. Getting the
+disabled *look* right needed a separate fix: `style.qss.template`'s
+`QComboBox, QSpinBox, QDoubleSpinBox` rule hardcodes `background-color`/
+`color`, which silently defeats Fusion's own automatic disabled-greying
+(a QSS property once set for the base selector wins over the style's
+built-in `:disabled` palette unless `:disabled` is spelled out too) - a
+`QComboBox:disabled, QSpinBox:disabled, QDoubleSpinBox:disabled` rule was
+added alongside the existing `QPushButton:disabled`/`QLineEdit:disabled`
+ones to fix this app-wide, not just for these two spinboxes.
+
+**Dragging Start/End while the loop is off freezes `loop_start`/
+`loop_end` instead of pushing them.** `WaveformView._push_marker` is a
+thin wrapper around the module-level `push_marker`: when the dragged/typed
+marker is `start` or `end` and `self._loop_enabled` is `False`, it runs
+the push against the reduced order `("start", "end")` only, leaving
+`loop_start`/`loop_end` completely untouched even if the moved marker
+crosses over them - deliberately breaking `push_marker`'s own `start <=
+loop_start <= loop_end <= end` invariant while the loop is off, since the
+user's own gut-feeling ask was "loop points shouldn't get silently
+dragged around by an unrelated trim while they're not even visible."
+Re-enabling the loop (`set_loop_enabled(True)`) then calls
+`_reconcile_loop_into_range` once, which clamps `loop_start`/`loop_end`
+back into `[start, end]` (a plain `min(max(x, start), end)` per edge -
+monotonic, so it can never flip `loop_start <= loop_end` since that
+already held the last time the loop was live) and emits `markers_changed`
+so the spinboxes resync; `program_editor_window.py`'s
+`_set_loop_markers_enabled` diffs old vs. new markers around that call and
+schedules the `LOOPAT1`/`LLNGTH1` write only if reconciliation actually
+moved something.
+
+**This reintroduced the exact bug class `trim_samples`/`reverse_samples`
+already assumed couldn't happen** - their own docstrings state loop
+markers are always within `[start, end]` on entry, which the freeze above
+can now violate while the loop is off. Fixed by
+`WaveformView.markers_with_loop_in_range()` (a *non-mutating* clamped
+view of `.markers()`) - `_perform_sample_edit` in
+`program_editor_window.py` reads from this instead of `.markers()`
+directly, so Trim/Reverse/Fade always get sane input regardless of
+whether the loop happens to be on, without permanently un-freezing the
+actual stored loop points the way turning the loop back on does.
+
+### Sample-load progress: removed, then partly brought back
+
+The full-width `QProgressBar` that used to sit under Trim/Reverse
+(`sample_load_progress`) was removed 2026-09-23 for ordinary sample-audio
+*loading* - redundant with both the waveform's own progressive fill (see
+"Progressive waveform loading" above) and the status bar, which already
+carried the raw frame count on every tick. `_on_sample_receive_progress`
+now takes a `label` (whatever static "why the interface is frozen"
+message was already showing at that call site) and writes a live
+`"{label} - {percentage}% ({current}/{total} frames)"` to the status bar
+instead of driving a bar widget.
+
+**Trim/Reverse/Fade got a small bar back**, per direct user follow-up
+request: unlike loading, sending already-loaded audio back out (the
+`transfer_progress`/demo-pacing-loop path in
+`_perform_sample_edit_real`/`_perform_sample_edit_demo`) has no
+progressively-filling waveform of its own - the existing audio just sits
+there static until the whole send/delete/rename pipeline finishes - so a
+small visual still earns its keep there. `sample_edit_progress` (fixed
+140px wide, hidden by default) lives next to the Zoom controls (the
+user's own suggested spot), driven by `_on_sample_edit_progress` (calls
+`_on_sample_receive_progress` for the shared status-bar text, then also
+updates the small bar) - ordinary loading never calls this, only
+Trim/Reverse/Fade's own progress callbacks do, so the bar stays hidden
+for a plain double-click load.
+
+### Waveform bar rendering: bridging gaps between low-variance columns
+
+Added 2026-09-23, per a user's own zoomed-in screenshots showing a
+decaying/quiet tail rendering as disconnected dashes rather than a
+continuous trace. `paintEvent`'s min/max bar mode (used whenever
+`view_length > width` - see "Zero-crossing line, and connected samples at
+high zoom" above for the other, already-continuous `view_length <= width`
+mode) draws only a single VERTICAL line per pixel column - nothing
+connects one column to the next. A loud/busy waveform's adjacent columns
+happen to overlap in range often enough to read as continuous anyway, but
+a column whose few samples all sit in a narrow, low-variance range (a
+decaying tail, a quiet passage) can leave real daylight between its own
+bar and the next one's even though the underlying audio is perfectly
+continuous - the classic min/max-bar-chart gap artifact.
+
+Fixed by `_bridge_envelope_gaps` (`waveform_view.py`, plain function,
+`build_envelope` now always runs its own output through it before
+returning): walks the envelope once, and whenever a column's range
+doesn't overlap the *previous* column's, nudges the one edge nearer the
+gap (never both, never the already-drawn previous column) just far enough
+to touch it. Operates on `build_envelope`'s own amplitude `(lo, hi)`
+pairs, not y-pixel coordinates - `paintEvent`'s `y = mid_y - amplitude *
+scale` mapping is a strictly decreasing *linear* function of amplitude,
+so a gap in amplitude space is the exact same gap in y-space, no separate
+pixel-space version needed. Never shrinks a column's own genuine peak/
+trough (only ever extends the edge nearer a neighbour's gap outward), and
+is a no-op for anything that already overlaps - `_draw_connected_samples`
+(the other, higher-zoom rendering path) is unaffected since it never
+reads `self._envelope` at all.
+
+### Fade In/Out: fades the lead-in/lead-out AROUND [start, end], not inside it
+
+Added 2026-09-23, per direct user request - design settled via an
+explicit options discussion rather than guessed, then corrected the same
+day after the first shipped version turned out to fade the wrong region.
+A single "Fade In/Out" button (next to Trim/Reverse) applies BOTH
+directions in one pass, not two separate buttons or a direction prompt.
+`core/sample_editing.py`'s `fade_in_out_samples(samples, start,
+loop_start, loop_end, end)` - same 5-arg-in/5-tuple-out shape as
+`trim_samples`/`reverse_samples`, so `_perform_sample_edit` needed zero
+changes to support it.
+
+**First version faded the first/last 10% of `[start, end]` itself** (a
+trapezoid inside the marked playback region) - matched the design
+discussion's own preview sketch, but not what the user actually meant.
+Corrected immediately after real use showed it: the user's actual intent
+is a linear ramp from silence at frame 0 up to full volume exactly AT the
+Start marker (the lead-in - everything before Start, which per the
+waveform tint's own "resident but never actually plays" reasoning isn't
+otherwise touched by anything else on this page), and a mirror-image ramp
+from full volume exactly AT the End marker down to silence at the
+buffer's own last frame (the lead-out). **`[start, end]` itself is left
+completely untouched** - both ramps merely happen to reach gain 1.0 at
+its own two edges. `start == 0` (nothing before Start) or `end ==
+frame_count - 1` (nothing after End) skips that ramp outright rather than
+dividing by zero; `_confirm_fade_sample`'s own "nothing to do" guard is
+`start == 0 and end == frame_count - 1` together, same shape as
+`_confirm_trim_sample`'s. Every marker still comes back UNCHANGED either
+way - fading only scales sample values in place, never resizes or
+reorders the buffer.
+
+If you're reading this while auditing the fade math and it looks
+backwards from what you'd expect a "fade in the marked region" feature to
+do, it isn't backwards - re-read this section before "fixing" it.
+
 ## Testing
 
 `TESTING.md` currently undersells this a little - as of this note there's also

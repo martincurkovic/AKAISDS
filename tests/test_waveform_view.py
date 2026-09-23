@@ -16,6 +16,7 @@ from ui import theme
 from ui.waveform_view import (
     _MARKER_ORDER,
     WaveformView,
+    _bridge_envelope_gaps,
     build_envelope,
     frame_for_x,
     push_marker,
@@ -40,6 +41,68 @@ def test_build_envelope_covers_the_full_sample_range():
 
 def test_build_envelope_handles_no_samples():
     assert build_envelope([], width=10) == [(0, 0)] * 10
+
+
+# --- _bridge_envelope_gaps: no more disconnected-looking dashes at some ------
+# zoom levels. Per direct user report (screenshots of zooming in on a
+# decaying tail): the bar-drawing loop only draws a VERTICAL line per
+# column, nothing connects one column to the next, so two adjacent columns
+# whose (lo, hi) ranges don't overlap read as a visible gap even though the
+# underlying waveform is continuous. build_envelope now runs every result
+# through this before returning it.
+
+
+def test_bridge_closes_a_gap_between_two_non_overlapping_columns():
+    # column 0 covers [0, 10], column 1 covers [50, 60] - a real gap
+    bridged = _bridge_envelope_gaps([(0, 10), (50, 60)])
+    assert bridged[0] == (0, 10)
+    # column 1's lower edge is pulled down to touch column 0's upper edge -
+    # its own hi (60, the genuine peak) is never touched
+    assert bridged[1] == (10, 60)
+
+
+def test_bridge_does_not_touch_columns_that_already_overlap():
+    envelope = [(0, 20), (15, 40), (35, 50)]
+    assert _bridge_envelope_gaps(envelope) == envelope
+
+
+def test_bridge_pulls_the_edge_nearer_the_gap_in_either_direction():
+    # a descending gap (column 1 sits BELOW column 0) needs its upper edge
+    # pulled up instead, not its lower edge pulled down
+    bridged = _bridge_envelope_gaps([(50, 60), (0, 10)])
+    assert bridged[0] == (50, 60)
+    assert bridged[1] == (0, 50)
+
+
+def test_bridge_cascades_through_a_whole_run_of_gaps():
+    # three columns, each a real gap above the last - every gap closes,
+    # not just the first one
+    bridged = _bridge_envelope_gaps([(0, 5), (20, 25), (50, 55)])
+    assert bridged == [(0, 5), (5, 25), (25, 55)]
+
+
+def test_bridge_never_shrinks_a_columns_own_extreme_value():
+    # bridging must never make a genuine peak/trough disappear - only ever
+    # extend an edge outward (toward the gap it's bridging), never touch
+    # the OTHER edge, which is what would actually erase a real peak
+    bridged = _bridge_envelope_gaps([(0, 5), (100, 200), (5, 10)])
+    assert bridged[1][1] == 200  # the peak itself is untouched
+    assert bridged[1][0] == 5  # only the lower edge was pulled down to bridge
+
+
+def test_build_envelope_bridges_gaps_between_flat_alternating_columns():
+    # a deliberately worst-case repro of the reported bug: each column's
+    # own chunk is perfectly CONSTANT (lo == hi, zero variance), and
+    # consecutive columns alternate between two far-apart constant values -
+    # every single column boundary is a real gap without bridging, the
+    # same "narrow low-variance column next to another one" shape a user's
+    # own screenshots showed on a quiet/decaying part of a real waveform,
+    # just exaggerated to guarantee the repro rather than rely on luck
+    samples = ([100] * 20 + [-100] * 20) * 5  # 10 columns of 20 samples, width=10
+    envelope = build_envelope(samples, width=10)
+    assert len(envelope) == 10
+    for (lo0, hi0), (lo1, hi1) in zip(envelope, envelope[1:]):
+        assert max(lo0, lo1) <= min(hi0, hi1), "adjacent columns must touch or overlap"
 
 
 # --- frame_for_x / x_for_frame (inverses of each other) ------------------------
