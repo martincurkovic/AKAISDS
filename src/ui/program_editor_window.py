@@ -1176,18 +1176,50 @@ class ProgramEditorWindow(QMainWindow):
         kg_mod_grid = QGridLayout()
         kg_mod_grid.setHorizontalSpacing(14)
         kg_mod_grid.setVerticalSpacing(10)
-        # max slot count of any row below (Filter Frequency) - see the
+        # max slot count of any row below (Filter Freq.) - see the
         # Program tab's identical header call above for why
         kg_header_rows = self._build_mod_matrix_amount_header(kg_mod_grid, 3)
+        # "Filter Freq.", not "Filter Frequency" - matches the Program
+        # tab's own row label for the same destination exactly (see its
+        # own _build_mod_matrix_row call further down)
         self._build_mod_matrix_amount_row(
             kg_mod_grid,
             kg_header_rows + 0,
-            "Filter Frequency",
+            "Filter Freq.",
             kg_filt1_col,
             kg_filt2_col,
             kg_filt3_col,
         )
 
+        # Pitch: two slots sharing one row, same hardware order as the
+        # front panel's own PITCHMOD1/PITCHMOD2 pages (see AGENTS.md's
+        # "MODULATING PITCH" investigation notes) - slot 1 is the fixed,
+        # always-on LFO1 route (L_PTCH; NOT part of the 3-slot assignable
+        # matrix, same idea as the fixed MWLDEP/PRSDEP/VELDEP fields
+        # already on the hardware for LFO1 depth - no source combo, since
+        # the source is always LFO1), slot 2 is the genuinely assignable
+        # one (MODVPITCH, source mirrored from the Program tab). Two
+        # separate single-slot rows used to make this look like two
+        # unrelated destinations rather than one "Pitch" facility with two
+        # inputs - per direct user request.
+        self.lfo1_to_pitch_knob = self._build_mod_amount_knob()
+        lfo1_to_pitch_knob_row, self.lfo1_to_pitch_value_label = (
+            self._build_knob_value_row(self.lfo1_to_pitch_knob)
+        )
+        self._wire_knob_write(
+            self.lfo1_to_pitch_knob,
+            "L_PTCH",
+            "keygroup",
+            keygroup_index_getter=self.keygroup_list.currentRow,
+        )
+        # "LFO1" label + knob, side by side - same (source, amount) shape
+        # as _build_mod_amount_column_with_source_mirror's real mirror
+        # slots, but a plain label instead (see
+        # _build_mod_fixed_source_label's own comment on why)
+        lfo1_to_pitch_col = QHBoxLayout()
+        lfo1_to_pitch_col.setSpacing(6)
+        lfo1_to_pitch_col.addWidget(self._build_mod_fixed_source_label("LFO1"))
+        lfo1_to_pitch_col.addLayout(lfo1_to_pitch_knob_row)
         (
             kg_pitch_col,
             self.mod_pitch_amount_knob,
@@ -1199,7 +1231,7 @@ class ProgramEditorWindow(QMainWindow):
             keygroup_index_getter=self.keygroup_list.currentRow,
         )
         self._build_mod_matrix_amount_row(
-            kg_mod_grid, kg_header_rows + 1, "Pitch (assignable)", kg_pitch_col
+            kg_mod_grid, kg_header_rows + 1, "Pitch", lfo1_to_pitch_col, kg_pitch_col
         )
 
         (
@@ -1212,32 +1244,19 @@ class ProgramEditorWindow(QMainWindow):
             "keygroup",
             keygroup_index_getter=self.keygroup_list.currentRow,
         )
+        # "Amplitude", in SLOT 3 (not slot 1) - matches where this exact
+        # destination (AMP MOD3, the keygroup-scoped 3rd loudness slot)
+        # sits on the Program tab's own "Loudness" row: slots 1/2 there
+        # are MODSAMP1/MODSAMP2 (program-level, amount included), slot 3
+        # is this one (source mirrored, amount here) - see that row's own
+        # _build_mod_matrix_row call further down
         self._build_mod_matrix_amount_row(
-            kg_mod_grid, kg_header_rows + 2, "Loudness (slot 3)", kg_amp3_col
-        )
-
-        # L_PTCH is NOT part of the 3-slot assignable matrix - it's a
-        # separate, always-on LFO1-to-pitch route (a fixed vibrato depth),
-        # same idea as the fixed MWLDEP/PRSDEP/VELDEP fields already on the
-        # hardware for LFO1 depth (not yet exposed here either). No source
-        # dropdown needed since the source is always LFO1.
-        self.lfo1_to_pitch_knob = self._build_mod_amount_knob()
-        lfo1_to_pitch_col, self.lfo1_to_pitch_value_label = self._build_knob_value_row(
-            self.lfo1_to_pitch_knob
-        )
-        self._wire_knob_write(
-            self.lfo1_to_pitch_knob,
-            "L_PTCH",
-            "keygroup",
-            keygroup_index_getter=self.keygroup_list.currentRow,
-        )
-        self._build_mod_matrix_amount_row(
-            kg_mod_grid, kg_header_rows + 3, "Pitch (LFO1)", lfo1_to_pitch_col
+            kg_mod_grid, kg_header_rows + 2, "Amplitude", None, None, kg_amp3_col
         )
 
         kg_mod_footnote = QLabel(
-            "Sources for these (shown above, read-only) are chosen on the "
-            "Program tab's Modulation card, shared by every keygroup in "
+            "Mod sources are chosen on the "
+            "Program tab's mod matrix, shared by every keygroup in "
             "this program."
         )
         kg_mod_footnote.setWordWrap(True)
@@ -1245,12 +1264,12 @@ class ProgramEditorWindow(QMainWindow):
         kg_mod_footnote_row = QHBoxLayout()
         kg_mod_footnote_row.addWidget(kg_mod_footnote)
 
-        # 4 destination rows above (Filter Frequency, Pitch (assignable),
-        # Loudness (slot 3), Pitch (LFO1)); this card is Amount-only (one
-        # column per slot, no Source column - see _ModMatrixGrid's own
-        # docstring), so a boundary sits between every column
+        # 3 destination rows above (Filter Freq., Pitch, Amplitude); this
+        # card is Amount-only (one column per slot, no Source column - see
+        # _ModMatrixGrid's own docstring), so a boundary sits between
+        # every column
         kg_mod_matrix = _ModMatrixGrid(
-            kg_mod_grid, kg_header_rows, 4, [(0, 1), (1, 2), (2, 3)]
+            kg_mod_grid, kg_header_rows, 3, [(0, 1), (1, 2), (2, 3)]
         )
         kg_mod_grid_row = QVBoxLayout()
         kg_mod_grid_row.setContentsMargins(0, 0, 0, 0)
@@ -1826,7 +1845,7 @@ class ProgramEditorWindow(QMainWindow):
         )
 
         mod_footnote = QLabel(
-            "Loudness slot 3, Filter Frequency and Pitch amounts are set "
+            "Loudness slot 3, Filter Freq. and Pitch amounts are set "
             "per keygroup, on the Keygroup tab's own Modulation card."
         )
         mod_footnote.setWordWrap(True)
@@ -1835,7 +1854,7 @@ class ProgramEditorWindow(QMainWindow):
         mod_footnote_row.addWidget(mod_footnote)
 
         # 7 destination rows above (Pan, Loudness, LFO1 Rate/Depth/Delay,
-        # Filter Frequency, Pitch); boundaries separate the label column
+        # Filter Freq., Pitch); boundaries separate the label column
         # from Slot 1, then Slot 1|2 and Slot 2|3 - never a slot's own
         # Source|Amount pair (see _ModMatrixGrid's own docstring)
         mod_matrix = _ModMatrixGrid(mod_grid, header_rows, 7, [(0, 1), (2, 3), (4, 5)])
@@ -3166,6 +3185,24 @@ class ProgramEditorWindow(QMainWindow):
         combo.setEnabled(False)
         return combo
 
+    def _build_mod_fixed_source_label(self, text):
+        # a PLAIN label, not a disabled combo, for a mod slot whose source
+        # can never be reassigned at all (e.g. the Pitch row's own Slot 1 -
+        # always LFO1, see L_PTCH) - per direct user request: a disabled
+        # combo there would still look like a choice that merely isn't
+        # available right now, the same way every other mirror combo on
+        # this card reads; a plain label makes "this one was never a
+        # choice to begin with" unambiguous instead. Same fixed width as
+        # the real mirror combos (130px, matching _build_mod_source_combo's
+        # own setMaximumWidth) so the row still lines up visually with
+        # every other slot's own source column, and the same muted colour
+        # as their disabled text so it reads as part of the same
+        # read-only row rather than ordinary page text.
+        label = QLabel(text)
+        label.setFixedWidth(130)
+        label.setStyleSheet(f"color: {theme.current_palette()['text_disabled']};")
+        return label
+
     def _build_mod_amount_column_with_source_mirror(
         self, amount_param, amount_region, *, keygroup_index_getter=None
     ):
@@ -3174,7 +3211,9 @@ class ProgramEditorWindow(QMainWindow):
         # LEFT of the amount knob instead of showing the amount alone -
         # for the subset of Keygroup-tab destinations that DO have an
         # assignable (if program-wide) source, unlike the fixed-source
-        # Pitch (LFO1) row. Side by side, same (source, amount) reading
+        # LFO1 pitch slot (see the "Pitch" row's own construction - that
+        # slot is built with _build_mod_amount_knob directly, no mirror).
+        # Side by side, same (source, amount) reading
         # order as the Program tab's own real slots - per direct user
         # request, after an initial vertically-stacked version (avoiding
         # widening each slot column) read wrong compared to that
@@ -3272,9 +3311,10 @@ class ProgramEditorWindow(QMainWindow):
         # column, under _build_mod_matrix_amount_header's "Slot N" columns.
         # Centered (AlignHCenter, not just AlignVCenter) so every amount
         # knob lines up under its centered "Slot N" label instead of
-        # hugging the cell's left edge. label_width defaults to fitting the
-        # Modulation cards' longest destination name ("Filter Frequency")
-        # - ENV2's Rate/Level grid below passes a much narrower one, since
+        # hugging the cell's left edge. label_width defaults to a size
+        # generous enough for the Keygroup tab's own Modulation card
+        # destination names ("Filter Freq.", "Pitch", "Amplitude") - ENV2's
+        # Rate/Level grid below passes a much narrower one instead, since
         # "Rate"/"Level" are short and the whole point of that grid is to
         # not waste width on a label column sized for something else.
         label = QLabel(label_text)

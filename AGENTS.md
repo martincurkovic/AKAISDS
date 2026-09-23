@@ -1471,6 +1471,24 @@ up.
 
 ### Keygroup tab's Modulation card: read-only source mirrors
 
+**Confirmed on real hardware, 2026-09-23**: right after this was built,
+the S2000 Operator's Manual's own screen-flow prose ("Each keygroup has
+these modulation facilities separately available", page 112's "A keygroup
+has two pitch modulation inputs") raised a direct question of whether
+Filter Mod/Pitch Mod/Amp Mod 3's SOURCE is actually per-keygroup on real
+hardware, not program-wide the way this section (and `s3k.params`)
+assume. A read-only diagnostic script
+(`test_scripts/keygroup_mod_source_diagnostic.py` - gitignored, not in
+this repo's history) read a program's header and two keygroups' own
+headers before and after changing Filter Mod 1's source on the actual
+sampler's front panel: only the PROGRAM header's byte changed; neither
+keygroup's own header moved a single byte. Confirmed: the source really
+is program-wide, exactly as implemented below. See
+`test_scripts/MOD_SOURCE_KEYGROUP_INVESTIGATION.md` for the full
+investigation (evidence on both sides, the diagnostic script, and the
+hardware result) if this question ever comes up again - don't re-litigate
+it from the manual's prose alone without reading that first.
+
 Added 2026-09-23, per direct user request. The Keygroup tab's Modulation
 card is Amount-only (see "LFO2 and the modulation matrix" above) -
 Filter Frequency/Pitch (assignable)/Loudness (slot 3)'s actual SOURCE is
@@ -1532,6 +1550,50 @@ confirming the mirror combo is a pure visual echo (never wired through
 `_wire_combo_write`, so editing it directly - which nothing in the UI
 actually lets a user do, since it's disabled - schedules no hardware
 write).
+
+**Row labels/slot layout, tightened up 2026-09-23, per direct user
+request** - now 3 rows instead of 4:
+
+- "Filter Frequency" -> **"Filter Freq."**, matching the Program tab's
+  own row label for the exact same destination (`_build_mod_matrix_row`'s
+  own call further down) verbatim - it used to say something different
+  from its own program-level counterpart for no real reason.
+- **"Pitch"** is now ONE row with two slots, not two separate single-slot
+  rows - Slot 1 is the fixed, always-on LFO1 route (`L_PTCH`; no source
+  combo, since the source is always LFO1 - built with
+  `_build_mod_amount_knob` directly), Slot 2 is the genuinely assignable
+  one (`MODVPITCH`, source mirrored from the Program tab). This matches
+  the real hardware's own PITCHMOD1/PITCHMOD2 order (see this file's own
+  mod-source investigation notes above) and reads as one "Pitch" facility
+  with two inputs instead of two unrelated destinations that happened to
+  both be about pitch.
+- "Loudness (slot 3)" -> **"Amplitude"**, and its mirror+knob now sit in
+  **Slot 3** specifically (`_build_mod_matrix_amount_row(...,  None,
+  None, kg_amp3_col)`), not Slot 1 - matching exactly where this same
+  destination (`MODSAMP3`/`MODVAMP3`, the keygroup-scoped 3rd loudness
+  slot) sits on the Program tab's own "Loudness" row (slots 1/2 there are
+  `MODSAMP1`/`MODSAMP2`, program-level; slot 3 is this one). Column
+  position now lines up across both tabs for the same field, not just the
+  row label.
+
+`_ModMatrixGrid`'s own `data_row_count` argument for this card dropped
+from 4 to 3 to match - if you add a row back, remember to bump it again
+(nothing catches a mismatch there except the card silently drawing one
+row shading band short or long).
+
+**Pitch Slot 1 shows a plain "LFO1" label, not a disabled combo** -
+`_build_mod_fixed_source_label` (new, alongside
+`_build_mod_source_mirror_combo`), added right after the row split above
+per direct follow-up request. A disabled combo there would still read as
+"a choice that merely isn't available right now," same as every genuine
+mirror combo on this card - misleading for a slot whose source was never
+assignable at all (`L_PTCH` is always LFO1). Same fixed width (130px) as
+the real mirror combos so the row still lines up, and the same muted
+`text_disabled` colour so it reads as part of the same read-only row -
+but a bare `QLabel`, no border/background, specifically so it looks
+unmistakably different from something you could click. If another
+never-assignable mod slot ever gets added to either Modulation card, use
+this helper for it rather than a disabled combo.
 
 ## Testing
 
