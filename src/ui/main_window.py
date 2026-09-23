@@ -18,7 +18,7 @@ _UPDATE_CHECK_INTERVAL_SECONDS = 24 * 60 * 60
 class ApplicationWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("AKAI SDS")
+        self.setWindowTitle("AKAISDS")
         self.setMinimumSize(1030, 600)
 
         # owns the real mido ports for the app's lifetime
@@ -66,7 +66,9 @@ class ApplicationWindow(QMainWindow):
         # shortcut at all, so it silently does nothing there. Ctrl+, is the
         # closest equivalent on those platforms.
         settings_action.setShortcut(
-            QKeySequence.StandardKey.Preferences if sys.platform == "darwin" else "Ctrl+,"
+            QKeySequence.StandardKey.Preferences
+            if sys.platform == "darwin"
+            else "Ctrl+,"
         )
         settings_action.triggered.connect(self.dashboard_view.open_settings_dialog)
         file_menu.addAction(settings_action)

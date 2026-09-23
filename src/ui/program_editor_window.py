@@ -3258,6 +3258,15 @@ class ProgramEditorWindow(QMainWindow):
         value_label.setFixedWidth(28)
 
         widget = QWidget()
+        # a bare QWidget otherwise picks up the global `QWidget {
+        # background-color: ${bg} }` rule (style.qss.template) - the
+        # page's own background, not whatever ancestor this actually sits
+        # in. Invisible when a caller places this directly on the page,
+        # but this one lands inside a QWidget#sectionCard (${bg_panel},
+        # a different shade - see _build_section_card), which showed up
+        # as a visible colored box behind the knob+label - same fix as
+        # _add_keygroup_row's own row_widget below.
+        widget.setStyleSheet("background: transparent;")
         row = QHBoxLayout(widget)
         row.setContentsMargins(0, 0, 0, 0)
         row.setSpacing(4)
@@ -3318,16 +3327,6 @@ class ProgramEditorWindow(QMainWindow):
 
         self.waveform_view = WaveformView()
 
-        # only shown while a sample's audio is actually being received -
-        # see _on_sample_receive_progress/_load_sample_waveform. The
-        # waveform view's own placeholder text already says loading will
-        # freeze the interface; this is what proves it's actually making
-        # progress rather than just hung, since receive_progress is real
-        # data from the transfer (word count in vs. total), not a fake
-        # animation.
-        self.sample_load_progress = QProgressBar()
-        self.sample_load_progress.setVisible(False)
-
         # zoom controls + horizontal pan scrollbar - WaveformView also
         # answers to Ctrl+wheel (zoom, centered on the cursor - this is
         # what a macOS trackpad pinch gesture arrives as too) and plain
@@ -3371,6 +3370,14 @@ class ProgramEditorWindow(QMainWindow):
         # currently shown, so the spinboxes never move
         scrollbar_container = QWidget()
         scrollbar_container.setFixedHeight(self.waveform_scrollbar.sizeHint().height())
+        # otherwise this bare QWidget picks up the global `QWidget {
+        # background-color: ${bg} }` rule (style.qss.template) - the
+        # page's own background - rather than blending into the
+        # QWidget#sectionCard (${bg_panel}, a different shade) it
+        # actually sits in here, so the reserved space read as a visible
+        # colored bar even while the real scrollbar inside was hidden.
+        # Same fix as _build_multi_part_knob's own widget above.
+        scrollbar_container.setStyleSheet("background: transparent;")
         scrollbar_container_layout = QVBoxLayout(scrollbar_container)
         scrollbar_container_layout.setContentsMargins(0, 0, 0, 0)
         scrollbar_container_layout.addWidget(self.waveform_scrollbar)
@@ -3576,7 +3583,6 @@ class ProgramEditorWindow(QMainWindow):
         loop_controls_content.addLayout(legend_row)
         loop_controls_content.addLayout(loop_meta_row)
         loop_controls_content.addLayout(sample_edit_row)
-        loop_controls_content.addWidget(self.sample_load_progress)
         loop_controls_card = self._build_section_card(
             "Loop Controls", loop_controls_content
         )
@@ -4586,12 +4592,14 @@ class ProgramEditorWindow(QMainWindow):
         fd, temp_path = tempfile.mkstemp(suffix=".wav", prefix="akaisds_sample_")
         os.close(fd)
         # real word-count-in/total progress from the transfer itself, not a
-        # fake animation - shown next to the waveform (see
+        # fake animation - live in the status bar (see
         # _on_sample_receive_progress) so a slow dump reads as "in
         # progress" instead of "hung", since the rest of the app really is
         # frozen the whole time this runs
         progress_connection = sampler_controller.receive_progress.connect(
-            self._on_sample_receive_progress
+            lambda current, total: self._on_sample_receive_progress(
+                current, total, f"Loading audio for sample {sample_index}"
+            )
         )
         # each already-decoded packet's worth of sample words, live -
         # feeds the same progressive-envelope path _fetch_demo_sample_audio
@@ -4632,10 +4640,23 @@ class ProgramEditorWindow(QMainWindow):
             except OSError:
                 pass
 
-    def _on_sample_receive_progress(self, current, total):
-        self.sample_load_progress.setRange(0, max(total, 1))
-        self.sample_load_progress.setValue(current)
-        self.sample_load_progress.setVisible(True)
+    def _on_sample_receive_progress(self, current, total, label):
+        # replaces the progress bar that used to live under Trim/Reverse
+        # (removed 2026-09-23) - redundant once the waveform itself
+        # progressively fills in during the same transfer (see AGENTS.md's
+        # "Progressive waveform loading") and the status bar already
+        # carried the raw frame count on every tick anyway (demo mode's
+        # own loop used to set that separately - now unified into this one
+        # call so every progress source, real or demo, gets the same
+        # percentage readout). *label* is whatever static "why the
+        # interface is frozen" message was already showing at each call
+        # site (see _load_sample_waveform/_perform_sample_edit) - this
+        # replaces it with a live, ticking one for the rest of the
+        # operation instead of leaving it static the whole time.
+        percentage = int(current * 100 / total) if total else 0
+        self.status_bar.showMessage(
+            f"{label} - {percentage}% ({current}/{total} frames)"
+        )
 
     def _on_sample_chunk_received(self, chunk):
         # SamplerController.sample_chunk_received - see
@@ -4665,12 +4686,12 @@ class ProgramEditorWindow(QMainWindow):
         # paced with real sleeps to roughly match how long an actual SDS
         # transfer takes (see _DEMO_MS_PER_WORD) rather than a token delay -
         # the whole point of demo mode here is letting someone evaluate
-        # this feature's real-world feel (the progress bar, the frozen
-        # interface, how long "double-click and wait" really is) without
-        # needing hardware in front of them. ~200ms between progress ticks
-        # is a reasonable UI update cadence regardless of how long the
-        # whole thing takes; never fewer than 6 ticks even for a short
-        # sample, so the progress bar still visibly moves rather than
+        # this feature's real-world feel (the live status bar readout, the
+        # frozen interface, how long "double-click and wait" really is)
+        # without needing hardware in front of them. ~200ms between
+        # progress ticks is a reasonable UI update cadence regardless of
+        # how long the whole thing takes; never fewer than 6 ticks even
+        # for a short sample, so it still visibly moves rather than
         # jumping straight to done.
         total = len(samples)
         total_seconds = total * _DEMO_MS_PER_WORD / 1000
@@ -4679,21 +4700,19 @@ class ProgramEditorWindow(QMainWindow):
         last_pushed = 0
         for step in range(1, steps + 1):
             current = total * step // steps
-            self._on_sample_receive_progress(current, total)
+            self._on_sample_receive_progress(
+                current, total, f"Loading audio for sample {sample_index} (demo)"
+            )
             # same progressive-envelope path the real hardware fetch feeds
             # from SamplerController.sample_chunk_received - demo mode has
             # no packets of its own (the whole file is already in hand
             # from the read above), so this just reveals it prefix by
-            # prefix on the same cadence the progress bar already ticks
-            # on, so someone evaluating this without hardware sees the
-            # real feature, not just its progress bar
+            # prefix on the same cadence the status bar readout above
+            # already ticks on, so someone evaluating this without
+            # hardware sees the real feature, not just its progress text
             if sample_index == self.sample_list_widget.currentRow():
                 self.waveform_view.append_live_samples(samples[last_pushed:current])
             last_pushed = current
-            self.status_bar.showMessage(
-                f"Loading audio for sample {sample_index} (demo) - "
-                f"{current}/{total} frames..."
-            )
             QApplication.processEvents()
             time.sleep(step_seconds)
 
@@ -4987,7 +5006,6 @@ class ProgramEditorWindow(QMainWindow):
         finally:
             self.main_tabs.setEnabled(True)
             self.waveform_view.set_loading(False)
-            self.sample_load_progress.setVisible(False)
 
     def _confirm_trim_sample(self):
         sample_index = self.sample_list_widget.currentRow()
@@ -5119,7 +5137,6 @@ class ProgramEditorWindow(QMainWindow):
         finally:
             self.main_tabs.setEnabled(True)
             self.waveform_view.set_loading(False)
-            self.sample_load_progress.setVisible(False)
 
     def _perform_sample_edit_demo(
         self,
@@ -5146,9 +5163,8 @@ class ProgramEditorWindow(QMainWindow):
         step_seconds = total_seconds / steps
         for step in range(1, steps + 1):
             current = total * step // steps
-            self._on_sample_receive_progress(current, total)
-            self.status_bar.showMessage(
-                f"{action_label} sample (demo) - {current}/{total} frames..."
+            self._on_sample_receive_progress(
+                current, total, f"{action_label} sample (demo)"
             )
             QApplication.processEvents()
             time.sleep(step_seconds)
@@ -5219,7 +5235,9 @@ class ProgramEditorWindow(QMainWindow):
             sds_encoder.write_wav_file(temp_path, new_samples, framerate, bit_depth=16)
 
             progress_connection = sampler_controller.transfer_progress.connect(
-                self._on_sample_receive_progress
+                lambda current, total: self._on_sample_receive_progress(
+                    current, total, f'{action_label} "{original_name}"'
+                )
             )
 
             def _start_send():

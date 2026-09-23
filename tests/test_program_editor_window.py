@@ -1398,6 +1398,58 @@ def test_load_sample_waveform_progressively_fills_the_envelope_in_demo_mode(
     assert editor.waveform_view.has_waveform() is True
 
 
+# --- Samples tab: load/Trim/Reverse progress lives in the status bar -------
+# The progress bar under Trim/Reverse was removed 2026-09-22 - redundant
+# with the waveform's own progressive fill and the frame count the status
+# bar already carried - replaced by a live percentage appended to whatever
+# message was already explaining the freeze. See _on_sample_receive_progress.
+
+
+def test_on_sample_receive_progress_writes_a_percentage_to_the_status_bar(editor):
+    editor._on_sample_receive_progress(50, 200, "Loading audio for sample 0")
+    message = editor.status_bar.currentMessage()
+    assert "25%" in message
+    assert "50/200 frames" in message
+    assert message.startswith("Loading audio for sample 0")
+
+
+def test_on_sample_receive_progress_handles_zero_total_without_crashing(editor):
+    editor._on_sample_receive_progress(0, 0, "Loading audio for sample 0")
+    assert "0%" in editor.status_bar.currentMessage()
+
+
+def test_loading_sample_audio_in_demo_mode_shows_a_live_percentage(
+    editor, qapp, monkeypatch
+):
+    import ui.program_editor_window as pew
+
+    monkeypatch.setenv("AKAISDS_DEMO_SAMPLER", "1")
+    monkeypatch.setattr(pew, "_DEMO_MS_PER_WORD", 0.001)
+
+    editor.sample_list_widget.setCurrentRow(0)
+    editor._worker.wait_until_idle()
+    _pump_until(qapp, lambda: editor.waveform_view.has_header())
+
+    messages = []
+    real_append = editor.waveform_view.append_live_samples
+
+    def _recording_append(chunk):
+        messages.append(editor.status_bar.currentMessage())
+        real_append(chunk)
+
+    monkeypatch.setattr(editor.waveform_view, "append_live_samples", _recording_append)
+
+    editor._load_sample_waveform()
+
+    assert len(messages) >= 6
+    assert all("%" in m and "(demo)" in m for m in messages)
+    # a genuinely live readout, not the same string repeated - the
+    # percentage actually climbs across ticks
+    percentages = [int(m.split("- ")[1].split("%")[0]) for m in messages]
+    assert percentages == sorted(percentages)
+    assert percentages[0] < percentages[-1]
+
+
 def test_demo_sample_frame_count_matches_the_real_fixture_length(editor):
     # _demo_sample_frame_count is the fix for a real bug a screen
     # recording caught (see the two tests below and AGENTS.md's
@@ -1982,6 +2034,45 @@ def test_trim_sample_in_demo_mode_shrinks_the_cached_sample_and_waveform(
     assert editor.waveform_view.markers() == {
         "start": 0, "loop_start": 50, "loop_end": 200, "end": 300,
     }
+
+
+def test_trim_sample_in_demo_mode_shows_a_live_percentage_in_the_status_bar(
+    editor, qapp, monkeypatch
+):
+    # the progress bar that used to sit under Trim/Reverse is gone (see
+    # AGENTS.md) - _perform_sample_edit_demo's own pacing loop now drives
+    # a live percentage in the status bar instead, same as loading audio
+    # in the first place does
+    import ui.program_editor_window as pew
+
+    monkeypatch.setenv("AKAISDS_DEMO_SAMPLER", "1")
+    _stub_demo_audio(editor, monkeypatch, list(range(500)))
+    editor.sample_list_widget.setCurrentRow(0)
+    editor._worker.wait_until_idle()
+    _pump_until(qapp, lambda: editor.waveform_view.has_header())
+    editor._load_sample_waveform()
+
+    editor.waveform_view.set_marker("start", 0)
+    editor.waveform_view.set_marker("end", 400)
+
+    monkeypatch.setattr(
+        pew.QMessageBox, "question", lambda *a, **k: pew.QMessageBox.StandardButton.Yes
+    )
+    monkeypatch.setattr(pew, "_DEMO_MS_PER_WORD", 0.001)
+
+    messages = []
+    real_progress = editor._on_sample_receive_progress
+
+    def _recording_progress(current, total, label):
+        real_progress(current, total, label)
+        messages.append(editor.status_bar.currentMessage())
+
+    monkeypatch.setattr(editor, "_on_sample_receive_progress", _recording_progress)
+
+    editor._confirm_trim_sample()
+
+    assert len(messages) >= 6
+    assert all("%" in m and m.startswith('Trim sample (demo)') for m in messages)
 
 
 def test_trim_sample_while_loop_is_off_clamps_the_frozen_loop_first(
