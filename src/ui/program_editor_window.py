@@ -2992,28 +2992,15 @@ class ProgramEditorWindow(QMainWindow):
             # SHNAME is deliberately not written here - new_name already
             # went out as the send's own filename, so the duplicate is
             # already named correctly, unlike _perform_sample_edit_real's
-            # temp-name-then-rename sequence.
-            #
-            # STUNO reads from the live sample_tune_spinbox rather than
-            # entry["stuno"] like the other three fields do, because that
-            # cache key isn't consistently raw: _on_sample_detail_loaded
-            # stores the raw STUNO byte, but _on_sample_tune_changed (a
-            # live edit) overwrites it with the spinbox's SEMITONES value
-            # instead - re-converting an already-raw value through
-            # _semitones_to_sample_tune_offset would send garbage. The
-            # spinbox itself has no such ambiguity - it's always semitones,
-            # for whichever sample is currently selected - so read that
-            # directly instead of trusting the cache for this one field.
+            # temp-name-then-rename sequence. entry["stuno"] is safe to
+            # read directly like the other three fields - it's always raw
+            # now (see _on_sample_tune_changed's own comment on the bug
+            # this used to be).
             for param_name, value in (
                 ("SPTYPE", entry["sptype"]),
                 ("SPITCH", entry["spitch"]),
                 ("SHLTO", entry["shlto"]),
-                (
-                    "STUNO",
-                    self._semitones_to_sample_tune_offset(
-                        self.sample_tune_spinbox.value()
-                    ),
-                ),
+                ("STUNO", entry["stuno"]),
                 ("SSTART", markers["start"]),
                 ("SMPEND", markers["end"]),
                 ("LOOPAT1", markers["loop_end"]),
@@ -4814,13 +4801,22 @@ class ProgramEditorWindow(QMainWindow):
         sample_index = self.sample_list_widget.currentRow()
         if sample_index < 0:
             return
+        # raw, not the spinbox's own semitones value - entry["stuno"] must
+        # always hold the same representation _on_sample_detail_loaded
+        # stores (a fresh header read), or a later reselect
+        # (_on_sample_selected's cache-restore branch) redisplays a stale
+        # semitones value run back through _sample_tune_offset_to_semitones
+        # as if it were still raw - this was a real, confirmed-on-hardware
+        # bug (see AGENTS.md's "Duplicate Sample" section): set Tune to
+        # +40.00st, reselect the sample, and it redisplayed as +0.16st.
+        raw_value = self._semitones_to_sample_tune_offset(value)
         entry = self._sample_waveform_cache.get(sample_index)
         if entry is not None:
-            entry["stuno"] = value
+            entry["stuno"] = raw_value
         self._schedule_write(
             "STUNO",
             "sample",
-            self._semitones_to_sample_tune_offset(value),
+            raw_value,
             index=sample_index,
             debounce_key="STUNO",
         )

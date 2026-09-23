@@ -1874,7 +1874,34 @@ def test_changing_sample_tune_writes_stuno_in_raw_units(editor, qapp):
     _pump_until(qapp, lambda: bridge.set_parameter_calls)
 
     assert ("STUNO", 0, 65024, 0) in bridge.set_parameter_calls
-    assert editor._sample_waveform_cache[0]["stuno"] == pytest.approx(-2.0)
+    # raw, matching the wire write above - not the spinbox's own semitones
+    # value (see _on_sample_tune_changed's own comment on the display bug
+    # that used to cause: a stale semitones value in this cache key,
+    # redisplayed through _sample_tune_offset_to_semitones as if raw)
+    assert editor._sample_waveform_cache[0]["stuno"] == 65024
+
+
+def test_sample_tune_survives_a_reselect_after_a_live_edit(editor, qapp):
+    # regression test for a real bug confirmed on the user's own hardware:
+    # editing Tune used to leave entry["stuno"] holding the spinbox's own
+    # SEMITONES value rather than the raw byte _on_sample_detail_loaded
+    # would have stored there - reselecting the sample later fed that
+    # stale semitones value through _sample_tune_offset_to_semitones as if
+    # it were still raw, double-converting it. Setting +40.00st reappeared
+    # as +0.16st. See _on_sample_tune_changed's own comment.
+    editor.sample_list_widget.setCurrentRow(0)
+    editor._worker.wait_until_idle()
+    _pump_until(qapp, lambda: editor.waveform_view.has_header())
+
+    editor.sample_tune_spinbox.setValue(40.0)
+    editor.sample_tune_spinbox.editingFinished.emit()
+    editor._worker.wait_until_idle()
+
+    editor.sample_list_widget.setCurrentRow(1)
+    editor._worker.wait_until_idle()
+    editor.sample_list_widget.setCurrentRow(0)
+
+    assert editor.sample_tune_spinbox.value() == pytest.approx(40.0, abs=0.01)
 
 
 def test_sample_tune_spinbox_range_is_plus_minus_fifty(editor):
@@ -2641,10 +2668,7 @@ def test_duplicate_sample_real_mode_happy_path_sends_and_copies_metadata(
     )
     entry = editor._sample_waveform_cache[0]
     entry["shlto"] = 7
-    entry["stuno"] = 999  # deliberately stale/irrelevant - see below
-    editor.sample_tune_spinbox.blockSignals(True)
-    editor.sample_tune_spinbox.setValue(-5.0)
-    editor.sample_tune_spinbox.blockSignals(False)
+    entry["stuno"] = editor._semitones_to_sample_tune_offset(-5.0)  # raw, like a real load
 
     editor._confirm_duplicate_sample()
 
@@ -2665,9 +2689,6 @@ def test_duplicate_sample_real_mode_happy_path_sends_and_copies_metadata(
     assert header_calls["SPTYPE"] == 0
     assert header_calls["SPITCH"] == 60
     assert header_calls["SHLTO"] == 7
-    # STUNO is read from the live spinbox (-5.00st), not entry["stuno"]
-    # (999) - see _perform_duplicate_sample_real's own comment on why
-    # that cache key can't be trusted for this one field
     assert header_calls["STUNO"] == editor._semitones_to_sample_tune_offset(-5.0)
     assert header_calls["SSTART"] == 10
     assert header_calls["SMPEND"] == 90

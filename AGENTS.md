@@ -706,21 +706,37 @@ Duplicate Program/Keygroup**, just through `_set_sample_edit_buttons_enabled`
 rather than `_update_list_context_actions_enabled` - this button needs
 `has_waveform()` too, which only that method already reacts to.
 
-**Found, not fixed, while building this**: `entry["stuno"]` in
-`_sample_waveform_cache` is NOT consistently raw. `_on_sample_detail_loaded`
-stores the raw `STUNO` byte; `_on_sample_tune_changed` (a live tune edit)
-overwrites the same key with the spinbox's SEMITONES value instead. Reselecting
-a previously-tune-edited sample (`_on_sample_selected`'s cache-restore
-branch) feeds that semitones value back into `_update_sample_meta_controls`,
-which unconditionally treats it as raw and re-converts it - a real,
-reachable display bug, not just theoretical. `SPTYPE`/`SPITCH`/`SHLTO`
-don't have this problem (their live-edit handlers store the same raw
-representation the load handler does - only `STUNO` has an actual unit
-conversion in between). Worked around here by reading
-`sample_tune_spinbox.value()` directly instead of `entry["stuno"]` (see
-`_perform_duplicate_sample_real`'s own comment) - the underlying cache
-inconsistency is still there and would bite the next thing that trusts
-`entry["stuno"]` blindly.
+### Sample tune redisplaying wrong after a reselect: `entry["stuno"]` wasn't consistently raw
+
+Found while building Duplicate Sample above, and **confirmed on real
+hardware the same day**: `entry["stuno"]` in `_sample_waveform_cache` was
+NOT consistently raw. `_on_sample_detail_loaded` stores the raw `STUNO`
+byte; `_on_sample_tune_changed` (a live tune edit) overwrote the same key
+with the spinbox's SEMITONES value instead. Reselecting a previously-
+tune-edited sample (`_on_sample_selected`'s cache-restore branch) fed that
+semitones value back into `_update_sample_meta_controls`, which
+unconditionally treats it as raw and re-converts it through
+`_sample_tune_offset_to_semitones` a second time. Reproduced on hardware
+exactly as predicted: set Tune to `+40.00st`, click a different sample
+then back, and it redisplayed as `+0.16st` - the actual hardware write was
+always correct (`_schedule_write` never used the cache), this was a
+display-only bug. `SPTYPE`/`SPITCH`/`SHLTO` never had this problem (their
+live-edit handlers already stored the same raw representation the load
+handler does - only `STUNO` has an actual unit conversion in between).
+
+**Fixed** by making `_on_sample_tune_changed` store the raw encoded value
+(`_semitones_to_sample_tune_offset(value)`) into `entry["stuno"]` instead
+of the bare spinbox value - same representation the header-load path
+already used, so the cache key means one thing everywhere now.
+`_perform_duplicate_sample_real`'s own `STUNO` read went back to
+`entry["stuno"]` directly (matching `SPTYPE`/`SPITCH`/`SHLTO`) now that
+it's trustworthy - no longer needs its own special-cased live-widget
+workaround. `test_sample_tune_survives_a_reselect_after_a_live_edit`
+reproduces the exact hardware repro (edit -> reselect away -> reselect
+back -> still correct) as a regression test;
+`test_changing_sample_tune_writes_stuno_in_raw_units` was also updated -
+it used to assert the OLD (buggy) semitones-in-the-cache behavior as if
+it were correct.
 
 ### Loop-point markers push each other instead of stopping dead
 
