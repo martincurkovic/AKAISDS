@@ -171,10 +171,10 @@ before assuming the spacing value is wrong.
 ## Transfer Dashboard: dropped/opened files get a stable local copy
 
 Added 2026-09-23. Dragging a "cropped" region out of a sample browser
-(Sononym on macOS) into the queue added the row fine, but Send later
+into the queue added the row fine, but Send later
 failed with "No such file or directory". Root cause: `create_local_row`
 only stored the dropped file's PATH; the actual read happens later, at
-send time. Sononym renders the crop to a real OS temp file for the drag
+send time. Sample editors render the crop to a real OS temp file for the drag
 and deletes it shortly after drop - well before Send is clicked. Qt's
 cross-platform `QMimeData.urls()` can't distinguish "temporary" from
 "permanent" paths (that's an AppKit-level file-promise protocol), so the
@@ -209,7 +209,7 @@ queued copy still reads.
 
 ### Follow-up: 32-bit float WAVs read as silence
 
-Found 2026-09-23, once the stable-copy fix let a real Sononym export
+Found 2026-09-23, once the stable-copy fix let a real sample editor export
 survive long enough to actually send - it played as silence. Root cause:
 `sds_encoder.read_wav_samples`/`read_wav_channels` called `sf.read(path,
 dtype="int16", always_2d=True)` - `soundfile`'s direct float→int16
@@ -217,7 +217,7 @@ coercion is not reliable for every source. Confirmed against the user's
 actual file: read as `int16` it peaked at 1 (of 32767); the same file
 read as `float64` and scaled by hand (`round(x * 32768)`, clipped to
 `[-32768, 32767]`) peaked at 22724, matching its real content. Not
-Sononym-specific - a `libsndfile` behavior that can affect any 32-bit
+sample editor-specific - a `libsndfile` behavior that can affect any 32-bit
 float WAV.
 
 Fixed by `_read_float_scaled_to_int16` (new; both functions funnel
@@ -421,6 +421,7 @@ both naively wrong the same direction) but the hardware reads a loop
 ~65536x too short. See `_LOOP_LENGTH_FIXED_POINT_SCALE`.
 
 **`STUNO`/`PRGNUM` raw-vs-display quirks, confirmed on hardware:**
+
 - `STUNO` (sample tune) is signed 1/256-semitone, same scale as `VTUNO` -
   but `s3k.params` declares it unsigned `0..65535`, so `encode_field`
   rejects a negative raw value. `_sample_tune_offset_to_semitones`/
@@ -633,6 +634,7 @@ invariant under this.
 
 **Why send-then-delete under a temp name** (`_perform_sample_edit_real`):
 two failure modes to design around:
+
 - Deleting the original before confirming the replacement sent would risk
   losing the sample if the send then failed - so replacement sends FIRST,
   original deletes only once confirmed resident.
@@ -823,6 +825,7 @@ filling waveform of its own - the audio sits static until send/delete/
 rename finishes. `sample_edit_progress` (140px, hidden by default) lives
 next to the Zoom controls, driven by `_on_sample_edit_progress` (which
 also calls `_on_sample_receive_progress` for the shared status-bar text)
+
 - ordinary loading never calls this, so the bar stays hidden for a plain
 double-click load.
 
@@ -918,6 +921,7 @@ needed adjusting.
 
 **Keeping the mirror in sync needs two mechanisms**, because of build
 order and how program loads avoid write-back loops:
+
 - **Live edits**: the Keygroup tab is built before the Program tab's
   source combos exist in `__init__`, so
   `combo.currentIndexChanged.connect(mirror.setCurrentIndex)` is wired
@@ -936,6 +940,7 @@ alone misses every load, the load-time sync alone misses live edits.
 never wired through `_wire_combo_write`).
 
 **Row labels/slots, tightened 2026-09-23** - now 3 rows, not 4:
+
 - "Filter Frequency" → **"Filter Freq."**, matching the Program tab's own
   label for the same destination.
 - **"Pitch"** is one row, two slots (was two separate rows): Slot 1 is

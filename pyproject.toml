@@ -18,4 +18,4 @@ dependencies = [
 dev = ["pytest>=9", "numpy>=2.5.1"]
 
 [tool.uv.sources]
-s3ked = { git = "https://github.com/lentferj/s3ked.git", rev = "38fb6fb70c8a7e5eca4d8b4a21d1aca632590653" }
+s3ked = { git = "https://github.com/lentferj/s3ked.git", rev = "cb93b2e28833ebfd20e3997edec9ac019ce6063e" }

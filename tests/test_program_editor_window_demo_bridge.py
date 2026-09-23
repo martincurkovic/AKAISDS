@@ -353,3 +353,164 @@ def test_bend_down_combo_above_12_reaches_hardware_via_the_range_override(
     )
 
     assert editor._failures.events == []
+
+
+def test_demo_bridge_mono_legato_combo_round_trips_through_real_encode_decode(
+    editor, qapp
+):
+    bridge = editor._demo_bridge
+    assert bridge.get_parameter(p.lookup("LEGATO", "program"), 0) != 1
+
+    editor.mono_legato_combo.setCurrentIndex(1)  # "On"
+    editor._flush_write("LEGATO")
+    editor._worker.wait_until_idle()
+    _pump_until(
+        qapp, lambda: bridge.get_parameter(p.lookup("LEGATO", "program"), 0) == 1
+    )
+
+    assert editor._failures.events == []
+
+
+def test_demo_bridge_program_number_display_offset_round_trips(editor, qapp):
+    # program_number_spinbox displays raw+1 and writes displayed-1 (see
+    # AGENTS.md's "STUNO/PRGNUM raw-vs-display quirks") - confirms that
+    # offset survives a real encode/decode round trip, not just FakeBridge
+    # recording whatever value it was handed.
+    bridge = editor._demo_bridge
+    editor.program_number_spinbox.setValue(5)  # -> raw PRGNUM 4
+    editor._flush_write("PRGNUM")
+    editor._worker.wait_until_idle()
+    _pump_until(
+        qapp, lambda: bridge.get_parameter(p.lookup("PRGNUM", "program"), 0) == 4
+    )
+
+    assert editor._failures.events == []
+
+
+# --- Samples tab: header math against the real dependency -------------------
+#
+# DemoBridge's own sample headers start entirely zeroed (SLNGTH included),
+# which collapses every marker/spinbox to a disabled frame-0 state the same
+# way AGENTS.md's "Sample loop type, root note, and rename/delete" section
+# describes - so these tests seed a plausible header directly through the
+# real bridge first (same shape FakeBridge's fixture data already uses),
+# then drive the UI exactly as a user would against real hardware.
+
+
+def _seed_sample_zero_header(bridge):
+    bridge.set_parameter(p.lookup("SLNGTH", "sample"), 0, 10000)
+    bridge.set_parameter(p.lookup("SSTART", "sample"), 0, 100)
+    bridge.set_parameter(p.lookup("SMPEND", "sample"), 0, 9999)
+    bridge.set_parameter(p.lookup("LOOPAT1", "sample"), 0, 8000)
+    bridge.set_parameter(p.lookup("LLNGTH1", "sample"), 0, 3000 * 65536)
+
+
+def test_demo_bridge_sample_loop_markers_round_trip_through_real_loopat1_llngth1_math(
+    editor, qapp
+):
+    # LOOPAT1 is the loop's END (not its start) and LLNGTH1 is 32.16 fixed
+    # point, not a plain frame count - see AGENTS.md's "Samples tab: loop
+    # points". Both the read-side derivation and the write-side re-encoding
+    # need to survive the real s3k.params encode_field/decode_field, not
+    # just FakeBridge echoing back whatever was handed to it.
+    bridge = editor._demo_bridge
+    _seed_sample_zero_header(bridge)
+
+    editor.sample_list_widget.setCurrentRow(0)
+    editor._worker.wait_until_idle()
+    _pump_until(qapp, lambda: editor.waveform_view.has_header())
+
+    assert editor.waveform_view.markers() == {
+        "start": 100, "loop_start": 5000, "loop_end": 8000, "end": 9999,
+    }
+
+    # drags "end" from 9999 to 6000 - pushes loop_end (8000) down to 6000
+    # along with it; loop_start (5000) is untouched
+    editor.waveform_view.set_marker("end", 6000)
+    m = editor.waveform_view.markers()
+    assert m == {"start": 100, "loop_start": 5000, "loop_end": 6000, "end": 6000}
+    editor._on_waveform_marker_committed(
+        "end", m["start"], m["loop_start"], m["loop_end"], m["end"]
+    )
+    editor._worker.wait_until_idle()
+    _pump_until(
+        qapp,
+        lambda: bridge.get_parameter(p.lookup("LLNGTH1", "sample"), 0) == 1000 * 65536,
+    )
+
+    assert bridge.get_parameter(p.lookup("SMPEND", "sample"), 0) == 6000
+    assert bridge.get_parameter(p.lookup("LOOPAT1", "sample"), 0) == 6000
+
+    # force a fresh header read (bypassing the cache) to also exercise the
+    # DECODE side against the values just written - closes the round trip
+    editor._worker.submit_sample_detail(0)
+    editor._worker.wait_until_idle()
+    _pump_until(
+        qapp,
+        lambda: editor.waveform_view.markers()
+        == {"start": 100, "loop_start": 5000, "loop_end": 6000, "end": 6000},
+    )
+
+    assert editor._failures.events == []
+
+
+def test_demo_bridge_sample_tune_negative_value_round_trips_through_real_sign_extension(
+    editor, qapp
+):
+    # STUNO is declared unsigned 0..65535 by s3k.params, with no automatic
+    # sign-extension on decode (unlike VTUNO/PTUNO/KGTUNO) - the app itself
+    # manually sign-extends on read and wraps to unsigned two's-complement
+    # on write (see _sample_tune_offset_to_semitones/
+    # _semitones_to_sample_tune_offset, AGENTS.md's "STUNO/PRGNUM raw-vs-
+    # display quirks"). This is the one field on this page where getting
+    # the real encode_field's range check wrong would surface immediately.
+    bridge = editor._demo_bridge
+    _seed_sample_zero_header(bridge)
+
+    editor.sample_list_widget.setCurrentRow(0)
+    editor._worker.wait_until_idle()
+    _pump_until(qapp, lambda: editor.waveform_view.has_header())
+
+    editor.sample_tune_spinbox.setValue(-10.0)
+    editor._commit_sample_tune()
+    editor._worker.wait_until_idle()
+    expected_raw = editor._semitones_to_sample_tune_offset(-10.0)
+    _pump_until(
+        qapp,
+        lambda: bridge.get_parameter(p.lookup("STUNO", "sample"), 0) == expected_raw,
+    )
+    # confirms the write actually wrapped to a real unsigned raw value, not
+    # a negative one encode_field would otherwise reject outright
+    assert expected_raw > 0
+
+    # force a fresh header read to exercise the manual sign-extension on
+    # the way back too
+    editor._worker.submit_sample_detail(0)
+    editor._worker.wait_until_idle()
+    _pump_until(
+        qapp,
+        lambda: editor.sample_tune_spinbox.value() == pytest.approx(-10.0, abs=0.01),
+    )
+
+    assert editor._failures.events == []
+
+
+def test_demo_bridge_sample_loop_type_and_root_note_round_trip(editor, qapp):
+    bridge = editor._demo_bridge
+    _seed_sample_zero_header(bridge)
+
+    editor.sample_list_widget.setCurrentRow(0)
+    editor._worker.wait_until_idle()
+    _pump_until(qapp, lambda: editor.waveform_view.has_header())
+
+    editor.sample_loop_type_combo.setCurrentIndex(2)  # "No looping"
+    editor.sample_root_note_spinbox.setValue(72)
+    editor._commit_sample_root_note()
+    editor._worker.wait_until_idle()
+    _pump_until(
+        qapp,
+        lambda: bridge.get_parameter(p.lookup("SPTYPE", "sample"), 0) == 2
+        and bridge.get_parameter(p.lookup("SPITCH", "sample"), 0) == 72,
+    )
+
+    assert editor._failures.events == []

@@ -249,6 +249,8 @@ class FakeBridge:
             return 55
         if param.name == "PORTYPE":
             return 1  # Time
+        if param.name == "LEGATO":
+            return 0  # Off
         keygroups = self._keygroups[program_index]
         if param.name == "GROUPS":
             return len(keygroups)
@@ -802,6 +804,19 @@ def test_lfo2_retrig_combo_loads_and_writes(editor, qapp):
     _pump_until(qapp, lambda: bridge.set_parameter_calls)
 
     assert bridge.set_parameter_calls[-1] == ("LFO2TRIG", 0, 0, 0)
+
+
+def test_mono_legato_combo_loads_and_writes(editor, qapp):
+    assert editor.mono_legato_combo.currentIndex() == 0
+    assert editor.mono_legato_combo.currentText() == "Off"
+
+    bridge = editor._bridge
+    editor.mono_legato_combo.setCurrentIndex(1)  # "On"
+    editor._flush_write("LEGATO")
+    editor._worker.wait_until_idle()
+    _pump_until(qapp, lambda: bridge.set_parameter_calls)
+
+    assert bridge.set_parameter_calls[-1] == ("LEGATO", 0, 1, 0)
 
 
 def test_modulation_pan_slot_loads_and_writes(editor, qapp):

@@ -40,7 +40,7 @@ def get_logger():
     try:
         LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
         handler = logging.handlers.RotatingFileHandler(
-            LOG_PATH, maxBytes=2_000_000, backupCount=3
+            LOG_PATH, maxBytes=8_000_000, backupCount=3
         )
         handler.setFormatter(
             logging.Formatter(
