@@ -270,14 +270,14 @@ def _sample_edit_temp_name(original_name):
     return (original_name.strip()[: NAME_LENGTH - len(suffix)] + suffix)[:NAME_LENGTH]
 
 
-def _program_duplicate_default_name(original_name):
-    # default name pre-filled into the "Duplicate Program..." dialog - same
-    # truncate-to-make-room-for-a-suffix shape as _sample_edit_temp_name
-    # above, but a real space rather than a hyphen (AKAI_CHARSET has one,
-    # nothing here needs to dodge it the way the sample temp name does) and
-    # no requirement to avoid the source program's own name - this is only
-    # ever a user-editable *suggestion* shown in the prompt, never sent to
-    # the hardware as-is the way the sample trim/reverse temp name is
+def _duplicate_default_name(original_name):
+    # default name pre-filled into the "Duplicate Program.../Duplicate
+    # Sample..." dialogs - same truncate-to-make-room-for-a-suffix shape as
+    # _sample_edit_temp_name above, but a real space rather than a hyphen
+    # (AKAI_CHARSET has one, nothing here needs to dodge it the way the
+    # sample trim/reverse temp name does) and no requirement to avoid the
+    # source's own name - this is only ever a user-editable *suggestion*
+    # shown in the prompt, never sent to the hardware as-is
     suffix = " COPY"
     return (original_name.strip()[: NAME_LENGTH - len(suffix)] + suffix)[:NAME_LENGTH]
 
@@ -2628,7 +2628,7 @@ class ProgramEditorWindow(QMainWindow):
             return
         source_index = self.program_list.currentRow()
         current_name = item.text()
-        default_name = _program_duplicate_default_name(current_name)
+        default_name = _duplicate_default_name(current_name)
         new_name = self._prompt_akai_name(
             "Duplicate Program", "New program name:", default_name
         )
@@ -2818,6 +2818,233 @@ class ProgramEditorWindow(QMainWindow):
         # but the index shift itself is the same problem a targeted
         # removal would get wrong)
         self._worker.submit_sample_list()
+
+    def _confirm_duplicate_sample(self):
+        # unlike Trim/Reverse/Fade/Normalise, this never touches the
+        # source sample at all - it only ever ADDS a new one - so it gets
+        # the lighter "Cancel from the name prompt IS the confirmation"
+        # treatment _confirm_duplicate_program already uses, not a second
+        # "this cannot be undone" warning on top
+        sample_index = self.sample_list_widget.currentRow()
+        if sample_index < 0 or not self.waveform_view.has_waveform():
+            return
+        entry = self._sample_waveform_cache.get(sample_index)
+        if entry is None or entry["samples"] is None:
+            return
+        item = self.sample_list_widget.currentItem()
+        current_name = item.text() if item is not None else ""
+        default_name = _duplicate_default_name(current_name)
+        new_name = self._prompt_akai_name(
+            "Duplicate Sample", "New sample name:", default_name
+        )
+        if new_name is None:
+            return
+        existing_names = [
+            self.sample_list_widget.item(i).text()
+            for i in range(self.sample_list_widget.count())
+        ]
+        if new_name in existing_names:
+            # same measured hardware behaviour _confirm_duplicate_program
+            # guards PRNAME against, but for a different reason here: DELS
+            # has no equivalent auto-delete-on-name-collision spec, but s3k
+            # itself documents keygroup zones resolving a sample by NAME,
+            # live, with no uniqueness enforced - two resident samples
+            # sharing a name would make every zone using it ambiguous (see
+            # AGENTS.md's "Trim/Reverse..." section)
+            QMessageBox.warning(
+                self,
+                "Duplicate Sample",
+                f'"{new_name}" is already in use by another resident '
+                "sample.\n\nTwo resident samples can't safely share a "
+                "name - pick a different one.",
+            )
+            return
+
+        sampler_controller = getattr(self._main_window, "sampler_controller", None)
+        if sampler_controller is None:
+            self.status_bar.showMessage(
+                "Can't duplicate sample - no Transfer Dashboard connection available"
+            )
+            return
+        if sampler_controller.is_transfer_busy():
+            self.status_bar.showMessage(
+                "Can't duplicate sample - a transfer is already in "
+                "progress on the Transfer Dashboard"
+            )
+            return
+
+        self.waveform_view.set_loading(True)
+        self.main_tabs.setEnabled(False)
+        self.status_bar.showMessage(
+            f'Duplicating "{current_name}" as "{new_name}" - this can '
+            "take a while and will freeze the interface..."
+        )
+        QApplication.processEvents()
+        try:
+            self._perform_duplicate_sample_real(
+                entry, sampler_controller, current_name, new_name
+            )
+        finally:
+            self.main_tabs.setEnabled(True)
+            self.waveform_view.set_loading(False)
+            self.sample_edit_progress.setVisible(False)
+
+    def _perform_duplicate_sample_real(
+        self, entry, sampler_controller, current_name, new_name
+    ):
+        # Simpler than _perform_sample_edit_real's replace-in-place dance:
+        # there's no original to delete and no name-collision window to
+        # dodge with a temp name (new_name was already confirmed distinct
+        # from every resident sample in _confirm_duplicate_sample) - just
+        # send the already-loaded audio under new_name directly, find
+        # where it landed, then copy the source's header metadata onto it
+        # (send_file_queue only ever sends AUDIO - without this the
+        # duplicate would land with whatever default loop points/tune/etc
+        # the sampler picks for a fresh sample, not an actual copy of the
+        # one it was duplicated from).
+        logger = debug_log.get_logger()
+        fd, temp_path = tempfile.mkstemp(suffix=".wav", prefix="akaisds_dup_")
+        os.close(fd)
+        try:
+            sds_encoder.write_wav_file(
+                temp_path, entry["samples"], entry["framerate"], bit_depth=16
+            )
+
+            progress_connection = sampler_controller.transfer_progress.connect(
+                lambda current, total: self._on_sample_edit_progress(
+                    current, total, f'Duplicate "{current_name}"'
+                )
+            )
+
+            def _start_send():
+                # returning exactly False here (send_file_queue declining
+                # to start) makes _wait_for_any_signal skip its own wait
+                # instead of hanging until timeout_ms=None's "forever"
+                return sampler_controller.send_file_queue(
+                    [
+                        {
+                            "filepath": temp_path,
+                            "name": new_name,
+                            "bit_depth": 16,
+                            "sample_rate": None,
+                            "mono": False,
+                        }
+                    ]
+                )
+
+            try:
+                which, args = self._wait_for_any_signal(
+                    [sampler_controller.transfer_finished],
+                    start=_start_send,
+                    timeout_ms=None,
+                )
+            finally:
+                sampler_controller.transfer_progress.disconnect(progress_connection)
+
+            if which is None or args is None:
+                logger.debug(
+                    "_perform_duplicate_sample_real: send_file_queue refused to start"
+                )
+                self.status_bar.showMessage(
+                    "Duplicate failed - couldn't start sending the sample"
+                )
+                return
+            if not args[0]:
+                logger.debug(
+                    f"_perform_duplicate_sample_real: send of {new_name!r} "
+                    "did not complete successfully"
+                )
+                self.status_bar.showMessage(
+                    f'Duplicate failed - couldn\'t send "{new_name}"'
+                )
+                return
+
+            # find the duplicate's index by name - nothing shifted
+            # underneath it the way a replace-in-place delete does, but
+            # its index still isn't known in advance, only looked up
+            which, args = self._wait_for_any_signal(
+                [self._worker.samples_loaded, self._worker.samples_load_failed],
+                start=self._worker.submit_sample_list,
+                timeout_ms=20000,
+            )
+            if which != 0:
+                self.status_bar.showMessage(
+                    f'"{new_name}" was sent successfully, but the sample '
+                    "list couldn't be refreshed to copy its loop points/"
+                    "metadata across - refresh manually."
+                )
+                return
+            samples_after_send = args[0]
+            if new_name not in samples_after_send:
+                logger.debug(
+                    f"_perform_duplicate_sample_real: {new_name!r} missing "
+                    f"from the reloaded list {samples_after_send!r}"
+                )
+                self.status_bar.showMessage(
+                    f'"{new_name}" was sent, but is missing from the '
+                    "reloaded sample list - check the sampler directly."
+                )
+                return
+            new_index = samples_after_send.index(new_name)
+
+            markers = self.waveform_view.markers()
+            loop_length_frames = markers["loop_end"] - markers["loop_start"]
+            # SHNAME is deliberately not written here - new_name already
+            # went out as the send's own filename, so the duplicate is
+            # already named correctly, unlike _perform_sample_edit_real's
+            # temp-name-then-rename sequence.
+            #
+            # STUNO reads from the live sample_tune_spinbox rather than
+            # entry["stuno"] like the other three fields do, because that
+            # cache key isn't consistently raw: _on_sample_detail_loaded
+            # stores the raw STUNO byte, but _on_sample_tune_changed (a
+            # live edit) overwrites it with the spinbox's SEMITONES value
+            # instead - re-converting an already-raw value through
+            # _semitones_to_sample_tune_offset would send garbage. The
+            # spinbox itself has no such ambiguity - it's always semitones,
+            # for whichever sample is currently selected - so read that
+            # directly instead of trusting the cache for this one field.
+            for param_name, value in (
+                ("SPTYPE", entry["sptype"]),
+                ("SPITCH", entry["spitch"]),
+                ("SHLTO", entry["shlto"]),
+                (
+                    "STUNO",
+                    self._semitones_to_sample_tune_offset(
+                        self.sample_tune_spinbox.value()
+                    ),
+                ),
+                ("SSTART", markers["start"]),
+                ("SMPEND", markers["end"]),
+                ("LOOPAT1", markers["loop_end"]),
+                (
+                    "LLNGTH1",
+                    loop_length_frames * _LOOP_LENGTH_FIXED_POINT_SCALE,
+                ),
+            ):
+                self._write_knob_value(
+                    param_name, "sample", value, keygroup_index=0, index=new_index
+                )
+
+            # one more reload so the sample list/zone combos reflect the
+            # new arrival, landing on it as the final selection
+            which, args = self._wait_for_any_signal(
+                [self._worker.samples_loaded, self._worker.samples_load_failed],
+                start=self._worker.submit_sample_list,
+                timeout_ms=20000,
+            )
+            self.status_bar.showMessage(
+                f'Duplicate complete: "{current_name}" -> "{new_name}"'
+            )
+            if which == 0:
+                final_samples = args[0]
+                if new_name in final_samples:
+                    self.sample_list_widget.setCurrentRow(final_samples.index(new_name))
+        finally:
+            try:
+                os.remove(temp_path)
+            except OSError:
+                pass
 
     def _on_keygroup_selected(self, current, previous):
         if current is None:
@@ -3787,6 +4014,19 @@ class ProgramEditorWindow(QMainWindow):
         sample_edit_row.addWidget(self.fade_sample_button)
         sample_edit_row.addWidget(self.normalize_sample_button)
         sample_edit_row.addStretch()
+        # right-aligned, and its own thing rather than a 5th button
+        # grouped with the four above - unlike them it never touches the
+        # source sample's own audio (see _confirm_duplicate_sample's own
+        # comment), it ADDS a new one, so it's not "cannot be undone" in
+        # the same destructive sense those four are
+        self.duplicate_sample_button = QPushButton("Duplicate Sample")
+        self.duplicate_sample_button.setToolTip(
+            "Send this sample's already-loaded audio to the sampler under "
+            "a new name, copying its loop points and tuning across."
+        )
+        self.duplicate_sample_button.setEnabled(False)
+        self.duplicate_sample_button.clicked.connect(self._confirm_duplicate_sample)
+        sample_edit_row.addWidget(self.duplicate_sample_button)
 
         # two section cards, same style as the Programs tab's own (see
         # _build_section_card) - one for the loop editor itself, one for
@@ -4472,6 +4712,13 @@ class ProgramEditorWindow(QMainWindow):
         self.reverse_sample_button.setEnabled(enabled)
         self.fade_sample_button.setEnabled(enabled)
         self.normalize_sample_button.setEnabled(enabled)
+        # Duplicate Sample needs the same loaded audio (it re-sends it
+        # under a new name - see its own construction comment) AND is
+        # unavailable in demo mode (DemoBridge has no add-sample
+        # primitive, same reasoning as _duplicate_program_action/
+        # _duplicate_keygroup_action in _update_list_context_actions_enabled)
+        demo_mode = bool(os.environ.get("AKAISDS_DEMO_SAMPLER"))
+        self.duplicate_sample_button.setEnabled(enabled and not demo_mode)
 
     def _update_sample_meta_controls(self, sptype, spitch, shlto=None, stuno=None):
         # sptype/spitch/shlto/stuno None means "nothing known about this

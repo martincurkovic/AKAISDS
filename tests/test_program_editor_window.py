@@ -2603,3 +2603,104 @@ def test_reverse_sample_real_mode_send_failure_leaves_original_untouched(
     message = editor.status_bar.currentMessage().lower()
     assert "failed" in message
     assert "not touched" in message
+
+
+def test_duplicate_sample_button_disabled_in_demo_mode(editor, monkeypatch):
+    # unlike Trim/Reverse/Fade/Normalise, Duplicate Sample is unavailable
+    # in demo mode entirely (DemoBridge has no add-sample primitive, same
+    # reasoning as _duplicate_program_action/_duplicate_keygroup_action) -
+    # this exercises the exact enabled-and-not-demo_mode condition in
+    # _set_sample_edit_buttons_enabled directly
+    monkeypatch.setenv("AKAISDS_DEMO_SAMPLER", "1")
+    editor._set_sample_edit_buttons_enabled(True)
+    assert editor.duplicate_sample_button.isEnabled() is False
+
+    monkeypatch.delenv("AKAISDS_DEMO_SAMPLER", raising=False)
+    editor._set_sample_edit_buttons_enabled(True)
+    assert editor.duplicate_sample_button.isEnabled() is True
+
+
+def test_duplicate_sample_real_mode_happy_path_sends_and_copies_metadata(
+    editor, qapp, monkeypatch
+):
+    # unlike Trim/Reverse/Fade/Normalise's replace-in-place dance, this
+    # never deletes or renames anything - it sends the loaded audio under
+    # a brand new name and then copies the source's header metadata
+    # (loop points, SPTYPE/SPITCH/SHLTO/STUNO) onto whatever index it
+    # landed at - see _perform_duplicate_sample_real's own comment
+    monkeypatch.delenv("AKAISDS_DEMO_SAMPLER", raising=False)
+    monkeypatch.setattr(editor, "_prompt_akai_name", lambda *a, **k: "SQUARE COPY")
+    bridge = editor._bridge
+    fake_sampler = FakeSamplerController(bridge)
+    editor._main_window.sampler_controller = fake_sampler
+
+    original_samples = list(range(100))
+    _select_sample_with_full_audio(  # sample 0 == "SQUARE"
+        editor, qapp, 0, original_samples,
+        {"start": 10, "loop_start": 30, "loop_end": 60, "end": 90},
+    )
+    entry = editor._sample_waveform_cache[0]
+    entry["shlto"] = 7
+    entry["stuno"] = 999  # deliberately stale/irrelevant - see below
+    editor.sample_tune_spinbox.blockSignals(True)
+    editor.sample_tune_spinbox.setValue(-5.0)
+    editor.sample_tune_spinbox.blockSignals(False)
+
+    editor._confirm_duplicate_sample()
+
+    # sent under the new name, original untouched (still resident, not
+    # renamed or deleted - the one thing that's genuinely different from
+    # every other sample-edit operation on this page)
+    assert len(fake_sampler.sent_entries) == 1
+    assert fake_sampler.sent_entries[0]["name"] == "SQUARE COPY"
+    assert fake_sampler.sent_entries[0]["samples"] == original_samples
+    assert "SQUARE" in bridge.sample_list()
+    assert "SQUARE COPY" in bridge.sample_list()
+    assert not any(c[0] == "SHNAME" for c in bridge.set_parameter_calls)
+
+    new_index = bridge.sample_list().index("SQUARE COPY")
+    header_calls = {
+        c[0]: c[2] for c in bridge.set_parameter_calls if c[1] == new_index
+    }
+    assert header_calls["SPTYPE"] == 0
+    assert header_calls["SPITCH"] == 60
+    assert header_calls["SHLTO"] == 7
+    # STUNO is read from the live spinbox (-5.00st), not entry["stuno"]
+    # (999) - see _perform_duplicate_sample_real's own comment on why
+    # that cache key can't be trusted for this one field
+    assert header_calls["STUNO"] == editor._semitones_to_sample_tune_offset(-5.0)
+    assert header_calls["SSTART"] == 10
+    assert header_calls["SMPEND"] == 90
+    assert header_calls["LOOPAT1"] == 60
+    assert header_calls["LLNGTH1"] == 30 * 65536
+
+    assert "complete" in editor.status_bar.currentMessage().lower()
+    assert editor.sample_list_widget.currentItem() is not None
+    assert editor.sample_list_widget.currentItem().text() == "SQUARE COPY"
+
+
+def test_duplicate_sample_refuses_a_name_already_in_use(editor, qapp, monkeypatch):
+    # two resident samples sharing a name is the exact hazard
+    # _perform_sample_edit_real's own temp-name dance exists to avoid -
+    # caught client-side before ever sending, same as
+    # _confirm_duplicate_program's own PRNAME collision guard
+    import ui.program_editor_window as pew
+
+    monkeypatch.delenv("AKAISDS_DEMO_SAMPLER", raising=False)
+    monkeypatch.setattr(editor, "_prompt_akai_name", lambda *a, **k: "SAWTOOTH")
+    # QMessageBox.warning() would otherwise block on a real modal dialog
+    # with nothing in an offscreen test to dismiss it
+    monkeypatch.setattr(pew.QMessageBox, "warning", lambda *a, **k: None)
+    bridge = editor._bridge
+    fake_sampler = FakeSamplerController(bridge)
+    editor._main_window.sampler_controller = fake_sampler
+
+    _select_sample_with_full_audio(  # sample 0 == "SQUARE"
+        editor, qapp, 0, list(range(50)),
+        {"start": 0, "loop_start": 10, "loop_end": 40, "end": 49},
+    )
+
+    editor._confirm_duplicate_sample()
+
+    assert fake_sampler.sent_entries == []
+    assert bridge.sample_list().count("SAWTOOTH") == 1
