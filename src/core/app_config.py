@@ -19,6 +19,7 @@ def load_config():
 def save_config(config):
     # overwrite saved config with current dict
     try:
+        CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
         with open(CONFIG_PATH, "w") as f:
             json.dump(config, f, indent=2)
     except OSError:

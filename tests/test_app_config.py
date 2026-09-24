@@ -64,6 +64,25 @@ def test_save_and_get_skipped_update_version_round_trip(monkeypatch, tmp_path):
     assert app_config.get_skipped_update_version() == "1.2.0"
 
 
+def test_save_creates_missing_parent_directory(monkeypatch, tmp_path):
+    # regression test: on a machine where ~/.akaisds has never been created
+    # (e.g. by dropped_files.py or debug_log.py, which both mkdir their own
+    # parent), save_config used to silently swallow the resulting
+    # FileNotFoundError - the port/channel/device-type save appeared to
+    # succeed (no crash, no error shown) but nothing ever actually landed on
+    # disk, so get_saved_ports() kept returning (None, None) forever even
+    # after the user picked real ports in MIDI Settings. Every existing test
+    # above uses tmp_path directly, which pytest already creates, so none of
+    # them exercise a genuinely-missing parent directory.
+    missing_dir_config = tmp_path / "not_created_yet" / "config.json"
+    monkeypatch.setattr(app_config, "CONFIG_PATH", missing_dir_config)
+
+    app_config.save_ports("My Input", "My Output")
+
+    assert missing_dir_config.exists()
+    assert app_config.get_saved_ports() == ("My Input", "My Output")
+
+
 def test_settings_saved_independently_dont_clobber_each_other(monkeypatch, tmp_path):
     # save ports/channel/device type each read, modify, write the same config file
     # confirm whether saving ONE doesnt wipe out something saved earlier
