@@ -16,7 +16,7 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QFont, QFontMetrics
-from core import dropped_files, sds_encoder, program_editor_bridge
+from core import dropped_files, sds_encoder, program_editor_bridge, debug_log
 from ui.qt_helpers import load_colored_pixmap
 from ui.settings_dialog import MidiSettingsDialog
 from ui.drop_list_widget import DropListWidget
@@ -317,6 +317,15 @@ class TransferDashboard(QWidget):
         try:
             bridge = program_editor_bridge.connect()
         except Exception as e:
+            # connect() failures happen before LoggingBridge ever wraps
+            # anything, so without this they're invisible to
+            # editor_debug.log - the one file AGENTS.md says to ask a user
+            # for when diagnosing a real-hardware issue
+            debug_log.get_logger().error(
+                "TransferDashboard: couldn't connect to the sampler for the "
+                "Program Editor",
+                exc_info=True,
+            )
             QMessageBox.warning(
                 self, "Couldn't connect", f"Couldn't reach the sampler: {e}"
             )

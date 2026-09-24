@@ -1,6 +1,8 @@
 import json
 from pathlib import Path
 
+from core import debug_log
+
 CONFIG_PATH = Path.home() / ".akaisds/config.json"
 
 
@@ -13,17 +15,42 @@ def load_config():
         with open(CONFIG_PATH, "r") as f:
             return json.load(f)
     except (json.JSONDecodeError, OSError):
+        # a corrupt/unreadable config silently falling back to defaults used
+        # to leave no trace anywhere - indistinguishable from "nothing saved
+        # yet" in every caller, which makes a real bug here hard to tell
+        # apart from a first-ever launch when a user reports it
+        debug_log.get_logger().error(
+            f"app_config: couldn't read {CONFIG_PATH} - falling back to defaults",
+            exc_info=True,
+        )
         return {}
 
 
 def save_config(config):
     # overwrite saved config with current dict
     try:
+        if not CONFIG_PATH.parent.exists():
+            # only interesting the first time - logged BEFORE mkdir so this
+            # still fires even if the mkdir itself is what fails below
+            debug_log.get_logger().info(
+                f"app_config: creating {CONFIG_PATH.parent} (didn't exist yet)"
+            )
         CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
         with open(CONFIG_PATH, "w") as f:
             json.dump(config, f, indent=2)
+        # confirms what actually landed on disk - pairs with
+        # MidiSettingsDialog's own "applied" log (settings_dialog.py) so a
+        # live-vs-persisted mismatch shows up as one log with an entry and
+        # no matching write nearby, instead of another guessing session
+        debug_log.get_logger().info(f"app_config: saved {config!r}")
     except OSError:
-        pass  # failed pref save doesnt crash the app
+        # failed pref save doesnt crash the app, but it used to also leave
+        # no record at all - a missing ~/.akaisds directory used to fail
+        # here silently (no mkdir), making every port/channel/device-type
+        # save a permanent no-op with nothing to diagnose it by
+        debug_log.get_logger().error(
+            f"app_config: couldn't save config to {CONFIG_PATH}", exc_info=True
+        )
 
 
 def get_saved_ports():

@@ -9,7 +9,7 @@ from ui.about_dialog import AboutDialog
 from ui.quickstart_dialog import show_quickstart_dialog
 from ui.update_helper import UpdateCheckRunner
 from core.midi_manager import MidiManager
-from core import app_config, dropped_files, sds_encoder
+from core import app_config, debug_log, dropped_files, sds_encoder
 from controller.sampler_controller import SamplerController
 
 # don't hit the GitHub API on every single launch
@@ -232,10 +232,25 @@ class ApplicationWindow(QMainWindow):
         available_outputs = self.midi_manager.list_outputs()
 
         if input_name and input_name in available_inputs:
-            self.midi_manager.open_input(input_name)
+            try:
+                self.midi_manager.open_input(input_name)
+            except Exception:
+                # a silent startup convenience - no dialog on failure, but
+                # still worth a trace so "ports reset every launch" is
+                # diagnosable instead of looking like they were never saved
+                debug_log.get_logger().error(
+                    f"ApplicationWindow: couldn't restore saved MIDI input {input_name!r}",
+                    exc_info=True,
+                )
 
         if output_name and output_name in available_outputs:
-            self.midi_manager.open_output(output_name)
+            try:
+                self.midi_manager.open_output(output_name)
+            except Exception:
+                debug_log.get_logger().error(
+                    f"ApplicationWindow: couldn't restore saved MIDI output {output_name!r}",
+                    exc_info=True,
+                )
 
     def closeEvent(self, event):
         # release midi ports cleanly so mido's backend doesnt hang around like a fart in a doctor's waiting room

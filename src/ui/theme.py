@@ -238,6 +238,15 @@ def apply_to_app(app):
         try:
             app.setStyleSheet(render_stylesheet(_active_palette))
         except (OSError, KeyError) as e:
+            # runs on every launch and every live OS theme change, in a
+            # packaged GUI app with no attached console - print() alone
+            # would be invisible exactly like core/debug_log.py's own
+            # docstring describes for every other unhandled failure here
+            from core import debug_log
+
+            debug_log.get_logger().error(
+                "theme.apply_to_app: couldn't apply stylesheet", exc_info=True
+            )
             print(
                 f"[WARN] Couldn't apply theme ({e}) - continuing with "
                 f"whatever's currently set"

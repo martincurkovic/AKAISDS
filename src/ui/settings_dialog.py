@@ -14,7 +14,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 from PySide6.QtCore import Qt
-from core import app_config, midi_identity
+from core import app_config, debug_log, midi_identity
 from ui.qt_helpers import FullWidthTabBar, widen_popup_to_fit_items
 import time
 import mido
@@ -188,8 +188,37 @@ class MidiSettingsDialog(QDialog):
         channel = self.spin_channel.value()
         device_type = self.combo_device_type.currentData()
 
-        self.midi_manager.open_input(input_name)
-        self.midi_manager.open_output(output_name)
+        try:
+            self.midi_manager.open_input(input_name)
+            self.midi_manager.open_output(output_name)
+        except Exception as e:
+            # unlike the Identity Request/Loopback Test paths above, this
+            # was previously completely unguarded - a real mido open
+            # failure here (device unplugged between refresh and click, a
+            # driver error) would propagate out of this Qt slot uncaught,
+            # with no log and no dialog
+            debug_log.get_logger().error(
+                "MidiSettingsDialog: couldn't open MIDI port(s) "
+                f"(input={input_name!r}, output={output_name!r})",
+                exc_info=True,
+            )
+            QMessageBox.critical(
+                self,
+                "MIDI Settings",
+                f"Couldn't open the selected MIDI port(s): {e}",
+            )
+            return
+
+        # the live MIDI setup actually applied, in one place - lets a user's
+        # bug report be checked against this instead of trusting "I set it
+        # up correctly", and against app_config's own "saved" log line to
+        # catch a live-vs-persisted mismatch like the one this pair of logs
+        # was added to catch
+        debug_log.get_logger().info(
+            f"MidiSettingsDialog: applied input={input_name!r} "
+            f"output={output_name!r} channel={channel} device_type={device_type!r}"
+        )
+
         self.sampler_controller.set_channel(channel)
         self.sampler_controller.set_device_type(device_type)
 
