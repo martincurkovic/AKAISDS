@@ -1,4 +1,6 @@
 import mido
+
+from core import debug_log
 from PySide6.QtCore import QObject, Signal
 
 
@@ -26,8 +28,15 @@ class MidiManager(QObject):
     def open_input(self, name):
         self.close_input()
         if name:
-            self.input_port = mido.open_input(name, callback=self._on_message)
+            try:
+                self.input_port = mido.open_input(name, callback=self._on_message)
+            except Exception:
+                debug_log.get_logger().error(
+                    f"MidiManager: couldn't open input {name!r}", exc_info=True
+                )
+                raise
             self.input_name = name
+            debug_log.get_logger().info(f"MidiManager: opened input {name!r}")
         self.connection_changed.emit()
 
     def close_input(self):
@@ -39,8 +48,15 @@ class MidiManager(QObject):
     def open_output(self, name):
         self.close_output()
         if name:
-            self.output_port = mido.open_output(name)
+            try:
+                self.output_port = mido.open_output(name)
+            except Exception:
+                debug_log.get_logger().error(
+                    f"MidiManager: couldn't open output {name!r}", exc_info=True
+                )
+                raise
             self.output_name = name
+            debug_log.get_logger().info(f"MidiManager: opened output {name!r}")
         self.connection_changed.emit()
 
     def close_output(self):
@@ -57,7 +73,14 @@ class MidiManager(QObject):
         # note that mido automatically adds the F0/F7 bytes to the payload
         if self.output_port is None:
             raise RuntimeError("No MIDI output port is open")
-        self.output_port.send(mido.Message("sysex", data=data_bytes))
+        try:
+            self.output_port.send(mido.Message("sysex", data=data_bytes))
+        except Exception:
+            debug_log.get_logger().error(
+                f"MidiManager: sysex send failed ({len(data_bytes)} bytes) on {self.output_name!r}",
+                exc_info=True,
+            )
+            raise
 
     def send_control_change(self, channel, control, value):
         if self.output_port is None:

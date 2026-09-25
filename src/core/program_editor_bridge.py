@@ -90,7 +90,7 @@ class LoggingBridge:
                         # 2026-09-22, so every step gets the same START/END/
                         # FAILED logging as everything else on this
                         # connection rather than being invisible to
-                        # ~/.akaisds/editor_debug.log
+                        # ~/.akaisds/akaisds.log
                         "get_header_bytes", "send_and_receive")
 
     def __init__(self, bridge, logger=None):

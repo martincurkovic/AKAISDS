@@ -42,6 +42,15 @@ class SamplerController(QObject):
         self._no_response_detected = False
         self._packet_send_generation = 0
 
+        # per-unit send diagnostics, logged once when the unit ends (never per packet,
+        # so a big sample can't flood the debug log)
+        self._send_stats = self._new_send_stats()
+        # batch-level "did it actually arrive" tracking, see _finish_unit
+        self._batch_names_before = None  # sample count before the batch, None = unknown
+        self._batch_units_sent = 0
+        self._batch_unacknowledged = False
+        self._verify_pending = None  # (count_before, units_sent) awaiting post-send SLIST
+
         # state for an in-progress send - lets us dispatch one packet at a time
         # via QTtimer instead of blocking the GUI thread like a slow person walking in the middle of the aisles at Kmart
         self._send_queue = []
@@ -259,9 +268,11 @@ class SamplerController(QObject):
                 elif self._awaiting_count_for_queue:
                     self._awaiting_count_for_queue = False
                     self._next_file_sample_number = len(names)
+                    self._batch_names_before = len(names)
                     self._send_next_queued_file()
                 else:
                     # plain refresh - not part of other flow
+                    self._verify_sent_samples_arrived(names)
                     # only announce refresh in status bar if it wasnt a SILENT refresh
                     if not self._refresh_is_silent:
                         self.status_changed.emit(
@@ -335,6 +346,20 @@ class SamplerController(QObject):
             f"Received unrecognised SysEx: {bytes(data_bytes).hex(' ')}"
         )
 
+    @staticmethod
+    def _new_send_stats():
+        return {"acks": 0, "naks": 0, "waits": 0, "late_acks": 0}
+
+    def _log_send_start(self, kind, name, sample_number, bit_depth):
+        self._send_stats = self._new_send_stats()
+        debug_log.get_logger().info(
+            f"SamplerController: send start ({kind}) name={name!r} slot={sample_number} "
+            f"bits={bit_depth} packets={len(self._send_queue)} channel={self._active_channel} "
+            f"device_type={self.device_type} in={self.midi_manager.input_name!r} "
+            f"out={getattr(self.midi_manager, 'output_name', None)!r} "
+            f"open_loop={self._is_open_loop()}"
+        )
+
     def _emit_progress(self, sent, total):
         # emith both progress signals for one packet level update
         self.transfer_progress.emit(sent, total)
@@ -348,20 +373,32 @@ class SamplerController(QObject):
         if not self._send_queue:
             return
         if kind == "ack":
+            if self._no_response_detected:
+                # already gave up on handshaking and moved on - this reply is late
+                self._send_stats["late_acks"] += 1
+            self._send_stats["acks"] += 1
             # previous packet accepted - move on to next packet
             self._send_index += 1
             self._emit_progress(self._send_index, len(self._send_queue))
             self._send_current_packet()
         elif kind == "wait":
             # Sampler still processing - do nothing and stfu
+            self._send_stats["waits"] += 1
             self.status_changed.emit("Sampler asked us to wait...")
         elif kind == "nak":
             # checksum failed on sampler's end - resend the same packet, DONT advance the index
+            self._send_stats["naks"] += 1
+            debug_log.get_logger().warning(
+                f"SamplerController: NAK for packet {self._send_index}/{len(self._send_queue)}"
+            )
             self.status_changed.emit(
                 f"NAK received - resending packet {self._send_index}"
             )
             self._send_current_packet()
         elif kind == "cancel":
+            debug_log.get_logger().warning(
+                f"SamplerController: sampler sent CANCEL at packet {self._send_index}/{len(self._send_queue)}"
+            )
             self.status_changed.emit("Transfer cancelled by sampler")
             self._abort_transfer(completed=False)
 
@@ -491,6 +528,29 @@ class SamplerController(QObject):
             samples = [sds_encoder.bitcrush_sample(s, effective_bits) for s in samples]
         return samples, framerate
 
+    def _verify_sent_samples_arrived(self, names):
+        # after a batch, the sample list should hold at least the pre-batch count + one per
+        # unit sent (each takes a fresh slot). Fewer means the sampler dropped data even though
+        # we reached the end of the send - e.g. a MIDI interface eating SysEx.
+        if self._verify_pending is None:
+            return
+        before, sent = self._verify_pending
+        self._verify_pending = None
+        expected = before + sent
+        if len(names) >= expected:
+            debug_log.get_logger().info(
+                f"SamplerController: post-send check OK ({len(names)} samples, expected >= {expected})"
+            )
+            return
+        debug_log.get_logger().error(
+            f"SamplerController: post-send check FAILED - sampler lists {len(names)} samples, "
+            f"expected >= {expected} ({before} before + {sent} sent)"
+        )
+        self.status_changed.emit(
+            f"Warning: the sampler didn't receive the sample(s) - expected {expected} "
+            f"samples but it reports {len(names)}. Check MIDI cabling/interface and try again."
+        )
+
     def _find_new_sample_slot(self, names_before, names_after):
         # compare sample name lists before and after to find which slot index changed
         for i in range(min(len(names_before), len(names_after))):
@@ -561,6 +621,7 @@ class SamplerController(QObject):
         self._no_response_detected = False
         self._active_channel = channel
         self._active_sample_number = sample_number_hint
+        self._log_send_start("generic SDS", None, sample_number_hint, bit_depth)
 
         mode_note = (
             " (open loop - no MIDI input selected)" if self._is_open_loop() else ""
@@ -623,6 +684,9 @@ class SamplerController(QObject):
         self._file_queue_total = len(file_entries)
         self._file_queue_skipped = 0
         self._file_queue_channel = channel
+        self._batch_names_before = None
+        self._batch_units_sent = 0
+        self._batch_unacknowledged = False
 
         if self.device_type == "generic" or self._is_open_loop():
             # no SLIST to check - go straight to user defined slot number
@@ -1090,12 +1154,28 @@ class SamplerController(QObject):
         # no reponse arrived in time - per spec, assume packet got thru and move past it
         # ie, switch to open loop comms
         self.status_changed.emit("No reponse from the sampler - assuming open loop...")
+        debug_log.get_logger().warning(
+            f"SamplerController: no handshake within {self._handshake_timeout_ms}ms at "
+            f"packet {self._send_index}/{len(self._send_queue)} - falling back to open loop "
+            f"(acks so far: {self._send_stats['acks']})"
+        )
         self._no_response_detected = True
         self._send_index += 1
         self._emit_progress(self._send_index, len(self._send_queue))
         self._send_current_packet()
 
     def _abort_transfer(self, completed):
+        stats = self._send_stats
+        debug_log.get_logger().info(
+            f"SamplerController: send {'finished' if completed else 'ABORTED'} at packet "
+            f"{self._send_index}/{len(self._send_queue)} - acks={stats['acks']} "
+            f"naks={stats['naks']} waits={stats['waits']} late_acks={stats['late_acks']} "
+            f"open_loop_fallback={self._no_response_detected}"
+        )
+        if completed:
+            self._batch_units_sent += 1
+            if self._no_response_detected and not self._is_open_loop():
+                self._batch_unacknowledged = True
         self._send_queue = []
         self._send_index = 0
 
@@ -1139,15 +1219,27 @@ class SamplerController(QObject):
         self._file_queue = []
         self._rename_after_send = None
         if completed:
+            unverified = (
+                " - the sampler never acknowledged any packets, so this is unverified"
+                if self._batch_unacknowledged
+                else ""
+            )
             if self._file_queue_skipped:
                 self.status_changed.emit(
                     f"Transfer complete ({self._file_queue_skipped} file"
                     f"{'s' if self._file_queue_skipped != 1 else ''} skipped, incompatible WAV file)"
+                    f"{unverified}"
                 )
             else:
-                self.status_changed.emit("Transfer complete")
+                self.status_changed.emit(f"Transfer complete{unverified}")
+            if self._batch_names_before is not None and self._batch_units_sent:
+                # checked when the refresh below comes back - see SLIST handler
+                self._verify_pending = (self._batch_names_before, self._batch_units_sent)
             # give the message above a real chance to be seen before the refresh's satus overwrites it
             QTimer.singleShot(2500, lambda: self.refresh_sample_list(silent=True))
+        self._batch_names_before = None
+        self._batch_units_sent = 0
+        self._batch_unacknowledged = False
         self.transfer_finished.emit(completed)
 
     def _start_send(self, name, samples, framerate, sample_number, channel):
@@ -1174,6 +1266,7 @@ class SamplerController(QObject):
         self._no_response_detected = False
         self._active_channel = channel
         self._active_sample_number = sample_number
+        self._log_send_start("Akai SDATA", name, sample_number, 16)
 
         mode_note = (
             " (open loop - no MIDI input selected)" if self._is_open_loop() else ""

@@ -30,7 +30,9 @@ import logging
 import logging.handlers
 from pathlib import Path
 
-LOG_PATH = Path.home() / ".akaisds" / "editor_debug.log"
+# Named editor_debug.log before the log became app-wide; that older file
+# (if present) is simply left behind, not migrated.
+LOG_PATH = Path.home() / ".akaisds" / "akaisds.log"
 
 _logger = None
 
@@ -40,7 +42,7 @@ def get_logger():
     if _logger is not None:
         return _logger
 
-    logger = logging.getLogger("akaisds.bridge")
+    logger = logging.getLogger("akaisds")
     logger.setLevel(logging.DEBUG)
     logger.propagate = False
     try:

@@ -319,7 +319,7 @@ class TransferDashboard(QWidget):
         except Exception as e:
             # connect() failures happen before LoggingBridge ever wraps
             # anything, so without this they're invisible to
-            # editor_debug.log - the one file AGENTS.md says to ask a user
+            # akaisds.log - the one file AGENTS.md says to ask a user
             # for when diagnosing a real-hardware issue
             debug_log.get_logger().error(
                 "TransferDashboard: couldn't connect to the sampler for the "

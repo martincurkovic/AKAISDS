@@ -910,3 +910,42 @@ def test_akai_receive_flow_requests_rspack_and_saves_wav(controller, tmp_path):
     read_back, rate = sds_encoder.read_wav_samples(save_path)
     assert list(read_back) == samples
     assert rate == 44100
+
+
+def _statuses(controller):
+    out = []
+    controller.status_changed.connect(out.append)
+    return out
+
+
+def test_post_send_check_warns_when_sample_never_appears(controller):
+    # 3 samples before the batch, 1 unit sent, but the sampler still lists 3
+    statuses = _statuses(controller)
+    controller._verify_pending = (3, 1)
+    controller._verify_sent_samples_arrived(["A", "B", "C"])
+    assert any("didn't receive" in s for s in statuses)
+    assert controller._verify_pending is None
+
+
+def test_post_send_check_is_quiet_when_sample_appears(controller):
+    statuses = _statuses(controller)
+    controller._verify_pending = (3, 1)
+    controller._verify_sent_samples_arrived(["A", "B", "C", "D"])
+    assert not any("didn't receive" in s for s in statuses)
+
+
+def test_completed_send_without_any_ack_is_reported_as_unverified(controller):
+    statuses = _statuses(controller)
+    controller._send_queue = [b"pkt0"]
+    controller._no_response_detected = True  # input port selected but sampler silent
+    controller._abort_transfer(completed=True)
+    controller._finish_unit(True)
+    assert any("unverified" in s for s in statuses)
+
+
+def test_completed_send_with_acks_is_not_flagged_unverified(controller):
+    statuses = _statuses(controller)
+    controller._send_queue = [b"pkt0"]
+    controller._abort_transfer(completed=True)
+    controller._finish_unit(True)
+    assert "Transfer complete" in statuses

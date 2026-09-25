@@ -257,7 +257,7 @@ mitigation for the suspected race, not a confirmed root-cause fix.
 
 ## Debug logging for real-hardware issues
 
-`core/debug_log.py` sets up a rotating log at `~/.akaisds/editor_debug.log`.
+`core/debug_log.py` sets up a rotating log at `~/.akaisds/akaisds.log` (renamed from `editor_debug.log` when it became app-wide; users on older builds may still have the old file).
 `LoggingBridge` (in `program_editor_bridge.py`) wraps whatever bridge
 `connect()` returns and logs every call's START/END/FAILED with thread
 identity, timing, and a traceback on failure. If a user reports frequent
@@ -579,7 +579,7 @@ still resets for a genuinely different sample (always goes through
 ### Diagnosing a load that silently does nothing
 
 A user hit intermittent "double-click loads nothing" that no scripted
-repro could reproduce. Reading `~/.akaisds/editor_debug.log` from their
+repro could reproduce. Reading `~/.akaisds/akaisds.log` from their
 actual session showed zero `FAILED` entries and no overlapping calls -
 the bridge layer itself was never at fault, meaning the problem was
 upstream of any bridge call. `WaveformView.mouseDoubleClickEvent` and
