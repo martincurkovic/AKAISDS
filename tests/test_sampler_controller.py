@@ -88,7 +88,7 @@ def controller(controller_module):
     # _FakeQTimer fires immediately, which would trip the reply watchdog the
     # instant it's armed - keep its bookkeeping but leave firing to the
     # tests that exercise it (via ctrl._on_reply_timeout(ctrl._reply_generation))
-    def _arm_without_timer(label):
+    def _arm_without_timer(label, timeout_ms=None):
         ctrl._reply_generation += 1
         ctrl._reply_wait_label = label
 
@@ -1003,3 +1003,39 @@ def test_refresh_without_output_port_reports_instead_of_raising(controller):
     controller.refresh_sample_list()  # must not raise
     assert controller._awaiting_memory_status is False
     assert any("No MIDI output port" in s for s in statuses)
+
+
+def test_receive_stall_aborts_the_receive_and_reports_failure(controller):
+    statuses = _statuses(controller)
+    finished = []
+    controller.receive_finished.connect(finished.append)
+    controller.receive_samples([(0, "/tmp/x.wav")])
+    assert controller._receiving is True
+    controller._on_reply_timeout(controller._reply_generation)
+    assert controller._receiving is False
+    assert finished == [False]
+    assert any("No reply from the sampler" in s for s in statuses)
+
+
+def test_sample_info_timeout_clears_the_busy_flag(controller):
+    controller.request_sample_info(0)
+    assert controller.is_transfer_busy() is True
+    controller._on_reply_timeout(controller._reply_generation)
+    assert controller.is_transfer_busy() is False
+
+
+def test_cancel_disarms_the_watchdog(controller):
+    statuses = _statuses(controller)
+    controller.request_sample_info(0)
+    stale = controller._reply_generation
+    controller.cancel_transfer()
+    controller._on_reply_timeout(stale)
+    assert not any("No reply" in s for s in statuses)
+
+
+def test_unexpected_sysex_is_logged(controller, caplog):
+    import logging
+
+    with caplog.at_level(logging.WARNING, logger="akaisds"):
+        controller._on_sysex_received_impl(bytes([0x47, 0, 0x55, 1, 2]))
+    assert any("unrecognised Akai message" in r.message for r in caplog.records)

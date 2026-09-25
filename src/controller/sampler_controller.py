@@ -49,6 +49,10 @@ class SamplerController(QObject):
         self._reply_generation = 0
         self._reply_wait_label = None
         self._reply_wait_started = 0.0
+        self._reply_wait_timeout_ms = self._reply_timeout_ms
+        # receiving waits longer - the hardware can take a while to start streaming
+        self._receive_timeout_ms = 10000
+        self._receive_checksum_errors = 0
 
         # per-unit send diagnostics, logged once when the unit ends (never per packet,
         # so a big sample can't flood the debug log)
@@ -178,6 +182,7 @@ class SamplerController(QObject):
         self._awaiting_sample_info = True
         request = akai_sysex.build_rsdata_request(sample_number, channel)
         self.midi_manager.send_sysex(request)
+        self._arm_reply_timeout("sample info (RSDATA)")
         self.status_changed.emit(f"Requesting info for sample {sample_number}...")
 
     def _send_rslist_request(self):
@@ -190,18 +195,22 @@ class SamplerController(QObject):
         self.midi_manager.send_sysex(request)
         self._arm_reply_timeout("memory status (RSTAT)")
 
-    def _arm_reply_timeout(self, label):
+    def _arm_reply_timeout(self, label, timeout_ms=None):
         self._reply_generation += 1
         expected = self._reply_generation
         self._reply_wait_label = label
         self._reply_wait_started = time.monotonic()
+        self._reply_wait_timeout_ms = (
+            self._reply_timeout_ms if timeout_ms is None else timeout_ms
+        )
         QTimer.singleShot(
-            self._reply_timeout_ms, lambda: self._on_reply_timeout(expected)
+            self._reply_wait_timeout_ms, lambda: self._on_reply_timeout(expected)
         )
 
-    def _disarm_reply_timeout(self):
-        # called when the awaited reply arrives; logs the round trip
-        if self._reply_wait_label is not None:
+    def _disarm_reply_timeout(self, log=True):
+        # called when the awaited reply arrives; logs the round trip (log=False for
+        # per-packet waits, where a line per packet would flood the log)
+        if log and self._reply_wait_label is not None:
             elapsed_ms = (time.monotonic() - self._reply_wait_started) * 1000
             debug_log.get_logger().info(
                 f"SamplerController: {self._reply_wait_label} reply after {elapsed_ms:.0f}ms"
@@ -215,7 +224,7 @@ class SamplerController(QObject):
         label = self._reply_wait_label
         self._reply_wait_label = None
         debug_log.get_logger().warning(
-            f"SamplerController: no reply to {label} within {self._reply_timeout_ms}ms "
+            f"SamplerController: no reply to {label} within {self._reply_wait_timeout_ms}ms "
             f"(channel={self.channel}, in={self.midi_manager.input_name!r}, "
             f"out={getattr(self.midi_manager, 'output_name', None)!r})"
         )
@@ -236,6 +245,18 @@ class SamplerController(QObject):
             self._pre_send_names = []
             self.status_changed.emit(message + " - couldn't rename the new sample")
             self._finish_unit(True)
+        elif self._receiving or self._receive_queue:
+            info = self._receive_header_info
+            expected = self._receive_expected_packets if info else "?"
+            debug_log.get_logger().error(
+                f"SamplerController: receive stalled waiting for {label} - sample "
+                f"{self._receive_sample_number}, packets {len(self._receive_packets)}/{expected}, "
+                f"checksum errors={self._receive_checksum_errors}"
+            )
+            self._recover_from_error(message)
+        elif self._awaiting_sample_info:
+            self._awaiting_sample_info = False
+            self.status_changed.emit(message)
         else:
             self._awaiting_memory_status = False
             self._verify_pending = None
@@ -279,6 +300,7 @@ class SamplerController(QObject):
         self._receive_queue = []
         self._receive_header_info = None
         self._receive_packets = []
+        self._disarm_reply_timeout(log=False)
 
         self.status_changed.emit(message)
 
@@ -354,11 +376,13 @@ class SamplerController(QObject):
                 # or something we're not expecting rn
                 if self._awaiting_sample_info:
                     self._awaiting_sample_info = False
+                    self._disarm_reply_timeout()
                     info = akai_sysex.parse_sdata_response(data_bytes)
                     self.sample_info_received.emit(info)
                 elif self._receiving and self._receive_header_info is None:
                     self._on_receive_sdata_header(data_bytes)
                 else:
+                    self._log_unexpected_sysex("unexpected SDATA", data_bytes)
                     self.status_changed.emit(
                         f"Received unexpected SDATA message: {bytes(data_bytes).hex(' ')}"
                     )
@@ -372,6 +396,7 @@ class SamplerController(QObject):
                     self.memory_status_updated.emit(info)
                     self._send_rslist_request()
                 else:
+                    self._log_unexpected_sysex("unexpected STAT", data_bytes)
                     self.status_changed.emit(
                         f"Received unexpected STAT message {bytes(data_bytes).hex(' ')}"
                     )
@@ -382,14 +407,19 @@ class SamplerController(QObject):
                 if result == 0:
                     self.status_changed.emit("Sampler confirmed: OK")
                 elif result == 1:
+                    self._log_unexpected_sysex("S1000 REPLY reporting ERROR", data_bytes)
                     self.status_changed.emit(
                         "Sampler confirmed: ERROR creating/replacing sample"
                     )
                 else:
+                    self._log_unexpected_sysex("REPLY with unexpected byte", data_bytes)
                     self.status_changed.emit(
                         f"Received REPLY with unexpected byte: {bytes(data_bytes).hex(' ')}"
                     )
             else:
+                self._log_unexpected_sysex(
+                    f"unrecognised Akai message (function {function_code})", data_bytes
+                )
                 self.status_changed.emit(
                     f"Received unrecognised Akai message (function {function_code}): "
                     f"{bytes(data_bytes).hex(' ')}"
@@ -412,9 +442,17 @@ class SamplerController(QObject):
             return
 
         # anything else - log it for now rather than crash so i can figure out wtf is going on
+        self._log_unexpected_sysex("unrecognised SysEx", data_bytes)
         self.status_changed.emit(
             f"Received unrecognised SysEx: {bytes(data_bytes).hex(' ')}"
         )
+
+    @staticmethod
+    def _log_unexpected_sysex(what, data_bytes):
+        # rare by nature, so safe to log; capped so a huge stray dump can't bloat the log
+        raw = bytes(data_bytes)
+        shown = raw[:64].hex(" ") + (f" ... ({len(raw)} bytes)" if len(raw) > 64 else "")
+        debug_log.get_logger().warning(f"SamplerController: received {what}: {shown}")
 
     @staticmethod
     def _new_send_stats():
@@ -794,6 +832,9 @@ class SamplerController(QObject):
         try:
             channels, framerate = sds_encoder.read_wav_channels(filepath)
         except (OSError, ValueError) as e:
+            debug_log.get_logger().warning(
+                f"SamplerController: skipping {filepath!r} - couldn't read WAV: {e!r}"
+            )
             self.status_changed.emit(f"Skipping {os.path.basename(filepath)}: {e}")
             self._file_queue_skipped += 1
             # tell the UI to remove this fiel from the queue too, same as succesfuly sent file
@@ -908,8 +949,13 @@ class SamplerController(QObject):
         self._receive_header_info = None
         self._receive_packets = []
 
+        self._receive_checksum_errors = 0
+        debug_log.get_logger().info(
+            f"SamplerController: receive start (generic SDS) slot={sample_number} channel={channel}"
+        )
         request = sds_encoder.build_dump_request(sample_number, channel)
         self.midi_manager.send_sysex(request)
+        self._arm_reply_timeout("dump header", self._receive_timeout_ms)
         self.status_changed.emit(f"Requesting sample {sample_number} (generic SDS)...")
 
     def receive_samples(self, sample_requests, channel=None):
@@ -952,8 +998,15 @@ class SamplerController(QObject):
         self._receive_header_info = None
         self._receive_packets = []
 
+        self._receive_checksum_errors = 0
+        debug_log.get_logger().info(
+            f"SamplerController: receive start (Akai) slot={sample_number} "
+            f"channel={self._receive_channel} ({current_index}/{self._receive_queue_total}) "
+            f"in={self.midi_manager.input_name!r}"
+        )
         request = akai_sysex.build_rsdata_request(sample_number, self._receive_channel)
         self.midi_manager.send_sysex(request)
+        self._arm_reply_timeout("sample header (RSDATA)", self._receive_timeout_ms)
         self.status_changed.emit(
             f"Requesting sample {sample_number} ({current_index}/{self._receive_queue_total})..."
         )
@@ -961,6 +1014,7 @@ class SamplerController(QObject):
     def _on_receive_sdata_header(self, data_bytes):
         # handles SDATA (0x0B) response to RSDATA requests
         # real akai mechanism for getting sample's header
+        self._disarm_reply_timeout()
         info = akai_sysex.parse_sdata_response(data_bytes)
         self._receive_header_info = info
         self._receive_packets = []
@@ -985,8 +1039,10 @@ class SamplerController(QObject):
             channel=self._receive_channel,
         )
         self.midi_manager.send_sysex(request)
+        self._arm_reply_timeout("audio data (RSPACK)", self._receive_timeout_ms)
 
     def _on_receive_header(self, data_bytes):
+        self._disarm_reply_timeout()
         info = sds_encoder.parse_dump_header(data_bytes)
         self._receive_header_info = info
         self._receive_packets = []
@@ -1006,11 +1062,14 @@ class SamplerController(QObject):
         self.midi_manager.send_sysex(
             [0x7E, self._receive_channel & 0x7F, sds_encoder.ACK, 0]
         )
+        self._arm_reply_timeout("first data packet", self._receive_timeout_ms)
 
     def _on_receive_data_packet(self, data_bytes):
         if self._receive_header_info is None:
             # got a data packet before ever seeing a header - ignore it instead of crashing, something's fucked it...
+            self._log_unexpected_sysex("data packet before any header", data_bytes)
             return
+        self._disarm_reply_timeout(log=False)
 
         packet_num = data_bytes[3] if len(data_bytes) > 3 else 0
         payload = data_bytes[4:-1]
@@ -1018,6 +1077,12 @@ class SamplerController(QObject):
 
         computed_checksum = sds_encoder.xor_checksum(list(data_bytes[:-1]))
         if computed_checksum != received_checksum:
+            self._receive_checksum_errors += 1
+            debug_log.get_logger().warning(
+                f"SamplerController: receive checksum error on packet {packet_num} "
+                f"(#{self._receive_checksum_errors}) - sending NAK"
+            )
+            self._arm_reply_timeout("resent data packet", self._receive_timeout_ms)
             self.status_changed.emit(
                 f"Checksum error on packet {packet_num} - requesting resend"
             )
@@ -1067,6 +1132,8 @@ class SamplerController(QObject):
 
         if len(self._receive_packets) >= self._receive_expected_packets:
             self._finish_receiving()
+        else:
+            self._arm_reply_timeout("next data packet", self._receive_timeout_ms)
 
     def _finish_receiving(self):
         info = self._receive_header_info
@@ -1092,6 +1159,11 @@ class SamplerController(QObject):
             info["bit_depth"],
         )
 
+        debug_log.get_logger().info(
+            f"SamplerController: receive finished slot={self._receive_sample_number} "
+            f"packets={len(self._receive_packets)}/{self._receive_expected_packets} "
+            f"checksum_errors={self._receive_checksum_errors} samples={len(samples)}"
+        )
         self.status_changed.emit(
             f"Saved sample {info['sample_number']} to {self._receive_save_path}"
         )
@@ -1119,6 +1191,8 @@ class SamplerController(QObject):
         )
         if not in_progrss:
             return
+
+        self._disarm_reply_timeout(log=False)  # a cancelled wait must not time out later
 
         if self._send_queue:
             # tell the sampler we're bailing out
