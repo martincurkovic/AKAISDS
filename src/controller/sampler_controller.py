@@ -1,6 +1,7 @@
 from PySide6.QtCore import QObject, Signal, QTimer
 from core import akai_sysex, sds_encoder, midi_identity, debug_log
 import os
+import time
 
 
 class SamplerController(QObject):
@@ -41,6 +42,13 @@ class SamplerController(QObject):
         self._handshake_timeout_ms = 500  # how long to wait for a reponse before switching to open-loop transmission
         self._no_response_detected = False
         self._packet_send_generation = 0
+
+        # watchdog for request/reply exchanges (RSTAT, RSLIST) - without it a dead
+        # input path leaves the app waiting forever with nothing in the log
+        self._reply_timeout_ms = 3000
+        self._reply_generation = 0
+        self._reply_wait_label = None
+        self._reply_wait_started = 0.0
 
         # per-unit send diagnostics, logged once when the unit ends (never per packet,
         # so a big sample can't flood the debug log)
@@ -115,7 +123,14 @@ class SamplerController(QObject):
             return
         self._refresh_is_silent = silent
         self._awaiting_memory_status = True
-        self._send_rstat_request()
+        try:
+            self._send_rstat_request()
+        except Exception as e:
+            # typically "No MIDI output port is open" (MidiManager already logged the detail)
+            self._awaiting_memory_status = False
+            self._disarm_reply_timeout()
+            self.status_changed.emit(f"Couldn't request the sample list: {e}")
+            return
         # self._send_rslist_request() # cant send this now, message collision if send them b2b
         if not silent:
             self.status_changed.emit("Requesting available memory...")
@@ -168,10 +183,63 @@ class SamplerController(QObject):
     def _send_rslist_request(self):
         request = akai_sysex.build_slist_request(self.channel)
         self.midi_manager.send_sysex(request)
+        self._arm_reply_timeout("sample list (RSLIST)")
 
     def _send_rstat_request(self):
         request = midi_identity.build_rstat_request_message(self.channel)
         self.midi_manager.send_sysex(request)
+        self._arm_reply_timeout("memory status (RSTAT)")
+
+    def _arm_reply_timeout(self, label):
+        self._reply_generation += 1
+        expected = self._reply_generation
+        self._reply_wait_label = label
+        self._reply_wait_started = time.monotonic()
+        QTimer.singleShot(
+            self._reply_timeout_ms, lambda: self._on_reply_timeout(expected)
+        )
+
+    def _disarm_reply_timeout(self):
+        # called when the awaited reply arrives; logs the round trip
+        if self._reply_wait_label is not None:
+            elapsed_ms = (time.monotonic() - self._reply_wait_started) * 1000
+            debug_log.get_logger().info(
+                f"SamplerController: {self._reply_wait_label} reply after {elapsed_ms:.0f}ms"
+            )
+        self._reply_generation += 1  # invalidates the pending timer
+        self._reply_wait_label = None
+
+    def _on_reply_timeout(self, expected_generation):
+        if expected_generation != self._reply_generation:
+            return  # reply arrived (or a newer request superseded this one)
+        label = self._reply_wait_label
+        self._reply_wait_label = None
+        debug_log.get_logger().warning(
+            f"SamplerController: no reply to {label} within {self._reply_timeout_ms}ms "
+            f"(channel={self.channel}, in={self.midi_manager.input_name!r}, "
+            f"out={getattr(self.midi_manager, 'output_name', None)!r})"
+        )
+        message = (
+            f"No reply from the sampler to the {label} request - check the MIDI "
+            f"input port, cabling and SysEx channel"
+        )
+        if (
+            self._awaiting_count_for_queue
+            or self._awaiting_pre_send_slist
+        ):
+            # a send is stuck at its pre-send snapshot - nothing has gone out yet
+            self._recover_from_error(message)
+        elif self._awaiting_post_send_slist_for_rename:
+            # the audio already went out; only the rename step is lost
+            self._awaiting_post_send_slist_for_rename = False
+            self._rename_after_send = None
+            self._pre_send_names = []
+            self.status_changed.emit(message + " - couldn't rename the new sample")
+            self._finish_unit(True)
+        else:
+            self._awaiting_memory_status = False
+            self._verify_pending = None
+            self.status_changed.emit(message)
 
     def on_sysex_received(self, data_bytes):
         # entry point for catching any unexpected eception from handling logic -
@@ -228,6 +296,7 @@ class SamplerController(QObject):
             if function_code == 0x05:
                 # SLIST response
                 count, names = akai_sysex.parse_slist_response(data_bytes)
+                self._disarm_reply_timeout()
                 self.sample_list_updated.emit(names)
 
                 if self._awaiting_pre_send_slist:
@@ -298,6 +367,7 @@ class SamplerController(QObject):
                 # STAT reponse to RSTAT
                 if self._awaiting_memory_status:
                     self._awaiting_memory_status = False
+                    self._disarm_reply_timeout()
                     info = midi_identity.parse_stat_response(data_bytes)
                     self.memory_status_updated.emit(info)
                     self._send_rslist_request()

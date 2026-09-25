@@ -83,7 +83,17 @@ def controller_module(monkeypatch):
 @pytest.fixture
 def controller(controller_module):
     midi = _FakeMidiManager()
-    return controller_module.SamplerController(midi)
+    ctrl = controller_module.SamplerController(midi)
+
+    # _FakeQTimer fires immediately, which would trip the reply watchdog the
+    # instant it's armed - keep its bookkeeping but leave firing to the
+    # tests that exercise it (via ctrl._on_reply_timeout(ctrl._reply_generation))
+    def _arm_without_timer(label):
+        ctrl._reply_generation += 1
+        ctrl._reply_wait_label = label
+
+    ctrl._arm_reply_timeout = _arm_without_timer
+    return ctrl
 
 
 def test_channel_propagates_into_rstat_request(controller):
@@ -949,3 +959,47 @@ def test_completed_send_with_acks_is_not_flagged_unverified(controller):
     controller._abort_transfer(completed=True)
     controller._finish_unit(True)
     assert "Transfer complete" in statuses
+
+
+def test_refresh_with_no_reply_times_out_and_clears_the_wait(controller):
+    statuses = _statuses(controller)
+    controller.refresh_sample_list()
+    assert controller._awaiting_memory_status is True
+    controller._on_reply_timeout(controller._reply_generation)
+    assert controller._awaiting_memory_status is False
+    assert any("No reply from the sampler" in s for s in statuses)
+
+
+def test_reply_arriving_cancels_the_watchdog(controller):
+    statuses = _statuses(controller)
+    controller.refresh_sample_list()
+    stale_generation = controller._reply_generation
+    controller._disarm_reply_timeout()  # what a real STAT/SLIST reply does
+    controller._on_reply_timeout(stale_generation)
+    assert not any("No reply" in s for s in statuses)
+
+
+def test_pre_send_slist_timeout_aborts_the_batch(controller):
+    statuses = _statuses(controller)
+    finished = []
+    controller.transfer_finished.connect(finished.append)
+    controller._file_queue = [{"filepath": "x.wav"}]
+    controller._awaiting_count_for_queue = True
+    controller._arm_reply_timeout("sample list (RSLIST)")
+    controller._on_reply_timeout(controller._reply_generation)
+    assert controller._awaiting_count_for_queue is False
+    assert controller._file_queue == []
+    assert finished == [False]
+    assert any("No reply from the sampler" in s for s in statuses)
+
+
+def test_refresh_without_output_port_reports_instead_of_raising(controller):
+    statuses = _statuses(controller)
+
+    def boom(_data):
+        raise RuntimeError("No MIDI output port is open")
+
+    controller.midi_manager.send_sysex = boom
+    controller.refresh_sample_list()  # must not raise
+    assert controller._awaiting_memory_status is False
+    assert any("No MIDI output port" in s for s in statuses)
