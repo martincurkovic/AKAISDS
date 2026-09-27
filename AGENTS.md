@@ -428,6 +428,24 @@ first.
 There's no hardware concept of "no program assigned" for a part - the
 blank `"-"` combo entry is a UI-only no-op placeholder, not a bug.
 
+**Raw-vs-display offset now lives in `s3ked`, not here.** Until the
+2026-09-27 `s3ked` bump, `s3k.params`' `PRGNUM` had no `display_offset`,
+so this app did its own +1 (display) / -1 (write) conversion by hand in
+`program_editor_window.py`. Upstream's §267 declared `display_offset=1`
+on `PRGNUM` itself (confirmed on hardware: the panel is 1-based, the
+register is 0-based - the same finding this app had already made
+independently), so `get_parameter`/`set_parameter` now do that conversion
+inside `s3k.params.decode_field`/`encode_field`. `program_number_spinbox`
+was updated to show/write the panel's 1..128 value straight through, with
+no converter of its own - re-adding one would double-offset it.
+`_handle_program_change` in `program_editor_bridge.py` still needs the
+raw wire-native byte for the actual MIDI Program Change message, so it
+explicitly subtracts `p.lookup("PRGNUM", "program").display_offset` back
+out after calling `get_parameter` rather than assuming the two now agree.
+If you bump `s3ked` again and `PRGNUM`'s handling changes further,
+recheck all three sites: the spinbox load, `_wire_spinbox_write`'s (lack
+of) converter, and this subtraction.
+
 **The 16 part combos hold their own copy of every program's name**
 (populated in `_on_programs_loaded`, a full reload) - they don't
 automatically follow changes elsewhere. Renaming a program used to leave
@@ -494,8 +512,11 @@ both naively wrong the same direction) but the hardware reads a loop
   `_semitones_to_sample_tune_offset(value)`, matching the load path.
   `test_sample_tune_survives_a_reselect_after_a_live_edit` guards this.
 - `PRGNUM`'s raw value is off by one from the panel's own numbering (raw
-  8 shows as program 9) - `program_number_spinbox` displays `raw + 1`,
-  writes `displayed - 1`.
+  8 shows as program 9) - since the 2026-09-27 `s3ked` bump this
+  conversion happens inside `s3k.params` itself (`display_offset=1`), not
+  in this app's spinbox code. See "PRGNUM and Program Change" above for
+  the full detail and why the MIDI Program Change send still needs the
+  raw byte back.
 
 Loading a sample's audio is a real SDS dump, legitimately minutes for a
 large sample - the UI is meant to freeze while it happens, not work

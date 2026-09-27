@@ -1317,10 +1317,10 @@ class ProgramEditorWindow(QMainWindow):
         # section). The S3000XL's own front panel numbers programs 1..128,
         # but is off by one from the raw PRGNUM byte - confirmed against
         # real hardware: writing raw 8 shows up as program 9 on the panel.
-        # This spinbox shows the panel's own 1..128 numbering; the +1/-1
-        # conversion to/from the raw byte lives in _wire_spinbox_write's
-        # value_converter below and program_values["PRGNUM"] + 1 where it
-        # loads from hardware.
+        # s3ked's own params table now declares this field's display_offset
+        # (s3ked bump 2026-09-27), so get_parameter/set_parameter already
+        # do the +1/-1 conversion - this spinbox just shows/writes the
+        # panel's 1..128 numbering directly, no converter needed.
         self.program_number_spinbox = QSpinBox()
         self.program_number_spinbox.setRange(1, 128)
         self.program_number_spinbox.setFixedWidth(70)
@@ -2132,7 +2132,6 @@ class ProgramEditorWindow(QMainWindow):
             self.program_number_spinbox,
             "PRGNUM",
             "program",
-            value_converter=lambda v: v - 1,
         )
         self.pan_knob.setEnabled(True)
         self._wire_knob_write(self.pan_knob, "PANPOS", "program")
@@ -2388,7 +2387,7 @@ class ProgramEditorWindow(QMainWindow):
         # side effects are set explicitly right here instead of relying on
         # the (now blocked) valueChanged connections.
         self.program_number_spinbox.blockSignals(True)
-        self.program_number_spinbox.setValue(program_values["PRGNUM"] + 1)
+        self.program_number_spinbox.setValue(program_values["PRGNUM"])
         self.program_number_spinbox.blockSignals(False)
         self.pan_knob.blockSignals(True)
         self.pan_knob.setValue(program_values["PANPOS"])

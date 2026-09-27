@@ -1063,6 +1063,10 @@ class _RecordingOut:
 
 
 class _RealBridgeForProgramChange:
+    # _prgnum is what get_parameter returns - i.e. the PANEL's 1-based
+    # number, since s3ked's PRGNUM carries display_offset=1 (§267) and
+    # get_parameter applies it. BridgeWorker subtracts the offset back out
+    # before sending, so the wire byte in every test below is _prgnum - 1.
     def __init__(self, prgnum, *, out_error=None, prgnum_error=None):
         self.out = _RecordingOut(error=out_error)
         self._prgnum = prgnum
@@ -1099,7 +1103,7 @@ def test_worker_program_change_sends_the_programs_own_midi_program_number():
     worker.submit_program_change(5, 1, "EPiano warm", 3)
     worker.process_pending()
 
-    assert bridge.out.sent == [[0xC0 | 3, 42]]
+    assert bridge.out.sent == [[0xC0 | 3, 41]]  # 42 (panel) - display_offset 1
     assert sent == [(5, "EPiano warm")]
 
 
@@ -1112,7 +1116,7 @@ def test_worker_program_change_uses_the_programs_own_number_not_its_list_index()
     worker.submit_program_change(0, 3, "Whatever", 0)
     worker.process_pending()
 
-    assert bridge.out.sent == [[0xC0, 99]]
+    assert bridge.out.sent == [[0xC0, 98]]  # 99 (panel) - display_offset 1
 
 
 def test_worker_emits_change_send_failed_when_prgnum_cant_be_read():
@@ -1152,7 +1156,7 @@ def test_worker_masks_channel_and_program_to_valid_midi_ranges():
 
     status_byte, program_byte = bridge.out.sent[0]
     assert status_byte == 0xC4  # 0xC0 | (20 & 0x0F)
-    assert program_byte == 72  # 200 & 0x7F
+    assert program_byte == 71  # (200 - display_offset 1) & 0x7F == 199 & 0x7F
 
 
 class _RenumberingBridge(_RealBridgeForProgramChange):
@@ -1184,7 +1188,7 @@ def test_worker_renumbers_programs_once_before_the_first_program_change():
     worker.process_pending()
 
     assert bridge.renumber_calls == 1
-    assert bridge.out.sent == [[0xC0, 99]]
+    assert bridge.out.sent == [[0xC0, 98]]  # 99 (panel) - display_offset 1
 
 
 def test_worker_does_not_renumber_again_for_a_second_program_change():
@@ -1229,7 +1233,7 @@ def test_worker_program_change_tolerates_a_bridge_without_renumber_programs():
     worker.submit_program_change(0, 0, "X", 0)
     worker.process_pending()
 
-    assert bridge.out.sent == [[0xC0, 7]]
+    assert bridge.out.sent == [[0xC0, 6]]  # 7 (panel) - display_offset 1
 
 
 def test_worker_processes_mixed_jobs_strictly_one_at_a_time_in_order():

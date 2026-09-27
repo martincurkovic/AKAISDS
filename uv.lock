@@ -29,7 +29,7 @@ requires-dist = [
     { name = "nuitka", specifier = "==4.1.3" },
     { name = "pyside6", specifier = "==6.11.2" },
     { name = "python-rtmidi", specifier = ">=1.5.8" },
-    { name = "s3ked", git = "https://github.com/lentferj/s3ked.git?rev=cb93b2e28833ebfd20e3997edec9ac019ce6063e" },
+    { name = "s3ked", git = "https://github.com/lentferj/s3ked.git?rev=665e855c45da9fe8102328961503f3282311862a" },
     { name = "soundfile", specifier = ">=0.14.0" },
 ]
 
@@ -502,7 +502,7 @@ wheels = [
 [[package]]
 name = "s3ked"
 version = "0.1.0"
-source = { git = "https://github.com/lentferj/s3ked.git?rev=cb93b2e28833ebfd20e3997edec9ac019ce6063e#cb93b2e28833ebfd20e3997edec9ac019ce6063e" }
+source = { git = "https://github.com/lentferj/s3ked.git?rev=665e855c45da9fe8102328961503f3282311862a#665e855c45da9fe8102328961503f3282311862a" }
 dependencies = [
     { name = "python-rtmidi" },
     { name = "textual" },

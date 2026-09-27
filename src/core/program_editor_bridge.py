@@ -729,8 +729,15 @@ class BridgeWorker(QThread):
                 if renumber is not None:
                     renumber()
                 self._programs_renumbered = True
-            program_number = self._bridge.get_parameter(
-                p.lookup("PRGNUM", "program"), program_index
+            # get_parameter applies PRGNUM's display_offset (the panel's
+            # 1-based numbering, since s3ked's params table declared it -
+            # see AGENTS.md's "PRGNUM and Program Change" section) - a MIDI
+            # Program Change needs the raw 0-based wire value, so the
+            # offset is subtracted back out here rather than assumed away.
+            prgnum_param = p.lookup("PRGNUM", "program")
+            program_number = (
+                self._bridge.get_parameter(prgnum_param, program_index)
+                - prgnum_param.display_offset
             )
             out.send_message([0xC0 | (channel & 0x0F), program_number & 0x7F])
         except Exception as e:

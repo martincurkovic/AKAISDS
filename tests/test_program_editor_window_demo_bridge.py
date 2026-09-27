@@ -372,16 +372,19 @@ def test_demo_bridge_mono_legato_combo_round_trips_through_real_encode_decode(
 
 
 def test_demo_bridge_program_number_display_offset_round_trips(editor, qapp):
-    # program_number_spinbox displays raw+1 and writes displayed-1 (see
-    # AGENTS.md's "STUNO/PRGNUM raw-vs-display quirks") - confirms that
-    # offset survives a real encode/decode round trip, not just FakeBridge
+    # s3ked's PRGNUM now carries display_offset=1 itself (§267 - see
+    # AGENTS.md's "PRGNUM and Program Change" section), so
+    # program_editor_window.py writes/reads the spinbox's panel value
+    # unconverted and get_parameter/set_parameter do the +1/-1 conversion
+    # to/from the raw stored byte. Confirms that offset survives a real
+    # encode/decode round trip against DemoBridge, not just FakeBridge
     # recording whatever value it was handed.
     bridge = editor._demo_bridge
-    editor.program_number_spinbox.setValue(5)  # -> raw PRGNUM 4
+    editor.program_number_spinbox.setValue(5)  # panel 5 -> raw PRGNUM 4
     editor._flush_write("PRGNUM")
     editor._worker.wait_until_idle()
     _pump_until(
-        qapp, lambda: bridge.get_parameter(p.lookup("PRGNUM", "program"), 0) == 4
+        qapp, lambda: bridge.get_parameter(p.lookup("PRGNUM", "program"), 0) == 5
     )
 
     assert editor._failures.events == []

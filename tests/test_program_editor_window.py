@@ -615,21 +615,25 @@ def test_program_tab_loads_channel_tune_and_priority_from_hardware(editor):
 
 
 def test_program_number_spinbox_loads_prgnum_from_hardware(editor):
-    # FakeBridge.get_parameter reports raw PRGNUM=42 - the panel/spinbox
-    # shows 43 (confirmed against real hardware: raw N shows up as N+1)
-    assert editor.program_number_spinbox.value() == 43
+    # FakeBridge.get_parameter reports PRGNUM=42 - since s3ked's PRGNUM now
+    # carries display_offset=1 (§267), get_parameter already returns the
+    # panel's own 1-based number, so the spinbox shows it unconverted (no
+    # +1/-1 in program_editor_window.py any more - see AGENTS.md's "PRGNUM
+    # and Program Change" section)
+    assert editor.program_number_spinbox.value() == 42
 
 
 def test_changing_program_number_writes_prgnum(editor, qapp):
     bridge = editor._bridge
 
-    # setting the spinbox (panel numbering) to 7 must write raw 6
+    # setting the spinbox (panel numbering) to 7 must write 7 unconverted -
+    # set_parameter/encode_field apply the display_offset subtraction now
     editor.program_number_spinbox.setValue(7)
     editor._flush_write("PRGNUM")
     editor._worker.wait_until_idle()
     _pump_until(qapp, lambda: bridge.set_parameter_calls)
 
-    assert bridge.set_parameter_calls[-1] == ("PRGNUM", 0, 6, 0)
+    assert bridge.set_parameter_calls[-1] == ("PRGNUM", 0, 7, 0)
 
 
 def test_program_number_spinbox_range_is_one_to_one_twenty_eight(editor):
