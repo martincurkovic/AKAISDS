@@ -328,3 +328,53 @@ def test_paint_does_not_crash_at_high_zoom_connected_sample_mode(qapp):
         view.zoom_in()
     assert 0 < view._view_length() <= view.width()
     view.grab()
+
+
+# --- trackpad pinch-to-zoom --------------------------------------------------
+# real macOS pinch gestures arrive as QEvent.Type.NativeGesture, not a
+# modified wheel event - see WaveformView._handle_pinch_zoom's own comment
+# for why (same mechanism mirrored here). _handle_pinch_zoom is exercised
+# directly (as WaveformView's own tests do) since a genuine NativeGesture
+# event can't be synthesized headlessly.
+
+
+class _FakePinchEvent:
+    def __init__(self, value, x):
+        self._value = value
+        self._x = x
+
+    def value(self):
+        return self._value
+
+    def position(self):
+        return _FakePos(self._x)
+
+
+def test_pinch_zoom_in_increases_zoom(qapp):
+    view = _view(100000)
+    before = view._zoom
+    view._handle_pinch_zoom(_FakePinchEvent(0.1, view.width() / 2))
+    assert view._zoom > before
+
+
+def test_pinch_zoom_out_decreases_zoom(qapp):
+    view = _view(100000)
+    for _ in range(5):
+        view.zoom_in()
+    before = view._zoom
+    view._handle_pinch_zoom(_FakePinchEvent(-0.1, view.width() / 2))
+    assert view._zoom < before
+
+
+def test_pinch_zoom_anchors_on_the_cursor_position(qapp):
+    view = _view(100000)
+    x = view._x_for(20000)
+    view._handle_pinch_zoom(_FakePinchEvent(0.5, x))
+    # the frame under the cursor should still be roughly under it post-zoom
+    assert abs(view._frame_for(x) - 20000) < 200
+
+
+def test_pinch_zoom_with_no_waveform_does_not_crash(qapp):
+    view = SliceWaveformView()
+    view.resize(400, 220)
+    view._handle_pinch_zoom(_FakePinchEvent(0.1, 100))  # no-op, must not raise

@@ -233,3 +233,128 @@ def test_reject_is_ignored_while_exporting(qapp):
     window._exporting = False
     window.reject()
     assert fired == [True]
+
+
+# --- close confirmation: unsaved slice edits --------------------------------
+
+
+def test_window_opens_clean_not_dirty(qapp):
+    window = _build_window()
+    assert window._dirty is False
+
+
+def test_placing_a_marker_marks_the_window_dirty(qapp):
+    window = _build_window()
+    window.waveform.add_marker(len(window._samples) // 2)
+    assert window._dirty is True
+
+
+def test_close_with_no_edits_closes_without_asking(qapp, monkeypatch):
+    window = _build_window()
+    asked = []
+    monkeypatch.setattr(
+        sew.QMessageBox, "question", lambda *a, **k: asked.append(True)
+    )
+    fired = []
+    window.rejected.connect(lambda: fired.append(True))
+    window.reject()
+    assert asked == []  # never even asked - nothing to lose
+    assert fired == [True]
+
+
+def test_close_with_unsaved_edits_asks_for_confirmation(qapp, monkeypatch):
+    window = _build_window()
+    window.waveform.set_markers([2000])
+    asked = []
+
+    def fake_question(*a, **k):
+        asked.append(True)
+        return sew.QMessageBox.StandardButton.No
+
+    monkeypatch.setattr(sew.QMessageBox, "question", fake_question)
+    fired = []
+    window.rejected.connect(lambda: fired.append(True))
+    window.reject()
+    assert asked == [True]
+    assert fired == []  # declined - window stays open
+
+
+def test_close_with_unsaved_edits_confirmed_closes(qapp, monkeypatch):
+    window = _build_window()
+    window.waveform.set_markers([2000])
+    monkeypatch.setattr(
+        sew.QMessageBox, "question", lambda *a, **k: sew.QMessageBox.StandardButton.Yes
+    )
+    fired = []
+    window.rejected.connect(lambda: fired.append(True))
+    window.reject()
+    assert fired == [True]
+
+
+def test_successful_export_clears_the_dirty_flag(qapp, monkeypatch):
+    window = _build_window(export_result=(True, "ok"))
+    window.waveform.set_markers([2000])
+    assert window._dirty is True
+    monkeypatch.setattr(
+        sew.QMessageBox, "question", lambda *a, **k: sew.QMessageBox.StandardButton.Yes
+    )
+    monkeypatch.setattr(sew.QMessageBox, "information", lambda *a, **k: None)
+
+    window._confirm_export()
+
+    assert window._dirty is False
+    # closing right after a successful export needs no confirmation
+    asked = []
+    monkeypatch.setattr(
+        sew.QMessageBox, "question", lambda *a, **k: asked.append(True)
+    )
+    fired = []
+    window.rejected.connect(lambda: fired.append(True))
+    window.reject()
+    assert asked == []
+    assert fired == [True]
+
+
+def test_failed_export_does_not_clear_the_dirty_flag(qapp, monkeypatch):
+    window = _build_window(export_result=(False, "it broke"))
+    window.waveform.set_markers([2000])
+    monkeypatch.setattr(
+        sew.QMessageBox, "question", lambda *a, **k: sew.QMessageBox.StandardButton.Yes
+    )
+    monkeypatch.setattr(sew.QMessageBox, "warning", lambda *a, **k: None)
+
+    window._confirm_export()
+
+    assert window._dirty is True
+
+
+# --- zoom row: terse +/- labels, Fit collapses the scrollbar ----------------
+
+
+def test_zoom_buttons_use_terse_symbols_not_the_word_zoom(qapp):
+    window = _build_window()
+    assert window.zoom_out_button.text() == "−"
+    assert window.zoom_in_button.text() == "+"
+
+
+def test_zoom_in_out_buttons_match_the_samples_tabs_own_width(qapp):
+    # same 36px as program_editor_window.py's own zoom_out_button/
+    # zoom_in_button on the Samples tab - both windows' zoom controls
+    # should be pixel-identical, not each pick their own width
+    window = _build_window()
+    assert window.zoom_out_button.width() == 36
+    assert window.zoom_in_button.width() == 36
+
+
+def test_scrollbar_is_hidden_when_fully_zoomed_out(qapp):
+    window = _build_window(samples=list(range(-5000, 5000)))
+    assert window.scrollbar.isHidden()
+
+
+def test_scrollbar_appears_once_zoomed_in_and_hides_again_on_fit(qapp):
+    window = _build_window(samples=list(range(-100000, 100000)))
+    window.waveform.zoom_in()
+    window.waveform.zoom_in()
+    assert not window.scrollbar.isHidden()
+    window.zoom_fit_button.click()
+    assert window.scrollbar.isHidden()

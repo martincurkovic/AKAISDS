@@ -2878,3 +2878,92 @@ def test_export_slices_returns_false_while_a_transfer_is_busy(editor):
     )
     assert success is False
     assert "already in progress" in message
+
+
+# --- _reload_sample_list_with_retries ----------------------------------------
+# real-hardware root cause (confirmed against an actual akaisds.log): this
+# window's own BridgeWorker connection and the Transfer Dashboard's
+# sampler_controller connection share one physical MIDI port (see AGENTS.md's
+# "Samples tab" section) - a big batch export finishing right as
+# sampler_controller does its own post-send RSTAT/RSLIST chatter can leave
+# this connection reading a reply meant for the OTHER one, which
+# s3k.bridge.sample_list() surfaces as a hard decode error rather than a
+# silent skip. A short retry clears the transient case without the user
+# ever seeing it.
+
+
+def test_reload_sample_list_with_retries_recovers_from_one_transient_failure(
+    editor, qapp
+):
+    bridge = editor._bridge
+    real_sample_list = bridge.sample_list
+    calls = {"n": 0}
+
+    def flaky_sample_list():
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise ValueError("SampleList: expected command 0x05, got 0x16")
+        return real_sample_list()
+
+    bridge.sample_list = flaky_sample_list
+    which, args = editor._reload_sample_list_with_retries(
+        attempts=3, retry_delay_seconds=0
+    )
+    assert which == 0  # samples_loaded, not samples_load_failed
+    assert calls["n"] == 2  # failed once, succeeded on the retry
+
+
+def test_reload_sample_list_with_retries_gives_up_after_every_attempt_fails(
+    editor, qapp
+):
+    bridge = editor._bridge
+    calls = {"n": 0}
+
+    def always_fails():
+        calls["n"] += 1
+        raise ValueError("SampleList: expected command 0x05, got 0x16")
+
+    bridge.sample_list = always_fails
+    which, args = editor._reload_sample_list_with_retries(
+        attempts=2, retry_delay_seconds=0
+    )
+    assert which == 1  # samples_load_failed
+    assert calls["n"] == 2  # exactly `attempts` tries, not more
+
+
+def test_export_slices_uses_the_retrying_reload_not_a_single_attempt(
+    editor, qapp, monkeypatch
+):
+    # end-to-end: a batch export whose header-fixup reload flakes once
+    # should still report success, not the "couldn't be refreshed" failure
+    monkeypatch.delenv("AKAISDS_DEMO_SAMPLER", raising=False)
+    bridge = editor._bridge
+    fake_sampler = FakeSamplerController(bridge)
+    editor._main_window.sampler_controller = fake_sampler
+
+    real_sample_list = bridge.sample_list
+    calls = {"n": 0}
+
+    def flaky_once_per_reload(seen=set()):
+        calls["n"] += 1
+        # fail only the FIRST reload attempt overall - proves a single
+        # transient failure doesn't sink the whole export
+        if calls["n"] == 1:
+            raise ValueError("SampleList: expected command 0x05, got 0x16")
+        return real_sample_list()
+
+    bridge.sample_list = flaky_once_per_reload
+    monkeypatch.setattr(
+        editor,
+        "_reload_sample_list_with_retries",
+        lambda: editor.__class__._reload_sample_list_with_retries(
+            editor, attempts=3, retry_delay_seconds=0
+        ),
+    )
+
+    success, message = editor._export_slices(
+        ["BREAK-1"], [list(range(20))], 44100, 16, None, 60, 0, 0,
+        lambda *a: None, lambda *a: None,
+    )
+    assert success is True
+    assert calls["n"] >= 2

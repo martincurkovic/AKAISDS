@@ -13,7 +13,6 @@ from PySide6.QtWidgets import (
     QScrollBar,
     QSpinBox,
     QVBoxLayout,
-    QWidget,
 )
 
 from core import sample_slicing
@@ -126,10 +125,17 @@ class SliceEditorWindow(QDialog):
         self._existing_names_provider = existing_names_provider
         self._export_callback = export_callback
         self._exporting = False
+        # whether any slice marker/start/end edit has happened since the
+        # last successful export (or since opening, if never exported) -
+        # what Close/Esc/window-X actually asks about below. Connected
+        # AFTER set_waveform (right below) so its own initial
+        # markers_changed emit doesn't mark a freshly-opened window dirty.
+        self._dirty = False
 
         self.waveform = SliceWaveformView()
         self.waveform.set_waveform(samples, 0, len(samples) - 1)
         self.waveform.markers_changed.connect(self._update_info_label)
+        self.waveform.markers_changed.connect(self._mark_dirty)
         self.waveform.view_changed.connect(self._on_view_changed)
 
         zoom_row = QHBoxLayout()
@@ -137,11 +143,20 @@ class SliceEditorWindow(QDialog):
             "Double-click: add slice   •   Drag edges/markers: adjust   •   "
             "Right-click a marker: delete"
         )
-        self.zoom_out_button = QPushButton("Zoom −")
+        self.zoom_out_button = QPushButton("−")
+        # same 36px as the Samples tab's own zoom_out_button/zoom_in_button
+        # (program_editor_window.py's _build_samples_tab) - keeps both
+        # windows' zoom controls pixel-identical rather than each picking
+        # its own width
+        self.zoom_out_button.setFixedWidth(36)
+        self.zoom_out_button.setToolTip("Zoom out")
         self.zoom_out_button.clicked.connect(lambda: self.waveform.zoom_out())
-        self.zoom_in_button = QPushButton("Zoom +")
+        self.zoom_in_button = QPushButton("+")
+        self.zoom_in_button.setFixedWidth(36)
+        self.zoom_in_button.setToolTip("Zoom in")
         self.zoom_in_button.clicked.connect(lambda: self.waveform.zoom_in())
         self.zoom_fit_button = QPushButton("Fit")
+        self.zoom_fit_button.setToolTip("Zoom to fit the whole sample")
         self.zoom_fit_button.clicked.connect(self.waveform.reset_zoom)
         zoom_row.addWidget(hint_label)
         zoom_row.addStretch()
@@ -149,18 +164,16 @@ class SliceEditorWindow(QDialog):
         zoom_row.addWidget(self.zoom_in_button)
         zoom_row.addWidget(self.zoom_fit_button)
 
+        # unlike program_editor_window.py's own scrollbar_container (which
+        # deliberately reserves its height even while hidden, so the
+        # Samples tab's permanently-visible marker row never jumps as zoom
+        # crosses the scrolling threshold), this dialog is short-lived and
+        # its own layout below the waveform has nothing that minds
+        # reflowing - added directly (no fixed-height wrapper) so it
+        # actually collapses to zero height at "Fit" instead of leaving a
+        # visible empty strip
         self.scrollbar = QScrollBar(Qt.Orientation.Horizontal)
         self.scrollbar.valueChanged.connect(self._on_scrollbar_moved)
-        # fixed-height container even when hidden - same reasoning as
-        # program_editor_window.py's own scrollbar_container (a bare
-        # setVisible(False) collapses it to zero height, which would shove
-        # everything below it up/down every time zoom crosses the
-        # scrolling threshold)
-        scrollbar_container = QWidget()
-        scrollbar_container.setFixedHeight(self.scrollbar.sizeHint().height())
-        scrollbar_layout = QHBoxLayout(scrollbar_container)
-        scrollbar_layout.setContentsMargins(0, 0, 0, 0)
-        scrollbar_layout.addWidget(self.scrollbar)
 
         self.info_label = QLabel()
         self.info_label.setWordWrap(True)
@@ -209,7 +222,7 @@ class SliceEditorWindow(QDialog):
         layout = QVBoxLayout(self)
         layout.addLayout(zoom_row)
         layout.addWidget(self.waveform)
-        layout.addWidget(scrollbar_container)
+        layout.addWidget(self.scrollbar)
         layout.addWidget(self.info_label)
         layout.addLayout(equal_row)
         layout.addLayout(name_row)
@@ -356,6 +369,7 @@ class SliceEditorWindow(QDialog):
 
         self.status_label.setText(message)
         if success:
+            self._dirty = False  # this exact marker layout is now on the sampler
             QMessageBox.information(self, "Export Slices", message)
         else:
             QMessageBox.warning(self, "Export Slices", message)
@@ -368,6 +382,9 @@ class SliceEditorWindow(QDialog):
     def _on_export_status(self, text):
         self.status_label.setText(text)
         QApplication.processEvents()
+
+    def _mark_dirty(self):
+        self._dirty = True
 
     def _set_controls_enabled(self, enabled):
         for widget in (
@@ -386,13 +403,27 @@ class SliceEditorWindow(QDialog):
         ):
             widget.setEnabled(enabled)
 
-    def reject(self):
+    def _confirm_discard(self):
+        # shared by reject()/closeEvent() below - True means "go ahead and
+        # actually close," False means "stay open"
         if self._exporting:
-            return  # ignore Close/Esc/window-X while a real send is in flight
-        super().reject()
+            return False  # ignore Close/Esc/window-X while a real send is in flight
+        if not self._dirty:
+            return True
+        reply = QMessageBox.question(
+            self,
+            "Close Slice Editor",
+            "Discard the slice markers placed since the last export?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        return reply == QMessageBox.StandardButton.Yes
+
+    def reject(self):
+        if self._confirm_discard():
+            super().reject()
 
     def closeEvent(self, event):
-        if self._exporting:
+        if self._confirm_discard():
+            super().closeEvent(event)
+        else:
             event.ignore()
-            return
-        super().closeEvent(event)

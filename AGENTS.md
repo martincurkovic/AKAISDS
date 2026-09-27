@@ -1145,6 +1145,67 @@ itself is never called in a test (would hang an offscreen test with
 nothing to close a real modal loop) - `test_slice_editor_window.py`
 constructs the dialog directly and drives its methods without showing it.
 
+### Follow-up, first real-hardware session: a confirmed dual-connection MIDI race
+
+A user's real `akaisds.log` showed an export report "N slices were sent,
+but the sample list couldn't be refreshed to set their header fields" -
+not a timeout. The actual traceback: `s3k.bridge.sample_list()` raised
+`ValueError("SampleList: expected command 0x05, got 0x16")` on
+`ProgramEditorWindow`'s own BridgeWorker connection, at the exact moment
+the log showed `SamplerController` (the Transfer Dashboard's own,
+separate connection to the same physical MIDI port - see "Samples tab:
+loop points..." above) doing its own post-send RSTAT/RSLIST chatter and a
+further queued send. Two independent software listeners on the same wire
+occasionally each grab a reply meant for the other - confirmed, not
+theoretical. `_reload_sample_list_with_retries` (used by both of
+`_export_slices`'s own reload points, replacing two direct
+`_wait_for_any_signal([samples_loaded, samples_load_failed], ...)` calls)
+retries `submit_sample_list()` up to 3 times with a short pause before
+reporting real failure - a large batch export is exactly the case most
+likely to overlap with `sampler_controller`'s own chatter, since it's the
+biggest, longest-running send this window ever triggers on that shared
+connection. **Deliberately scoped to `_export_slices` only** -
+`_perform_duplicate_sample_real`/`_perform_sample_edit_real` have the
+identical latent race in their own single "one more reload" calls, but
+weren't reported failing and are more heavily-relied-on paths; don't
+retrofit the retry there without a reason to believe they're actually
+hitting it.
+
+### Follow-up: trackpad pinch-zoom, terse zoom buttons, and Fit collapsing the scrollbar
+
+`SliceWaveformView` initially shipped without `WaveformView`'s trackpad
+pinch-to-zoom (`QEvent.Type.NativeGesture` handling) - added afterward
+once asked for, same `event()`/`_handle_pinch_zoom` mechanism, mirrored
+rather than shared (this widget doesn't subclass `WaveformView` - see its
+own class docstring for why). Zoom buttons read bare "−"/"+" (with
+`setToolTip` picking up the discoverability a text label used to provide),
+not "Zoom −"/"Zoom +".
+
+**The horizontal scrollbar collapses to zero height at "Fit", unlike the
+Samples tab's own `WaveformView` scrollbar.** That one is deliberately
+wrapped in a fixed-height container even while hidden (see "Editing:
+markers, spinboxes, zoom" above) because it sits in a permanently-visible
+panel where neighbouring rows jumping on every zoom change would be
+worse. `SliceEditorWindow` is a short-lived modal dialog with nothing
+below the scrollbar that mockup/user testing found jarring about a bit of
+reflow - `self.scrollbar` is added directly to the dialog's layout with no
+such wrapper, so `setVisible(view_length < frame_count)` actually reclaims
+the space instead of just hiding the handle inside a reserved strip.
+
+**Close/Esc/window-X now asks for confirmation if there are unsaved slice
+edits.** `self._dirty` starts `False`, is set by `_mark_dirty` (wired to
+`SliceWaveformView.markers_changed`, connected only AFTER the initial
+`set_waveform` call so that call's own emit doesn't mark a freshly-opened
+window dirty), and is cleared again only after a SUCCESSFUL export (a
+failed one leaves it set - nothing actually landed on the sampler, so
+there's still something to lose). `_confirm_discard` is the single method
+both `reject()` and `closeEvent()` call through - checked in this order:
+still exporting (never allowed to close, no prompt - see the modality
+section above) → not dirty (close immediately, no prompt - nothing to
+lose) → dirty (ask). Zoom/pan changes don't count as "edits" (they use
+`SliceWaveformView`'s separate `view_changed` signal, never
+`markers_changed`), only start/end/marker changes do.
+
 ## Testing
 
 `TESTING.md` undersells this slightly - there's also

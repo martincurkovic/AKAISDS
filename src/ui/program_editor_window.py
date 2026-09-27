@@ -3127,6 +3127,37 @@ class ProgramEditorWindow(QMainWindow):
         # user closed the dialog without exporting (a no-op reload then)
         self._worker.submit_sample_list()
 
+    def _reload_sample_list_with_retries(self, attempts=3, retry_delay_seconds=0.3):
+        # submit_sample_list() with a couple of retries on failure. Root
+        # cause, confirmed against a real akaisds.log: this window's own
+        # BridgeWorker connection and the Transfer Dashboard's
+        # sampler_controller connection share the same physical MIDI port
+        # (see AGENTS.md's "Samples tab" section - "a second, separate MIDI
+        # connection to the same port, open concurrently... worth knowing
+        # if hardware actions ever seem to interleave strangely"). A big
+        # batch export finishing right as sampler_controller does its own
+        # post-send RSTAT/RSLIST chatter can leave this connection reading
+        # a reply meant for the OTHER one, which s3k.bridge.sample_list()
+        # surfaces as a hard decode error ("SampleList: expected command
+        # 0x05, got 0x16") rather than a silent skip - BridgeWorker turns
+        # that into samples_load_failed rather than crashing, but a single
+        # attempt has no way to tell "genuinely broken" apart from "lost
+        # this one race." A short retry clears the transient case almost
+        # every time without the user ever seeing it; only exhausting
+        # every attempt is reported as a real failure.
+        which, args = None, None
+        for attempt in range(attempts):
+            which, args = self._wait_for_any_signal(
+                [self._worker.samples_loaded, self._worker.samples_load_failed],
+                start=self._worker.submit_sample_list,
+                timeout_ms=20000,
+            )
+            if which == 0:
+                return which, args
+            if attempt < attempts - 1:
+                time.sleep(retry_delay_seconds)
+        return which, args
+
     def _export_slices(
         self,
         names,
@@ -3218,11 +3249,7 @@ class ProgramEditorWindow(QMainWindow):
                 )
                 return False, "Export failed - sending the slices did not complete"
 
-            which, args = self._wait_for_any_signal(
-                [self._worker.samples_loaded, self._worker.samples_load_failed],
-                start=self._worker.submit_sample_list,
-                timeout_ms=20000,
-            )
+            which, args = self._reload_sample_list_with_retries()
             if which != 0:
                 return False, (
                     f"{len(names)} slices were sent, but the sample list "
@@ -3263,11 +3290,7 @@ class ProgramEditorWindow(QMainWindow):
             # one more reload so the sample list/zone combos reflect every
             # new arrival - same closing step _perform_duplicate_sample_real
             # ends on
-            self._wait_for_any_signal(
-                [self._worker.samples_loaded, self._worker.samples_load_failed],
-                start=self._worker.submit_sample_list,
-                timeout_ms=20000,
-            )
+            self._reload_sample_list_with_retries()
 
             if missing:
                 return False, (

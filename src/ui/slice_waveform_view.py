@@ -1,6 +1,6 @@
 from PySide6.QtWidgets import QApplication, QMenu, QSizePolicy, QWidget
 from PySide6.QtGui import QCursor, QPainter, QPen, QColor, QPolygonF
-from PySide6.QtCore import Qt, QPointF, QRectF, Signal
+from PySide6.QtCore import Qt, QEvent, QPointF, QRectF, Signal
 
 from core.sample_slicing import find_nearest_zero_crossing
 from core.sample_slicing import slice_bounds as _slice_bounds_fn
@@ -593,3 +593,27 @@ class SliceWaveformView(QWidget):
         pan_frames = int(-delta / 120 * max(1, view_length // 10))
         self.set_view_start(self._view_start + pan_frames)
         event.accept()
+
+    def event(self, event):
+        # real macOS trackpad pinch-to-zoom arrives as its own native
+        # gesture event, not a modified wheel event - same reasoning and
+        # same mechanism as WaveformView._handle_pinch_zoom/event() on the
+        # Samples tab (Qt has no dedicated nativeGestureEvent() virtual to
+        # override, so this is the documented way to catch it)
+        if (
+            event.type() == QEvent.Type.NativeGesture
+            and event.gestureType() == Qt.NativeGestureType.ZoomNativeGesture
+        ):
+            self._handle_pinch_zoom(event)
+            return True
+        return super().event(event)
+
+    def _handle_pinch_zoom(self, event):
+        if self._frame_count == 0:
+            return
+        # value() is the incremental scale change for this one event, not
+        # an absolute zoom level - multiplies into the current zoom rather
+        # than replacing it, same as repeated zoom_in()/zoom_out() calls
+        factor = max(0.1, 1.0 + event.value())
+        anchor_frame = self._frame_for(event.position().x())
+        self.set_zoom(self._zoom * factor, anchor_frame)
