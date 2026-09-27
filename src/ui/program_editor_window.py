@@ -55,6 +55,7 @@ from ui.qt_helpers import FullWidthTabBar
 from ui.envelope_graph import ADSREnvelopeGraph, Envelope2Graph
 from ui.keygroup_range_bar import KeygroupRangeBar, keygroup_color
 from ui.waveform_view import WaveformView
+from ui.slice_editor_window import SliceEditorWindow
 from ui import theme
 from ui.about_dialog import AboutDialog
 from ui.quickstart_dialog import show_quickstart_dialog
@@ -3076,6 +3077,212 @@ class ProgramEditorWindow(QMainWindow):
             except OSError:
                 pass
 
+    def _open_slice_editor(self):
+        # same has_waveform()/demo-mode gate as Duplicate Sample (see
+        # _set_sample_edit_buttons_enabled) - re-checked here too since a
+        # button's enabled state and the moment it's actually clicked can
+        # never be perfectly synchronized with async state
+        sample_index = self.sample_list_widget.currentRow()
+        if sample_index < 0 or not self.waveform_view.has_waveform():
+            return
+        entry = self._sample_waveform_cache.get(sample_index)
+        if entry is None or entry["samples"] is None:
+            return
+        item = self.sample_list_widget.currentItem()
+        sample_name = item.text() if item is not None else ""
+
+        sampler_controller = getattr(self._main_window, "sampler_controller", None)
+        if sampler_controller is None:
+            self.status_bar.showMessage(
+                "Can't open Slice Editor - no Transfer Dashboard connection available"
+            )
+            return
+        if sampler_controller.is_transfer_busy():
+            self.status_bar.showMessage(
+                "Can't open Slice Editor - a transfer is already in progress "
+                "on the Transfer Dashboard"
+            )
+            return
+
+        def _existing_names():
+            return [
+                self.sample_list_widget.item(i).text()
+                for i in range(self.sample_list_widget.count())
+            ]
+
+        dialog = SliceEditorWindow(
+            self,
+            sample_name,
+            entry["samples"],
+            entry["framerate"],
+            entry["spitch"],
+            entry["stuno"],
+            entry["shlto"],
+            _existing_names,
+            self._export_slices,
+        )
+        dialog.exec()
+        # slice export can add several new resident samples - refresh so
+        # the Samples tab's own list/zone combos pick them up even if the
+        # user closed the dialog without exporting (a no-op reload then)
+        self._worker.submit_sample_list()
+
+    def _export_slices(
+        self,
+        names,
+        slices,
+        framerate,
+        bit_depth,
+        sample_rate,
+        spitch,
+        stuno,
+        shlto,
+        progress_callback,
+        status_callback,
+    ):
+        # the actual hardware-talking half of the Slice Editor (see
+        # ui/slice_editor_window.py's own class docstring for the split) -
+        # called synchronously from SliceEditorWindow's Export Slices
+        # button, blocking exactly the way every other real send on this
+        # page does. Writes every slice to its own temp 16-bit mono WAV,
+        # then sends the WHOLE BATCH in one send_file_queue call rather
+        # than looping _perform_duplicate_sample_real's single-file dance
+        # once per slice - SamplerController.send_file_queue already
+        # sequences a list of files on its own (one transfer_progress per
+        # file, "Sending file X/N" via status_changed) and only fires
+        # transfer_finished once every file in the batch is done, which is
+        # exactly the "start once, wait once" shape this needs. Returns
+        # (success: bool, message: str).
+        sampler_controller = getattr(self._main_window, "sampler_controller", None)
+        if sampler_controller is None:
+            return False, "Export failed - no Transfer Dashboard connection available"
+        if sampler_controller.is_transfer_busy():
+            return False, (
+                "Export failed - a transfer is already in progress on the "
+                "Transfer Dashboard"
+            )
+
+        logger = debug_log.get_logger()
+        temp_paths = []
+        try:
+            file_entries = []
+            for name, slice_samples in zip(names, slices):
+                fd, temp_path = tempfile.mkstemp(
+                    suffix=".wav", prefix="akaisds_slice_"
+                )
+                os.close(fd)
+                temp_paths.append(temp_path)
+                sds_encoder.write_wav_file(
+                    temp_path, slice_samples, framerate, bit_depth=16
+                )
+                file_entries.append(
+                    {
+                        "filepath": temp_path,
+                        "name": name,
+                        "bit_depth": bit_depth,
+                        "sample_rate": sample_rate,
+                        "mono": True,
+                    }
+                )
+
+            progress_connection = sampler_controller.transfer_progress.connect(
+                progress_callback
+            )
+            status_connection = sampler_controller.status_changed.connect(
+                status_callback
+            )
+
+            def _start_send():
+                # returning exactly False here (send_file_queue declining
+                # to start) makes _wait_for_any_signal skip its own wait -
+                # same convention _perform_duplicate_sample_real's
+                # _start_send uses
+                return sampler_controller.send_file_queue(file_entries)
+
+            try:
+                which, args = self._wait_for_any_signal(
+                    [sampler_controller.transfer_finished],
+                    start=_start_send,
+                    timeout_ms=None,
+                )
+            finally:
+                sampler_controller.transfer_progress.disconnect(progress_connection)
+                sampler_controller.status_changed.disconnect(status_connection)
+
+            if which is None or args is None:
+                logger.debug("_export_slices: send_file_queue refused to start")
+                return False, "Export failed - couldn't start sending the slices"
+            if not args[0]:
+                logger.debug(
+                    "_export_slices: batch send did not complete successfully"
+                )
+                return False, "Export failed - sending the slices did not complete"
+
+            which, args = self._wait_for_any_signal(
+                [self._worker.samples_loaded, self._worker.samples_load_failed],
+                start=self._worker.submit_sample_list,
+                timeout_ms=20000,
+            )
+            if which != 0:
+                return False, (
+                    f"{len(names)} slices were sent, but the sample list "
+                    "couldn't be refreshed to set their header fields - "
+                    "refresh manually and check the sampler directly."
+                )
+            samples_after_send = args[0]
+            landed = [n for n in names if n in samples_after_send]
+            missing = [n for n in names if n not in samples_after_send]
+
+            for index, name in enumerate(names):
+                if name not in samples_after_send:
+                    continue
+                new_index = samples_after_send.index(name)
+                slice_frame_count = len(slices[index])
+                # SPTYPE forced to one-shot (3, matching
+                # _SAMPLE_PLAYBACK_TYPE_OPTIONS' own raw-byte-order) - a
+                # chopped slice isn't meant to loop, regardless of what
+                # the source sample's own loop was; SPITCH/STUNO/SHLTO
+                # copied from the source, same fields
+                # _perform_duplicate_sample_real copies, so each slice at
+                # least plays back at the source's own pitch/tuning;
+                # SSTART/SMPEND cover the whole sent buffer (send_file_queue
+                # only ever sends audio, never these header fields - same
+                # reasoning as Duplicate Sample's own header fixup)
+                for param_name, value in (
+                    ("SPTYPE", 3),
+                    ("SPITCH", spitch),
+                    ("SHLTO", shlto),
+                    ("STUNO", stuno),
+                    ("SSTART", 0),
+                    ("SMPEND", slice_frame_count - 1),
+                ):
+                    self._write_knob_value(
+                        param_name, "sample", value, keygroup_index=0, index=new_index
+                    )
+
+            # one more reload so the sample list/zone combos reflect every
+            # new arrival - same closing step _perform_duplicate_sample_real
+            # ends on
+            self._wait_for_any_signal(
+                [self._worker.samples_loaded, self._worker.samples_load_failed],
+                start=self._worker.submit_sample_list,
+                timeout_ms=20000,
+            )
+
+            if missing:
+                return False, (
+                    f"Sent {len(landed)}/{len(names)} slices; missing from the "
+                    f"reloaded list: {', '.join(missing)} - check the sampler "
+                    "directly."
+                )
+            return True, f"Export complete: {len(names)} slices sent as {names[0]}..{names[-1]}"
+        finally:
+            for path in temp_paths:
+                try:
+                    os.remove(path)
+                except OSError:
+                    pass
+
     def _on_keygroup_selected(self, current, previous):
         if current is None:
             return
@@ -4090,6 +4297,19 @@ class ProgramEditorWindow(QMainWindow):
         self.duplicate_sample_button.setEnabled(False)
         self.duplicate_sample_button.clicked.connect(self._confirm_duplicate_sample)
         sample_edit_row.addWidget(self.duplicate_sample_button)
+        # ReCycle-style breakbeat chopper - manual slice markers, no
+        # transient detection (see AGENTS.md's own design discussion), a
+        # whole separate modal window rather than more controls on this
+        # page. Same demo-mode/has_waveform() gating as Duplicate Sample -
+        # see _open_slice_editor/_set_sample_edit_buttons_enabled.
+        self.slice_editor_button = QPushButton("Slice Editor…")
+        self.slice_editor_button.setToolTip(
+            "Manually chop this sample's already-loaded audio into slices "
+            "and export them back to the sampler as new one-shot samples."
+        )
+        self.slice_editor_button.setEnabled(False)
+        self.slice_editor_button.clicked.connect(self._open_slice_editor)
+        sample_edit_row.addWidget(self.slice_editor_button)
 
         # two section cards, same style as the Programs tab's own (see
         # _build_section_card) - one for the loop editor itself, one for
@@ -4782,6 +5002,10 @@ class ProgramEditorWindow(QMainWindow):
         # _duplicate_keygroup_action in _update_list_context_actions_enabled)
         demo_mode = bool(os.environ.get("AKAISDS_DEMO_SAMPLER"))
         self.duplicate_sample_button.setEnabled(enabled and not demo_mode)
+        # Slice Editor's export step is a batch version of the same
+        # add-new-resident-sample primitive Duplicate Sample needs -
+        # DemoBridge has none, same reasoning, same gate
+        self.slice_editor_button.setEnabled(enabled and not demo_mode)
 
     def _update_sample_meta_controls(self, sptype, spitch, shlto=None, stuno=None):
         # sptype/spitch/shlto/stuno None means "nothing known about this

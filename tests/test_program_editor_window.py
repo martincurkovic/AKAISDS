@@ -347,6 +347,7 @@ class FakeSamplerController(QObject):
     transfer_progress = Signal(int, int)
     transfer_finished = Signal(bool)
     file_transferred = Signal(str)
+    status_changed = Signal(str)
 
     def __init__(self, bridge):
         super().__init__()
@@ -359,31 +360,42 @@ class FakeSamplerController(QObject):
         return self.busy
 
     def send_file_queue(self, file_entries, channel=None, starting_sample_number=None):
-        entry = file_entries[0]
-        # read the sent WAV's own samples now, while the file still
-        # exists - _perform_sample_edit_real deletes its temp file in a
-        # finally: block as soon as the whole operation returns, well
-        # before a test gets a chance to inspect it afterwards
+        # iterates the WHOLE batch, same as the real SamplerController's
+        # own _file_queue draining (see AGENTS.md/_export_slices' own
+        # comment on why the Slice Editor sends every slice in one
+        # send_file_queue call instead of looping this once per file) -
+        # only the batch's LAST file's path is what transfer_finished
+        # carries forward to _finish_send below, mirroring how the real
+        # one only fires transfer_finished once the whole queue drains
         from core import sds_encoder
 
-        sent_samples, sent_rate = sds_encoder.read_wav_samples(entry["filepath"])
-        self.sent_entries.append({**entry, "samples": list(sent_samples), "rate": sent_rate})
         result = self.next_result
-        if result:
-            new_index = len(self._bridge._samples)
-            self._bridge._samples.append(entry["name"])
-            self._bridge.sample_headers[new_index] = {
-                "SSTART": 0, "SMPEND": 0, "LOOPAT1": 0, "LLNGTH1": 0,
-                "SLNGTH": 0, "SSRATE": 44100, "SPTYPE": 0, "SPITCH": 60,
-                "SHLTO": 0, "STUNO": 0,
-            }
+        last_filepath = None
+        for entry in file_entries:
+            # read the sent WAV's own samples now, while the file still
+            # exists - the real caller deletes its temp file in a
+            # finally: block as soon as the whole operation returns, well
+            # before a test gets a chance to inspect it afterwards
+            sent_samples, sent_rate = sds_encoder.read_wav_samples(entry["filepath"])
+            self.sent_entries.append(
+                {**entry, "samples": list(sent_samples), "rate": sent_rate}
+            )
+            last_filepath = entry["filepath"]
+            if result:
+                new_index = len(self._bridge._samples)
+                self._bridge._samples.append(entry["name"])
+                self._bridge.sample_headers[new_index] = {
+                    "SSTART": 0, "SMPEND": 0, "LOOPAT1": 0, "LLNGTH1": 0,
+                    "SLNGTH": 0, "SSRATE": 44100, "SPTYPE": 0, "SPITCH": 60,
+                    "SHLTO": 0, "STUNO": 0,
+                }
         # deferred, not synchronous - _perform_sample_edit_real connects
         # its _wait_for_any_signal listener AFTER calling send_file_queue,
         # same as the real (fully async) SamplerController; emitting
         # synchronously here would fire before that connection exists and
         # the wait would hang forever, same as the real one would if it
         # somehow replied before the caller finished wiring up
-        QTimer.singleShot(0, lambda: self._finish_send(result, entry["filepath"]))
+        QTimer.singleShot(0, lambda: self._finish_send(result, last_filepath))
         return True
 
     def _finish_send(self, result, filepath):
@@ -2729,3 +2741,140 @@ def test_duplicate_sample_refuses_a_name_already_in_use(editor, qapp, monkeypatc
 
     assert fake_sampler.sent_entries == []
     assert bridge.sample_list().count("SAWTOOTH") == 1
+
+
+# --- Slice Editor (Samples tab) ---------------------------------------------
+# _open_slice_editor's own guards (no sampler_controller connected, or a
+# transfer already busy) are tested directly here - the happy path opens a
+# real modal SliceEditorWindow via .exec(), which would hang an offscreen
+# test with nothing to close it, so that path (and everything the dialog
+# itself is responsible for - naming/collisions/confirmations) is covered
+# instead in tests/test_slice_editor_window.py, which fakes export_callback
+# entirely. _export_slices - the actual hardware-talking half this window
+# calls into - is exercised directly here, the same way
+# _perform_duplicate_sample_real is above.
+
+
+def test_slice_editor_button_disabled_in_demo_mode(editor, monkeypatch):
+    monkeypatch.setenv("AKAISDS_DEMO_SAMPLER", "1")
+    editor._set_sample_edit_buttons_enabled(True)
+    assert editor.slice_editor_button.isEnabled() is False
+
+    monkeypatch.delenv("AKAISDS_DEMO_SAMPLER", raising=False)
+    editor._set_sample_edit_buttons_enabled(True)
+    assert editor.slice_editor_button.isEnabled() is True
+
+
+def test_open_slice_editor_does_nothing_without_a_sampler_controller(editor, qapp):
+    editor._main_window.sampler_controller = None
+    _select_sample_with_full_audio(
+        editor, qapp, 0, list(range(100)),
+        {"start": 0, "loop_start": 0, "loop_end": 0, "end": 99},
+    )
+    editor._open_slice_editor()  # must return early, not open a modal dialog
+    assert "no Transfer Dashboard connection" in editor.status_bar.currentMessage()
+
+
+def test_open_slice_editor_does_nothing_while_a_transfer_is_busy(editor, qapp):
+    bridge = editor._bridge
+    fake_sampler = FakeSamplerController(bridge)
+    fake_sampler.busy = True
+    editor._main_window.sampler_controller = fake_sampler
+    _select_sample_with_full_audio(
+        editor, qapp, 0, list(range(100)),
+        {"start": 0, "loop_start": 0, "loop_end": 0, "end": 99},
+    )
+    editor._open_slice_editor()  # must return early, not open a modal dialog
+    assert "already in progress" in editor.status_bar.currentMessage()
+
+
+def test_export_slices_real_mode_happy_path_sends_batch_and_writes_headers(
+    editor, qapp, monkeypatch
+):
+    monkeypatch.delenv("AKAISDS_DEMO_SAMPLER", raising=False)
+    bridge = editor._bridge
+    fake_sampler = FakeSamplerController(bridge)
+    editor._main_window.sampler_controller = fake_sampler
+
+    slices = [list(range(0, 50)), list(range(50, 120)), list(range(120, 200))]
+    names = ["BREAK-1", "BREAK-2", "BREAK-3"]
+    progress_calls = []
+    status_calls = []
+
+    success, message = editor._export_slices(
+        names, slices, 44100, 16, None, 60, 128, 3,
+        lambda cur, total: progress_calls.append((cur, total)),
+        lambda text: status_calls.append(text),
+    )
+
+    assert success is True
+    assert "3 slices" in message
+    # one send_file_queue call for the WHOLE batch, not one per slice (see
+    # AGENTS.md's own note on why) - sent_entries covers all 3 from that
+    # single call, in order
+    assert [e["name"] for e in fake_sampler.sent_entries] == names
+    assert fake_sampler.sent_entries[0]["samples"] == slices[0]
+    assert fake_sampler.sent_entries[1]["samples"] == slices[1]
+    assert fake_sampler.sent_entries[2]["samples"] == slices[2]
+    for entry in fake_sampler.sent_entries:
+        assert entry["bit_depth"] == 16
+        assert entry["sample_rate"] is None
+        assert entry["mono"] is True
+
+    for name, slice_samples in zip(names, slices):
+        index = bridge.sample_list().index(name)
+        header_calls = {
+            c[0]: c[2] for c in bridge.set_parameter_calls if c[1] == index
+        }
+        # SPTYPE forced to one-shot regardless of the source's own loop -
+        # see _export_slices' own comment
+        assert header_calls["SPTYPE"] == 3
+        # SPITCH/STUNO/SHLTO copied from the source sample (60/128/3, the
+        # arguments passed above), same fields Duplicate Sample copies
+        assert header_calls["SPITCH"] == 60
+        assert header_calls["STUNO"] == 128
+        assert header_calls["SHLTO"] == 3
+        assert header_calls["SSTART"] == 0
+        assert header_calls["SMPEND"] == len(slice_samples) - 1
+
+
+def test_export_slices_reports_failure_when_the_batch_send_fails(
+    editor, qapp, monkeypatch
+):
+    monkeypatch.delenv("AKAISDS_DEMO_SAMPLER", raising=False)
+    bridge = editor._bridge
+    fake_sampler = FakeSamplerController(bridge)
+    fake_sampler.next_result = False
+    editor._main_window.sampler_controller = fake_sampler
+
+    success, message = editor._export_slices(
+        ["BREAK-1"], [list(range(10))], 44100, 16, None, 60, 0, 0,
+        lambda *a: None, lambda *a: None,
+    )
+
+    assert success is False
+    assert "did not complete" in message
+    assert bridge.sample_list().count("BREAK-1") == 0
+
+
+def test_export_slices_returns_false_without_a_sampler_controller(editor):
+    editor._main_window.sampler_controller = None
+    success, message = editor._export_slices(
+        ["X-1"], [[0, 1, 2]], 44100, 16, None, 60, 0, 0,
+        lambda *a: None, lambda *a: None,
+    )
+    assert success is False
+    assert "no Transfer Dashboard connection" in message
+
+
+def test_export_slices_returns_false_while_a_transfer_is_busy(editor):
+    bridge = editor._bridge
+    fake_sampler = FakeSamplerController(bridge)
+    fake_sampler.busy = True
+    editor._main_window.sampler_controller = fake_sampler
+    success, message = editor._export_slices(
+        ["X-1"], [[0, 1, 2]], 44100, 16, None, 60, 0, 0,
+        lambda *a: None, lambda *a: None,
+    )
+    assert success is False
+    assert "already in progress" in message

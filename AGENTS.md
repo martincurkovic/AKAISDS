@@ -1022,6 +1022,129 @@ color, but a bare `QLabel` with no border/background so it looks
 unmistakably unclickable. Use this helper for any future never-assignable
 mod slot rather than a disabled combo.
 
+## Slice Editor (Samples tab): manual ReCycle-style breakbeat chopping
+
+"Slice Editor…" (next to Duplicate Sample) opens a modal
+`SliceEditorWindow` (`ui/slice_editor_window.py`) over a sample's already-
+loaded audio, letting the user place slice markers by hand and export every
+resulting slice back to the sampler as a new one-shot sample. Same
+`has_waveform()`/demo-mode gate as Duplicate Sample in
+`_set_sample_edit_buttons_enabled` - DemoBridge has no add-sample primitive
+either, so the button is fully disabled in demo mode rather than offering a
+partial fake (same reasoning already established for Duplicate
+Program/Keygroup/Sample - see "Trim/Reverse..." above).
+
+**No transient detection** - manual markers only, plus an "Equal Slices"
+quick-start (even spacing via `core.sample_slicing.equal_slice_markers`) and
+zero-crossing snapping (`find_nearest_zero_crossing`) on every add/drag-
+release. Automatic transient detection was discussed and deliberately cut
+as a separate, much larger undertaking - if it's ever added, it should
+produce the same plain frame-index marker list this already consumes, not
+a parallel code path.
+
+**`SliceWaveformView` (`ui/slice_waveform_view.py`) is NOT a reuse of the
+Samples tab's own `WaveformView`** - genuinely different marker model:
+`WaveformView` has a FIXED four named markers that PUSH each other past a
+neighbour (Newton's-cradle cascade, see `push_marker`); this widget has two
+edge handles (start/end - "shave off dead space") plus an ARBITRARY-length,
+user-managed interior marker list, and a drag just CLAMPS at whichever
+neighbour (marker or edge) is nearest - there's no meaningful "shove the
+next slice along" behaviour here, since slices are independent chunks, not
+one continuous loop region. It does reuse `waveform_view.py`'s free,
+Qt-independent helpers (`build_envelope`, `frame_for_x`, `x_for_frame`,
+`_MIN_ZOOM`) rather than re-deriving that math.
+
+**Zero-crossing snapping is snap-ON-RELEASE, not continuous during the
+drag** - the same "redraw live, commit on release" split
+`WaveformView.marker_committed` already uses for its own hardware writes.
+Snapping on every mouse-move would make a marker visibly jump around
+mid-drag instead of tracking the cursor smoothly; it also isn't free
+(`find_nearest_zero_crossing` searches outward from a target frame,
+`O(search_radius)` per call). `core.sample_slicing.find_nearest_zero_crossing`
+picks the nearest of two samples straddling a genuine sign change (or a
+sample that's exactly 0) - there's no continuous zero to land on in
+discrete audio, so "nearest to zero amplitude among the two frames the
+crossing sits between" is the practical definition used throughout.
+
+**Every exported slice is forced to one-shot (`SPTYPE = 3`)** regardless of
+the source sample's own loop settings - a chopped drum break slice isn't
+meant to loop. `SPITCH`/`STUNO`/`SHLTO` are still copied from the source
+(same fields `_perform_duplicate_sample_real` copies), so at least pitch/
+tuning carry over; `SSTART`/`SMPEND` are written to cover the whole sent
+buffer (0 to the slice's own length - 1).
+
+**Export sends the WHOLE batch in ONE `send_file_queue` call**, not one
+call per slice the way `_perform_duplicate_sample_real` sends its single
+file - `SamplerController._finish_unit` only emits `transfer_finished` once
+`self._file_queue` is fully drained (see its own code), so a single
+`send_file_queue(file_entries)` with all N slices already gets "send these,
+tell me once they're ALL done," including per-file progress
+(`transfer_progress`) and per-file status text (`status_changed`, "Sending
+file X/N") for free - looping `_wait_for_any_signal` N times would be
+strictly more code for a worse result. `_export_slices` in
+`program_editor_window.py` is the hardware-talking half that does this
+(temp WAVs, the batch send, then one header-field fixup pass per landed
+sample); `SliceEditorWindow` itself only owns naming/collision/confirmation
+UI and calls into it - same layering `BridgeWorker`'s own section above
+describes for the rest of this window's hardware access.
+`tests/test_program_editor_window.py`'s own `FakeSamplerController` used to
+only read `file_entries[0]` (every existing caller only ever sent one file)
+- extended to iterate the whole list for this, backward-compatible with
+every single-file caller.
+
+**Slice names are zero-padded to a FIXED width computed once per batch**
+(`ui.slice_editor_window.slice_export_names`) - `<base>-01`.."<base>-16"`,
+not `-1`.."-16"` - so every name in the same export truncates its base
+identically. Getting this wrong (each name computing its own suffix width)
+would silently truncate slice 1's base one character longer than slice
+10's the moment a batch crosses 10 slices, since `NAME_LENGTH` (12) always
+needs to leave room for the suffix. Collisions are checked against a live
+`existing_names_provider()` callback (re-queried right before export), not
+a snapshot taken when the dialog opened - the same "stale copy" bug class
+`_update_multi_program_combo_names`/`_update_zone_sample_combo_names`
+already exist to avoid elsewhere on this page.
+
+**`SliceEditorWindow` is deliberately application-modal** (`.exec()`, not
+`.show()`) - there's no `is_transfer_busy()` re-check once export is
+actually underway, so modality is what actually prevents the user tabbing
+back to the Transfer Dashboard and starting a conflicting send while the
+window is open, rather than a race this window would otherwise have to
+poll for. `_wait_for_any_signal` (in `ProgramEditorWindow`, which is what
+performs the real export) already pumps its own nested `QEventLoop` while
+blocking on a send, so nesting `QDialog.exec()` on top of that is nothing
+new for this codebase. `reject()`/`closeEvent()` both ignore Close/Esc/
+window-X while an export is actually in flight (`self._exporting`) - that
+nested event loop means a Close click COULD otherwise be delivered and
+processed mid-batch-send.
+
+**Deferred to a later version, deliberately out of scope for this pass**:
+click-to-preview playback through the computer's own speakers (needs an
+audio output driver this app has never opened before - a separate,
+larger piece of work); real macOS trackpad pinch-to-zoom
+(`WaveformView._handle_pinch_zoom`'s own `QEvent.Type.NativeGesture`
+handling was not duplicated onto `SliceWaveformView` - Ctrl+wheel zoom and
+the Zoom +/-/Fit buttons cover it for now). Mono only - stereo sample
+editing was out of scope for this pass too, though in practice every
+resident S3000-series sample is already a single mono buffer on this
+hardware regardless (stereo only ever exists as a pair of mono sample
+slots, `-L`/`-R` - see `sampler_controller.py`'s own
+`build_stereo_channel_name`), so this was never actually a gap to guard
+against on the input side.
+
+Test split: pure math (`equal_slice_markers`/`find_nearest_zero_crossing`/
+`slice_bounds`/`slice_samples`) in `tests/test_sample_slicing.py`, the
+widget's own marker/drag/zoom behaviour in
+`tests/test_slice_waveform_view.py`, the dialog's naming/collision/
+confirmation UI (with `export_callback` entirely faked, never a real send)
+in `tests/test_slice_editor_window.py`, and the real hardware-talking half
+(`_export_slices`, plus `_open_slice_editor`'s own early guards) in
+`tests/test_program_editor_window.py` - the same split
+`core/sample_editing.py` vs. `_perform_sample_edit_real` already
+established for Trim/Reverse/Fade/Normalise. `SliceEditorWindow.exec()`
+itself is never called in a test (would hang an offscreen test with
+nothing to close a real modal loop) - `test_slice_editor_window.py`
+constructs the dialog directly and drives its methods without showing it.
+
 ## Testing
 
 `TESTING.md` undersells this slightly - there's also
