@@ -12,6 +12,7 @@ dependencies = [
     "python-rtmidi>=1.5.8",
     "soundfile>=0.14.0",
     "s3ked",
+    "miniaudio>=1.71",
 ]
 
 [dependency-groups]

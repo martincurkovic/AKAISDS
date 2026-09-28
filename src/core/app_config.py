@@ -92,13 +92,14 @@ def save_device_type(device_type):
 
 # samples, not ms/bytes - same unit an Ableton-style buffer-size combobox
 # shows (see ui/settings_dialog.py's _BUFFER_SIZE_OPTIONS), converted to
-# actual bytes at playback time via QAudioFormat.bytesForFrames() (see
-# core/audio_preview.py) since that depends on the format actually in use
+# milliseconds at playback time (see core/audio_preview.py, which passes
+# it to miniaudio.PlaybackDevice's buffersize_msec) since that conversion
+# depends on the sample rate actually in use
 _DEFAULT_AUDIO_BUFFER_SAMPLES = 1024
 
 
 def get_saved_audio_output_device():
-    # hex-encoded QAudioDevice.id() (see core.audio_preview.device_id_string),
+    # hex-encoded miniaudio device id (see core.audio_preview.device_id_string),
     # or None for "system default" - the same meaning an unset/missing key
     # already has, so there's no separate sentinel to keep in sync
     config = load_config()

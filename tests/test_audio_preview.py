@@ -1,14 +1,16 @@
 # tests for core/audio_preview.py - the Slice Editor's click-to-preview
 # playback (see ui/slice_editor_window.py, ui/slice_waveform_view.py).
 # Device enumeration/resolution is tested against whatever real audio
-# devices this machine actually has (there's no way to fake QMediaDevices
-# itself); actual playback tests are skipped outright on a machine with no
-# audio output device at all, same reasoning tests/test_dashboard.py etc.
-# use for anything that would otherwise need real hardware.
+# devices this machine actually has (there's no way to fake miniaudio's own
+# device enumeration); actual playback tests are skipped outright on a
+# machine with no audio output device at all, same reasoning
+# tests/test_dashboard.py etc. use for anything that would otherwise need
+# real hardware.
+
+import time
 
 import pytest
 from PySide6.QtWidgets import QApplication
-from PySide6.QtMultimedia import QMediaDevices
 
 from core import app_config, audio_preview
 
@@ -19,7 +21,7 @@ def qapp():
     yield app
 
 
-_HAS_AUDIO_DEVICE = not QMediaDevices.defaultAudioOutput().isNull()
+_HAS_AUDIO_DEVICE = bool(audio_preview.list_output_devices())
 _requires_audio_device = pytest.mark.skipif(
     not _HAS_AUDIO_DEVICE, reason="no audio output device available in this environment"
 )
@@ -58,11 +60,12 @@ def test_find_output_device_returns_none_for_falsy_input(qapp):
 def test_resolve_output_device_uses_system_default_when_nothing_saved(
     qapp, monkeypatch, tmp_path
 ):
+    # None IS the "system default" answer here (miniaudio.PlaybackDevice
+    # resolves a None device_id to the default itself) - not "nothing
+    # found", unlike the old QAudioDevice-based version which always
+    # returned some concrete device object even for the default case
     _use_temp_config(monkeypatch, tmp_path)
-    device = audio_preview.resolve_output_device()
-    assert audio_preview.device_id_string(device) == audio_preview.device_id_string(
-        QMediaDevices.defaultAudioOutput()
-    )
+    assert audio_preview.resolve_output_device() is None
 
 
 def test_resolve_output_device_falls_back_when_saved_device_is_missing(
@@ -70,10 +73,7 @@ def test_resolve_output_device_falls_back_when_saved_device_is_missing(
 ):
     _use_temp_config(monkeypatch, tmp_path)
     app_config.save_audio_output_device("not-a-real-device-id")
-    device = audio_preview.resolve_output_device()
-    assert audio_preview.device_id_string(device) == audio_preview.device_id_string(
-        QMediaDevices.defaultAudioOutput()
-    )
+    assert audio_preview.resolve_output_device() is None
 
 
 def test_resolve_output_device_uses_the_saved_device_when_it_still_exists(
@@ -86,6 +86,7 @@ def test_resolve_output_device_uses_the_saved_device_when_it_still_exists(
     target_id = audio_preview.device_id_string(devices[-1])
     app_config.save_audio_output_device(target_id)
     device = audio_preview.resolve_output_device()
+    assert device is not None
     assert audio_preview.device_id_string(device) == target_id
 
 
@@ -93,17 +94,19 @@ def test_resolve_output_device_uses_the_saved_device_when_it_still_exists(
 
 
 def test_play_with_no_available_device_logs_and_noops(qapp, monkeypatch):
-    monkeypatch.setattr(audio_preview, "resolve_output_device", lambda: None)
+    def _raise(*args, **kwargs):
+        raise audio_preview.miniaudio.MiniaudioError("no device")
+
+    monkeypatch.setattr(audio_preview.miniaudio, "PlaybackDevice", _raise)
     player = audio_preview.SlicePreviewPlayer()
     player.play([0] * 100, 0, 99, 44100)  # must not raise
-    assert player._sink is None
-    assert player._buffer is None
+    assert player._device is None
 
 
 def test_play_with_an_empty_slice_range_is_a_noop(qapp):
     player = audio_preview.SlicePreviewPlayer()
     player.play([], 0, -1, 44100)  # must not raise
-    assert player._sink is None
+    assert player._device is None
 
 
 def test_stop_without_playing_is_a_noop_and_emits_nothing(qapp):
@@ -118,18 +121,17 @@ def test_stop_without_playing_is_a_noop_and_emits_nothing(qapp):
 
 
 @_requires_audio_device
-def test_play_starts_a_sink_and_stop_emits_finished(qapp):
+def test_play_starts_a_device_and_stop_emits_finished(qapp):
     player = audio_preview.SlicePreviewPlayer()
     finished_calls = []
     player.finished.connect(lambda: finished_calls.append(True))
 
     samples = [1000 if i % 2 == 0 else -1000 for i in range(4410)]
     player.play(samples, 0, len(samples) - 1, 44100)
-    assert player._sink is not None
+    assert player._device is not None
 
     player.stop()
-    assert player._sink is None
-    assert player._buffer is None
+    assert player._device is None
     assert finished_calls == [True]
 
 
@@ -140,7 +142,21 @@ def test_play_retriggers_instead_of_overlapping(qapp):
     player = audio_preview.SlicePreviewPlayer()
     samples = [0] * 4410
     player.play(samples, 0, len(samples) - 1, 44100)
-    first_sink = player._sink
+    first_device = player._device
     player.play(samples, 0, len(samples) - 1, 44100)
-    assert player._sink is not None
-    assert player._sink is not first_sink
+    assert player._device is not None
+    assert player._device is not first_device
+    player.stop()
+
+
+@_requires_audio_device
+def test_play_advances_frames_sent_over_time(qapp):
+    # the generator's own progress counter is what _on_tick polls for the
+    # playhead/end-of-playback - confirm it actually advances during real
+    # playback rather than staying pinned at 0
+    player = audio_preview.SlicePreviewPlayer()
+    samples = [1000 if i % 2 == 0 else -1000 for i in range(44100)]
+    player.play(samples, 0, len(samples) - 1, 44100)
+    time.sleep(0.2)
+    assert player._frames_sent > 0
+    player.stop()

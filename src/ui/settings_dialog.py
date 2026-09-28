@@ -27,9 +27,10 @@ import mido
 _LOOPBACK_TEST_SIZES = [8, 32, 64, 127, 256, 512, 1024, 1536, 2048, 2560, 3072]
 
 # frames, same options/unit a DAW's own audio buffer-size combobox uses
-# (e.g. Ableton Live) rather than milliseconds - converted to actual bytes
-# at playback time via QAudioFormat.bytesForFrames() (core/audio_preview.py),
-# since that depends on the sample rate/format actually in use
+# (e.g. Ableton Live) rather than milliseconds - converted to milliseconds
+# at playback time (core/audio_preview.py, miniaudio.PlaybackDevice's
+# buffersize_msec), since that conversion depends on the sample rate
+# actually in use
 _BUFFER_SIZE_OPTIONS = [32, 64, 128, 256, 512, 1024, 2048]
 
 # seconds to wait for each message to return. also used for hardware test
@@ -149,7 +150,7 @@ class MidiSettingsDialog(QDialog):
         self.combo_audio_output.addItem("(System Default)", None)
         for device in audio_preview.list_output_devices():
             self.combo_audio_output.addItem(
-                device.description(), audio_preview.device_id_string(device)
+                device["name"], audio_preview.device_id_string(device)
             )
         self.combo_audio_output.setSizeAdjustPolicy(
             QComboBox.SizeAdjustPolicy.AdjustToContents
