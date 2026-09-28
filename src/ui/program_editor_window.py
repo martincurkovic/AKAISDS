@@ -913,7 +913,7 @@ class ProgramEditorWindow(QMainWindow):
         self._zone_button_group.setExclusive(True)
 
         self._zone_stack = QStackedWidget()
-        self._zone_stack.setStyleSheet("background: transparent;")
+        self._zone_stack.setObjectName("transparentContainer")
 
         self._zone_loudness_labels = []
         self._zone_pan_labels = []
@@ -934,7 +934,7 @@ class ProgramEditorWindow(QMainWindow):
             zone_selector_row.addWidget(btn)
 
             page = QWidget()
-            page.setStyleSheet("background: transparent;")
+            page.setObjectName("transparentContainer")
             page_layout = QVBoxLayout()
             page_layout.setSpacing(6)
 
@@ -3933,7 +3933,7 @@ class ProgramEditorWindow(QMainWindow):
         # a different shade - see _build_section_card), which showed up
         # as a visible colored box behind the knob+label - same fix as
         # _add_keygroup_row's own row_widget below.
-        widget.setStyleSheet("background: transparent;")
+        widget.setObjectName("transparentContainer")
         row = QHBoxLayout(widget)
         row.setContentsMargins(0, 0, 0, 0)
         row.setSpacing(4)
@@ -4063,7 +4063,7 @@ class ProgramEditorWindow(QMainWindow):
         # actually sits in here, so the reserved space read as a visible
         # colored bar even while the real scrollbar inside was hidden.
         # Same fix as _build_multi_part_knob's own widget above.
-        scrollbar_container.setStyleSheet("background: transparent;")
+        scrollbar_container.setObjectName("transparentContainer")
         scrollbar_container_layout = QVBoxLayout(scrollbar_container)
         scrollbar_container_layout.setContentsMargins(0, 0, 0, 0)
         scrollbar_container_layout.addWidget(self.waveform_scrollbar)
@@ -4551,7 +4551,7 @@ class ProgramEditorWindow(QMainWindow):
         item = QListWidgetItem(self.keygroup_list)
 
         row_widget = QWidget()
-        row_widget.setStyleSheet("background: transparent;")
+        row_widget.setObjectName("transparentContainer")
         row_layout = QHBoxLayout(row_widget)
         row_layout.setContentsMargins(8, 6, 8, 6)
         row_layout.setSpacing(8)

@@ -23,9 +23,41 @@ QMainWindow {
     background-color: ${bg};
 }
 
+/* A plain QWidget used only as a transparent layout container (so it
+   blends into whatever ancestor panel it actually sits in, instead of
+   picking up the base QWidget rule's own ${bg}) - selected by object name
+   rather than each call site giving it its OWN local setStyleSheet(...).
+   That distinction matters beyond style: QToolTip's tip label copies its
+   palette from the nearest ANCESTOR widget that has a non-empty local
+   stylesheet of its own - a call-site-local "background: transparent;"
+   made every tooltip on a descendant of that container inherit a
+   transparent background with nothing behind it to composite against,
+   rendering solid black on at least some Linux compositors. Routing this
+   through the app-wide stylesheet by object name instead means no widget
+   in this chain has a local stylesheet, so descendant tooltips resolve
+   normally through the QToolTip rule below. See ui/program_editor_window.py's
+   call sites (search "transparentContainer") for where this is applied. */
+QWidget#transparentContainer {
+    background: transparent;
+}
+
 QLabel {
     background: transparent;
     color: ${text};
+}
+
+/* Qt's tooltip (QToolTip) is internally a QLabel too, so without its own
+   rule here it inherits the QLabel rule above - "background: transparent"
+   on a real top-level popup window, with nothing underneath for the
+   compositor to blend against, renders as an undrawn black box on at
+   least some Linux window managers/compositors instead of the OS's normal
+   tooltip look. Give it an explicit opaque background so it never falls
+   through to that. */
+QToolTip {
+    background-color: ${bg_dialog};
+    color: ${text};
+    border: 1px solid ${border};
+    padding: 4px 6px;
 }
 
 /* ---------- Buttons ---------- */
