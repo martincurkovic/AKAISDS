@@ -94,9 +94,9 @@ def test_save_and_get_audio_output_device_round_trip(monkeypatch, tmp_path):
     assert app_config.get_saved_audio_output_device() == "deadbeef"
 
 
-def test_get_saved_audio_buffer_samples_defaults_to_512(monkeypatch, tmp_path):
+def test_get_saved_audio_buffer_samples_defaults_to_1024(monkeypatch, tmp_path):
     _use_temp_config(monkeypatch, tmp_path)
-    assert app_config.get_saved_audio_buffer_samples() == 512
+    assert app_config.get_saved_audio_buffer_samples() == 1024
 
 
 def test_save_and_get_audio_buffer_samples_round_trip(monkeypatch, tmp_path):

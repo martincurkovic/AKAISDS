@@ -10,7 +10,7 @@ import struct
 from PySide6.QtCore import QBuffer, QByteArray, QIODevice, QObject, QTimer, Signal
 from PySide6.QtMultimedia import QAudio, QAudioFormat, QAudioSink, QMediaDevices
 
-from core import app_config, debug_log
+from core import app_config, debug_log, sds_encoder
 
 # how often the playhead position is re-read/re-emitted during playback -
 # fast enough to look smooth, cheap enough that polling it costs nothing
@@ -106,22 +106,53 @@ class SlicePreviewPlayer(QObject):
             )
             return
 
+        chunk = samples[start_frame : end_frame + 1]
+        if not chunk:
+            return
+
+        # Match the OUTPUT DEVICE's own native rate/channel count instead of
+        # asking for this sample's own (mono, rarely device-native) rate
+        # directly. Confirmed as a real source of the crackle/underrun
+        # reports on Linux: a mismatch here makes PipeWire/PulseAudio
+        # resample AND channel-upmix in real time on every playback, which
+        # a small low-latency buffer is prone to glitching under -
+        # reproduced against a PreSonus Studio 26 running its "Surround
+        # 4.0" profile (native 48kHz/4ch) while this app requested
+        # 44.1kHz/mono, with isFormatSupported() reporting the mismatched
+        # request as "supported" the whole time (PulseAudio's compat layer
+        # accepts almost any format and converts server-side, so this
+        # never hit the fallback path below to reveal itself). Resampling
+        # and channel-duplicating ONCE here, off the real-time path, and
+        # only asking the device for a bit-depth conversion (int16 -> its
+        # native sample type, a trivial/glitch-free conversion) avoids
+        # that real-time work entirely.
+        preferred = device.preferredFormat()
+        device_rate = preferred.sampleRate() or framerate
+        device_channels = preferred.channelCount() or 1
+
         fmt = QAudioFormat()
-        fmt.setSampleRate(framerate)
-        fmt.setChannelCount(1)
+        fmt.setSampleRate(device_rate)
+        fmt.setChannelCount(device_channels)
         fmt.setSampleFormat(QAudioFormat.SampleFormat.Int16)
         if not device.isFormatSupported(fmt):
             debug_log.get_logger().error(
                 f"SlicePreviewPlayer: {device.description()!r} doesn't "
-                f"support {framerate}Hz mono 16-bit - falling back to its "
-                "own preferred format (pitch will be off)"
+                f"support {device_rate}Hz {device_channels}ch 16-bit - "
+                "falling back to its own preferred format (pitch may be off)"
             )
-            fmt = device.preferredFormat()
+            fmt = preferred
+            device_rate = fmt.sampleRate()
+            device_channels = fmt.channelCount()
 
-        chunk = samples[start_frame : end_frame + 1]
-        if not chunk:
-            return
-        pcm_bytes = struct.pack("<" + "h" * len(chunk), *chunk)
+        resampled, _ = sds_encoder.resample_to_target_rate(
+            chunk, framerate, device_rate
+        )
+        if device_channels > 1:
+            interleaved = []
+            for sample in resampled:
+                interleaved.extend([sample] * device_channels)
+            resampled = interleaved
+        pcm_bytes = struct.pack("<" + "h" * len(resampled), *resampled)
 
         try:
             sink = QAudioSink(device, fmt, self)
