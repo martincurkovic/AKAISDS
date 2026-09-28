@@ -444,7 +444,15 @@ class SliceEditorWindow(QDialog):
             "Discard the slice markers placed since the last export?",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
         )
-        return reply == QMessageBox.StandardButton.Yes
+        if reply == QMessageBox.StandardButton.Yes:
+            # closeEvent()'s own super().closeEvent(event) call re-enters
+            # through QDialog's default closeEvent -> reject() (the X-button
+            # path, not the in-window Close button) - without clearing this,
+            # that second pass would hit _confirm_discard() again and ask
+            # the same question twice for one close
+            self._dirty = False
+            return True
+        return False
 
     def reject(self):
         if self._confirm_discard():
