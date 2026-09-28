@@ -1,6 +1,6 @@
 import math
-from PySide6.QtWidgets import QDial, QLineEdit
-from PySide6.QtGui import QPainter, QPen, QColor, QIntValidator
+from PySide6.QtWidgets import QApplication, QDial, QLineEdit
+from PySide6.QtGui import QCursor, QPainter, QPen, QColor, QIntValidator
 from PySide6.QtCore import Qt, QPointF
 from ui import theme
 
@@ -10,6 +10,11 @@ _RING_WIDTH = 4
 _POINTER_WIDTH = 3
 
 _DRAG_SENSITIVITY_PX = 150
+# how much slower a Shift-held drag moves - same convention/value as
+# WaveformView's own _FINE_DRAG_DIVISOR (ui/waveform_view.py), kept as an
+# independent constant here rather than a shared import so this widget
+# doesn't need to depend on that module for one number
+_FINE_DRAG_DIVISOR = 8
 
 _TYPE_EDIT_SIZE = (52, 22)
 
@@ -53,10 +58,15 @@ class Knob(QDial):
         super().__init__(parent)
         self.setEnabled(False)  # read-only for now
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
-        self._drag_start_y = None
-        self._drag_start_value = None
+        self._drag_anchor_y = None
+        self._drag_value = None  # float accumulator - see mouseMoveEvent
         self._default_value = None
         self._type_edit = None
+        # fine (Shift-held) mode warps the OS cursor back to a fixed point
+        # every move event - see _enter_fine_drag/mouseMoveEvent, same
+        # mechanism/reasoning as WaveformView's own fine-drag marker editing
+        self._fine_active = False
+        self._warp_anchor_global = None
 
     def defaultValue(self):
         if self._default_value is not None:
@@ -68,8 +78,8 @@ class Knob(QDial):
 
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
-            self._drag_start_y = event.position().y()
-            self._drag_start_value = self.value()
+            self._drag_anchor_y = event.position().y()
+            self._drag_value = float(self.value())
 
     def mouseDoubleClickEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
@@ -126,20 +136,89 @@ class Knob(QDial):
         edit.deleteLater()
 
     def mouseMoveEvent(self, event):
-        if self._drag_start_y is None:
+        if self._drag_anchor_y is None:
             return
-        delta_y = self._drag_start_y - event.position().y()
+        fine = bool(event.modifiers() & Qt.KeyboardModifier.ShiftModifier)
+        if fine and not self._fine_active:
+            self._enter_fine_drag()
+        elif not fine and self._fine_active:
+            self._exit_fine_drag()
+
+        if self._fine_active:
+            # the cursor gets warped back to _warp_anchor_global at the end
+            # of this branch, so THIS event's global position is already
+            # the delta since the last one - not since drag start. The warp
+            # itself generates its own synthetic move event on most
+            # platforms, landing exactly on the anchor - skip it rather
+            # than read it as a zero-length real move (harmless either way
+            # since dy would be 0, but skips a redundant setValue/repaint)
+            current = event.globalPosition()
+            anchor = self._warp_anchor_global
+            if (round(current.x()), round(current.y())) == (
+                round(anchor.x()),
+                round(anchor.y()),
+            ):
+                return
+            dy = (anchor.y() - current.y()) / _FINE_DRAG_DIVISOR
+            QCursor.setPos(anchor)  # QCursor.pos() is already a QPoint
+        else:
+            y = event.position().y()
+            dy = self._drag_anchor_y - y
+            self._drag_anchor_y = y
+
         value_range = self.maximum() - self.minimum()
         sensitivity = value_range / _DRAG_SENSITIVITY_PX
-        new_value = int(self._drag_start_value + delta_y * sensitivity)
-        new_value = max(self.minimum(), min(self.maximum(), new_value))
-        self.setValue(new_value)
+        # a float accumulator (_drag_value) carries the sub-unit remainder
+        # between events instead of rounding it away each time, same reason
+        # WaveformView's own marker dragging needs one - see its comment
+        self._drag_value += dy * sensitivity
+        new_value = int(round(self._drag_value))
+        clamped_value = max(self.minimum(), min(self.maximum(), new_value))
+        # only resync the accumulator when the value itself just got
+        # clamped to the knob's own range - never unconditionally (see
+        # WaveformView's identical comment on why: it would otherwise
+        # silently throw away the sub-unit remainder on every move event,
+        # making a slow, careful drag barely move at all)
+        if clamped_value != new_value:
+            self._drag_value = clamped_value
+        self.setValue(clamped_value)
+
+    def _enter_fine_drag(self):
+        # Shift held mid-drag: the same physical mouse movement now covers
+        # only 1/_FINE_DRAG_DIVISOR of the distance, for precise placement -
+        # which means crawling across the same screen-height of physical
+        # travel many times over for a large move. Hiding the cursor and
+        # warping it back to a fixed point every event (see mouseMoveEvent)
+        # is the same trick WaveformView's own fine-drag marker editing
+        # uses, so the mouse never runs out of screen and stalls mid-drag.
+        self._fine_active = True
+        self._warp_anchor_global = QCursor.pos()
+        QApplication.setOverrideCursor(Qt.CursorShape.BlankCursor)
+
+    def _exit_fine_drag(self):
+        # Shift released mid-drag, or the drag ending - always paired with
+        # _enter_fine_drag's setOverrideCursor so the app is never left
+        # with a permanently invisible cursor
+        self._fine_active = False
+        self._warp_anchor_global = None
+        QApplication.restoreOverrideCursor()
 
     def mouseReleaseEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
-            self._drag_start_y = None
-            self._drag_start_value = None
+            if self._fine_active:
+                self._exit_fine_drag()
+            self._drag_anchor_y = None
+            self._drag_value = None
             self.sliderReleased.emit()
+
+    def hideEvent(self, event):
+        # safety net: if this widget is hidden mid-drag (switching tabs,
+        # the window closing) with no mouseReleaseEvent ever arriving, make
+        # sure the app isn't left with a stuck invisible cursor - same
+        # reasoning as WaveformView's own hideEvent
+        if self._fine_active:
+            self._exit_fine_drag()
+        super().hideEvent(event)
 
     def wheelEvent(self, event):
         # QAbstractSlider's own wheelEvent (inherited via QDial) only

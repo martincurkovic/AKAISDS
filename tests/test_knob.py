@@ -15,7 +15,8 @@ from PySide6.QtCore import QPoint, QPointF, Qt
 from PySide6.QtGui import QKeyEvent, QWheelEvent
 from PySide6.QtWidgets import QApplication
 
-from ui.knob import Knob, _DRAG_SENSITIVITY_PX
+import ui.knob as knob_module
+from ui.knob import Knob, _DRAG_SENSITIVITY_PX, _FINE_DRAG_DIVISOR
 
 
 @pytest.fixture(scope="session")
@@ -25,15 +26,31 @@ def qapp():
 
 
 class _FakeMouseEvent:
-    def __init__(self, y, button=Qt.MouseButton.LeftButton):
+    def __init__(
+        self,
+        y,
+        button=Qt.MouseButton.LeftButton,
+        modifiers=Qt.KeyboardModifier.NoModifier,
+        global_y=None,
+    ):
         self._y = y
         self._button = button
+        self._modifiers = modifiers
+        # only meaningful for fine-drag events (see _drag_fine below) -
+        # real global screen position, distinct from the widget-local one
+        self._global_y = y if global_y is None else global_y
 
     def button(self):
         return self._button
 
     def position(self):
         return QPointF(0, self._y)
+
+    def globalPosition(self):
+        return QPointF(0, self._global_y)
+
+    def modifiers(self):
+        return self._modifiers
 
 
 def _drag(knob, start_y, end_y):
@@ -95,6 +112,137 @@ def test_mouse_move_without_a_preceding_press_is_a_no_op(qapp):
     knob.mouseMoveEvent(_FakeMouseEvent(0))
 
     assert knob.value() == 50
+
+
+class _FakeCursor:
+    # stands in for QCursor for fine-drag tests - the real one reflects
+    # actual OS cursor state, which is unpredictable (and warping it is a
+    # real side effect) under the offscreen QPA platform these tests run
+    # under. Knob only ever calls .pos()/.setPos() on it.
+    _pos = QPoint(0, 0)
+
+    @classmethod
+    def pos(cls):
+        return cls._pos
+
+    @classmethod
+    def setPos(cls, point):
+        cls._pos = point
+
+
+def _drag_fine(knob, global_travel, *, anchor_y=1000):
+    # mirrors _drag above, but holding Shift and driving the (faked) global
+    # cursor position - fine mode reads global position (see mouseMoveEvent),
+    # not the widget-local one, so the warp-back-to-anchor trick works
+    # regardless of where the knob itself sits on screen. Widget-local y is
+    # irrelevant here and left at a fixed dummy value throughout.
+    _FakeCursor._pos = QPoint(0, anchor_y)
+    knob.mousePressEvent(_FakeMouseEvent(0))
+    shift = Qt.KeyboardModifier.ShiftModifier
+    # first Shift-held move only ENTERS fine mode - its anchor is set from
+    # (faked) QCursor.pos() inside _enter_fine_drag, so feeding this same
+    # event's own global position back in as the anchor's starting point
+    # keeps that first move a genuine no-op rather than an unpredictable
+    # jump, matching what real hardware delivers (the OS cursor hasn't
+    # actually moved anywhere yet the instant Shift goes down)
+    knob.mouseMoveEvent(_FakeMouseEvent(0, modifiers=shift, global_y=anchor_y))
+    knob.mouseMoveEvent(
+        _FakeMouseEvent(0, modifiers=shift, global_y=anchor_y - global_travel)
+    )
+    # always finish the drag - leaving fine mode "active" would leave the
+    # override cursor pushed on QApplication's shared stack forever,
+    # bleeding into every later test in this (session-scoped qapp) file
+    knob.mouseReleaseEvent(_FakeMouseEvent(0))
+
+
+def test_fine_drag_needs_far_more_travel_for_the_same_change(qapp, monkeypatch):
+    monkeypatch.setattr(knob_module, "QCursor", _FakeCursor)
+    knob = Knob()
+    knob.setRange(0, 100)
+    knob.setValue(50)
+
+    # the same travel that covers the WHOLE range in normal mode (see
+    # test_dragging_upward_increases_the_value) only covers ~1/_FINE_DRAG_
+    # DIVISOR of it here - not "the whole range", not "barely moved"
+    _drag_fine(knob, global_travel=_DRAG_SENSITIVITY_PX)
+
+    assert 50 < knob.value() < 70
+
+
+def test_fine_drag_divisor_times_the_travel_matches_a_normal_drag(qapp, monkeypatch):
+    monkeypatch.setattr(knob_module, "QCursor", _FakeCursor)
+    knob = Knob()
+    knob.setRange(0, 100)
+    knob.setValue(50)
+
+    _drag_fine(knob, global_travel=_DRAG_SENSITIVITY_PX * _FINE_DRAG_DIVISOR)
+
+    assert knob.value() == 100  # same distance a normal drag covers the whole range in
+
+
+def test_entering_fine_drag_hides_the_cursor_and_releasing_restores_it(qapp, monkeypatch):
+    monkeypatch.setattr(knob_module, "QCursor", _FakeCursor)
+    knob = Knob()
+    knob.setRange(0, 100)
+    knob.setValue(50)
+
+    _FakeCursor._pos = QPoint(0, 1000)
+    knob.mousePressEvent(_FakeMouseEvent(100))
+    knob.mouseMoveEvent(
+        _FakeMouseEvent(
+            100, modifiers=Qt.KeyboardModifier.ShiftModifier, global_y=1000
+        )
+    )
+
+    assert QApplication.overrideCursor() is not None
+    assert QApplication.overrideCursor().shape() == Qt.CursorShape.BlankCursor
+
+    knob.mouseReleaseEvent(_FakeMouseEvent(0))
+
+    assert QApplication.overrideCursor() is None
+
+
+def test_releasing_shift_mid_drag_exits_fine_mode(qapp, monkeypatch):
+    monkeypatch.setattr(knob_module, "QCursor", _FakeCursor)
+    knob = Knob()
+    knob.setRange(0, 100)
+    knob.setValue(50)
+
+    _FakeCursor._pos = QPoint(0, 1000)
+    knob.mousePressEvent(_FakeMouseEvent(100))
+    knob.mouseMoveEvent(
+        _FakeMouseEvent(
+            100, modifiers=Qt.KeyboardModifier.ShiftModifier, global_y=1000
+        )
+    )
+    assert knob._fine_active is True
+
+    # Shift released mid-drag - back to normal (non-warped) dragging
+    knob.mouseMoveEvent(_FakeMouseEvent(90))
+
+    assert knob._fine_active is False
+    assert QApplication.overrideCursor() is None
+
+
+def test_hiding_the_knob_mid_fine_drag_restores_the_cursor(qapp, monkeypatch):
+    monkeypatch.setattr(knob_module, "QCursor", _FakeCursor)
+    knob = Knob()
+    knob.setRange(0, 100)
+    knob.setValue(50)
+    knob.show()
+
+    _FakeCursor._pos = QPoint(0, 1000)
+    knob.mousePressEvent(_FakeMouseEvent(100))
+    knob.mouseMoveEvent(
+        _FakeMouseEvent(
+            100, modifiers=Qt.KeyboardModifier.ShiftModifier, global_y=1000
+        )
+    )
+    assert QApplication.overrideCursor() is not None
+
+    knob.hide()
+
+    assert QApplication.overrideCursor() is None
 
 
 def test_default_value_falls_back_to_the_range_midpoint(qapp):
