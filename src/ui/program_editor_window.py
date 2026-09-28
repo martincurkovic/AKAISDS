@@ -6141,17 +6141,22 @@ class ProgramEditorWindow(QMainWindow):
         if not dialog.exec():
             return
 
-        # filter_samples needs filter_type/cutoff_hz/framerate on top of
-        # the standard (samples, start, loop_start, loop_end, end) shape
-        # _perform_sample_edit's transform(...) call always uses - bound
-        # here via functools.partial so the extra arguments never need to
-        # be visible to that shared dispatcher (see filter_samples' own
+        # filter_samples needs framerate + both filters' own
+        # enabled/cutoff/slope on top of the standard (samples, start,
+        # loop_start, loop_end, end) shape _perform_sample_edit's
+        # transform(...) call always uses - bound here via
+        # functools.partial so the extra arguments never need to be
+        # visible to that shared dispatcher (see filter_samples' own
         # docstring)
         transform = functools.partial(
             sample_editing.filter_samples,
-            filter_type=dialog.filter_type(),
-            cutoff_hz=dialog.cutoff_hz(),
             framerate=entry["framerate"],
+            highpass_enabled=dialog.highpass_enabled(),
+            highpass_cutoff_hz=dialog.highpass_cutoff_hz(),
+            highpass_slope_db_per_octave=dialog.highpass_slope_db_per_octave(),
+            lowpass_enabled=dialog.lowpass_enabled(),
+            lowpass_cutoff_hz=dialog.lowpass_cutoff_hz(),
+            lowpass_slope_db_per_octave=dialog.lowpass_slope_db_per_octave(),
         )
         self._perform_sample_edit(sample_index, transform, "Filter")
 

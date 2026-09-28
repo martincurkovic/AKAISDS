@@ -3293,11 +3293,23 @@ class _FakeFilterSampleDialog:
     def exec(self):
         return self._accept
 
-    def filter_type(self):
-        return "highpass"
+    def highpass_enabled(self):
+        return True
 
-    def cutoff_hz(self):
+    def highpass_cutoff_hz(self):
         return 500
+
+    def highpass_slope_db_per_octave(self):
+        return 24
+
+    def lowpass_enabled(self):
+        return True
+
+    def lowpass_cutoff_hz(self):
+        return 8000
+
+    def lowpass_slope_db_per_octave(self):
+        return 12
 
 
 def test_confirm_filter_sample_passes_the_right_sample_data_to_the_dialog(
@@ -3368,14 +3380,17 @@ def test_confirm_filter_sample_accepted_calls_perform_sample_edit_with_a_working
     assert sample_index == 0
     assert action_label == "Filter"
     # the bound transform must behave exactly like a direct
-    # sample_editing.filter_samples("highpass", 500, 44100) call - the
-    # dialog's own chosen values (see _FakeFilterSampleDialog) actually
-    # made it through the functools.partial binding
+    # sample_editing.filter_samples(...) call with BOTH filters' settings
+    # from the dialog (see _FakeFilterSampleDialog) - confirms every one
+    # of the 6 extra arguments actually made it through the
+    # functools.partial binding, not just a couple of them
     import core.sample_editing as sample_editing_module
 
     expected = sample_editing_module.filter_samples(
         samples, markers["start"], markers["loop_start"], markers["loop_end"],
-        markers["end"], "highpass", 500, 44100,
+        markers["end"], 44100,
+        highpass_enabled=True, highpass_cutoff_hz=500, highpass_slope_db_per_octave=24,
+        lowpass_enabled=True, lowpass_cutoff_hz=8000, lowpass_slope_db_per_octave=12,
     )
     actual = transform(
         samples, markers["start"], markers["loop_start"], markers["loop_end"],

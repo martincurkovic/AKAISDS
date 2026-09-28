@@ -15,8 +15,10 @@ from PySide6.QtCore import QPoint, QPointF, Qt
 from PySide6.QtGui import QKeyEvent, QWheelEvent
 from PySide6.QtWidgets import QApplication
 
+import math
+
 import ui.knob as knob_module
-from ui.knob import Knob, _DRAG_SENSITIVITY_PX, _FINE_DRAG_DIVISOR
+from ui.knob import Knob, LogKnob, _DRAG_SENSITIVITY_PX, _FINE_DRAG_DIVISOR
 
 
 @pytest.fixture(scope="session")
@@ -424,3 +426,108 @@ def test_wheel_within_range_still_changes_the_value(qapp):
 
     assert knob.value() > 50
     assert event.isAccepted()
+
+
+# --- LogKnob: logarithmic drag/paint, same value()/setValue() units --------
+
+
+def test_log_knob_fraction_to_value_and_back_are_inverses(qapp):
+    knob = LogKnob()
+    knob.setRange(20, 20000)
+    for fraction in (0.0, 0.25, 0.5, 0.75, 1.0):
+        value = knob._fraction_to_value(fraction)
+        assert knob._value_to_fraction(value) == pytest.approx(fraction, abs=1e-9)
+
+
+def test_log_knob_midpoint_fraction_is_the_geometric_mean(qapp):
+    # halfway in LOG space is sqrt(min*max), not (min+max)/2 - the whole
+    # point of a log knob: equal ROTATION covers equal RATIO
+    knob = LogKnob()
+    knob.setRange(20, 20000)
+    assert knob._fraction_to_value(0.5) == pytest.approx(math.sqrt(20 * 20000))
+
+
+def test_log_knob_endpoints_match_min_and_max(qapp):
+    knob = LogKnob()
+    knob.setRange(20, 20000)
+    assert knob._fraction_to_value(0.0) == pytest.approx(20)
+    assert knob._fraction_to_value(1.0) == pytest.approx(20000)
+
+
+def test_log_knob_full_drag_from_minimum_reaches_maximum(qapp):
+    knob = LogKnob()
+    knob.setRange(20, 20000)
+    knob.setValue(20)
+
+    _drag(knob, start_y=100, end_y=100 - _DRAG_SENSITIVITY_PX)
+
+    assert knob.value() == 20000
+
+
+def test_log_knob_half_drag_from_minimum_lands_on_the_geometric_mean(qapp):
+    knob = LogKnob()
+    knob.setRange(20, 20000)
+    knob.setValue(20)
+
+    _drag(knob, start_y=100, end_y=100 - (_DRAG_SENSITIVITY_PX / 2))
+
+    assert knob.value() == round(math.sqrt(20 * 20000))
+
+
+def test_log_knob_dragging_past_the_range_clamps_rather_than_wrapping(qapp):
+    knob = LogKnob()
+    knob.setRange(20, 20000)
+    knob.setValue(1000)
+
+    _drag(knob, start_y=100, end_y=100 - _DRAG_SENSITIVITY_PX * 10)
+    assert knob.value() == 20000
+
+    _drag(knob, start_y=100, end_y=100 + _DRAG_SENSITIVITY_PX * 10)
+    assert knob.value() == 20
+
+
+def test_log_knob_rejects_a_non_positive_minimum(qapp):
+    knob = LogKnob()
+    knob.setRange(0, 20000)
+    with pytest.raises(ValueError):
+        knob._value_to_fraction(100)
+    with pytest.raises(ValueError):
+        knob._fraction_to_value(0.5)
+
+
+def test_log_knob_value_and_type_entry_stay_in_plain_linear_units(qapp):
+    # value()/setValue()/click-to-type are all UNCHANGED by LogKnob - only
+    # drag/paint angle are logarithmic (see the class's own docstring) -
+    # typing "300" must set exactly 300, not a log-transformed number
+    knob = LogKnob()
+    knob.setRange(20, 20000)
+    knob._begin_type_edit("3")
+    knob._type_edit.setText("300")
+    knob._type_edit.returnPressed.emit()
+    assert knob.value() == 300
+
+
+# --- disabled-state painting -------------------------------------------------
+
+
+def test_disabled_knob_paints_without_error(qapp):
+    # regression guard for the disabled/greyed-out paint branch (palette
+    # key typos etc wouldn't show up any other way, since nothing else
+    # calls paintEvent directly)
+    knob = Knob()
+    knob.setRange(0, 100)
+    knob.setValue(50)
+    knob.setEnabled(False)
+    knob.resize(56, 56)
+    pixmap = knob.grab()
+    assert not pixmap.isNull()
+
+
+def test_disabled_log_knob_paints_without_error(qapp):
+    knob = LogKnob()
+    knob.setRange(20, 20000)
+    knob.setValue(1000)
+    knob.setEnabled(False)
+    knob.resize(56, 56)
+    pixmap = knob.grab()
+    assert not pixmap.isNull()

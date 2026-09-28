@@ -59,7 +59,12 @@ class Knob(QDial):
         self.setEnabled(False)  # read-only for now
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self._drag_anchor_y = None
-        self._drag_value = None  # float accumulator - see mouseMoveEvent
+        self._drag_fraction = None  # float accumulator, in [0, 1] fraction
+        # space, not raw value units - see mouseMoveEvent. Fraction space
+        # (rather than value units) is what lets LogKnob below reuse this
+        # exact drag/paint logic unchanged, just by overriding
+        # _value_to_fraction/_fraction_to_value with log/exp math instead
+        # of the linear default here.
         self._default_value = None
         self._type_edit = None
         # fine (Shift-held) mode warps the OS cursor back to a fixed point
@@ -67,6 +72,21 @@ class Knob(QDial):
         # mechanism/reasoning as WaveformView's own fine-drag marker editing
         self._fine_active = False
         self._warp_anchor_global = None
+
+    def _value_to_fraction(self, value):
+        # linear by default - LogKnob overrides this (and its inverse
+        # below) with log/exp math; every caller (mouseMoveEvent's drag
+        # accumulator, paintEvent's pointer angle) goes through these two
+        # hooks rather than computing a linear fraction directly, so a
+        # subclass changing these two methods is enough to change the
+        # knob's whole feel (drag AND paint) with no other code to touch
+        value_range = self.maximum() - self.minimum()
+        if not value_range:
+            return 0.0
+        return (value - self.minimum()) / value_range
+
+    def _fraction_to_value(self, fraction):
+        return self.minimum() + fraction * (self.maximum() - self.minimum())
 
     def defaultValue(self):
         if self._default_value is not None:
@@ -79,7 +99,7 @@ class Knob(QDial):
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
             self._drag_anchor_y = event.position().y()
-            self._drag_value = float(self.value())
+            self._drag_fraction = self._value_to_fraction(self.value())
 
     def mouseDoubleClickEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
@@ -166,21 +186,27 @@ class Knob(QDial):
             dy = self._drag_anchor_y - y
             self._drag_anchor_y = y
 
-        value_range = self.maximum() - self.minimum()
-        sensitivity = value_range / _DRAG_SENSITIVITY_PX
-        # a float accumulator (_drag_value) carries the sub-unit remainder
-        # between events instead of rounding it away each time, same reason
-        # WaveformView's own marker dragging needs one - see its comment
-        self._drag_value += dy * sensitivity
-        new_value = int(round(self._drag_value))
+        # sensitivity is in FRACTION units (a full _DRAG_SENSITIVITY_PX
+        # drag covers the whole 0..1 knob range), not raw value units -
+        # see _value_to_fraction/_fraction_to_value's own comment on why;
+        # mathematically identical to the old value-units math for the
+        # default linear mapping, but this is what makes LogKnob's
+        # override actually change the drag feel too, not just the paint
+        sensitivity = 1.0 / _DRAG_SENSITIVITY_PX
+        # a float accumulator (_drag_fraction) carries the sub-step
+        # remainder between events instead of rounding it away each time,
+        # same reason WaveformView's own marker dragging needs one - see
+        # its comment
+        self._drag_fraction += dy * sensitivity
+        new_value = int(round(self._fraction_to_value(self._drag_fraction)))
         clamped_value = max(self.minimum(), min(self.maximum(), new_value))
         # only resync the accumulator when the value itself just got
         # clamped to the knob's own range - never unconditionally (see
         # WaveformView's identical comment on why: it would otherwise
-        # silently throw away the sub-unit remainder on every move event,
+        # silently throw away the sub-step remainder on every move event,
         # making a slow, careful drag barely move at all)
         if clamped_value != new_value:
-            self._drag_value = clamped_value
+            self._drag_fraction = self._value_to_fraction(clamped_value)
         self.setValue(clamped_value)
 
     def _enter_fine_drag(self):
@@ -208,7 +234,7 @@ class Knob(QDial):
             if self._fine_active:
                 self._exit_fine_drag()
             self._drag_anchor_y = None
-            self._drag_value = None
+            self._drag_fraction = None
             self.sliderReleased.emit()
 
     def hideEvent(self, event):
@@ -239,6 +265,7 @@ class Knob(QDial):
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         rect = self.rect().adjusted(4, 4, -4, -4)
         palette = theme.current_palette()
+        enabled = self.isEnabled()
 
         # track color reacts to theme (was a fixed dark slate, which read as
         # too dark against the light theme's near-white background)
@@ -247,16 +274,24 @@ class Knob(QDial):
         # line now that the pointer reaches all the way to the ring: the
         # round cap at the value arc's current-value end would peek out past
         # both edges of the pointer right where they cross
-        track_pen = QPen(QColor(palette["border_hover"]))
+        track_pen = QPen(
+            QColor(palette["border_hover"] if enabled else palette["border_disabled"])
+        )
         track_pen.setWidth(_RING_WIDTH)
         track_pen.setCapStyle(Qt.PenCapStyle.FlatCap)
         painter.setPen(track_pen)
         painter.drawArc(rect, START_ANGLE_DEG * 16, -SWEEP_DEG * 16)
 
-        value_range = self.maximum() - self.minimum()
-        fraction = (self.value() - self.minimum()) / value_range if value_range else 0
+        fraction = self._value_to_fraction(self.value())
 
-        value_pen = QPen(QColor("#3aa88a"))
+        # disabled reuses the same muted "text_disabled" token style.qss
+        # already uses for every other disabled control (QPushButton,
+        # QLineEdit, etc - see AGENTS.md's "Loop type gating" section on
+        # why that had to be spelled out explicitly for QComboBox/QSpinBox
+        # too) - a knob painting itself with QPainter rather than through
+        # the stylesheet needed its own explicit check here for the same
+        # reason those did
+        value_pen = QPen(QColor("#3aa88a" if enabled else palette["text_disabled"]))
         value_pen.setWidth(_RING_WIDTH)
         value_pen.setCapStyle(Qt.PenCapStyle.FlatCap)
         painter.setPen(value_pen)
@@ -274,7 +309,9 @@ class Knob(QDial):
         # invisible against the light theme's near-white background) - using
         # the app's brightest/darkest ink token guarantees strong contrast
         # in both themes
-        pointer_pen = QPen(QColor(palette["text_bright"]))
+        pointer_pen = QPen(
+            QColor(palette["text_bright"] if enabled else palette["text_disabled"])
+        )
         pointer_pen.setWidth(_POINTER_WIDTH)
         pointer_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
         painter.setPen(pointer_pen)
@@ -294,3 +331,53 @@ class Knob(QDial):
             cy - outer_radius * math.sin(angle_rad),
         )
         painter.drawLine(inner, outer)
+
+
+class LogKnob(Knob):
+    """A Knob whose DRAG and PAINT angle are logarithmic in value, not
+    linear - equal rotation covers equal ratio (e.g. doubling), not equal
+    difference, matching how a hardware/software EQ's own frequency knob
+    normally works (so 20Hz-200Hz, a musically enormous range, gets the
+    same rotational real estate as 2kHz-20kHz, a comparatively narrow
+    one). Built for the Filter Sample dialog's cutoff knobs (see
+    ui/filter_sample_dialog.py) but has nothing filter-specific in it.
+
+    value()/setValue() themselves are UNCHANGED - still the real, linear
+    unit (e.g. Hz) the rest of the app already expects (the value label
+    under the knob, click-to-type entry, and every external accessor all
+    read/write this directly) - only _value_to_fraction/_fraction_to_value
+    are overridden, which is what actually determines drag feel and
+    pointer angle (see Knob's own base implementation and its comment on
+    why routing both through this one hook pair is what makes a subclass
+    like this work with no other code to touch).
+
+    minimum() must be > 0 - log(0) and log(negative) are undefined. Never
+    call setRange() with a minimum <= 0 on a LogKnob (a plain Knob has no
+    such restriction).
+    """
+
+    def _value_to_fraction(self, value):
+        lo, hi = self.minimum(), self.maximum()
+        if lo <= 0:
+            raise ValueError(
+                f"LogKnob requires a positive minimum (got {lo}) - log(0) "
+                "and log(negative) are undefined"
+            )
+        if hi <= lo:
+            return 0.0
+        log_lo, log_hi = math.log(lo), math.log(hi)
+        # value can transiently sit outside [lo, hi] mid-drag (see Knob.
+        # mouseMoveEvent's own resync-on-clamp comment) - clamped here so
+        # math.log never sees a non-positive value during that transient
+        value = max(lo, min(hi, value))
+        return (math.log(value) - log_lo) / (log_hi - log_lo)
+
+    def _fraction_to_value(self, fraction):
+        lo, hi = self.minimum(), self.maximum()
+        if lo <= 0:
+            raise ValueError(
+                f"LogKnob requires a positive minimum (got {lo}) - log(0) "
+                "and log(negative) are undefined"
+            )
+        log_lo, log_hi = math.log(lo), math.log(hi)
+        return math.exp(log_lo + fraction * (log_hi - log_lo))
