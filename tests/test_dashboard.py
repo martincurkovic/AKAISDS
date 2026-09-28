@@ -6,6 +6,7 @@
 # never read/write the user's real ~/.akaisds/config.json.
 
 import os
+import struct
 import time
 import wave
 from pathlib import Path
@@ -14,7 +15,7 @@ import pytest
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication, QLineEdit
 
-from core import dropped_files
+from core import dropped_files, sample_slicing, sds_encoder
 from core.midi_manager import MidiManager
 from controller.sampler_controller import SamplerController
 from ui.dashboard import SETTINGS_ROLE, TransferDashboard
@@ -154,6 +155,18 @@ def _write_wav(path, n_frames=100):
         wf.setsampwidth(2)
         wf.setframerate(44100)
         wf.writeframes(b"\x00\x00" * n_frames)
+
+
+def _write_stereo_wav(path, n_frames=100, left_value=1000, right_value=-1000):
+    # distinct, easily-asserted-on L/R values (rather than silence) so a
+    # test can actually catch a channel-order bug, not just "some stereo
+    # data survived"
+    with wave.open(str(path), "wb") as wf:
+        wf.setnchannels(2)
+        wf.setsampwidth(2)
+        wf.setframerate(44100)
+        frame = struct.pack("<hh", left_value, right_value)
+        wf.writeframes(frame * n_frames)
 
 
 def test_dropping_a_file_queues_a_stable_copy_not_the_original_path(
@@ -418,3 +431,144 @@ def test_export_slices_to_queue_rolls_back_on_a_mid_batch_failure(
     assert dashboard.list_local.count() == 1
     assert dashboard.list_local.item(0).data(Qt.ItemDataRole.UserRole) == original_path
     assert os.path.exists(original_path)
+
+
+# --- Stereo source files: right channel preserved through slicing ---------
+
+
+def test_export_slices_to_queue_preserves_both_channels_for_a_stereo_source(
+    dashboard, tmp_path
+):
+    source = tmp_path / "stereo_beat.wav"
+    _write_stereo_wav(source, n_frames=4410, left_value=1000, right_value=-1000)
+    dashboard.on_files_dropped([str(source)])
+    item = dashboard.list_local.item(0)
+
+    left_slices = [[1000] * 2205, [1000] * 2205]
+    right_slices = [[-1000] * 2205, [-1000] * 2205]
+    success, message = dashboard._export_slices_to_queue(
+        item,
+        ["BEAT-01", "BEAT-02"],
+        left_slices,
+        44100,
+        16,
+        None,
+        _noop,
+        _noop,
+        right_slices=right_slices,
+    )
+
+    assert success is True
+    assert dashboard.list_local.count() == 2
+    for i in range(2):
+        new_item = dashboard.list_local.item(i)
+        new_path = new_item.data(Qt.ItemDataRole.UserRole)
+        channels, rate = sds_encoder.read_wav_channels(new_path)
+        assert rate == 44100
+        assert len(channels) == 2
+        assert channels[0] == left_slices[i]
+        assert channels[1] == right_slices[i]
+        # a stereo slice must never fall back to the dashboard's own
+        # global mono default - that would silently discard the right
+        # channel this test just confirmed survived the write itself
+        assert new_item.data(SETTINGS_ROLE)["mono"] is False
+
+
+def test_export_slices_to_queue_forces_mono_false_even_when_global_default_is_mono(
+    dashboard, tmp_path
+):
+    dashboard._global_mono = True
+    source = tmp_path / "stereo_beat.wav"
+    _write_stereo_wav(source, n_frames=100)
+    dashboard.on_files_dropped([str(source)])
+    item = dashboard.list_local.item(0)
+
+    dashboard._export_slices_to_queue(
+        item,
+        ["SLICE-01"],
+        [[1000] * 100],
+        44100,
+        16,
+        None,
+        _noop,
+        _noop,
+        right_slices=[[-1000] * 100],
+    )
+
+    new_item = dashboard.list_local.item(0)
+    assert new_item.data(SETTINGS_ROLE)["mono"] is False
+
+
+def test_export_slices_to_queue_without_right_slices_stays_mono(dashboard, tmp_path):
+    # the plain mono path (right_slices=None, exercised by every other
+    # _export_slices_to_queue test above) must still write ordinary mono
+    # WAVs, not accidentally pick up stereo handling
+    source = tmp_path / "beat.wav"
+    _write_wav(source, n_frames=100)
+    dashboard.on_files_dropped([str(source)])
+    item = dashboard.list_local.item(0)
+
+    dashboard._export_slices_to_queue(
+        item, ["SLICE-01"], [[0] * 100], 44100, 16, None, _noop, _noop
+    )
+
+    new_item = dashboard.list_local.item(0)
+    new_path = new_item.data(Qt.ItemDataRole.UserRole)
+    channels, _rate = sds_encoder.read_wav_channels(new_path)
+    assert len(channels) == 1
+
+
+def test_open_slice_editor_wires_both_channels_through_to_export(
+    dashboard, tmp_path, monkeypatch
+):
+    # end-to-end check of _open_slice_editor's own closure (the `dialog`
+    # forward-reference in particular - it's assigned AFTER _export is
+    # defined, and only resolved once _export actually runs) - fakes
+    # SliceEditorWindow.exec() rather than calling it for real, same
+    # reasoning tests/test_slice_editor_window.py's own module comment
+    # gives for never driving the real modal dialog in a test
+    from ui.slice_editor_window import SliceEditorWindow
+
+    source = tmp_path / "stereo_beat.wav"
+    _write_stereo_wav(source, n_frames=4410, left_value=1000, right_value=-1000)
+    dashboard.on_files_dropped([str(source)])
+    item = dashboard.list_local.item(0)
+    row_widget = dashboard.list_local.itemWidget(item)
+    edit_field = row_widget.findChild(QLineEdit)
+
+    captured = {}
+
+    def _fake_exec(self):
+        # one marker splitting the sample into two halves, then invoke
+        # the export callback exactly like a real "Export Slices" click
+        self.waveform.set_markers([2205])
+        names = ["S-01", "S-02"]
+        slices = sample_slicing.slice_samples(
+            self._samples, self.waveform.start(), self.waveform.end(), [2205]
+        )
+        captured["result"] = self._export_callback(
+            names,
+            slices,
+            self._framerate,
+            16,
+            None,
+            self._spitch,
+            self._stuno,
+            self._shlto,
+            _noop,
+            _noop,
+        )
+        return 0
+
+    monkeypatch.setattr(SliceEditorWindow, "exec", _fake_exec)
+
+    dashboard._open_slice_editor(item, edit_field)
+
+    success, message = captured["result"]
+    assert success is True
+    assert dashboard.list_local.count() == 2
+    for i in range(2):
+        new_path = dashboard.list_local.item(i).data(Qt.ItemDataRole.UserRole)
+        channels, _rate = sds_encoder.read_wav_channels(new_path)
+        assert channels[0] == [1000] * 2205
+        assert channels[1] == [-1000] * 2205

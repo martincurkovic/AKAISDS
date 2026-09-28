@@ -17,7 +17,7 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QFont, QFontMetrics
-from core import dropped_files, sds_encoder, program_editor_bridge, debug_log
+from core import dropped_files, sample_slicing, sds_encoder, program_editor_bridge, debug_log
 from ui.qt_helpers import load_colored_pixmap
 from ui.settings_dialog import MidiSettingsDialog
 from ui.drop_list_widget import DropListWidget
@@ -576,9 +576,26 @@ class TransferDashboard(QWidget):
         # SDS targets identically, since nothing here talks to a sampler
         # at all - see _export_slices_to_queue below for why there's no
         # device-type branching anywhere in this path.
+        #
+        # Stereo: the waveform/marker editing and click-to-preview are
+        # deliberately never made stereo-aware - a slice boundary is just
+        # a frame index, identical for both channels since they're time-
+        # aligned, so SliceEditorWindow only ever sees/plays the left
+        # channel (read_wav_channels()[0], same value read_wav_samples()
+        # would have given). The right channel (if any) is read here too
+        # and only ever touched again in _export below, at the point
+        # sliced audio actually gets written to disk - unlike the Program
+        # Editor's own Slice Editor use, which is genuinely mono-only
+        # (Akai hardware has no such thing as a stereo resident sample -
+        # see AGENTS.md), a queued LOCAL file can be real stereo, and this
+        # app's existing Send path already treats it as one (sends a
+        # -L/-R pair - see sds_encoder.read_wav_channels/
+        # sampler_controller.build_stereo_channel_name) - dropping the
+        # right channel here without at least trying to preserve it would
+        # be a real, silent loss of audio, not just a simplification.
         filepath = item.data(Qt.ItemDataRole.UserRole)
         try:
-            samples, framerate = sds_encoder.read_wav_samples(filepath)
+            channels, framerate = sds_encoder.read_wav_channels(filepath)
         except Exception as e:
             debug_log.get_logger().error(
                 f"TransferDashboard: couldn't load {filepath!r} for slicing",
@@ -588,6 +605,9 @@ class TransferDashboard(QWidget):
                 f"Couldn't open Slice Editor - couldn't read the audio: {e}"
             )
             return
+
+        samples = channels[0]
+        right_channel = channels[1] if len(channels) == 2 else None
 
         sample_name = edit_field.text().strip() or "SLICE"
 
@@ -608,6 +628,12 @@ class TransferDashboard(QWidget):
                     names.append(other_edit.text().strip())
             return names
 
+        # assigned right below - _export only ever runs later, from a user
+        # click inside dialog itself, so by the time it's actually called
+        # `dialog` is always already set (a plain forward reference within
+        # this same closure, not a race)
+        dialog = None
+
         def _export(
             names,
             slices,
@@ -625,6 +651,20 @@ class TransferDashboard(QWidget):
             # forwards them) with no equivalent for a queued file that
             # hasn't been sent to any sampler yet - accepted positionally,
             # unused
+            right_slices = None
+            if right_channel is not None:
+                # the exact same start/end/markers that produced `slices`
+                # (the left channel's own sliced buffers) just above, read
+                # live off the still-open dialog - see sample_slicing.
+                # slice_samples's own contract; this can't disagree with
+                # `slices` since nothing else runs between SliceEditorWindow
+                # computing one and calling this callback with the other
+                right_slices = sample_slicing.slice_samples(
+                    right_channel,
+                    dialog.waveform.start(),
+                    dialog.waveform.end(),
+                    dialog.waveform.slice_markers(),
+                )
             return self._export_slices_to_queue(
                 item,
                 names,
@@ -634,6 +674,7 @@ class TransferDashboard(QWidget):
                 sample_rate,
                 progress_callback,
                 status_callback,
+                right_slices=right_slices,
             )
 
         dialog = SliceEditorWindow(
@@ -671,6 +712,7 @@ class TransferDashboard(QWidget):
         sample_rate,
         progress_callback,
         status_callback,
+        right_slices=None,
     ):
         # the Transfer Dashboard's own export_callback for SliceEditorWindow
         # - see ProgramEditorWindow._export_slices for the hardware-sending
@@ -690,21 +732,38 @@ class TransferDashboard(QWidget):
         # base SDS dump-header level regardless of device type (see
         # sds_encoder.build_dump_header) - one-shot is already the only
         # thing a plain queued-file send has ever produced, for both.
+        #
+        # right_slices (see _open_slice_editor) mirrors `slices` 1:1 when
+        # the source file was stereo - each pair gets written as one real
+        # interleaved stereo WAV (write_wav_file_stereo) rather than two
+        # separate mono files; the existing Send path already knows how to
+        # split a stereo queued file into a -L/-R pair on its own (see
+        # sds_encoder.read_wav_channels/build_stereo_channel_name), so
+        # there's nothing else stereo-specific to do here.
         logger = debug_log.get_logger()
         total = len(names)
         temp_paths = []
         new_items = []
         try:
-            for index, (name, slice_samples) in enumerate(zip(names, slices)):
+            for index, name in enumerate(names):
                 status_callback(f"Writing slice {index + 1}/{total}...")
                 fd, temp_path = tempfile.mkstemp(
                     suffix=".wav", prefix="akaisds_slice_"
                 )
                 os.close(fd)
                 temp_paths.append(temp_path)
-                sds_encoder.write_wav_file(
-                    temp_path, slice_samples, framerate, bit_depth=16
-                )
+                if right_slices is not None:
+                    sds_encoder.write_wav_file_stereo(
+                        temp_path,
+                        slices[index],
+                        right_slices[index],
+                        framerate,
+                        bit_depth=16,
+                    )
+                else:
+                    sds_encoder.write_wav_file(
+                        temp_path, slices[index], framerate, bit_depth=16
+                    )
 
                 if not self.create_local_row(temp_path):
                     self._remove_rows(new_items)
@@ -725,11 +784,15 @@ class TransferDashboard(QWidget):
                 # create_local_row otherwise defaults every new row to the
                 # dashboard's global settings, which would silently
                 # discard the choice made in the Slice Editor's own Bit
-                # depth/Sample rate combos
+                # depth/Sample rate combos. mono is forced False for a
+                # stereo source specifically - falling through to the
+                # dashboard's own global mono default here would risk
+                # silently sending just-preserved right-channel audio as
+                # mono anyway the moment that default happens to be True
                 new_settings = {
                     "bit_depth": bit_depth,
                     "sample_rate": sample_rate,
-                    "mono": self._global_mono,
+                    "mono": False if right_slices is not None else self._global_mono,
                 }
                 new_item.setData(SETTINGS_ROLE, new_settings)
                 if new_row_widget is not None:

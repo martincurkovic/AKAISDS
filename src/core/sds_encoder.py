@@ -419,27 +419,54 @@ def build_sds_dump(samples, framerate, sample_number=0, channel=0, bit_depth=16)
     return [header_packet] + data_packets
 
 
+def _pcm_bytes_for_wav(samples, bit_depth):
+    # shared by write_wav_file/write_wav_file_stereo below - packs a FLAT
+    # sample list (already interleaved, for the stereo case) into WAV PCM
+    # bytes. Standard WAV only has clean native support for 8 or 16 bit
+    # (nothing in between): 8 bit = unsigned WAV, 16 bit = signed WAV,
+    # anything else is upscaled to fit 16 bit range (left shifted, unused
+    # bits zero). Returns (sampwidth, frames_bytes).
+    if bit_depth == 8:
+        # wav 8 bit is unsigned - shift our signed -128..127 range up to
+        # wav's unsigned 0-255 convention
+        return 1, bytes((s + 128) & 0xFF for s in samples)
+    if bit_depth != 16:
+        shift = 16 - bit_depth
+        samples = [s << shift for s in samples]
+    return 2, struct.pack("<" + "h" * len(samples), *samples)
+
+
 def write_wav_file(path, samples, framerate, bit_depth=16):
     # write samples (unsigned ints as decoded by sds_bytes_to_sample) to standard wav file
-    # standard WAV only has clean native support for 8 or 16 bit (nothing in between)
-    # 8 bit = unsigned WAV
-    # 16 bit = signed WAV
-    # anything else is upscaled to fit 16 bit range (left shifted)
-    # unused bits are just zeros
-    if bit_depth == 8:
-        sampwidth = 1
-        # wav 8 bit is unsigned
-        # shift our signed -128 - 127 range up to wav's unsigned 0-255 convention
-        frames = bytes((s + 128) & 0xFF for s in samples)
-    else:
-        if bit_depth != 16:
-            shift = 16 - bit_depth
-            samples = [s << shift for s in samples]
-        sampwidth = 2
-        frames = struct.pack("<" + "h" * len(samples), *samples)
-
+    sampwidth, frames = _pcm_bytes_for_wav(samples, bit_depth)
     with wave.open(path, "wb") as wf:
         wf.setnchannels(1)
+        wf.setsampwidth(sampwidth)
+        wf.setframerate(framerate)
+        wf.writeframes(frames)
+
+
+def write_wav_file_stereo(path, left_samples, right_samples, framerate, bit_depth=16):
+    # same per-channel bit-depth encoding as write_wav_file (see
+    # _pcm_bytes_for_wav) - just interleaved L/R/L/R instead of one
+    # channel alone. Used by the Transfer Dashboard's own Slice Editor
+    # export (ui/dashboard.py) when the file being sliced was stereo -
+    # the sliced output stays a real stereo file this way, sent later via
+    # the SAME -L/-R split every other stereo queued file already goes
+    # through at actual Send time (SamplerController._send_next_queued_
+    # file_impl via read_wav_channels/build_stereo_channel_name) - this
+    # writer doesn't need to know or duplicate that split itself.
+    if len(left_samples) != len(right_samples):
+        raise ValueError(
+            "left/right channel length mismatch "
+            f"({len(left_samples)} vs {len(right_samples)})"
+        )
+    interleaved = [0] * (len(left_samples) * 2)
+    interleaved[0::2] = left_samples
+    interleaved[1::2] = right_samples
+    sampwidth, frames = _pcm_bytes_for_wav(interleaved, bit_depth)
+    with wave.open(path, "wb") as wf:
+        wf.setnchannels(2)
         wf.setsampwidth(sampwidth)
         wf.setframerate(framerate)
         wf.writeframes(frames)
