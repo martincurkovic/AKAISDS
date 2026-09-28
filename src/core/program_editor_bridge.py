@@ -239,6 +239,12 @@ _SAMPLE_DETAIL_FIELDS = [
     "STUNO",  # sample's own gross tuning offset, unsigned raw 0..65535
     # centered at 32768 - see program_editor_window.py's sample_tune_spinbox
     # and _semitones_to_sample_tune_offset/_sample_tune_offset_to_semitones
+    "LDWELL1",  # loop hold/dwell time, ms - 0..9999, 0="Off" (no loop),
+    # 9999="Hold" (loop forever, the default), 1..9998 a plain dwell time.
+    # Confirmed on a real S2000, matching s3k.params' own LDWELL1 notes.
+    # This app only edits ONE loop region (LOOPAT1/LLNGTH1), so this is the
+    # first loop's own dwell setting - see program_editor_window.py's
+    # sample_loop_hold_spinbox/ui/loop_hold_spinbox.py.
 ]
 
 _PROGRAM_LEVEL_FIELDS = [

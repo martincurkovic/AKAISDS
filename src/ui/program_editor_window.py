@@ -50,6 +50,7 @@ from PySide6.QtWidgets import (
 from s3k.messages import AKAI_CHARSET, NAME_LENGTH
 from ui.knob import Knob
 from ui.note_spinbox import NoteSpinBox
+from ui.loop_hold_spinbox import LoopHoldSpinBox
 from ui.qt_helpers import FullWidthTabBar, build_scroll_area, build_section_card
 from ui.envelope_graph import ADSREnvelopeGraph, Envelope2Graph
 from ui.keygroup_range_bar import KeygroupRangeBar, keygroup_color
@@ -4134,6 +4135,34 @@ class ProgramEditorWindow(QMainWindow):
         self.sample_loop_type_combo.currentIndexChanged.connect(
             self._on_sample_loop_type_changed
         )
+
+        # LDWELL1 ("Loop Hold Time") - the first loop's own dwell setting:
+        # Off (no loop), Hold (loop forever - the default), or a 1-9998ms
+        # dwell time. A spinbox, not a knob, to match this page's other
+        # precise/discrete sample-header fields (Root Note, loop-point
+        # markers) rather than its fine-adjustment knobs - there's no
+        # graph to sweep this against, and dialing all the way to one end
+        # of a 0..9999 range just to reach the *default* (Hold) would be
+        # awkward. LoopHoldSpinBox's own textFromValue/valueFromText/
+        # mouseDoubleClickEvent handle the Off/Hold display and the
+        # double-click-to-Hold shortcut - see ui/loop_hold_spinbox.py.
+        loop_hold_label = QLabel("Loop Hold")
+        loop_hold_label.setFixedWidth(70)
+        self.sample_loop_hold_spinbox = LoopHoldSpinBox()
+        self.sample_loop_hold_spinbox.setFixedWidth(90)
+        self.sample_loop_hold_spinbox.setEnabled(False)
+        self.sample_loop_hold_spinbox.setToolTip(
+            "How long the loop dwells before releasing: Off (no loop), "
+            "Hold (loops forever), or a 1-9998ms dwell time. "
+            "Double-click to set Hold."
+        )
+        self.sample_loop_hold_spinbox.valueChanged.connect(
+            self._on_sample_loop_hold_changed
+        )
+        self.sample_loop_hold_spinbox.editingFinished.connect(
+            self._commit_sample_loop_hold
+        )
+
         root_note_label = QLabel("Root Note")
         root_note_label.setFixedWidth(70)
         self.sample_root_note_spinbox = NoteSpinBox()
@@ -4206,6 +4235,9 @@ class ProgramEditorWindow(QMainWindow):
 
         loop_meta_row.addWidget(loop_type_label)
         loop_meta_row.addWidget(self.sample_loop_type_combo)
+        loop_meta_row.addSpacing(12)
+        loop_meta_row.addWidget(loop_hold_label)
+        loop_meta_row.addWidget(self.sample_loop_hold_spinbox)
         loop_meta_row.addSpacing(12)
         loop_meta_row.addWidget(loop_tune_label)
         loop_meta_row.addWidget(loop_tune_widget)
@@ -4894,7 +4926,11 @@ class ProgramEditorWindow(QMainWindow):
                 entry["end"],
             )
             self._update_sample_meta_controls(
-                entry["sptype"], entry["spitch"], entry["shlto"], entry["stuno"]
+                entry["sptype"],
+                entry["spitch"],
+                entry["shlto"],
+                entry["stuno"],
+                entry["ldwell1"],
             )
             self._set_sample_edit_buttons_enabled(True)
         elif entry is not None:
@@ -4908,7 +4944,11 @@ class ProgramEditorWindow(QMainWindow):
                 entry["end"],
             )
             self._update_sample_meta_controls(
-                entry["sptype"], entry["spitch"], entry["shlto"], entry["stuno"]
+                entry["sptype"],
+                entry["spitch"],
+                entry["shlto"],
+                entry["stuno"],
+                entry["ldwell1"],
             )
             self._set_sample_edit_buttons_enabled(False)
         else:
@@ -4942,13 +4982,18 @@ class ProgramEditorWindow(QMainWindow):
             "spitch": values["SPITCH"],
             "shlto": values["SHLTO"],
             "stuno": values["STUNO"],
+            "ldwell1": values["LDWELL1"],
         }
         self._sample_waveform_cache[sample_index] = entry
         if sample_index == self.sample_list_widget.currentRow():
             self._set_marker_spinbox_range(frame_count)
             self.waveform_view.set_header(frame_count, start, loop_start, loop_end, end)
             self._update_sample_meta_controls(
-                values["SPTYPE"], values["SPITCH"], values["SHLTO"], values["STUNO"]
+                values["SPTYPE"],
+                values["SPITCH"],
+                values["SHLTO"],
+                values["STUNO"],
+                values["LDWELL1"],
             )
             self._set_sample_edit_buttons_enabled(False)
 
@@ -4989,13 +5034,16 @@ class ProgramEditorWindow(QMainWindow):
         # just its own Export button when demo_mode (see _open_slice_editor).
         self.slice_editor_button.setEnabled(enabled)
 
-    def _update_sample_meta_controls(self, sptype, spitch, shlto=None, stuno=None):
-        # sptype/spitch/shlto/stuno None means "nothing known about this
-        # sample yet" - mirrors _update_marker_spinboxes' own None
+    def _update_sample_meta_controls(
+        self, sptype, spitch, shlto=None, stuno=None, ldwell1=None
+    ):
+        # sptype/spitch/shlto/stuno/ldwell1 None means "nothing known about
+        # this sample yet" - mirrors _update_marker_spinboxes' own None
         # convention, disabling every control rather than showing a stale
         # or zeroed-out value
         enabled = sptype is not None
         self.sample_loop_type_combo.setEnabled(enabled)
+        self.sample_loop_hold_spinbox.setEnabled(enabled)
         self.sample_root_note_spinbox.setEnabled(enabled)
         self.sample_loop_tune_knob.setEnabled(enabled)
         self.sample_tune_spinbox.setEnabled(enabled)
@@ -5014,6 +5062,10 @@ class ProgramEditorWindow(QMainWindow):
             self.sample_loop_type_combo.setToolTip(
                 _SAMPLE_PLAYBACK_TYPE_OPTIONS[sptype][1]
             )
+        if ldwell1 is not None:
+            self.sample_loop_hold_spinbox.blockSignals(True)
+            self.sample_loop_hold_spinbox.setValue(ldwell1)
+            self.sample_loop_hold_spinbox.blockSignals(False)
         if spitch is not None:
             self.sample_root_note_spinbox.blockSignals(True)
             self.sample_root_note_spinbox.setValue(spitch)
@@ -5061,6 +5113,20 @@ class ProgramEditorWindow(QMainWindow):
 
     def _commit_sample_root_note(self):
         self._flush_write("SPITCH")
+
+    def _on_sample_loop_hold_changed(self, value):
+        sample_index = self.sample_list_widget.currentRow()
+        if sample_index < 0:
+            return
+        entry = self._sample_waveform_cache.get(sample_index)
+        if entry is not None:
+            entry["ldwell1"] = value
+        self._schedule_write(
+            "LDWELL1", "sample", value, index=sample_index, debounce_key="LDWELL1"
+        )
+
+    def _commit_sample_loop_hold(self):
+        self._flush_write("LDWELL1")
 
     def _on_sample_loop_tune_changed(self, value):
         sample_index = self.sample_list_widget.currentRow()
@@ -5684,6 +5750,7 @@ class ProgramEditorWindow(QMainWindow):
                 spitch = entry["spitch"]
                 shlto = entry["shlto"]
                 stuno = entry["stuno"]
+                ldwell1 = entry["ldwell1"]
             else:
                 # rare: the automatic on-selection fetch hasn't resolved
                 # yet (the user double-clicked before it landed) - fall
@@ -5705,6 +5772,7 @@ class ProgramEditorWindow(QMainWindow):
                 spitch = header["SPITCH"]
                 shlto = header["SHLTO"]
                 stuno = header["STUNO"]
+                ldwell1 = header["LDWELL1"]
                 if sample_index == self.sample_list_widget.currentRow():
                     # normally already shown by _on_sample_detail_loaded's
                     # automatic fetch - this branch only runs when that
@@ -5714,7 +5782,9 @@ class ProgramEditorWindow(QMainWindow):
                     self.waveform_view.set_header(
                         frame_count, start, loop_start, loop_end, end
                     )
-                    self._update_sample_meta_controls(sptype, spitch, shlto, stuno)
+                    self._update_sample_meta_controls(
+                        sptype, spitch, shlto, stuno, ldwell1
+                    )
 
             if sample_index == self.sample_list_widget.currentRow():
                 # markers/frame_count are known either way by this point
@@ -5753,6 +5823,7 @@ class ProgramEditorWindow(QMainWindow):
                 "spitch": spitch,
                 "shlto": shlto,
                 "stuno": stuno,
+                "ldwell1": ldwell1,
             }
             self._sample_waveform_cache[sample_index] = entry
             if sample_index == self.sample_list_widget.currentRow():

@@ -13,6 +13,7 @@ import s3k.params as s3k_params
 from PySide6.QtCore import Qt, QObject, QTimer, Signal
 from PySide6.QtWidgets import QApplication, QLabel, QWidget
 from ui.program_editor_window import ProgramEditorWindow, _LOOP_TYPE_OPTIONS
+from ui.loop_hold_spinbox import LoopHoldSpinBox
 from core.program_editor_bridge import MULTI_PART_COUNT
 
 
@@ -49,6 +50,10 @@ class FakeBridge:
                 # scale as VTUNO) - see _sample_tune_offset_to_semitones -
                 # so 512 is +2.00 semitones
                 "STUNO": 512,
+                # LDWELL1 - loop hold/dwell time, ms. A real dwell value
+                # (not 0/9999) so a test can catch it being confused with
+                # Off/Hold.
+                "LDWELL1": 1500,
             }
             for i in range(len(self._samples))
         }
@@ -324,6 +329,14 @@ def editor(qapp):
     editor._worker.wait()
 
 
+class _FakeSpinboxDoubleClick:
+    # LoopHoldSpinBox.mouseDoubleClickEvent only calls .accept() - no
+    # position/button info needed, unlike SliceWaveformView's own event
+    # simulation (see test_slice_waveform_view.py's _FakeEvent)
+    def accept(self):
+        pass
+
+
 def _keygroup_row_text(editor, row):
     # keygroup rows are a swatch + QLabel row widget (program_editor_window's
     # _add_keygroup_row), not plain text items - the item's own .text() is
@@ -387,7 +400,7 @@ class FakeSamplerController(QObject):
                 self._bridge.sample_headers[new_index] = {
                     "SSTART": 0, "SMPEND": 0, "LOOPAT1": 0, "LLNGTH1": 0,
                     "SLNGTH": 0, "SSRATE": 44100, "SPTYPE": 0, "SPITCH": 60,
-                    "SHLTO": 0, "STUNO": 0,
+                    "SHLTO": 0, "STUNO": 0, "LDWELL1": 0,
                 }
         # deferred, not synchronous - _perform_sample_edit_real connects
         # its _wait_for_any_signal listener AFTER calling send_file_queue,
@@ -1874,6 +1887,59 @@ def test_changing_sample_loop_tune_writes_shlto(editor, qapp):
 def test_sample_loop_tune_knob_range_is_plus_minus_fifty(editor):
     assert editor.sample_loop_tune_knob.minimum() == -50
     assert editor.sample_loop_tune_knob.maximum() == 50
+
+
+def test_selecting_a_sample_shows_loop_hold_from_header(editor, qapp):
+    # LDWELL1=1500 in FakeBridge - a real dwell value, not Off(0)/Hold(9999),
+    # so this can't pass by accident if the field got wired to a sentinel
+    editor.sample_list_widget.setCurrentRow(0)
+    editor._worker.wait_until_idle()
+    _pump_until(qapp, lambda: editor.waveform_view.has_header())
+
+    assert editor.sample_loop_hold_spinbox.isEnabled() is True
+    assert editor.sample_loop_hold_spinbox.value() == 1500
+    assert editor.sample_loop_hold_spinbox.text() == "1500 ms"
+
+
+def test_nothing_selected_disables_loop_hold(editor, qapp):
+    editor.sample_list_widget.setCurrentRow(0)
+    editor._worker.wait_until_idle()
+    _pump_until(qapp, lambda: editor.waveform_view.has_header())
+
+    editor.sample_list_widget.setCurrentRow(-1)
+
+    assert editor.sample_loop_hold_spinbox.isEnabled() is False
+
+
+def test_changing_sample_loop_hold_writes_ldwell1(editor, qapp):
+    editor.sample_list_widget.setCurrentRow(0)
+    editor._worker.wait_until_idle()
+    _pump_until(qapp, lambda: editor.waveform_view.has_header())
+    bridge = editor._bridge
+
+    editor.sample_loop_hold_spinbox.setValue(250)
+    editor.sample_loop_hold_spinbox.editingFinished.emit()
+    editor._worker.wait_until_idle()
+    _pump_until(qapp, lambda: bridge.set_parameter_calls)
+
+    assert ("LDWELL1", 0, 250, 0) in bridge.set_parameter_calls
+    assert editor._sample_waveform_cache[0]["ldwell1"] == 250
+
+
+def test_double_clicking_sample_loop_hold_sets_hold_and_writes_it(editor, qapp):
+    editor.sample_list_widget.setCurrentRow(0)
+    editor._worker.wait_until_idle()
+    _pump_until(qapp, lambda: editor.waveform_view.has_header())
+    bridge = editor._bridge
+    assert editor.sample_loop_hold_spinbox.value() == 1500  # not already Hold
+
+    editor.sample_loop_hold_spinbox.mouseDoubleClickEvent(_FakeSpinboxDoubleClick())
+    assert editor.sample_loop_hold_spinbox.value() == LoopHoldSpinBox.HOLD_VALUE
+    editor._flush_write("LDWELL1")
+    editor._worker.wait_until_idle()
+    _pump_until(qapp, lambda: bridge.set_parameter_calls)
+
+    assert ("LDWELL1", 0, 9999, 0) in bridge.set_parameter_calls
 
 
 def test_sample_loop_tune_value_label_updates_as_the_knob_turns(editor, qapp):
