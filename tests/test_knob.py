@@ -12,7 +12,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
 from PySide6.QtCore import QPoint, QPointF, Qt
-from PySide6.QtGui import QWheelEvent
+from PySide6.QtGui import QKeyEvent, QWheelEvent
 from PySide6.QtWidgets import QApplication
 
 from ui.knob import Knob, _DRAG_SENSITIVITY_PX
@@ -166,6 +166,100 @@ def test_wheel_at_min_value_is_still_accepted(qapp):
 
     assert knob.value() == 0
     assert event.isAccepted()
+
+
+class _FakeKeyEvent:
+    # Knob.keyPressEvent only calls .text() to decide whether to open the
+    # type-to-enter box - no key code needed for that branch
+    def __init__(self, text):
+        self._text = text
+
+    def text(self):
+        return self._text
+
+
+def test_typing_a_digit_opens_the_type_edit_box(qapp):
+    knob = Knob()
+    knob.setRange(0, 9999)
+
+    knob.keyPressEvent(_FakeKeyEvent("3"))
+
+    assert knob._type_edit is not None
+    assert knob._type_edit.text() == "3"
+
+
+def test_minus_only_opens_the_type_edit_box_on_a_signed_range(qapp):
+    # unsigned falls through to QDial's own keyPressEvent (real base-class
+    # behaviour, e.g. arrow-key stepping) - needs a real QKeyEvent, unlike
+    # the digit/signed-minus branch which returns before ever touching it
+    real_event = QKeyEvent(QKeyEvent.Type.KeyPress, Qt.Key.Key_Minus, Qt.KeyboardModifier.NoModifier, "-")
+    unsigned = Knob()
+    unsigned.setRange(0, 100)
+    unsigned.keyPressEvent(real_event)
+    assert unsigned._type_edit is None
+
+    signed = Knob()
+    signed.setRange(-50, 50)
+    signed.keyPressEvent(_FakeKeyEvent("-"))
+    assert signed._type_edit is not None
+
+
+def test_pressing_enter_in_the_type_edit_commits_the_typed_value(qapp):
+    knob = Knob()
+    knob.setRange(0, 9999)
+    knob.setValue(10)
+    released = []
+    knob.sliderReleased.connect(lambda: released.append(knob.value()))
+
+    knob._begin_type_edit("1")
+    knob._type_edit.setText("1500")
+    knob._type_edit.returnPressed.emit()
+
+    assert knob.value() == 1500
+    assert knob._type_edit is None  # cleaned up after commit
+    assert released == [1500]  # write-commit wiring reacts the same as a drag
+
+
+class _FakeEscapeEvent:
+    # _TypeEdit.keyPressEvent only calls .key() for the Escape check
+    def key(self):
+        return Qt.Key.Key_Escape
+
+
+def test_escape_in_the_type_edit_cancels_without_changing_the_value(qapp):
+    knob = Knob()
+    knob.setRange(0, 9999)
+    knob.setValue(42)
+
+    knob._begin_type_edit("9")
+    knob._type_edit.setText("9999")
+    knob._type_edit.keyPressEvent(_FakeEscapeEvent())
+
+    assert knob.value() == 42
+    assert knob._type_edit is None
+
+
+def test_typed_value_out_of_range_clamps_rather_than_erroring(qapp):
+    knob = Knob()
+    knob.setRange(0, 9999)
+
+    knob._begin_type_edit("9")
+    knob._type_edit.setText("50000")
+    knob._type_edit.returnPressed.emit()
+
+    assert knob.value() == 9999
+
+
+def test_committing_an_empty_type_edit_leaves_the_value_unchanged(qapp):
+    knob = Knob()
+    knob.setRange(0, 9999)
+    knob.setValue(77)
+
+    knob._begin_type_edit("-")
+    knob._type_edit.setText("-")
+    knob._type_edit.returnPressed.emit()
+
+    assert knob.value() == 77
 
 
 def test_wheel_within_range_still_changes_the_value(qapp):

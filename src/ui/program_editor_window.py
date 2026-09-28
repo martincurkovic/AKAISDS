@@ -50,7 +50,6 @@ from PySide6.QtWidgets import (
 from s3k.messages import AKAI_CHARSET, NAME_LENGTH
 from ui.knob import Knob
 from ui.note_spinbox import NoteSpinBox
-from ui.loop_hold_spinbox import LoopHoldSpinBox
 from ui.qt_helpers import FullWidthTabBar, build_scroll_area, build_section_card
 from ui.envelope_graph import ADSREnvelopeGraph, Envelope2Graph
 from ui.keygroup_range_bar import KeygroupRangeBar, keygroup_color
@@ -137,6 +136,19 @@ _SAMPLE_PLAYBACK_TYPE_OPTIONS = [
 # loop-region tint all grey out when SPTYPE is one of these, since editing
 # a loop region the hardware won't use is misleading rather than useful.
 _SPTYPE_VALUES_WITHOUT_LOOP = frozenset({2, 3})
+
+_LOOP_HOLD_OFF_VALUE = 0
+_LOOP_HOLD_HOLD_VALUE = 9999
+
+
+def _format_loop_hold(value):
+    # LDWELL1's own display convention (confirmed on a real S2000, matching
+    # s3k.params' notes) - see sample_loop_hold_knob's construction comment
+    if value == _LOOP_HOLD_OFF_VALUE:
+        return "Off"
+    if value == _LOOP_HOLD_HOLD_VALUE:
+        return "Hold"
+    return f"{value} ms"
 
 # (label, tooltip) per PORTYPE value - s3k.params transcribes this field as
 # "PORTAMENTO TYPE" with no decoded values={} map (unlike most other
@@ -4137,30 +4149,47 @@ class ProgramEditorWindow(QMainWindow):
         )
 
         # LDWELL1 ("Loop Hold Time") - the first loop's own dwell setting:
-        # Off (no loop), Hold (loop forever - the default), or a 1-9998ms
-        # dwell time. A spinbox, not a knob, to match this page's other
-        # precise/discrete sample-header fields (Root Note, loop-point
-        # markers) rather than its fine-adjustment knobs - there's no
-        # graph to sweep this against, and dialing all the way to one end
-        # of a 0..9999 range just to reach the *default* (Hold) would be
-        # awkward. LoopHoldSpinBox's own textFromValue/valueFromText/
-        # mouseDoubleClickEvent handle the Off/Hold display and the
-        # double-click-to-Hold shortcut - see ui/loop_hold_spinbox.py.
+        # Off (no loop, far left) or Hold (loop forever, far right - the
+        # default) at the two ends of the sweep, a 1-9998ms dwell time
+        # everywhere in between. A knob rather than a spinbox (an earlier
+        # version used LoopHoldSpinBox - removed) at the user's own request,
+        # once Knob gained click-to-type entry (see ui/knob.py's
+        # _begin_type_edit/_finish_type_edit) to fix the imprecision a bare
+        # drag-only knob would have over a 10000-value range. Double-click
+        # already resets to defaultValue() for free (Knob.mouseDoubleClickEvent)
+        # - setDefaultValue(9999) is what makes that land on Hold.
         loop_hold_label = QLabel("Loop Hold")
         loop_hold_label.setFixedWidth(70)
-        self.sample_loop_hold_spinbox = LoopHoldSpinBox()
-        self.sample_loop_hold_spinbox.setFixedWidth(90)
-        self.sample_loop_hold_spinbox.setEnabled(False)
-        self.sample_loop_hold_spinbox.setToolTip(
-            "How long the loop dwells before releasing: Off (no loop), "
-            "Hold (loops forever), or a 1-9998ms dwell time. "
-            "Double-click to set Hold."
+        (
+            self.sample_loop_hold_knob,
+            self.sample_loop_hold_value_label,
+            loop_hold_widget,
+        ) = self._build_multi_part_knob(
+            _LOOP_HOLD_OFF_VALUE, _LOOP_HOLD_HOLD_VALUE, default=_LOOP_HOLD_HOLD_VALUE
         )
-        self.sample_loop_hold_spinbox.valueChanged.connect(
+        self.sample_loop_hold_knob.setEnabled(False)
+        # wider than _build_multi_part_knob's default 28px - that width
+        # only needs to fit a 2-3 digit number, not "Off"/"Hold"/"9998 ms"
+        self.sample_loop_hold_value_label.setFixedWidth(56)
+        self.sample_loop_hold_value_label.setText(
+            _format_loop_hold(_LOOP_HOLD_HOLD_VALUE)
+        )
+        # not wired the generic way, same reason sample_loop_tune_knob isn't
+        # ( _build_multi_part_knob's own value label needs a custom
+        # Off/Hold/"N ms" formatter here, not a bare str(v) )
+        self.sample_loop_hold_knob.valueChanged.connect(
+            lambda v: self.sample_loop_hold_value_label.setText(_format_loop_hold(v))
+        )
+        self.sample_loop_hold_knob.valueChanged.connect(
             self._on_sample_loop_hold_changed
         )
-        self.sample_loop_hold_spinbox.editingFinished.connect(
+        self.sample_loop_hold_knob.sliderReleased.connect(
             self._commit_sample_loop_hold
+        )
+        self.sample_loop_hold_knob.setToolTip(
+            "How long the loop dwells before releasing: Off (no loop, far "
+            "left), Hold (loops forever, far right), or a 1-9998ms dwell "
+            "time in between. Click then type a number for an exact value."
         )
 
         root_note_label = QLabel("Root Note")
@@ -4237,7 +4266,7 @@ class ProgramEditorWindow(QMainWindow):
         loop_meta_row.addWidget(self.sample_loop_type_combo)
         loop_meta_row.addSpacing(12)
         loop_meta_row.addWidget(loop_hold_label)
-        loop_meta_row.addWidget(self.sample_loop_hold_spinbox)
+        loop_meta_row.addWidget(loop_hold_widget)
         loop_meta_row.addSpacing(12)
         loop_meta_row.addWidget(loop_tune_label)
         loop_meta_row.addWidget(loop_tune_widget)
@@ -5043,7 +5072,7 @@ class ProgramEditorWindow(QMainWindow):
         # or zeroed-out value
         enabled = sptype is not None
         self.sample_loop_type_combo.setEnabled(enabled)
-        self.sample_loop_hold_spinbox.setEnabled(enabled)
+        self.sample_loop_hold_knob.setEnabled(enabled)
         self.sample_root_note_spinbox.setEnabled(enabled)
         self.sample_loop_tune_knob.setEnabled(enabled)
         self.sample_tune_spinbox.setEnabled(enabled)
@@ -5063,9 +5092,10 @@ class ProgramEditorWindow(QMainWindow):
                 _SAMPLE_PLAYBACK_TYPE_OPTIONS[sptype][1]
             )
         if ldwell1 is not None:
-            self.sample_loop_hold_spinbox.blockSignals(True)
-            self.sample_loop_hold_spinbox.setValue(ldwell1)
-            self.sample_loop_hold_spinbox.blockSignals(False)
+            self.sample_loop_hold_knob.blockSignals(True)
+            self.sample_loop_hold_knob.setValue(ldwell1)
+            self.sample_loop_hold_knob.blockSignals(False)
+            self.sample_loop_hold_value_label.setText(_format_loop_hold(ldwell1))
         if spitch is not None:
             self.sample_root_note_spinbox.blockSignals(True)
             self.sample_root_note_spinbox.setValue(spitch)

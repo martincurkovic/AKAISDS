@@ -244,7 +244,8 @@ _SAMPLE_DETAIL_FIELDS = [
     # Confirmed on a real S2000, matching s3k.params' own LDWELL1 notes.
     # This app only edits ONE loop region (LOOPAT1/LLNGTH1), so this is the
     # first loop's own dwell setting - see program_editor_window.py's
-    # sample_loop_hold_spinbox/ui/loop_hold_spinbox.py.
+    # sample_loop_hold_knob (a Knob, ranged 0..9999 - far left is Off, far
+    # right is Hold).
 ]
 
 _PROGRAM_LEVEL_FIELDS = [

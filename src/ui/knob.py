@@ -1,6 +1,6 @@
 import math
-from PySide6.QtWidgets import QDial
-from PySide6.QtGui import QPainter, QPen, QColor
+from PySide6.QtWidgets import QDial, QLineEdit
+from PySide6.QtGui import QPainter, QPen, QColor, QIntValidator
 from PySide6.QtCore import Qt, QPointF
 from ui import theme
 
@@ -11,14 +11,52 @@ _POINTER_WIDTH = 3
 
 _DRAG_SENSITIVITY_PX = 150
 
+_TYPE_EDIT_SIZE = (52, 22)
+
+
+class _TypeEdit(QLineEdit):
+    """The floating text box a Knob opens for click-then-type entry (see
+    Knob._begin_type_edit). A real top-level window (Qt.WindowType.Popup),
+    not a child of the knob - a child widget is clipped to its parent's own
+    rect, and the smallest knobs on this page (28x28) are far too small to
+    hold a legible text box themselves. Popup gets two behaviours for free
+    that a plain child widget wouldn't: it grabs the keyboard immediately,
+    and clicking anywhere outside it closes it automatically - which is
+    exactly "click away to commit" (see hideEvent below).
+    """
+
+    def __init__(self, knob):
+        super().__init__()
+        self._knob = knob
+        self._cancelled = False
+        self.setWindowFlags(Qt.WindowType.Popup)
+        self.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key.Key_Escape:
+            self._cancelled = True
+            self.close()
+            return
+        super().keyPressEvent(event)
+
+    def hideEvent(self, event):
+        super().hideEvent(event)
+        # closing a Popup (Escape, Enter via returnPressed->close, or Qt's
+        # own click-outside dismissal) always ends up here - one path for
+        # every way this can end, rather than duplicating the commit/cancel
+        # decision at each trigger
+        self._knob._finish_type_edit(self, self._cancelled)
+
 
 class Knob(QDial):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setEnabled(False)  # read-only for now
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self._drag_start_y = None
         self._drag_start_value = None
         self._default_value = None
+        self._type_edit = None
 
     def defaultValue(self):
         if self._default_value is not None:
@@ -38,6 +76,54 @@ class Knob(QDial):
             # the release that Qt sends right after this event does the
             # actual commit (sliderReleased), same as an ordinary drag
             self.setValue(self.defaultValue())
+
+    def keyPressEvent(self, event):
+        # click-to-type, Ableton-style: clicking a knob just focuses it (no
+        # visual change) - typing a digit (or '-' on a signed range) right
+        # after is what actually opens the entry box. Anything else falls
+        # through to QDial's own key handling (arrow keys/PageUp/Home etc).
+        text = event.text()
+        if self._type_edit is None and (
+            text.isdigit() or (text == "-" and self.minimum() < 0)
+        ):
+            self._begin_type_edit(text)
+            return
+        super().keyPressEvent(event)
+
+    def _begin_type_edit(self, initial_text):
+        if self._type_edit is not None:
+            return
+        edit = _TypeEdit(self)
+        edit.setValidator(QIntValidator(self.minimum(), self.maximum(), edit))
+        edit.setText(initial_text)
+        edit.returnPressed.connect(edit.close)
+        width, height = _TYPE_EDIT_SIZE
+        edit.resize(width, height)
+        center = self.mapToGlobal(self.rect().center())
+        edit.move(center.x() - width // 2, center.y() - height // 2)
+        self._type_edit = edit
+        edit.show()
+        edit.setFocus(Qt.FocusReason.MouseFocusReason)
+
+    def _finish_type_edit(self, edit, cancelled):
+        if self._type_edit is not edit:
+            return
+        self._type_edit = None
+        if not cancelled:
+            text = edit.text().strip()
+            if text not in ("", "-"):
+                try:
+                    value = max(self.minimum(), min(self.maximum(), int(text)))
+                except ValueError:
+                    value = None
+                if value is not None:
+                    self.setValue(value)
+                    # typing a value is a discrete, deliberate commit, same
+                    # as releasing a drag - callers wire their write-commit
+                    # (e.g. _flush_write) to this signal, not to every
+                    # valueChanged tick
+                    self.sliderReleased.emit()
+        edit.deleteLater()
 
     def mouseMoveEvent(self, event):
         if self._drag_start_y is None:
