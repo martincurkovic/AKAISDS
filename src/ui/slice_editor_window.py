@@ -147,8 +147,9 @@ class SliceEditorWindow(QDialog):
 
         zoom_row = QHBoxLayout()
         hint_label = QLabel(
-            "Click: preview slice   •   Double-click: add slice   •   "
-            "Drag edges/markers: adjust   •   Right-click a marker: delete"
+            "Click: preview slice   •   Double-click empty space: add slice   •   "
+            "Double-click or right-click a marker: delete   •   "
+            "Drag edges/markers: adjust"
         )
         self.zoom_out_button = QPushButton("−")
         # same 36px as the Samples tab's own zoom_out_button/zoom_in_button

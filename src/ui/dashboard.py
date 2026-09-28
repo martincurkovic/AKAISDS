@@ -107,17 +107,17 @@ class TransferDashboard(QWidget):
         top_bar.addWidget(self.lbl_logo)
 
         top_bar.addStretch()
-        self.btn_settings = QPushButton("\u2699 MIDI Settings")
+        self.btn_settings = QPushButton("\u2699 Settings...")
         self.btn_settings.clicked.connect(self.open_settings_dialog)
 
-        self.btn_open_editor = QPushButton("Open Editor")
+        self.btn_open_editor = QPushButton("Open Editor...")
         self.btn_open_editor.clicked.connect(self.open_program_editor)
         # only enabled once there's actually somewhere for the editor to
         # connect TO - both a MIDI input and output port selected, and the
         # sampler type set to "Akai Sampler" (program_editor_bridge.connect()
         # needs Akai-specific SysEx extensions the Generic SDS protocol
         # family doesn't have) - see _update_open_editor_enabled, called
-        # here and after the MIDI Settings dialog closes (open_settings_
+        # here and after the Settings dialog closes (open_settings_
         # dialog), the same two points _update_device_type_ui already
         # hooks for its own device-type-driven enabling.
         settings_editor_column = QVBoxLayout()
@@ -126,8 +126,10 @@ class TransferDashboard(QWidget):
         settings_editor_column.addWidget(self.btn_open_editor)
         # same width, stacked - both requested directly rather than the
         # original side-by-side layout; sized to whichever button's own
-        # text is wider ("MIDI Settings", not "Open Editor") so neither
-        # one gets clipped
+        # text is wider so neither one gets clipped (computed from each
+        # button's own current sizeHint rather than hardcoded, so renaming
+        # either button's text - as already happened once - can't silently
+        # go stale)
         button_width = max(
             self.btn_settings.sizeHint().width(),
             self.btn_open_editor.sizeHint().width(),
@@ -410,7 +412,7 @@ class TransferDashboard(QWidget):
         # doesn't have at all). Called at the two points the dashboard's
         # own knowledge of this state can change: construction (whatever
         # was restored from app_config before this widget was built - see
-        # __init__'s own comment) and after the MIDI Settings dialog closes
+        # __init__'s own comment) and after the Settings dialog closes
         # (open_settings_dialog) - same two hooks _update_device_type_ui
         # already uses for its own device-type-driven enabling.
         # register_menu_actions' polling timer mirrors this onto the
@@ -425,11 +427,11 @@ class TransferDashboard(QWidget):
             self.btn_open_editor.setToolTip("")
         elif not has_ports:
             self.btn_open_editor.setToolTip(
-                "Select both a MIDI Input and MIDI Output in MIDI Settings first"
+                "Select both a MIDI Input and MIDI Output in Settings first"
             )
         else:
             self.btn_open_editor.setToolTip(
-                'Set Sampler Type to "Akai Sampler" in MIDI Settings first'
+                'Set Sampler Type to "Akai Sampler" in Settings first'
             )
 
     def _update_device_type_ui(self):

@@ -15,7 +15,12 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import Qt
 from core import app_config, audio_preview, debug_log, midi_identity
-from ui.qt_helpers import FullWidthTabBar, widen_popup_to_fit_items
+from ui.qt_helpers import (
+    FullWidthTabBar,
+    build_scroll_area,
+    build_section_card,
+    widen_popup_to_fit_items,
+)
 import time
 import mido
 
@@ -32,23 +37,52 @@ _LOOPBACK_RECEIVE_TIMEOUT = 1.5
 
 
 class MidiSettingsDialog(QDialog):
+    # Two tabs, each a couple of section cards (same look/sizing rules as
+    # ui.qt_helpers.build_section_card - originally Program Editor-only,
+    # moved out to be shared once this dialog needed it too): "Audio/MIDI"
+    # (MIDI Input/Output + Audio Output, the two things you set up once and
+    # rarely touch again) and "Troubleshooting" (Hardware Test + Interface
+    # Test, the two things you only reach for when something's not working).
+    # Used to be 4 flat tabs (MIDI Settings/MIDI Hardware Test/MIDI
+    # Interface Test/Audio Preview, the last added alongside the Slice
+    # Editor's click-to-preview feature) - collapsed at the user's own
+    # request once 4 tabs made the dialog uncomfortably narrow. Each page
+    # is wrapped in build_scroll_area rather than added directly, same
+    # reasoning as the Program Editor's own tabs: past the minimum size,
+    # a tab scrolls instead of the window being forced to grow to fit
+    # everything unscrolled.
     def __init__(self, midi_manager, sampler_controller, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("MIDI Settings")
+        self.setWindowTitle("Settings")
         self.midi_manager = midi_manager
         self.sampler_controller = sampler_controller
 
         outer_layout = QVBoxLayout(self)
-        self.setMinimumHeight(300)
-        self.setMinimumWidth(500)
+        self.setMinimumHeight(560)
+        self.setMinimumWidth(560)
 
         tabs = QTabWidget()
         tabs.setTabBar(FullWidthTabBar(tabs))
         outer_layout.addWidget(tabs)
 
-        # TAB 1 - MIDI SETTINGS ------------------------------
-        settings_tab = QWidget()
-        settings_layout = QFormLayout(settings_tab)
+        tabs.addTab(
+            build_scroll_area(self._build_audio_midi_page()), "Audio/MIDI"
+        )
+        tabs.addTab(
+            build_scroll_area(self._build_troubleshooting_page()), "Troubleshooting"
+        )
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(self._apply_and_close)
+        buttons.rejected.connect(self.reject)
+        outer_layout.addWidget(buttons)
+
+    # --- Audio/MIDI tab ------------------------------------------------------
+
+    def _build_audio_midi_page(self):
+        midi_form = QFormLayout()
 
         self.combo_input = QComboBox()
         self.combo_output = QComboBox()
@@ -60,8 +94,8 @@ class MidiSettingsDialog(QDialog):
         )
         self._populate_ports()
 
-        settings_layout.addRow(QLabel("MIDI Input:"), self.combo_input)
-        settings_layout.addRow(QLabel("MIDI Output:"), self.combo_output)
+        midi_form.addRow(QLabel("MIDI Input:"), self.combo_input)
+        midi_form.addRow(QLabel("MIDI Output:"), self.combo_output)
 
         # SysEx device ID (0-127) - NOT THE SAME AS MIDI CHANNELS 1-16!!!
         # Set for daisy chained devices to avoid message conflicts
@@ -74,7 +108,7 @@ class MidiSettingsDialog(QDialog):
             "same MIDI chain. Note that some hardware may report\n"
             "SysEx channels to be 1-128 instead of 0-127."
         )
-        settings_layout.addRow(
+        midi_form.addRow(
             QLabel("Device ID (SysEx channel 0-127):"), self.spin_channel
         )
 
@@ -93,88 +127,23 @@ class MidiSettingsDialog(QDialog):
             "receiving still work, but by sample number only, with no way\n"
             "to browse, rename or delete what's on the device."
         )
-        settings_layout.addRow(QLabel("Sampler Type:"), self.combo_device_type)
+        midi_form.addRow(QLabel("Sampler Type:"), self.combo_device_type)
 
-        tabs.addTab(settings_tab, "MIDI Settings")
+        midi_card = build_section_card("MIDI Input/Output", midi_form)
 
-        # TAB 2 = MIDI Hardware Test -----------------------------------------------------
-        device_id_tab = QWidget()
-        device_id_layout = QVBoxLayout(device_id_tab)
-
-        hardware_test_note = QLabel(
-            "To test your MIDI hardware setup, "
-            "connect your MIDI device to both your interface's MIDI IN and OUT ports. "
-            "Select the ports on the MIDI Settings tab, then run the test below."
-        )
-        hardware_test_note.setWordWrap(True)
-        hardware_test_note.setAlignment(
-            Qt.AlignmentFlag.AlignCenter | Qt.AlignmentFlag.AlignTop
-        )
-        device_id_layout.addWidget(hardware_test_note)
-
-        device_id_layout.addStretch()
-
-        self.id_results_label = QLabel()
-        self.id_results_label.setWordWrap(True)
-        device_id_layout.addWidget(self.id_results_label)
-
-        device_id_layout.addStretch()
-
-        self.btn_run_id_request = QPushButton("Run Hardware Test")
-        self.btn_run_id_request.clicked.connect(self._run_identity_request)
-        device_id_layout.addWidget(self.btn_run_id_request)
-
-        self.id_progress = QProgressBar()
-        self.id_progress.setRange(0, 0)
-        self.id_progress.setVisible(False)
-        device_id_layout.addWidget(self.id_progress)
-
-        tabs.addTab(device_id_tab, "MIDI Hardware Test")
-
-        # TAB 3 - MIDI Interface TEST ----------------------------------------------------
-        test_tab = QWidget()
-        test_layout = QVBoxLayout(test_tab)
-
-        loopback_note = QLabel(
-            "To test a MIDI interface's SysEx reliability, "
-            "connect a cable from its MIDI OUT port back into its own MIDI IN port. "
-            "Select the ports on the MIDI Settings tab, then run the test below (may take 5-20 seconds to complete)."
-        )
-        loopback_note.setWordWrap(True)
-        loopback_note.setAlignment(
-            Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop
-        )
-        test_layout.addWidget(loopback_note)
-
-        test_layout.addStretch()
-
-        self.btn_loopback_test = QPushButton("Run Loopback Test")
-        self.btn_loopback_test.clicked.connect(self._run_loopback_test)
-        test_layout.addWidget(self.btn_loopback_test)
-
-        self.loopback_progress = QProgressBar()
-        self.loopback_progress.setRange(0, 0)
-        self.loopback_progress.setVisible(False)
-        test_layout.addWidget(self.loopback_progress)
-
-        tabs.addTab(test_tab, "MIDI Interface Test")
-
-        # TAB 4 - AUDIO PREVIEW ------------------------------------------------
-        # Unrelated to MIDI/SysEx transfers - this is the output device/buffer
-        # size the Slice Editor's click-to-preview playback uses (Program
-        # Editor > Samples tab > Slice Editor). Lives in this dialog rather
-        # than a separate window since it's still "I/O hardware settings",
-        # just for the computer's own speakers instead of the sampler.
-        audio_tab = QWidget()
-        audio_layout = QFormLayout(audio_tab)
+        # Unrelated to MIDI/SysEx transfers - this is the output device/
+        # buffer size the Slice Editor's click-to-preview playback uses
+        # (Program Editor > Samples tab > Slice Editor). Still lives on
+        # this same page since it's still "I/O hardware settings," just
+        # for the computer's own speakers instead of the sampler.
+        audio_form = QFormLayout()
 
         audio_note = QLabel(
-            "Used by the Slice Editor's click-to-preview playback "
-            "(Program Editor > Samples tab). Doesn't affect MIDI/SysEx "
-            "transfers to the sampler."
+            "Used by the Slice Editor's click-to-preview playback. "
+            "Doesn't affect MIDI/SysEx transfers to the sampler."
         )
         audio_note.setWordWrap(True)
-        audio_layout.addRow(audio_note)
+        audio_form.addRow(audio_note)
 
         self.combo_audio_output = QComboBox()
         self.combo_audio_output.addItem("(System Default)", None)
@@ -189,7 +158,7 @@ class MidiSettingsDialog(QDialog):
         idx = self.combo_audio_output.findData(saved_device_id)
         self.combo_audio_output.setCurrentIndex(idx if idx >= 0 else 0)
         widen_popup_to_fit_items(self.combo_audio_output)
-        audio_layout.addRow(QLabel("Output Device:"), self.combo_audio_output)
+        audio_form.addRow(QLabel("Output Device:"), self.combo_audio_output)
 
         self.combo_audio_buffer = QComboBox()
         for frames in _BUFFER_SIZE_OPTIONS:
@@ -206,16 +175,82 @@ class MidiSettingsDialog(QDialog):
             "output device or interface; higher values are more reliable\n"
             "but add latency before playback audibly starts."
         )
-        audio_layout.addRow(QLabel("Buffer Size:"), self.combo_audio_buffer)
+        audio_form.addRow(QLabel("Buffer Size:"), self.combo_audio_buffer)
 
-        tabs.addTab(audio_tab, "Audio Preview")
-
-        buttons = QDialogButtonBox(
-            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        audio_card = build_section_card(
+            "Audio Output (Slice Editor Preview)", audio_form
         )
-        buttons.accepted.connect(self._apply_and_close)
-        buttons.rejected.connect(self.reject)
-        outer_layout.addWidget(buttons)
+
+        page = QWidget()
+        page_layout = QVBoxLayout(page)
+        page_layout.addWidget(midi_card)
+        page_layout.addWidget(audio_card)
+        page_layout.addStretch()
+        return page
+
+    # --- Troubleshooting tab --------------------------------------------------
+
+    def _build_troubleshooting_page(self):
+        hardware_test_layout = QVBoxLayout()
+
+        hardware_test_note = QLabel(
+            "To test your MIDI hardware setup, "
+            "connect your MIDI device to both your interface's MIDI IN and OUT ports. "
+            "Select the ports on the Audio/MIDI tab, then run the test below."
+        )
+        hardware_test_note.setWordWrap(True)
+        hardware_test_note.setAlignment(
+            Qt.AlignmentFlag.AlignCenter | Qt.AlignmentFlag.AlignTop
+        )
+        hardware_test_layout.addWidget(hardware_test_note)
+
+        self.id_results_label = QLabel()
+        self.id_results_label.setWordWrap(True)
+        hardware_test_layout.addWidget(self.id_results_label)
+
+        self.btn_run_id_request = QPushButton("Run Hardware Test")
+        self.btn_run_id_request.clicked.connect(self._run_identity_request)
+        hardware_test_layout.addWidget(self.btn_run_id_request)
+
+        self.id_progress = QProgressBar()
+        self.id_progress.setRange(0, 0)
+        self.id_progress.setVisible(False)
+        hardware_test_layout.addWidget(self.id_progress)
+
+        hardware_test_card = build_section_card("Hardware Test", hardware_test_layout)
+
+        interface_test_layout = QVBoxLayout()
+
+        loopback_note = QLabel(
+            "To test a MIDI interface's SysEx reliability, "
+            "connect a cable from its MIDI OUT port back into its own MIDI IN port. "
+            "Select the ports on the Audio/MIDI tab, then run the test below (may take 5-20 seconds to complete)."
+        )
+        loopback_note.setWordWrap(True)
+        loopback_note.setAlignment(
+            Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop
+        )
+        interface_test_layout.addWidget(loopback_note)
+
+        self.btn_loopback_test = QPushButton("Run Loopback Test")
+        self.btn_loopback_test.clicked.connect(self._run_loopback_test)
+        interface_test_layout.addWidget(self.btn_loopback_test)
+
+        self.loopback_progress = QProgressBar()
+        self.loopback_progress.setRange(0, 0)
+        self.loopback_progress.setVisible(False)
+        interface_test_layout.addWidget(self.loopback_progress)
+
+        interface_test_card = build_section_card(
+            "Interface Test", interface_test_layout
+        )
+
+        page = QWidget()
+        page_layout = QVBoxLayout(page)
+        page_layout.addWidget(hardware_test_card)
+        page_layout.addWidget(interface_test_card)
+        page_layout.addStretch()
+        return page
 
     def _populate_ports(self):
         self.combo_input.addItem("(None)", None)
@@ -261,7 +296,7 @@ class MidiSettingsDialog(QDialog):
             )
             QMessageBox.critical(
                 self,
-                "MIDI Settings",
+                "Settings",
                 f"Couldn't open the selected MIDI port(s): {e}",
             )
             return

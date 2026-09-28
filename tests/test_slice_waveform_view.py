@@ -180,6 +180,28 @@ def test_double_click_on_an_existing_handle_does_not_add_a_second_marker(qapp):
     assert view.slice_markers() == []
 
 
+def test_double_click_on_a_marker_deletes_it(qapp):
+    view = _view(4000, markers=[2000])
+    marker_x = view._x_for(2000)
+    view.mouseDoubleClickEvent(_FakeEvent(marker_x))
+    assert view.slice_markers() == []
+
+
+def test_double_click_on_start_or_end_does_not_delete_the_edge(qapp):
+    # start/end aren't slice markers - there's nothing to delete there,
+    # unlike an interior marker
+    view = _view(4000, start=100, end=3900, markers=[2000])
+    start_x = view._x_for(100)
+    view.mouseDoubleClickEvent(_FakeEvent(start_x))
+    assert view.start() == 100
+    assert view.slice_markers() == [2000]
+
+    end_x = view._x_for(3900)
+    view.mouseDoubleClickEvent(_FakeEvent(end_x))
+    assert view.end() == 3900
+    assert view.slice_markers() == [2000]
+
+
 # --- dragging: start/end edges never cross a marker, markers never cross ---
 # their neighbours - a clamp, not a push (see the widget's own docstring)
 
@@ -391,6 +413,18 @@ def test_click_in_empty_space_schedules_a_pending_preview(qapp):
     view.mousePressEvent(_FakeEvent(mid_x))
     assert view._preview_timer.isActive()
     assert view._pending_preview_frame is not None
+
+
+def test_scheduled_preview_uses_half_the_platform_double_click_interval(qapp):
+    # halved at the user's own request (the full interval felt too
+    # sluggish for scrubbing through slices) - still derived from Qt's own
+    # doubleClickInterval() rather than a made-up constant, just at half
+    from PySide6.QtWidgets import QApplication
+
+    view = _view(4000)
+    mid_x = view.width() / 2
+    view.mousePressEvent(_FakeEvent(mid_x))
+    assert view._preview_timer.interval() == QApplication.doubleClickInterval() // 2
 
 
 def test_click_on_a_handle_does_not_schedule_a_preview(qapp):

@@ -102,7 +102,7 @@ def test_open_editor_becomes_disabled_again_if_a_port_is_cleared(dashboard):
 
 def test_open_editor_tooltip_explains_whats_missing(dashboard):
     dashboard._update_open_editor_enabled()
-    assert "MIDI Settings" in dashboard.btn_open_editor.toolTip()
+    assert "Settings" in dashboard.btn_open_editor.toolTip()
 
     dashboard.midi_manager.input_name = "Fake In"
     dashboard.midi_manager.output_name = "Fake Out"
@@ -131,7 +131,7 @@ def test_open_editor_enabled_state_reflects_whatever_was_already_restored(qapp):
     assert dashboard.btn_open_editor.isEnabled() is True
 
 
-# --- MIDI Settings / Open Editor buttons: stacked, same width -------------
+# --- Settings / Open Editor buttons: stacked, same width -------------
 
 
 def test_settings_and_open_editor_buttons_are_the_same_width(dashboard):

@@ -45,13 +45,12 @@ from PySide6.QtWidgets import (
     QSpinBox,
     QStatusBar,
     QTabWidget,
-    QScrollArea,
     QProgressBar,
 )
 from s3k.messages import AKAI_CHARSET, NAME_LENGTH
 from ui.knob import Knob
 from ui.note_spinbox import NoteSpinBox
-from ui.qt_helpers import FullWidthTabBar
+from ui.qt_helpers import FullWidthTabBar, build_scroll_area, build_section_card
 from ui.envelope_graph import ADSREnvelopeGraph, Envelope2Graph
 from ui.keygroup_range_bar import KeygroupRangeBar, keygroup_color
 from ui.waveform_view import WaveformView
@@ -3870,50 +3869,11 @@ class ProgramEditorWindow(QMainWindow):
     def _build_section_card(self, title, *row_layouts):
         # groups related rows (e.g. every LFO control, or Volume/Pan/
         # Velocity together on the Program tab; Filter or Envelopes on the
-        # Keygroup tab) into one visually distinct card - same surface/
-        # border look as the keygroup zone card (see QWidget#zoneCard in
-        # style.qss.template), just under a different objectName since this
-        # isn't zone-selector content
-        header = QLabel(title)
-        header.setObjectName("sectionHeader")
-
-        section_layout = QVBoxLayout()
-        section_layout.setContentsMargins(12, 10, 12, 12)
-        section_layout.setSpacing(10)
-        section_layout.addWidget(header)
-        for row in row_layouts:
-            section_layout.addLayout(row)
-        # without this, a card whose content is shorter than the row it's
-        # paired with (Range next to Filter; Envelope 1 next to Envelope 2)
-        # gets its leftover height split BEFORE the header too, not just
-        # after the content - QBoxLayout distributes surplus space evenly
-        # across every gap when nothing claims a stretch, which reads as
-        # the whole card being vertically centered rather than top-aligned
-        # like its taller neighbor. This claims all of it at the bottom
-        # instead.
-        section_layout.addStretch()
-
-        card = QWidget()
-        card.setObjectName("sectionCard")
-        card.setLayout(section_layout)
-        # a bare QWidget defaults to Preferred vertically, which CAN grow
-        # past its own sizeHint when the surrounding layout has surplus
-        # space to hand out - normally a trailing addStretch() (see e.g.
-        # program_page_layout) is enough to claim that surplus instead,
-        # but addStretch()'s own default stretch factor (0) doesn't
-        # actually outrank a sibling Preferred-policy widget's willingness
-        # to grow (both are stretch 0), so Qt's layout can still split the
-        # extra space across the CARDS themselves rather than routing all
-        # of it into the stretch at the end - visible as every card
-        # growing taller (and its own internal addStretch() padding out
-        # further) as the window grows, on every tab. Fixed vertically
-        # pins each card to its sizeHint - can't grow OR compress below it
-        # (the latter is what caused cards to visibly overlap during
-        # development - see this file's own "section cards" notes) -
-        # regardless of how any particular tab's surrounding layout
-        # resolves its own stretch distribution.
-        card.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
-        return card
+        # Keygroup tab) into one visually distinct card - see
+        # ui.qt_helpers.build_section_card's own docstring for the actual
+        # implementation and the gotchas it exists to avoid (also used
+        # directly, not through this wrapper, by ui/settings_dialog.py).
+        return build_section_card(title, *row_layouts)
 
     def _equalize_card_heights(self, *cards):
         # pairs like Range+Filter or the two Envelope cards read oddly
@@ -3933,15 +3893,9 @@ class ProgramEditorWindow(QMainWindow):
 
     def _build_scroll_area(self, page):
         # both detail_stack pages (Program, Keygroup) are wrapped in one of
-        # these rather than added directly - lets the window's minimum
-        # height stay comfortable without needing to grow every time a
-        # section card is added, at the cost of a scrollbar on a short
-        # window instead of everything always fitting unscrolled
-        scroll_area = QScrollArea()
-        scroll_area.setWidgetResizable(True)
-        scroll_area.setFrameShape(QScrollArea.Shape.NoFrame)
-        scroll_area.setWidget(page)
-        return scroll_area
+        # these rather than added directly - see
+        # ui.qt_helpers.build_scroll_area's own docstring
+        return build_scroll_area(page)
 
     def _build_multi_part_knob(self, minimum, maximum, *, default):
         # compact knob + numeric readout for a Multis-tab row - unlike

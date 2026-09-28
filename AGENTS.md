@@ -1335,6 +1335,65 @@ falling through to a real-hardware code path that `_StandaloneHost` can't
 support). `setdefault` means an explicit `AKAISDS_DEMO_INSTANT=1` alongside
 it on the command line still works normally.
 
+### Follow-up: faster preview debounce, double-click deletes a marker, Settings dialog reorganized
+
+**The click-to-preview debounce is `QApplication.doubleClickInterval() // 2`**,
+not the full interval - halved at the user's own request (the full delay
+felt sluggish for quickly scrubbing through slices). Still derived from
+the platform's own interval rather than a hardcoded constant, just at half
+of it. Trade-off, worth knowing if "double-click to add a marker also
+plays a stray blip of audio" ever gets reported again: halving narrows,
+but doesn't eliminate, the window described in `_schedule_preview_click`'s
+own comment - an unusually slow double-click can still land outside it.
+
+**Double-clicking an existing slice marker now deletes it** - a faster
+alternative to the right-click context menu (`_show_marker_context_menu`),
+not a replacement for it; both stay wired. Double-clicking start/end does
+nothing, same as before this existed - they're the region's own edges,
+not slice boundaries, and were never deletable any way. Safe against the
+same first-click-before-the-double-click-fires event ordering
+`_cancel_pending_preview` already has to account for elsewhere on this
+widget: Qt's documented sequence for a double-click is press → release →
+doubleClick → release, so `self._dragging` (set by the first press,
+targeting the marker about to be deleted) is already cleared by the first
+release *before* `mouseDoubleClickEvent` ever runs - no stale reference to
+guard against in the second `mouseReleaseEvent`.
+
+**`build_section_card`/`build_scroll_area` moved from `ProgramEditorWindow`
+methods into free functions in `ui/qt_helpers.py`**, unchanged apart from
+no longer taking `self` - `ui/settings_dialog.py` needed the exact same
+card look and the exact same "past the minimum, a tab scrolls instead of
+the window growing" scroll-area behavior, and duplicating either (both
+carry real, easy-to-get-wrong subtlety - see this file's own "section
+cards, scroll areas" notes above) would have meant keeping two copies of
+the same gotchas in sync by hand. `ProgramEditorWindow._build_section_card`/
+`_build_scroll_area` are now one-line delegates kept only so every existing
+`self._build_section_card(...)` call site elsewhere in that (huge) file
+didn't need touching.
+
+**`MidiSettingsDialog` (`ui/settings_dialog.py`) collapsed from 4 flat tabs
+to 2, each built from section cards**, at the user's own request once 4
+tabs made the dialog uncomfortably narrow: "Audio/MIDI" (MIDI Input/Output
+card + Audio Output card - the Slice Editor preview device/buffer size
+added alongside that feature) and "Troubleshooting" (Hardware Test card +
+Interface Test card - what used to be "MIDI Hardware Test"/"MIDI Interface
+Test"). Window title changed from "MIDI Settings" to plain "Settings" to
+match - **grep for the literal string `"MIDI Settings"` before assuming
+it's gone everywhere**; a couple of tooltip/log strings in
+`dashboard.py`/`settings_dialog.py` that referenced the dialog by its old
+name were updated alongside it, but this is exactly the kind of string a
+future addition could reintroduce without realizing the dialog was
+renamed.
+
+**`btn_settings`/`btn_open_editor` (`ui/dashboard.py`) renamed** from
+"⚙ MIDI Settings"/"Open Editor" to "⚙ Settings..."/"Open Editor..." (the
+trailing `...` signals both open another window, matching the Settings
+menu action's own existing "Settings..." wording, which the button had
+drifted out of sync with). The fixed-width-column sizing next to the logo
+(see "Transfer Dashboard: window/tab shortcuts" above) is computed from
+each button's own live `sizeHint()`, not a hardcoded width, so this rename
+needed no follow-up fix there.
+
 ## Testing
 
 `TESTING.md` undersells this slightly - there's also

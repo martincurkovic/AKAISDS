@@ -476,8 +476,19 @@ class SliceWaveformView(QWidget):
         if self._frame_count == 0:
             return
         x = event.position().x()
-        if self._nearest_hit_target(x) is not None:
-            return  # double-clicking an existing handle isn't "add a marker"
+        target = self._nearest_hit_target(x)
+        if target is not None:
+            kind, key = target
+            # double-clicking a slice marker deletes it - a quicker
+            # alternative to the right-click context menu
+            # (_show_marker_context_menu), not a replacement for it.
+            # start/end aren't markers and can't be deleted this way (or
+            # any way - they're the region's own edges, not a slice
+            # boundary), so double-clicking one does nothing, same as
+            # before this existed.
+            if kind == "marker":
+                self.remove_marker(key)
+            return
         frame = self._frame_for(x)
         if self._start < frame < self._end:
             self.add_marker(frame)
@@ -514,7 +525,16 @@ class SliceWaveformView(QWidget):
         if not (self._start <= frame <= self._end):
             return
         self._pending_preview_frame = frame
-        self._preview_timer.start(QApplication.doubleClickInterval())
+        # half of Qt's own doubleClickInterval() - a straight
+        # doubleClickInterval() delay (the original, safest choice) felt
+        # too sluggish for quickly scrubbing through slices, per the
+        # user's own request. Still tied to the platform's own interval
+        # rather than a made-up constant, just at half of it - narrows, but
+        # doesn't eliminate, the window an unusually slow double-click
+        # could land outside of and still trigger one stray preview blip
+        # before its marker gets added (see this timer's own __init__
+        # comment for the full reasoning on why this exists at all)
+        self._preview_timer.start(QApplication.doubleClickInterval() // 2)
 
     def _cancel_pending_preview(self):
         self._preview_timer.stop()
