@@ -1,6 +1,6 @@
 from PySide6.QtWidgets import QApplication, QMenu, QSizePolicy, QWidget
 from PySide6.QtGui import QCursor, QPainter, QPen, QColor, QPolygonF
-from PySide6.QtCore import Qt, QEvent, QPointF, QRectF, Signal
+from PySide6.QtCore import Qt, QEvent, QPointF, QRectF, QTimer, Signal
 
 from core.sample_slicing import find_nearest_zero_crossing
 from core.sample_slicing import slice_bounds as _slice_bounds_fn
@@ -54,6 +54,9 @@ class SliceWaveformView(QWidget):
     # to support here at all.
     markers_changed = Signal()  # start, end, or the marker list itself changed
     view_changed = Signal(int, int, int)  # view_start, view_length, frame_count
+    # a plain (non-handle) single click settled long enough to not be the
+    # first half of a double-click - (slice_start, slice_end), inclusive
+    slice_preview_requested = Signal(int, int)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -73,6 +76,19 @@ class SliceWaveformView(QWidget):
         self._drag_value = 0.0  # float accumulator, same reasoning as WaveformView
         self._fine_active = False
         self._warp_anchor_global = None
+        # click-to-preview: a plain click in empty space (no handle nearby)
+        # schedules a preview instead of firing it immediately, deferred by
+        # Qt's own double-click interval so that double-clicking to add a
+        # marker (mouseDoubleClickEvent below) never also plays a stray
+        # blip of audio from the single click that precedes it - the
+        # standard single-vs-double-click disambiguation pattern
+        self._preview_timer = QTimer(self)
+        self._preview_timer.setSingleShot(True)
+        self._preview_timer.timeout.connect(self._fire_preview)
+        self._pending_preview_frame = None
+        # driven by SlicePreviewPlayer.position_changed/finished (wired in
+        # slice_editor_window.py) - None means nothing is currently playing
+        self._playhead_frame = None
 
     # --- state -----------------------------------------------------------
 
@@ -159,6 +175,17 @@ class SliceWaveformView(QWidget):
 
     def _emit_markers_changed(self):
         self.markers_changed.emit()
+
+    # --- playhead (click-to-preview visual feedback) ------------------------
+
+    def set_playhead(self, frame):
+        self._playhead_frame = frame
+        self.update()
+
+    def clear_playhead(self):
+        if self._playhead_frame is not None:
+            self._playhead_frame = None
+            self.update()
 
     # --- zoom / pan (same shape as WaveformView's own) --------------------
 
@@ -329,6 +356,7 @@ class SliceWaveformView(QWidget):
             )
             return
 
+        self._draw_playhead_highlight(painter, palette)
         self._draw_zero_crossing_line(painter, palette)
 
         view_start = self._view_start
@@ -377,6 +405,43 @@ class SliceWaveformView(QWidget):
             self._draw_marker_line(painter, m, marker_color)
 
         self._draw_slice_labels(painter, palette)
+        self._draw_playhead_line(painter, palette)
+
+    def _draw_playhead_highlight(self, painter, palette):
+        # a translucent tint across whichever slice is currently sounding -
+        # drawn first (under the waveform/markers), see _draw_playhead_line
+        # below for the moving line itself. No-op unless something's
+        # actually playing (see clear_playhead)
+        if self._playhead_frame is None:
+            return
+        bounds = self.slice_bounds()
+        index = self._slice_index_of(self._playhead_frame)
+        if not (0 <= index < len(bounds)):
+            return
+        slice_start, slice_end = bounds[index]
+        view_start = self._view_start
+        view_end = view_start + self._view_length() - 1
+        visible_start = max(slice_start, view_start)
+        visible_end = min(slice_end, view_end)
+        if visible_start > visible_end:
+            return  # the playing slice has scrolled/zoomed fully offscreen
+        x1 = self._x_for(visible_start)
+        x2 = self._x_for(visible_end)
+        color = QColor(palette["accent"])
+        color.setAlpha(50)
+        painter.fillRect(QRectF(x1, 0, max(1.0, x2 - x1), self.height()), color)
+
+    def _draw_playhead_line(self, painter, palette):
+        # a solid, undashed line - deliberately distinct from the dashed
+        # start/end/marker lines (_draw_marker_line) so "this is where
+        # playback currently is" never reads as just another marker
+        if self._playhead_frame is None or not self._visible(self._playhead_frame):
+            return
+        x = self._x_for(self._playhead_frame)
+        pen = QPen(QColor(palette["text_bright"]))
+        pen.setWidthF(2.0)
+        painter.setPen(pen)
+        painter.drawLine(QPointF(x, 0), QPointF(x, self.height()))
 
     # --- mouse handling ------------------------------------------------------
 
@@ -407,6 +472,7 @@ class SliceWaveformView(QWidget):
         return best
 
     def mouseDoubleClickEvent(self, event):
+        self._cancel_pending_preview()
         if self._frame_count == 0:
             return
         x = event.position().x()
@@ -426,16 +492,40 @@ class SliceWaveformView(QWidget):
         x = event.position().x()
         target = self._nearest_hit_target(x)
         if target is None:
+            if event.button() == Qt.MouseButton.LeftButton:
+                self._schedule_preview_click(self._frame_for(x))
             return
         kind, key = target
         if event.button() == Qt.MouseButton.RightButton:
             if kind == "marker":
                 self._show_marker_context_menu(key, event.globalPosition().toPoint())
             return
+        self._cancel_pending_preview()
         self._dragging = target
         self._drag_anchor_x = x
         self._drag_value = float(self._start if kind == "start" else
                                   self._end if kind == "end" else key)
+
+    # --- click-to-preview --------------------------------------------------
+
+    def _schedule_preview_click(self, frame):
+        # only meaningful inside [start, end] - clicking the greyed-out
+        # dead space either side isn't part of any slice
+        if not (self._start <= frame <= self._end):
+            return
+        self._pending_preview_frame = frame
+        self._preview_timer.start(QApplication.doubleClickInterval())
+
+    def _cancel_pending_preview(self):
+        self._preview_timer.stop()
+
+    def _fire_preview(self):
+        frame = self._pending_preview_frame
+        bounds = self.slice_bounds()
+        index = self._slice_index_of(frame)
+        if 0 <= index < len(bounds):
+            slice_start, slice_end = bounds[index]
+            self.slice_preview_requested.emit(slice_start, slice_end)
 
     def _show_marker_context_menu(self, frame, global_pos):
         menu = QMenu(self)
@@ -563,6 +653,7 @@ class SliceWaveformView(QWidget):
     def hideEvent(self, event):
         if self._fine_active:
             self._exit_fine_drag()
+        self._cancel_pending_preview()
         super().hideEvent(event)
 
     def wheelEvent(self, event):

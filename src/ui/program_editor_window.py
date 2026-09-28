@@ -3120,6 +3120,7 @@ class ProgramEditorWindow(QMainWindow):
             entry["shlto"],
             _existing_names,
             self._export_slices,
+            demo_mode=bool(os.environ.get("AKAISDS_DEMO_SAMPLER")),
         )
         dialog.exec()
         # slice export can add several new resident samples - refresh so
@@ -5025,10 +5026,14 @@ class ProgramEditorWindow(QMainWindow):
         # _duplicate_keygroup_action in _update_list_context_actions_enabled)
         demo_mode = bool(os.environ.get("AKAISDS_DEMO_SAMPLER"))
         self.duplicate_sample_button.setEnabled(enabled and not demo_mode)
-        # Slice Editor's export step is a batch version of the same
-        # add-new-resident-sample primitive Duplicate Sample needs -
-        # DemoBridge has none, same reasoning, same gate
-        self.slice_editor_button.setEnabled(enabled and not demo_mode)
+        # Unlike Duplicate Sample, the Slice Editor is NOT all-or-nothing in
+        # demo mode: placing/dragging/previewing slices needs only the
+        # audio already in memory, nothing hardware-shaped. Only its Export
+        # step is a batch version of the same add-new-resident-sample
+        # primitive Duplicate Sample needs (DemoBridge has none) - so the
+        # button itself stays enabled here, and SliceEditorWindow disables
+        # just its own Export button when demo_mode (see _open_slice_editor).
+        self.slice_editor_button.setEnabled(enabled)
 
     def _update_sample_meta_controls(self, sptype, spitch, shlto=None, stuno=None):
         # sptype/spitch/shlto/stuno None means "nothing known about this
@@ -5494,10 +5499,21 @@ class ProgramEditorWindow(QMainWindow):
         # how long the whole thing takes; never fewer than 6 ticks even
         # for a short sample, so it still visibly moves rather than
         # jumping straight to done.
+        #
+        # AKAISDS_DEMO_INSTANT opts OUT of all that pacing - same env-var-
+        # gated shape as AKAISDS_DEMO_SAMPLER itself, re-checked live rather
+        # than cached, for whoever's actually iterating on UI work away
+        # from hardware (the Slice Editor above all) and wants every sample
+        # to load in one step instead of waiting out a realistic transfer
+        # each time they select one.
         total = len(samples)
-        total_seconds = total * _DEMO_MS_PER_WORD / 1000
-        steps = max(6, round(total_seconds / 0.2))
-        step_seconds = total_seconds / steps
+        instant = bool(os.environ.get("AKAISDS_DEMO_INSTANT"))
+        if instant:
+            steps = 1
+        else:
+            total_seconds = total * _DEMO_MS_PER_WORD / 1000
+            steps = max(6, round(total_seconds / 0.2))
+        step_seconds = 0.0 if instant else total_seconds / steps
         last_pushed = 0
         for step in range(1, steps + 1):
             current = total * step // steps
@@ -6479,12 +6495,30 @@ if __name__ == "__main__":
     from s3ked.demo import DemoBridge
     from ui import theme
 
+    class _StandaloneSamplerController:
+        # the only thing _open_slice_editor/_export_slices actually need
+        # from a real SamplerController when there's no Transfer Dashboard
+        # around at all - just enough for the Slice Editor's own busy-check
+        # to pass. Export itself still isn't reachable this way (its button
+        # is disabled in demo mode - see SliceEditorWindow's demo_mode
+        # param), so send_file_queue is deliberately not stubbed here.
+        def is_transfer_busy(self):
+            return False
+
     class _StandaloneHost:
         # ProgramEditorWindow.closeEvent() calls main_window.show() to bring
         # the dashboard back - there is none here, so close the app instead
         def show(self):
             QApplication.instance().quit()
 
+        sampler_controller = _StandaloneSamplerController()
+
+    # this script always constructs a DemoBridge two lines down regardless -
+    # setdefault so every demo_mode check elsewhere in this file (audio
+    # fetch path, Slice Editor Export gating, etc.) actually agrees with
+    # that, while still letting AKAISDS_DEMO_INSTANT be set alongside it on
+    # the command line the normal way
+    os.environ.setdefault("AKAISDS_DEMO_SAMPLER", "1")
     app = QApplication(sys.argv)
     theme.apply_to_app(app)
     window = ProgramEditorWindow(_StandaloneHost(), bridge=DemoBridge())

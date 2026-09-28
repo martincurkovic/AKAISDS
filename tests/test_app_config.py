@@ -83,6 +83,28 @@ def test_save_creates_missing_parent_directory(monkeypatch, tmp_path):
     assert app_config.get_saved_ports() == ("My Input", "My Output")
 
 
+def test_get_saved_audio_output_device_defaults_to_none(monkeypatch, tmp_path):
+    _use_temp_config(monkeypatch, tmp_path)
+    assert app_config.get_saved_audio_output_device() is None
+
+
+def test_save_and_get_audio_output_device_round_trip(monkeypatch, tmp_path):
+    _use_temp_config(monkeypatch, tmp_path)
+    app_config.save_audio_output_device("deadbeef")
+    assert app_config.get_saved_audio_output_device() == "deadbeef"
+
+
+def test_get_saved_audio_buffer_samples_defaults_to_512(monkeypatch, tmp_path):
+    _use_temp_config(monkeypatch, tmp_path)
+    assert app_config.get_saved_audio_buffer_samples() == 512
+
+
+def test_save_and_get_audio_buffer_samples_round_trip(monkeypatch, tmp_path):
+    _use_temp_config(monkeypatch, tmp_path)
+    app_config.save_audio_buffer_samples(1024)
+    assert app_config.get_saved_audio_buffer_samples() == 1024
+
+
 def test_settings_saved_independently_dont_clobber_each_other(monkeypatch, tmp_path):
     # save ports/channel/device type each read, modify, write the same config file
     # confirm whether saving ONE doesnt wipe out something saved earlier

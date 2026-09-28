@@ -90,6 +90,38 @@ def save_device_type(device_type):
     save_config(config)
 
 
+# samples, not ms/bytes - same unit an Ableton-style buffer-size combobox
+# shows (see ui/settings_dialog.py's _BUFFER_SIZE_OPTIONS), converted to
+# actual bytes at playback time via QAudioFormat.bytesForFrames() (see
+# core/audio_preview.py) since that depends on the format actually in use
+_DEFAULT_AUDIO_BUFFER_SAMPLES = 512
+
+
+def get_saved_audio_output_device():
+    # hex-encoded QAudioDevice.id() (see core.audio_preview.device_id_string),
+    # or None for "system default" - the same meaning an unset/missing key
+    # already has, so there's no separate sentinel to keep in sync
+    config = load_config()
+    return config.get("audio_output_device")
+
+
+def save_audio_output_device(device_id):
+    config = load_config()
+    config["audio_output_device"] = device_id
+    save_config(config)
+
+
+def get_saved_audio_buffer_samples():
+    config = load_config()
+    return config.get("audio_buffer_samples", _DEFAULT_AUDIO_BUFFER_SAMPLES)
+
+
+def save_audio_buffer_samples(buffer_samples):
+    config = load_config()
+    config["audio_buffer_samples"] = buffer_samples
+    save_config(config)
+
+
 def get_last_update_check():
     # unix timestamp of the last successful update check, or 0 if never
     config = load_config()

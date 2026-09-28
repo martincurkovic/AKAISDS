@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
 )
 
 from core import sample_slicing
+from core.audio_preview import SlicePreviewPlayer
 from s3k.messages import AKAI_CHARSET, NAME_LENGTH
 from ui.qt_helpers import widen_popup_to_fit_items
 from ui.sample_settings_dialog import _BIT_DEPTH_OPTIONS, _RATE_OPTIONS
@@ -112,6 +113,7 @@ class SliceEditorWindow(QDialog):
         shlto,
         existing_names_provider,
         export_callback,
+        demo_mode=False,
     ):
         super().__init__(parent)
         self.setWindowTitle(f'Slice Editor - "{sample_name}"')
@@ -132,16 +134,21 @@ class SliceEditorWindow(QDialog):
         # markers_changed emit doesn't mark a freshly-opened window dirty.
         self._dirty = False
 
+        self._preview_player = SlicePreviewPlayer(self)
+
         self.waveform = SliceWaveformView()
         self.waveform.set_waveform(samples, 0, len(samples) - 1)
         self.waveform.markers_changed.connect(self._update_info_label)
         self.waveform.markers_changed.connect(self._mark_dirty)
         self.waveform.view_changed.connect(self._on_view_changed)
+        self.waveform.slice_preview_requested.connect(self._preview_slice)
+        self._preview_player.position_changed.connect(self.waveform.set_playhead)
+        self._preview_player.finished.connect(self.waveform.clear_playhead)
 
         zoom_row = QHBoxLayout()
         hint_label = QLabel(
-            "Double-click: add slice   •   Drag edges/markers: adjust   •   "
-            "Right-click a marker: delete"
+            "Click: preview slice   •   Double-click: add slice   •   "
+            "Drag edges/markers: adjust   •   Right-click a marker: delete"
         )
         self.zoom_out_button = QPushButton("−")
         # same 36px as the Samples tab's own zoom_out_button/zoom_in_button
@@ -207,6 +214,18 @@ class SliceEditorWindow(QDialog):
         export_row = QHBoxLayout()
         self.export_button = QPushButton("Export Slices")
         self.export_button.clicked.connect(self._confirm_export)
+        if demo_mode:
+            # unlike Duplicate Sample/Program/Keygroup (fully disabled in
+            # demo mode - DemoBridge has no add-sample primitive at all),
+            # the Slice Editor's marker placement and click-to-preview work
+            # fine without hardware, so only THIS button - the one step
+            # that actually writes new samples to the sampler - is disabled
+            self.export_button.setEnabled(False)
+            self.export_button.setToolTip(
+                "Exporting slices to the sampler needs a real hardware "
+                "connection - not available in demo mode. Marker placement "
+                "and click-to-preview still work fully."
+            )
         self.export_progress = QProgressBar()
         self.export_progress.setRange(0, 100)
         self.export_progress.setFixedWidth(160)
@@ -254,6 +273,13 @@ class SliceEditorWindow(QDialog):
         self.info_label.setText(
             f"{len(bounds)} slice{'s' if len(bounds) != 1 else ''} - "
             f"lengths (frames): {lengths}"
+        )
+
+    # --- click-to-preview --------------------------------------------------
+
+    def _preview_slice(self, slice_start, slice_end):
+        self._preview_player.play(
+            self._samples, slice_start, slice_end, self._framerate
         )
 
     # --- Equal Slices ------------------------------------------------------
@@ -343,6 +369,7 @@ class SliceEditorWindow(QDialog):
             self._samples, self.waveform.start(), self.waveform.end(), markers
         )
 
+        self._preview_player.stop()
         self._set_controls_enabled(False)
         self._exporting = True
         self.export_progress.setVisible(True)
@@ -420,10 +447,12 @@ class SliceEditorWindow(QDialog):
 
     def reject(self):
         if self._confirm_discard():
+            self._preview_player.stop()
             super().reject()
 
     def closeEvent(self, event):
         if self._confirm_discard():
+            self._preview_player.stop()
             super().closeEvent(event)
         else:
             event.ignore()

@@ -61,6 +61,7 @@ def _build_window(
     export_result=(True, "ok"),
     existing_names=(),
     export_calls=None,
+    demo_mode=False,
 ):
     samples = samples if samples is not None else list(range(-5000, 5000))
 
@@ -79,6 +80,7 @@ def _build_window(
         0,
         lambda: list(existing_names),
         export_callback,
+        demo_mode=demo_mode,
     )
 
 
@@ -97,6 +99,29 @@ def test_info_label_updates_when_markers_change(qapp):
 def test_name_field_defaults_to_the_source_sample_name(qapp):
     window = _build_window()
     assert window.name_edit.text() == "SQUARE"
+
+
+# --- demo mode: Export disabled, everything else still works ---------------
+
+
+def test_export_button_enabled_by_default(qapp):
+    window = _build_window()
+    assert window.export_button.isEnabled() is True
+
+
+def test_export_button_disabled_in_demo_mode(qapp):
+    window = _build_window(demo_mode=True)
+    assert window.export_button.isEnabled() is False
+    assert window.export_button.toolTip() != ""
+
+
+def test_marker_placement_and_equal_slices_still_work_in_demo_mode(qapp):
+    # only Export needs real hardware - everything else on this dialog
+    # doesn't, and must keep working exactly as in the non-demo case
+    window = _build_window(demo_mode=True)
+    window.equal_count_spin.setValue(4)
+    window._generate_equal_slices()
+    assert window.waveform.slice_count() == 4
 
 
 # --- Equal Slices ------------------------------------------------------------

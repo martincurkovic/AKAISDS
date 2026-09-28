@@ -14,12 +14,18 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 from PySide6.QtCore import Qt
-from core import app_config, debug_log, midi_identity
+from core import app_config, audio_preview, debug_log, midi_identity
 from ui.qt_helpers import FullWidthTabBar, widen_popup_to_fit_items
 import time
 import mido
 
 _LOOPBACK_TEST_SIZES = [8, 32, 64, 127, 256, 512, 1024, 1536, 2048, 2560, 3072]
+
+# frames, same options/unit a DAW's own audio buffer-size combobox uses
+# (e.g. Ableton Live) rather than milliseconds - converted to actual bytes
+# at playback time via QAudioFormat.bytesForFrames() (core/audio_preview.py),
+# since that depends on the sample rate/format actually in use
+_BUFFER_SIZE_OPTIONS = [32, 64, 128, 256, 512, 1024, 2048]
 
 # seconds to wait for each message to return. also used for hardware test
 _LOOPBACK_RECEIVE_TIMEOUT = 1.5
@@ -153,6 +159,57 @@ class MidiSettingsDialog(QDialog):
 
         tabs.addTab(test_tab, "MIDI Interface Test")
 
+        # TAB 4 - AUDIO PREVIEW ------------------------------------------------
+        # Unrelated to MIDI/SysEx transfers - this is the output device/buffer
+        # size the Slice Editor's click-to-preview playback uses (Program
+        # Editor > Samples tab > Slice Editor). Lives in this dialog rather
+        # than a separate window since it's still "I/O hardware settings",
+        # just for the computer's own speakers instead of the sampler.
+        audio_tab = QWidget()
+        audio_layout = QFormLayout(audio_tab)
+
+        audio_note = QLabel(
+            "Used by the Slice Editor's click-to-preview playback "
+            "(Program Editor > Samples tab). Doesn't affect MIDI/SysEx "
+            "transfers to the sampler."
+        )
+        audio_note.setWordWrap(True)
+        audio_layout.addRow(audio_note)
+
+        self.combo_audio_output = QComboBox()
+        self.combo_audio_output.addItem("(System Default)", None)
+        for device in audio_preview.list_output_devices():
+            self.combo_audio_output.addItem(
+                device.description(), audio_preview.device_id_string(device)
+            )
+        self.combo_audio_output.setSizeAdjustPolicy(
+            QComboBox.SizeAdjustPolicy.AdjustToContents
+        )
+        saved_device_id = app_config.get_saved_audio_output_device()
+        idx = self.combo_audio_output.findData(saved_device_id)
+        self.combo_audio_output.setCurrentIndex(idx if idx >= 0 else 0)
+        widen_popup_to_fit_items(self.combo_audio_output)
+        audio_layout.addRow(QLabel("Output Device:"), self.combo_audio_output)
+
+        self.combo_audio_buffer = QComboBox()
+        for frames in _BUFFER_SIZE_OPTIONS:
+            self.combo_audio_buffer.addItem(f"{frames} samples", frames)
+        self.combo_audio_buffer.setSizeAdjustPolicy(
+            QComboBox.SizeAdjustPolicy.AdjustToContents
+        )
+        saved_buffer_samples = app_config.get_saved_audio_buffer_samples()
+        idx = self.combo_audio_buffer.findData(saved_buffer_samples)
+        self.combo_audio_buffer.setCurrentIndex(idx if idx >= 0 else 0)
+        self.combo_audio_buffer.setToolTip(
+            "How much audio is buffered ahead during preview playback.\n"
+            "Lower values react faster but may click/pop on a slower\n"
+            "output device or interface; higher values are more reliable\n"
+            "but add latency before playback audibly starts."
+        )
+        audio_layout.addRow(QLabel("Buffer Size:"), self.combo_audio_buffer)
+
+        tabs.addTab(audio_tab, "Audio Preview")
+
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
         )
@@ -226,6 +283,8 @@ class MidiSettingsDialog(QDialog):
         app_config.save_ports(input_name, output_name)
         app_config.save_channel(channel)
         app_config.save_device_type(device_type)
+        app_config.save_audio_output_device(self.combo_audio_output.currentData())
+        app_config.save_audio_buffer_samples(self.combo_audio_buffer.currentData())
 
         self.accept()
 

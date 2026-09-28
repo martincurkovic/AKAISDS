@@ -1483,6 +1483,38 @@ def test_load_sample_waveform_progressively_fills_the_envelope_in_demo_mode(
     assert editor.waveform_view.has_waveform() is True
 
 
+def test_akaisds_demo_instant_skips_the_pacing_loop_entirely(editor, qapp, monkeypatch):
+    # AKAISDS_DEMO_INSTANT opts out of the realistic-transfer-speed pacing
+    # above entirely - for someone actually iterating on UI work (the
+    # Slice Editor above all) who wants every sample to load in one step
+    # rather than waiting out a simulated transfer each time they select
+    # one. Deliberately does NOT cut _DEMO_MS_PER_WORD down like the
+    # sibling test above - if instant mode still consulted it at all, a
+    # real (uncut) value here would make this test itself take real
+    # wall-clock seconds, which it must not.
+    monkeypatch.setenv("AKAISDS_DEMO_SAMPLER", "1")
+    monkeypatch.setenv("AKAISDS_DEMO_INSTANT", "1")
+
+    editor.sample_list_widget.setCurrentRow(0)
+    editor._worker.wait_until_idle()
+    _pump_until(qapp, lambda: editor.waveform_view.has_header())
+
+    calls = []
+    real_append = editor.waveform_view.append_live_samples
+
+    def _recording_append(chunk):
+        calls.append(len(chunk))
+        real_append(chunk)
+
+    monkeypatch.setattr(editor.waveform_view, "append_live_samples", _recording_append)
+
+    editor._load_sample_waveform()
+
+    assert len(calls) == 1  # one step, not the usual >= 6
+    assert sum(calls) == len(editor._sample_waveform_cache[0]["samples"])
+    assert editor.waveform_view.has_waveform() is True
+
+
 # --- Samples tab: load/Trim/Reverse progress lives in the status bar -------
 # The progress bar under Trim/Reverse was removed 2026-09-22 - redundant
 # with the waveform's own progressive fill and the frame count the status
@@ -2755,14 +2787,54 @@ def test_duplicate_sample_refuses_a_name_already_in_use(editor, qapp, monkeypatc
 # _perform_duplicate_sample_real is above.
 
 
-def test_slice_editor_button_disabled_in_demo_mode(editor, monkeypatch):
+def test_slice_editor_button_stays_enabled_in_demo_mode(editor, monkeypatch):
+    # unlike Duplicate Sample (fully disabled in demo mode - see above),
+    # the Slice Editor's marker placement/click-to-preview don't need any
+    # hardware at all - only its own Export button does (see
+    # SliceEditorWindow's demo_mode param, exercised below) - so the button
+    # that opens the dialog in the first place stays enabled either way
     monkeypatch.setenv("AKAISDS_DEMO_SAMPLER", "1")
     editor._set_sample_edit_buttons_enabled(True)
-    assert editor.slice_editor_button.isEnabled() is False
+    assert editor.slice_editor_button.isEnabled() is True
 
     monkeypatch.delenv("AKAISDS_DEMO_SAMPLER", raising=False)
     editor._set_sample_edit_buttons_enabled(True)
     assert editor.slice_editor_button.isEnabled() is True
+
+
+def test_open_slice_editor_passes_demo_mode_through(editor, qapp, monkeypatch):
+    # _open_slice_editor's happy path isn't exercised end-to-end elsewhere
+    # (a real SliceEditorWindow.exec() would hang an offscreen test - see
+    # the comment above test_open_slice_editor_does_nothing_without_a_sampler_controller)
+    # - SliceEditorWindow itself is faked here just to confirm the
+    # constructor actually receives the right demo_mode value, the one
+    # thing _open_slice_editor changed
+    captured = {}
+
+    class _FakeSliceEditorWindow:
+        def __init__(self, *args, **kwargs):
+            captured["demo_mode"] = kwargs.get("demo_mode")
+
+        def exec(self):
+            pass
+
+    monkeypatch.setattr(
+        "ui.program_editor_window.SliceEditorWindow", _FakeSliceEditorWindow
+    )
+    monkeypatch.setenv("AKAISDS_DEMO_SAMPLER", "1")
+
+    bridge = editor._bridge
+    fake_sampler = FakeSamplerController(bridge)
+    editor._main_window.sampler_controller = fake_sampler
+    _select_sample_with_full_audio(
+        editor, qapp, 0, list(range(100)),
+        {
+            "start": 0, "loop_start": 0, "loop_end": 0, "end": 99,
+            "stuno": 0, "shlto": 0,  # _open_slice_editor reads these directly
+        },
+    )
+    editor._open_slice_editor()
+    assert captured["demo_mode"] is True
 
 
 def test_open_slice_editor_does_nothing_without_a_sampler_controller(editor, qapp):

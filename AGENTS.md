@@ -1206,6 +1206,135 @@ lose) → dirty (ask). Zoom/pan changes don't count as "edits" (they use
 `SliceWaveformView`'s separate `view_changed` signal, never
 `markers_changed`), only start/end/marker changes do.
 
+### Follow-up: click-to-preview playback, and the audio output driver this app never had before
+
+The "deferred to a later version" note above (click-to-preview needing an
+audio output driver this app had never opened) is now implemented: a plain
+single click on empty waveform space (no handle nearby) previews that
+slice's audio through the computer's own speakers/interface -
+`core/audio_preview.py`'s `SlicePreviewPlayer`, the first thing in this
+codebase to open a `QAudioSink` rather than a MIDI port. The device/buffer
+size it uses are chosen in `MidiSettingsDialog`'s new "Audio Preview" tab
+(`ui/settings_dialog.py`) and persisted via `app_config.save_audio_output_device`/
+`save_audio_buffer_ms` - unrelated to MIDI, but kept in the same dialog
+since it's still "I/O hardware settings," just for the computer's own
+output instead of the sampler's.
+
+**Single click previews, double click still adds a marker** (unlike real
+ReCycle, which uses double-click to preview) - deliberate, confirmed with
+the user: this app had already committed double-click to "add a slice
+marker" before this feature existed, and re-purposing it would break the
+existing marker workflow. The two don't actually collide today (a plain
+click on empty space is currently a no-op in `SliceWaveformView`'s own
+`mousePressEvent` - only clicks on a handle do anything), **except** for
+the literal event sequence Qt delivers for every double-click: `mousePress`
+→ `mouseRelease` → `mouseDoubleClick` → `mouseRelease` - there IS a real
+single-click press before Qt recognizes the second one as a double-click.
+Firing preview playback immediately on that first press would mean every
+"add a marker" double-click also plays a brief blip of the wrong (pre-split)
+slice a moment before the marker lands.
+
+Fixed with the standard single-vs-double-click disambiguation pattern:
+`SliceWaveformView._schedule_preview_click` doesn't preview immediately -
+it starts a single-shot `QTimer` for `QApplication.doubleClickInterval()`ms
+(the platform's own double-click timing, not a made-up constant) and only
+actually emits `slice_preview_requested` when that timer fires
+(`_fire_preview`). `mouseDoubleClickEvent` and grabbing an actual handle
+(`mousePressEvent`'s drag-start branch) both call `_cancel_pending_preview()`
+first - so the ~300-400ms most users will never consciously notice buys a
+guarantee that a marker-adding double-click never also triggers a preview.
+See `tests/test_slice_waveform_view.py`'s click-to-preview tests, which
+call `_fire_preview()` directly to simulate the timer elapsing rather than
+sleeping a real test.
+
+**`SlicePreviewPlayer` retriggers, it doesn't queue** - a new `play()` call
+always `stop()`s whatever's already playing first, matching how a user
+actually scans through slices while chopping a break (click, click, click
+- each one should cut off the last and start immediately, not queue up a
+backlog). Both the `QAudioSink` and its backing `QBuffer` are kept alive on
+`self` for exactly this reason - Qt does not take ownership of the
+`QIODevice*` passed to `QAudioSink.start()`, and a local reference falling
+out of scope mid-playback is a real crash, not just a leak (same class of
+gotcha `BridgeWorker`'s section above warns about for a different Qt
+object). `SliceEditorWindow` calls `stop()` before a real export starts
+(the batch send freezes the UI for a while - nothing should still be
+playing under that) and in both `reject()`/`closeEvent()`, after
+`_confirm_discard()` says it's actually OK to close.
+
+Mono 16-bit PCM only, matching every sample this app ever handles
+(`struct.pack("<" + "h" * len(chunk), *chunk)` - same packing
+`sds_encoder.py` already uses, not `array.array`, to avoid introducing a
+second convention for the same job). `QAudioDevice.isFormatSupported()` is
+checked before construction; an unsupported combination falls back to the
+device's own `preferredFormat()` (pitch will be off, logged, rather than
+refusing to preview at all) - realistically only reachable via an unusual
+audio interface, not the default output on a Mac/Windows/Linux machine.
+
+**Buffer size is a `QComboBox` of raw sample-frame counts (32/64/128/256/
+512/1024/2048), not milliseconds** - deliberately mirrors the unit a DAW's
+own audio buffer-size setting uses (e.g. Ableton Live) rather than
+inventing a different one, at the user's own request. `app_config`'s
+`audio_buffer_samples` key stores the raw frame count; converted to actual
+bytes at playback time via `QAudioFormat.bytesForFrames()` (depends on the
+format actually in use, so this can't be precomputed once).
+
+**The playhead**: while a slice is sounding, `SlicePreviewPlayer` polls
+`QAudioSink.processedUSecs()` on a 30ms `QTimer` and emits
+`position_changed(frame)` - converted via the ORIGINAL sample's own
+framerate (not whatever `fmt` ended up being, in case
+`isFormatSupported()` above forced a fallback - see that method's own
+comment), since `processedUSecs()` measures real elapsed time regardless
+of which format is actually playing. `finished()` fires once when playback
+actually stops, for any reason (ran off the slice's own end, `IdleState`,
+or an explicit `stop()`/retrigger) - `SliceWaveformView.set_playhead`/
+`clear_playhead` are wired straight to these two signals in
+`SliceEditorWindow.__init__` and don't know anything about `QAudioSink`
+themselves. Drawn as two things, both gated on `self._playhead_frame`
+being non-`None`: `_draw_playhead_highlight` (a low-alpha `accent`-colored
+tint across the whole currently-playing slice band, drawn early so the
+waveform/markers paint on top of it) and `_draw_playhead_line` (a solid,
+undashed line at the exact current frame, drawn last so it's never
+obscured - deliberately undashed, unlike every other marker line on this
+widget, so it doesn't read as just another slice boundary).
+
+**The Slice Editor is now openable in demo mode, not fully disabled like
+Duplicate Sample/Program/Keygroup.** Marker placement and click-to-preview
+need only the audio already in memory - only the Export step is the same
+add-new-resident-sample primitive `DemoBridge` genuinely lacks. So
+`_set_sample_edit_buttons_enabled` no longer gates `slice_editor_button` on
+`demo_mode` at all; instead `SliceEditorWindow` takes its own `demo_mode`
+param (passed by `_open_slice_editor`) and disables just `export_button`
+(with a tooltip explaining why) when set. **Don't re-merge this back into
+one all-or-nothing gate** - unlike Duplicate Sample, most of this dialog's
+value has nothing to do with hardware at all, and disabling the whole
+thing again would silently regress the only way to evaluate/demo this
+feature without real hardware in front of you.
+
+**`AKAISDS_DEMO_INSTANT`** (new env var, checked live like
+`AKAISDS_DEMO_SAMPLER` itself, not cached) skips `_fetch_demo_sample_audio`'s
+own realistic-transfer-speed pacing entirely (`steps = 1`, no `time.sleep`)
+- for iterating on UI work away from hardware (the Slice Editor above all)
+without waiting out a simulated SDS transfer on every sample selected.
+Doesn't touch `_DEMO_MS_PER_WORD` at all when set, deliberately (see
+`test_akaisds_demo_instant_skips_the_pacing_loop_entirely`'s own comment on
+why that's asserted, not just assumed).
+
+**The bottom-of-file standalone launcher** (`if __name__ == "__main__":`)
+now does two more things than it used to: `_StandaloneHost` gained a
+`sampler_controller` stub (just enough for the Slice Editor's own
+busy-check - `is_transfer_busy() -> False` - Export itself still isn't
+reachable this way, its button is disabled by `demo_mode` regardless), and
+the script now `os.environ.setdefault("AKAISDS_DEMO_SAMPLER", "1")` before
+constructing anything. That second part fixes a real latent bug: this
+script always passes `bridge=DemoBridge()` two lines down regardless, but
+every `demo_mode` check elsewhere in this file re-reads the env var
+independently - so running this script without ALSO manually exporting
+`AKAISDS_DEMO_SAMPLER=1` used to leave every one of those checks disagreeing
+with the actual bridge in use (e.g. `_fetch_demo_sample_audio` never firing,
+falling through to a real-hardware code path that `_StandaloneHost` can't
+support). `setdefault` means an explicit `AKAISDS_DEMO_INSTANT=1` alongside
+it on the command line still works normally.
+
 ## Testing
 
 `TESTING.md` undersells this slightly - there's also

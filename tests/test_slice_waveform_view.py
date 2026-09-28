@@ -378,3 +378,85 @@ def test_pinch_zoom_with_no_waveform_does_not_crash(qapp):
     view = SliceWaveformView()
     view.resize(400, 220)
     view._handle_pinch_zoom(_FakePinchEvent(0.1, 100))  # no-op, must not raise
+
+
+# --- click-to-preview: a plain click schedules a preview, a double-click ---
+# cancels it (see the widget's own __init__ comment for why it's deferred
+# rather than firing immediately on press)
+
+
+def test_click_in_empty_space_schedules_a_pending_preview(qapp):
+    view = _view(4000)
+    mid_x = view.width() / 2
+    view.mousePressEvent(_FakeEvent(mid_x))
+    assert view._preview_timer.isActive()
+    assert view._pending_preview_frame is not None
+
+
+def test_click_on_a_handle_does_not_schedule_a_preview(qapp):
+    view = _view(4000)
+    start_x = view._x_for(0)
+    view.mousePressEvent(_FakeEvent(start_x))
+    assert not view._preview_timer.isActive()
+
+
+def test_click_outside_start_end_does_not_schedule_a_preview(qapp):
+    view = _view(1000, start=400, end=600)
+    view.mousePressEvent(_FakeEvent(1))  # far left - outside [start, end]
+    assert not view._preview_timer.isActive()
+
+
+def test_double_click_cancels_a_pending_preview(qapp):
+    view = _view(4000)
+    mid_x = view.width() / 2
+    view.mousePressEvent(_FakeEvent(mid_x))
+    assert view._preview_timer.isActive()
+    view.mouseDoubleClickEvent(_FakeEvent(mid_x))
+    assert not view._preview_timer.isActive()
+
+
+def test_fired_preview_reports_the_slice_the_clicked_frame_falls_in(qapp):
+    view = _view(4000, markers=[2000])
+    x = view._x_for(3000)  # inside the second slice, [2000, 3999]
+    view.mousePressEvent(_FakeEvent(x))
+    received = []
+    view.slice_preview_requested.connect(lambda s, e: received.append((s, e)))
+    view._fire_preview()  # simulate the debounce timer elapsing
+    assert received == [(2000, 3999)]
+
+
+def test_set_playhead_stores_the_frame_and_repaints(qapp):
+    view = _view(4000)
+    view.set_playhead(1500)
+    assert view._playhead_frame == 1500
+
+
+def test_clear_playhead_resets_to_none(qapp):
+    view = _view(4000)
+    view.set_playhead(1500)
+    view.clear_playhead()
+    assert view._playhead_frame is None
+
+
+def test_clear_playhead_is_a_noop_when_nothing_is_playing(qapp):
+    view = _view(4000)
+    view.clear_playhead()  # must not raise
+    assert view._playhead_frame is None
+
+
+def test_paint_with_an_active_playhead_does_not_crash(qapp):
+    view = _view(4000, markers=[2000])
+    view.set_playhead(2500)
+    view.grab()  # must not raise, whichever slice band 2500 falls in
+
+
+def test_starting_a_drag_cancels_a_pending_preview(qapp):
+    # a click on empty space followed quickly by grabbing a handle
+    # shouldn't leave a stray preview scheduled to fire later
+    view = _view(4000, markers=[2000])
+    empty_x = view._x_for(500)
+    view.mousePressEvent(_FakeEvent(empty_x))
+    assert view._preview_timer.isActive()
+    start_x = view._x_for(0)
+    view.mousePressEvent(_FakeEvent(start_x))
+    assert not view._preview_timer.isActive()
