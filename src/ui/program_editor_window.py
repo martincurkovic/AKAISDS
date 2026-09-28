@@ -2117,6 +2117,9 @@ class ProgramEditorWindow(QMainWindow):
         self.waveform_view.load_requested.connect(self._load_sample_waveform)
         self.waveform_view.marker_committed.connect(self._on_waveform_marker_committed)
         self.waveform_view.markers_changed.connect(self._update_marker_spinboxes)
+        self.waveform_view.markers_changed.connect(
+            self._on_waveform_markers_changed_live_preview
+        )
         self.waveform_view.view_changed.connect(self._on_waveform_view_changed)
         self.waveform_view.preview_requested.connect(
             self._on_waveform_preview_requested
@@ -6601,6 +6604,26 @@ class ProgramEditorWindow(QMainWindow):
             framerate,
             dwell_ms=dwell_ms,
         )
+
+    def _on_waveform_markers_changed_live_preview(self, start, loop_start, loop_end, end):
+        # WaveformView.markers_changed fires continuously during a drag
+        # (not just on release - see that signal's own docstring), for
+        # WHICHEVER marker moved, AND whenever a new sample's markers load
+        # (set_waveform/set_header) - not just an actual user drag.
+        # update_loop_points() is already a safe no-op with nothing
+        # playing, but the is_playing() check here isn't just belt-and-
+        # braces: without it, selecting a different sample right after
+        # stopping a preview would queue a pointless call every time,
+        # since loading the new sample's own markers fires this same
+        # signal. Dragging start/end alone (not touching loop_start/
+        # loop_end) still correctly forwards unconditionally while a
+        # preview IS running - update_loop_points() only actually rebuilds
+        # anything if the bounds genuinely changed. This is what lets a
+        # user hear their loop point adjustments live while dragging
+        # instead of stopping/restarting preview each time - per direct
+        # user request.
+        if self._sample_preview_player.is_playing():
+            self._sample_preview_player.update_loop_points(loop_start, loop_end)
 
     def _on_zone_sample_changed(self, field, zone_idx):
         text = self._zone_combos[zone_idx].currentText()

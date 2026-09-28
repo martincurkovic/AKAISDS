@@ -124,6 +124,13 @@ class SlicePreviewPlayer(QObject):
         # clicking the waveform again to stop it - see WaveformView's own
         # preview_requested).
         self._finished = False
+        # live loop-point bounds for an in-progress play_loop() - see its
+        # own docstring and update_loop_points() below. Meaningless (never
+        # read) outside an active play_loop() call, so a default of 0 here
+        # is only ever there to make update_loop_points() callable safely
+        # before the first play_loop() ever happens, not a real value.
+        self._live_loop_start = 0
+        self._live_loop_end = 0
         self._timer = QTimer(self)
         self._timer.setInterval(_PLAYHEAD_TICK_MS)
         self._timer.timeout.connect(self._on_tick)
@@ -261,6 +268,20 @@ class SlicePreviewPlayer(QObject):
         Callers decide whether a loop applies at ALL (a "No looping"/
         "One-shot" SPTYPE, or a dwell of 0/"Off", should call plain play()
         instead) - this method always assumes there IS one to repeat.
+
+        Live loop-point dragging: while this is playing, a caller can call
+        update_loop_points(new_loop_start, new_loop_end) at any time (e.g.
+        on every WaveformView.markers_changed tick during a drag) and the
+        LOOP REGION - only that, not the attack/tail, which have either
+        already played once or haven't started yet - picks up the new
+        bounds at the start of its next pass, without stopping/restarting
+        playback. This is what lets a user dial in exact loop points by
+        ear against continuous audio instead of stop/start/stop/start.
+        Deferred to the next pass boundary rather than applied instantly
+        mid-buffer, same reasoning dwell already finishes its current pass
+        before moving to the tail (see above) - jumping to an arbitrary
+        new position mid-buffer is an audible click, not just a design
+        nicety.
         """
         self.stop()
 
@@ -272,19 +293,27 @@ class SlicePreviewPlayer(QObject):
             return
 
         attack = samples[start_frame : loop_end_frame + 1]
-        loop_region = samples[loop_start_frame : loop_end_frame + 1]
         tail = samples[loop_end_frame : end_frame + 1]
         attack_bytes = struct.pack("<" + "h" * len(attack), *attack) if attack else b""
-        loop_bytes = struct.pack("<" + "h" * len(loop_region), *loop_region)
         tail_bytes = struct.pack("<" + "h" * len(tail), *tail) if tail else b""
 
         loop_frame_budget = (
             None if dwell_ms is None else max(0, round(dwell_ms / 1000 * framerate))
         )
 
+        # live, mutable loop bounds - update_loop_points() below writes
+        # these; the generator reads them fresh at the top of every pass.
+        # Starts at the bounds play_loop() was actually called with.
+        self._live_loop_start = loop_start_frame
+        self._live_loop_end = loop_end_frame
+
         device = self._open_device(framerate)
         if device is None:
             return
+
+        def _loop_region_bytes(lo, hi):
+            region = samples[lo : hi + 1]
+            return struct.pack("<" + "h" * len(region), *region)
 
         def generator():
             try:
@@ -299,24 +328,53 @@ class SlicePreviewPlayer(QObject):
                     required_frames = yield out
                 # loop region, repeated for loop_frame_budget frames, or
                 # forever ("Hold") if loop_frame_budget is None - rechecked
-                # only between full passes, never mid-pass (see docstring)
+                # only between full passes, never mid-pass (see docstring).
+                # cached_bounds/cached_bytes avoid re-slicing/re-packing on
+                # every single pass (this runs on the real-time audio
+                # thread) - only when update_loop_points() actually moved
+                # something since the last pass, which for a stable loop
+                # (the common case) is never.
                 looped_frames = 0
+                cur_loop_start = loop_start_frame
+                cur_loop_end = loop_end_frame
+                loop_bytes = _loop_region_bytes(cur_loop_start, cur_loop_end)
                 while loop_frame_budget is None or looped_frames < loop_frame_budget:
+                    live_start = self._live_loop_start
+                    live_end = self._live_loop_end
+                    if (
+                        live_end > live_start
+                        and (live_start, live_end) != (cur_loop_start, cur_loop_end)
+                    ):
+                        cur_loop_start, cur_loop_end = live_start, live_end
+                        loop_bytes = _loop_region_bytes(cur_loop_start, cur_loop_end)
                     pos = 0
                     while pos < len(loop_bytes):
                         end = pos + required_frames * _BYTES_PER_FRAME
                         out = loop_bytes[pos:end]
                         pos += len(out)
                         looped_frames += len(out) // _BYTES_PER_FRAME
-                        self._current_frame = loop_start_frame + pos // _BYTES_PER_FRAME
+                        self._current_frame = cur_loop_start + pos // _BYTES_PER_FRAME
                         required_frames = yield out
-                # release tail, once
+                # release tail, once - from the loop's own last-used end
+                # point (cur_loop_end), which may have moved since
+                # play_loop() was first called
                 pos = 0
-                while pos < len(tail_bytes):
+                tail_start = cur_loop_end
+                live_tail = (
+                    samples[tail_start : end_frame + 1]
+                    if cur_loop_end != loop_end_frame
+                    else None
+                )
+                out_bytes = (
+                    struct.pack("<" + "h" * len(live_tail), *live_tail)
+                    if live_tail is not None
+                    else tail_bytes
+                )
+                while pos < len(out_bytes):
                     end = pos + required_frames * _BYTES_PER_FRAME
-                    out = tail_bytes[pos:end]
+                    out = out_bytes[pos:end]
                     pos += len(out)
-                    self._current_frame = loop_end_frame + pos // _BYTES_PER_FRAME
+                    self._current_frame = tail_start + pos // _BYTES_PER_FRAME
                     required_frames = yield out
             except Exception:
                 # see play()'s own generator for why this is caught/logged
@@ -329,6 +387,19 @@ class SlicePreviewPlayer(QObject):
                 self._finished = True
 
         self._start(device, generator, start_frame)
+
+    def update_loop_points(self, loop_start_frame, loop_end_frame):
+        """Live-updates the loop region of an in-progress play_loop() -
+        see that method's own docstring. A no-op if nothing is currently
+        looping (play() is active instead, or nothing's playing at all) or
+        the given bounds are degenerate (end <= start) - the generator
+        simply keeps whatever bounds it last had in either case, rather
+        than being told to loop zero/negative frames.
+        """
+        if loop_end_frame <= loop_start_frame:
+            return
+        self._live_loop_start = loop_start_frame
+        self._live_loop_end = loop_end_frame
 
     def stop(self):
         was_playing = self._device is not None

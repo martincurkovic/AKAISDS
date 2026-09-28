@@ -2720,9 +2720,15 @@ def _fake_preview_player(editor, monkeypatch):
         calls.append(("stop", (), {}))
         state["playing"] = False
 
+    def fake_update_loop_points(*args, **kwargs):
+        calls.append(("update_loop_points", args, kwargs))
+
     monkeypatch.setattr(editor._sample_preview_player, "play", fake_play)
     monkeypatch.setattr(editor._sample_preview_player, "play_loop", fake_play_loop)
     monkeypatch.setattr(editor._sample_preview_player, "stop", fake_stop)
+    monkeypatch.setattr(
+        editor._sample_preview_player, "update_loop_points", fake_update_loop_points
+    )
     monkeypatch.setattr(
         editor._sample_preview_player, "is_playing", lambda: state["playing"]
     )
@@ -2854,6 +2860,66 @@ def test_switching_main_tabs_stops_a_playing_preview(editor, qapp, monkeypatch):
 
     assert editor._sample_preview_player.is_playing() is False
     assert calls[-1][0] == "stop"
+
+
+# --- live loop-point dragging feeds the in-progress preview ---------------
+
+
+def test_dragging_a_loop_marker_live_updates_an_in_progress_preview(
+    editor, qapp, monkeypatch
+):
+    calls = _fake_preview_player(editor, monkeypatch)
+    samples = [0] * 10000
+    markers = {"start": 0, "loop_start": 2500, "loop_end": 7500, "end": 9999}
+    _select_sample_with_full_audio(editor, qapp, 0, samples, markers)
+    editor.sample_loop_type_combo.setCurrentIndex(0)  # "Loop in release"
+    editor.sample_loop_hold_knob.setValue(500)
+    editor._on_waveform_preview_requested()  # start a loop preview
+    assert editor._sample_preview_player.is_playing() is True
+    calls.clear()  # discard the play_loop() call from starting it above
+
+    editor.waveform_view.markers_changed.emit(0, 3000, 7500, 9999)  # dragged loop_start
+
+    assert ("update_loop_points", (3000, 7500), {}) in calls
+
+
+def test_dragging_start_or_end_alone_still_forwards_current_loop_points(
+    editor, qapp, monkeypatch
+):
+    # markers_changed fires for ANY marker moving, not just the loop ones
+    # - update_loop_points() itself is a no-op unless a loop preview is
+    # actually running and the bounds genuinely changed (see its own
+    # docstring), so this handler forwards unconditionally (while a
+    # preview IS running) rather than trying to filter by which marker
+    # moved
+    calls = _fake_preview_player(editor, monkeypatch)
+    samples = [0] * 10000
+    markers = {"start": 0, "loop_start": 2500, "loop_end": 7500, "end": 9999}
+    _select_sample_with_full_audio(editor, qapp, 0, samples, markers)
+    editor.sample_loop_type_combo.setCurrentIndex(0)  # "Loop in release"
+    editor.sample_loop_hold_knob.setValue(500)
+    editor._on_waveform_preview_requested()  # start a loop preview
+    calls.clear()
+
+    editor.waveform_view.markers_changed.emit(500, 2500, 7500, 9999)  # dragged start
+
+    assert calls == [("update_loop_points", (2500, 7500), {})]
+
+
+def test_markers_changed_with_no_preview_playing_forwards_nothing(editor, qapp, monkeypatch):
+    # loading a new sample's own markers (set_waveform/set_header) also
+    # fires markers_changed - must not queue a pointless call when nothing
+    # is playing (which selecting a sample right after stopping a preview
+    # would otherwise do on every selection)
+    calls = _fake_preview_player(editor, monkeypatch)
+    samples = [0] * 10000
+    markers = {"start": 0, "loop_start": 2500, "loop_end": 7500, "end": 9999}
+    _select_sample_with_full_audio(editor, qapp, 0, samples, markers)
+    calls.clear()
+
+    editor.waveform_view.markers_changed.emit(0, 3000, 7500, 9999)
+
+    assert calls == []
 
 
 def test_reverse_sample_real_mode_happy_path_sends_deletes_and_renames(

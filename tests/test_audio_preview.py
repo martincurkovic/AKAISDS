@@ -218,3 +218,44 @@ def test_play_loop_hold_does_not_finish_on_its_own(qapp):
     assert player._device is not None
     player.stop()
     assert player._device is None
+
+
+# --- SlicePreviewPlayer.update_loop_points(): live loop-point dragging -----
+
+
+@_requires_audio_device
+def test_update_loop_points_moves_the_live_playhead_into_the_new_region(qapp):
+    # a short loop region (~2.5ms at 44100Hz) passes very rapidly, so the
+    # new bounds should take effect within a couple of loop passes -
+    # sleeping past that and checking _current_frame (updated by the
+    # generator itself, on the real-time thread - see this file's own
+    # module comment) confirms the live region actually changed, not just
+    # that the call didn't crash
+    player = audio_preview.SlicePreviewPlayer()
+    samples = _tone(10000)
+    player.play_loop(samples, 0, 1000, 1100, len(samples) - 1, 44100, dwell_ms=None)
+    time.sleep(0.1)
+    assert 1000 <= player._current_frame <= 1101
+
+    player.update_loop_points(5000, 5100)
+    time.sleep(0.1)
+    assert 5000 <= player._current_frame <= 5101
+    player.stop()
+
+
+@_requires_audio_device
+def test_update_loop_points_with_degenerate_bounds_is_ignored(qapp):
+    player = audio_preview.SlicePreviewPlayer()
+    samples = _tone(10000)
+    player.play_loop(samples, 0, 1000, 1100, len(samples) - 1, 44100, dwell_ms=None)
+    time.sleep(0.1)
+
+    player.update_loop_points(2000, 2000)  # end <= start - ignored
+    time.sleep(0.1)
+    assert 1000 <= player._current_frame <= 1101  # unchanged
+    player.stop()
+
+
+def test_update_loop_points_before_any_play_loop_call_does_not_raise(qapp):
+    player = audio_preview.SlicePreviewPlayer()
+    player.update_loop_points(100, 200)  # must not raise
