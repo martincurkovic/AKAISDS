@@ -17,7 +17,7 @@ from PySide6.QtWidgets import QApplication, QLineEdit
 from core import dropped_files
 from core.midi_manager import MidiManager
 from controller.sampler_controller import SamplerController
-from ui.dashboard import TransferDashboard
+from ui.dashboard import SETTINGS_ROLE, TransferDashboard
 
 
 @pytest.fixture(scope="session")
@@ -238,6 +238,8 @@ def test_renaming_to_a_long_name_scrolls_the_field_back_to_the_start(
     long_name = "A_VERY_LONG_SAMPLE_FILENAME_THAT_OVERFLOWS_THE_FIELD"
 
     class _FakeSettingsDialog:
+        slice_requested = False
+
         def __init__(self, *args, **kwargs):
             pass
 
@@ -316,3 +318,103 @@ def test_on_file_transferred_deletes_the_copy(dashboard, tmp_path):
 
     assert dashboard.list_local.count() == 0
     assert not os.path.exists(queued_path)
+
+
+# --- Slice Editor reachable from the queue's own Edit dialog --------------
+# _export_slices_to_queue is SliceEditorWindow's export_callback for the
+# Transfer Dashboard (see ui/dashboard.py's own _open_slice_editor) - tested
+# directly with fabricated names/slices rather than driving the real modal
+# dialog, same reasoning SliceEditorWindow.exec() itself is never called in
+# a test (see tests/test_slice_editor_window.py's own module comment).
+
+
+def _noop(*args, **kwargs):
+    pass
+
+
+def test_export_slices_to_queue_replaces_the_row_with_new_ones(dashboard, tmp_path):
+    source = tmp_path / "beat.wav"
+    _write_wav(source, n_frames=4410)
+    dashboard.on_files_dropped([str(source)])
+    item = dashboard.list_local.item(0)
+    original_path = item.data(Qt.ItemDataRole.UserRole)
+
+    names = ["BEAT-01", "BEAT-02"]
+    slices = [[0] * 2205, [0] * 2205]
+    success, message = dashboard._export_slices_to_queue(
+        item, names, slices, 44100, 16, None, _noop, _noop
+    )
+
+    assert success is True
+    assert "BEAT-01" in message and "BEAT-02" in message
+    assert dashboard.list_local.count() == 2
+    row_names = [
+        dashboard.list_local.itemWidget(dashboard.list_local.item(i))
+        .findChild(QLineEdit)
+        .text()
+        for i in range(2)
+    ]
+    assert row_names == names
+    # the original row's own stable copy is gone, replaced by two new ones
+    assert not os.path.exists(original_path)
+    for i in range(2):
+        new_path = dashboard.list_local.item(i).data(Qt.ItemDataRole.UserRole)
+        assert os.path.exists(new_path)
+
+
+def test_export_slices_to_queue_carries_bit_depth_and_rate_choice_onto_new_rows(
+    dashboard, tmp_path
+):
+    source = tmp_path / "beat.wav"
+    _write_wav(source, n_frames=4410)
+    dashboard.on_files_dropped([str(source)])
+    item = dashboard.list_local.item(0)
+
+    dashboard._export_slices_to_queue(
+        item, ["SLICE-01"], [[0] * 4410], 44100, 8, 22050, _noop, _noop
+    )
+
+    new_item = dashboard.list_local.item(0)
+    settings = new_item.data(SETTINGS_ROLE)
+    assert settings["bit_depth"] == 8
+    assert settings["sample_rate"] == 22050
+
+
+def test_export_slices_to_queue_rolls_back_on_a_mid_batch_failure(
+    dashboard, tmp_path, monkeypatch
+):
+    source = tmp_path / "beat.wav"
+    _write_wav(source, n_frames=4410)
+    dashboard.on_files_dropped([str(source)])
+    item = dashboard.list_local.item(0)
+    original_path = item.data(Qt.ItemDataRole.UserRole)
+
+    real_create_local_row = dashboard.create_local_row
+    calls = []
+
+    def _flaky_create_local_row(filepath):
+        calls.append(filepath)
+        if len(calls) == 2:
+            return False
+        return real_create_local_row(filepath)
+
+    monkeypatch.setattr(dashboard, "create_local_row", _flaky_create_local_row)
+
+    success, message = dashboard._export_slices_to_queue(
+        item,
+        ["SLICE-01", "SLICE-02"],
+        [[0] * 2205, [0] * 2205],
+        44100,
+        16,
+        None,
+        _noop,
+        _noop,
+    )
+
+    assert success is False
+    # the first slice that DID land got rolled back, and the original row
+    # this was supposed to replace is still untouched - a failed slice
+    # must not leave the queue in a half-sliced state
+    assert dashboard.list_local.count() == 1
+    assert dashboard.list_local.item(0).data(Qt.ItemDataRole.UserRole) == original_path
+    assert os.path.exists(original_path)

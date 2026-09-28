@@ -1,4 +1,5 @@
 import os
+import tempfile
 from PySide6.QtWidgets import (
     QCheckBox,
     QFileDialog,
@@ -23,6 +24,7 @@ from ui.drop_list_widget import DropListWidget
 from ui.program_editor_window import ProgramEditorWindow
 from ui.sample_settings_dialog import SampleSettingsDialog
 from ui.sample_info_dialog import SampleInfoDialog
+from ui.slice_editor_window import SliceEditorWindow
 from ui.ascii_logo import LOGO
 
 SETTINGS_ROLE = Qt.ItemDataRole.UserRole + 1
@@ -531,8 +533,17 @@ class TransferDashboard(QWidget):
             bit_depth=current_settings["bit_depth"],
             sample_rate=current_settings["sample_rate"],
             mono=current_settings["mono"],
+            show_slice_button=True,
         )
-        if dialog.exec():
+        accepted = dialog.exec()
+        if dialog.slice_requested:
+            # jumps to the Slice Editor instead of saving anything from
+            # this dialog - whatever's in its fields right now was never
+            # meant to be committed (see SampleSettingsDialog._request_
+            # slice_editor's own comment)
+            self._open_slice_editor(item, edit_field)
+            return
+        if accepted:
             settings = dialog.get_settings()
             edit_field.setText(settings["name"])
             # QLineEdit only recomputes its horizontal scroll offset lazily,
@@ -555,6 +566,203 @@ class TransferDashboard(QWidget):
             row_widget = self.list_local.itemWidget(item)
             filepath = item.data(Qt.ItemDataRole.UserRole)
             self._refresh_row_indicators(row_widget, filepath, new_settings)
+
+    def _open_slice_editor(self, item, edit_field):
+        # brings the Slice Editor (ui/slice_editor_window.py) - previously
+        # only reachable from the Program Editor's Samples tab, hardware-
+        # bound and Akai-only - to the Transfer Dashboard's own local
+        # queue instead, so a file can be chopped into one-shot slices
+        # BEFORE it's ever sent anywhere. Works for both Akai and Generic
+        # SDS targets identically, since nothing here talks to a sampler
+        # at all - see _export_slices_to_queue below for why there's no
+        # device-type branching anywhere in this path.
+        filepath = item.data(Qt.ItemDataRole.UserRole)
+        try:
+            samples, framerate = sds_encoder.read_wav_samples(filepath)
+        except Exception as e:
+            debug_log.get_logger().error(
+                f"TransferDashboard: couldn't load {filepath!r} for slicing",
+                exc_info=True,
+            )
+            self.status_bar.showMessage(
+                f"Couldn't open Slice Editor - couldn't read the audio: {e}"
+            )
+            return
+
+        sample_name = edit_field.text().strip() or "SLICE"
+
+        def _existing_names():
+            # collision-check against every OTHER queued row's own display
+            # name - nothing's resident on a sampler yet, so there's no
+            # hardware sample list to check against the way
+            # ProgramEditorWindow._open_slice_editor's own
+            # existing_names_provider does
+            names = []
+            for i in range(self.list_local.count()):
+                other_item = self.list_local.item(i)
+                if other_item is item:
+                    continue
+                other_widget = self.list_local.itemWidget(other_item)
+                other_edit = other_widget.findChild(QLineEdit) if other_widget else None
+                if other_edit is not None:
+                    names.append(other_edit.text().strip())
+            return names
+
+        def _export(
+            names,
+            slices,
+            slice_framerate,
+            bit_depth,
+            sample_rate,
+            spitch,
+            stuno,
+            shlto,
+            progress_callback,
+            status_callback,
+        ):
+            # spitch/stuno/shlto are Akai program-header concepts
+            # (SliceEditorWindow's shared export_callback contract always
+            # forwards them) with no equivalent for a queued file that
+            # hasn't been sent to any sampler yet - accepted positionally,
+            # unused
+            return self._export_slices_to_queue(
+                item,
+                names,
+                slices,
+                slice_framerate,
+                bit_depth,
+                sample_rate,
+                progress_callback,
+                status_callback,
+            )
+
+        dialog = SliceEditorWindow(
+            self,
+            sample_name,
+            samples,
+            framerate,
+            60,
+            0,
+            0,
+            _existing_names,
+            _export,
+            demo_mode=False,
+            export_confirm_message=lambda slice_count, names: (
+                f'Replace "{sample_name}" in the queue with {slice_count} '
+                f'slice{"s" if slice_count != 1 else ""} '
+                f'("{names[0]}".."{names[-1]}")? This cannot be undone.'
+            ),
+        )
+        dialog.exec()
+
+    def _remove_rows(self, items):
+        for row_item in items:
+            row_widget = self.list_local.itemWidget(row_item)
+            edit_field = row_widget.findChild(QLineEdit) if row_widget else None
+            self._remove_local_row(row_item, edit_field)
+
+    def _export_slices_to_queue(
+        self,
+        item,
+        names,
+        slices,
+        framerate,
+        bit_depth,
+        sample_rate,
+        progress_callback,
+        status_callback,
+    ):
+        # the Transfer Dashboard's own export_callback for SliceEditorWindow
+        # - see ProgramEditorWindow._export_slices for the hardware-sending
+        # counterpart this mirrors. Nothing here talks to any sampler:
+        # this operates purely on the local queue, replacing the row being
+        # sliced with N new rows, one per slice - each becomes an ordinary
+        # queued file from this point on, sent later (to an Akai OR a
+        # Generic SDS device, identically) through the exact same
+        # send_queued_samples path as any other queued file.
+        #
+        # Deliberately no equivalent of ProgramEditorWindow._export_slices'
+        # own SPTYPE=3 "force one-shot" header write here - that's a
+        # resident-Akai-sample-header concept with no meaning for a file
+        # that hasn't been sent anywhere yet, so there's nothing to
+        # disable for a Generic SDS target either: every file this app
+        # ever sends is already unconditionally encoded as NO_LOOP at the
+        # base SDS dump-header level regardless of device type (see
+        # sds_encoder.build_dump_header) - one-shot is already the only
+        # thing a plain queued-file send has ever produced, for both.
+        logger = debug_log.get_logger()
+        total = len(names)
+        temp_paths = []
+        new_items = []
+        try:
+            for index, (name, slice_samples) in enumerate(zip(names, slices)):
+                status_callback(f"Writing slice {index + 1}/{total}...")
+                fd, temp_path = tempfile.mkstemp(
+                    suffix=".wav", prefix="akaisds_slice_"
+                )
+                os.close(fd)
+                temp_paths.append(temp_path)
+                sds_encoder.write_wav_file(
+                    temp_path, slice_samples, framerate, bit_depth=16
+                )
+
+                if not self.create_local_row(temp_path):
+                    self._remove_rows(new_items)
+                    return False, (
+                        f"Couldn't add slice {index + 1}/{total} to the queue "
+                        "- see the status bar message above for why"
+                    )
+                new_item = self.list_local.item(self.list_local.count() - 1)
+                new_row_widget = self.list_local.itemWidget(new_item)
+                new_edit_field = (
+                    new_row_widget.findChild(QLineEdit) if new_row_widget else None
+                )
+                if new_edit_field is not None:
+                    new_edit_field.setText(name)
+                    new_edit_field.setCursorPosition(0)
+                # carries the dialog's own chosen bit depth/sample rate
+                # through as this row's transmission override -
+                # create_local_row otherwise defaults every new row to the
+                # dashboard's global settings, which would silently
+                # discard the choice made in the Slice Editor's own Bit
+                # depth/Sample rate combos
+                new_settings = {
+                    "bit_depth": bit_depth,
+                    "sample_rate": sample_rate,
+                    "mono": self._global_mono,
+                }
+                new_item.setData(SETTINGS_ROLE, new_settings)
+                if new_row_widget is not None:
+                    self._refresh_row_indicators(
+                        new_row_widget,
+                        new_item.data(Qt.ItemDataRole.UserRole),
+                        new_settings,
+                    )
+                new_items.append(new_item)
+                progress_callback(index + 1, total)
+
+            # every slice landed - now safe to remove the original row it
+            # replaces
+            self._remove_rows([item])
+            return True, (
+                f"Replaced with {total} slice{'s' if total != 1 else ''}: "
+                f"{names[0]}..{names[-1]}"
+            )
+        except Exception:
+            logger.error("_export_slices_to_queue: unexpected error", exc_info=True)
+            # roll back whatever slices already landed rather than leaving
+            # a half-sliced queue with the original row still present too
+            self._remove_rows(new_items)
+            return False, (
+                f"Slicing failed - unexpected error, see {debug_log.LOG_PATH} "
+                "for details"
+            )
+        finally:
+            for path in temp_paths:
+                try:
+                    os.remove(path)
+                except OSError:
+                    pass
 
     def send_queued_samples(self):
         entries = []

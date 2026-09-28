@@ -43,9 +43,16 @@ class SampleSettingsDialog(QDialog):
         show_mono=True,
         show_starting_slot=False,
         starting_sample_number=None,
+        show_slice_button=False,
     ):
         super().__init__(parent)
         self.setWindowTitle(title)
+
+        # set True by _request_slice_editor below instead of accept()/
+        # reject()'s usual bool - the caller checks this AFTER exec()
+        # regardless of the dialog's own result, since opening the Slice
+        # Editor is a "do something else instead" action, not a save
+        self.slice_requested = False
 
         layout = QFormLayout(self)
 
@@ -108,10 +115,25 @@ class SampleSettingsDialog(QDialog):
         )
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
+        if show_slice_button:
+            # an ActionRole button (not Ok/Cancel) so Qt doesn't try to
+            # place it as if it were one of those - jumps straight to the
+            # Slice Editor instead of saving these settings, same reasoning
+            # a "do something else" action always takes here: whatever's in
+            # the name/bit-depth/rate/mono fields right now was never
+            # meant to be committed by this button
+            slice_button = buttons.addButton(
+                "Slice Editor...", QDialogButtonBox.ButtonRole.ActionRole
+            )
+            slice_button.clicked.connect(self._request_slice_editor)
         layout.addRow(buttons)
 
         # fixed window size - computed from actual content rather than hardcoded value
         layout.setSizeConstraint(QLayout.SizeConstraint.SetFixedSize)
+
+    def _request_slice_editor(self):
+        self.slice_requested = True
+        self.reject()
 
     def get_settings(self):
         # returns a dict {"name": str or None, "bit_depth": int,

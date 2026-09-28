@@ -114,6 +114,7 @@ class SliceEditorWindow(QDialog):
         existing_names_provider,
         export_callback,
         demo_mode=False,
+        export_confirm_message=None,
     ):
         super().__init__(parent)
         self.setWindowTitle(f'Slice Editor - "{sample_name}"')
@@ -126,6 +127,15 @@ class SliceEditorWindow(QDialog):
         self._shlto = shlto
         self._existing_names_provider = existing_names_provider
         self._export_callback = export_callback
+        # (slice_count, names) -> str, shown in the Export confirmation
+        # dialog - defaults to the original "send to the sampler" wording
+        # (Program Editor's own use, unchanged), but the Transfer
+        # Dashboard's own reuse of this window (slicing a QUEUED local
+        # file, nothing sent to hardware yet, no freeze) needs genuinely
+        # different wording, not just a substituted noun
+        self._export_confirm_message = (
+            export_confirm_message or self._default_export_confirm_message
+        )
         self._exporting = False
         # whether any slice marker/start/end edit has happened since the
         # last successful export (or since opening, if never exported) -
@@ -309,6 +319,14 @@ class SliceEditorWindow(QDialog):
 
     # --- export --------------------------------------------------------------
 
+    @staticmethod
+    def _default_export_confirm_message(slice_count, names):
+        return (
+            f'Send {slice_count} slices to the sampler as new samples '
+            f'("{names[0]}".."{names[-1]}")? This can take a while and will '
+            "freeze the interface."
+        )
+
     def _confirm_export(self):
         markers = self.waveform.slice_markers()
         slice_count = len(markers) + 1
@@ -356,9 +374,7 @@ class SliceEditorWindow(QDialog):
         reply = QMessageBox.question(
             self,
             "Export Slices",
-            f'Send {slice_count} slices to the sampler as new samples '
-            f'("{names[0]}".."{names[-1]}")? This can take a while and will '
-            "freeze the interface.",
+            self._export_confirm_message(slice_count, names),
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
         )
         if reply != QMessageBox.StandardButton.Yes:
