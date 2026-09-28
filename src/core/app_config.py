@@ -94,7 +94,7 @@ def save_device_type(device_type):
 # shows (see ui/settings_dialog.py's _BUFFER_SIZE_OPTIONS), converted to
 # actual bytes at playback time via QAudioFormat.bytesForFrames() (see
 # core/audio_preview.py) since that depends on the format actually in use
-_DEFAULT_AUDIO_BUFFER_SAMPLES = 512
+_DEFAULT_AUDIO_BUFFER_SAMPLES = 1024
 
 
 def get_saved_audio_output_device():
