@@ -3135,6 +3135,8 @@ def test_open_slice_editor_passes_demo_mode_through(editor, qapp, monkeypatch):
     captured = {}
 
     class _FakeSliceEditorWindow:
+        export_succeeded = False
+
         def __init__(self, *args, **kwargs):
             captured["demo_mode"] = kwargs.get("demo_mode")
 
@@ -3158,6 +3160,89 @@ def test_open_slice_editor_passes_demo_mode_through(editor, qapp, monkeypatch):
     )
     editor._open_slice_editor()
     assert captured["demo_mode"] is True
+
+
+def test_closing_slice_editor_without_exporting_does_not_reload_the_sample_list(
+    editor, qapp, monkeypatch
+):
+    # regression test: this used to call submit_sample_list()
+    # unconditionally on every close, which wipes the whole
+    # _sample_waveform_cache (see _on_samples_loaded's own comment) even
+    # when nothing was exported - reported directly as "the waveform
+    # disappears after closing the Slice Editor". A plain look-then-close
+    # must leave the cache (and the worker queue) untouched.
+    class _FakeSliceEditorWindow:
+        export_succeeded = False
+
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def exec(self):
+            pass
+
+    monkeypatch.setattr(
+        "ui.program_editor_window.SliceEditorWindow", _FakeSliceEditorWindow
+    )
+    bridge = editor._bridge
+    fake_sampler = FakeSamplerController(bridge)
+    editor._main_window.sampler_controller = fake_sampler
+    _select_sample_with_full_audio(
+        editor, qapp, 0, list(range(100)),
+        {
+            "start": 0, "loop_start": 0, "loop_end": 0, "end": 99,
+            "stuno": 0, "shlto": 0,
+        },
+    )
+    editor._worker.wait_until_idle()
+    submit_calls = []
+    monkeypatch.setattr(
+        editor._worker,
+        "submit_sample_list",
+        lambda: submit_calls.append(True),
+    )
+
+    editor._open_slice_editor()
+
+    assert submit_calls == []
+    assert 0 in editor._sample_waveform_cache
+
+
+def test_closing_slice_editor_after_exporting_reloads_the_sample_list(
+    editor, qapp, monkeypatch
+):
+    class _FakeSliceEditorWindow:
+        export_succeeded = True
+
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def exec(self):
+            pass
+
+    monkeypatch.setattr(
+        "ui.program_editor_window.SliceEditorWindow", _FakeSliceEditorWindow
+    )
+    bridge = editor._bridge
+    fake_sampler = FakeSamplerController(bridge)
+    editor._main_window.sampler_controller = fake_sampler
+    _select_sample_with_full_audio(
+        editor, qapp, 0, list(range(100)),
+        {
+            "start": 0, "loop_start": 0, "loop_end": 0, "end": 99,
+            "stuno": 0, "shlto": 0,
+        },
+    )
+    editor._worker.wait_until_idle()
+    submit_calls = []
+    monkeypatch.setattr(
+        editor._worker,
+        "submit_sample_list",
+        lambda: submit_calls.append(True),
+    )
+
+    editor._open_slice_editor()
+
+    assert submit_calls == [True]
 
 
 def test_open_slice_editor_does_nothing_without_a_sampler_controller(editor, qapp):

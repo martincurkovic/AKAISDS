@@ -3173,9 +3173,17 @@ class ProgramEditorWindow(QMainWindow):
         )
         dialog.exec()
         # slice export can add several new resident samples - refresh so
-        # the Samples tab's own list/zone combos pick them up even if the
-        # user closed the dialog without exporting (a no-op reload then)
-        self._worker.submit_sample_list()
+        # the Samples tab's own list/zone combos pick them up. Only when
+        # something was ACTUALLY exported, though (dialog.export_succeeded) -
+        # this used to run unconditionally on every close, including a
+        # plain "look at the waveform, then close" with nothing exported,
+        # which made _on_samples_loaded wipe the whole _sample_waveform_
+        # cache (see its own comment) and forced a fresh, slow real SDS
+        # transfer just to see the waveform again - confirmed as the
+        # actual cause of "the waveform disappears after closing the Slice
+        # Editor," reported directly.
+        if dialog.export_succeeded:
+            self._worker.submit_sample_list()
 
     def _reload_sample_list_with_retries(self, attempts=3, retry_delay_seconds=0.3):
         # submit_sample_list() with a couple of retries on failure. Root

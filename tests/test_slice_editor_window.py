@@ -391,6 +391,39 @@ def test_failed_export_does_not_clear_the_dirty_flag(qapp, monkeypatch):
     assert window._dirty is True
 
 
+def test_export_succeeded_flag_starts_false_and_stays_false_on_failure(
+    qapp, monkeypatch
+):
+    # ProgramEditorWindow._open_slice_editor reads this after .exec() to
+    # decide whether a sample-list reload is even needed - see its own
+    # comment on why an unconditional reload was the actual cause of the
+    # waveform disappearing after closing this dialog
+    window = _build_window(export_result=(False, "it broke"))
+    assert window.export_succeeded is False
+    window.waveform.set_markers([2000])
+    monkeypatch.setattr(
+        sew.QMessageBox, "question", lambda *a, **k: sew.QMessageBox.StandardButton.Yes
+    )
+    monkeypatch.setattr(sew.QMessageBox, "warning", lambda *a, **k: None)
+
+    window._confirm_export()
+
+    assert window.export_succeeded is False
+
+
+def test_export_succeeded_flag_set_true_on_a_successful_export(qapp, monkeypatch):
+    window = _build_window(export_result=(True, "ok"))
+    window.waveform.set_markers([2000])
+    monkeypatch.setattr(
+        sew.QMessageBox, "question", lambda *a, **k: sew.QMessageBox.StandardButton.Yes
+    )
+    monkeypatch.setattr(sew.QMessageBox, "information", lambda *a, **k: None)
+
+    window._confirm_export()
+
+    assert window.export_succeeded is True
+
+
 # --- zoom row: terse +/- labels, Fit collapses the scrollbar ----------------
 
 

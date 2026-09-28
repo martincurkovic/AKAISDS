@@ -163,6 +163,14 @@ class SliceEditorWindow(QDialog):
         # AFTER set_waveform (right below) so its own initial
         # markers_changed emit doesn't mark a freshly-opened window dirty.
         self._dirty = False
+        # True once at least one export has actually succeeded this
+        # session - a public flag (not underscore-prefixed) callers can
+        # check after .exec() returns, so they only reload/refresh
+        # whatever list this sample lives in when something on the
+        # sampler could actually have changed, not on every close
+        # regardless of whether Export was ever even clicked. See
+        # ProgramEditorWindow._open_slice_editor's own use of this.
+        self.export_succeeded = False
 
         self._preview_player = SlicePreviewPlayer(self)
 
@@ -445,6 +453,7 @@ class SliceEditorWindow(QDialog):
         self.status_label.setText(message)
         if success:
             self._dirty = False  # this exact marker layout is now on the sampler
+            self.export_succeeded = True
             QMessageBox.information(self, "Export Slices", message)
         else:
             QMessageBox.warning(self, "Export Slices", message)
