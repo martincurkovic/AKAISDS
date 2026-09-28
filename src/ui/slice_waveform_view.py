@@ -2,6 +2,7 @@ from PySide6.QtWidgets import QApplication, QMenu, QSizePolicy, QWidget
 from PySide6.QtGui import QCursor, QPainter, QPen, QColor, QPolygonF
 from PySide6.QtCore import Qt, QEvent, QPointF, QRectF, QTimer, Signal
 
+from core import debug_log
 from core.sample_slicing import find_nearest_zero_crossing
 from core.sample_slicing import slice_bounds as _slice_bounds_fn
 from ui import theme
@@ -472,50 +473,73 @@ class SliceWaveformView(QWidget):
         return best
 
     def mouseDoubleClickEvent(self, event):
-        self._cancel_pending_preview()
-        if self._frame_count == 0:
-            return
-        x = event.position().x()
-        target = self._nearest_hit_target(x)
-        if target is not None:
-            kind, key = target
-            # double-clicking a slice marker deletes it - a quicker
-            # alternative to the right-click context menu
-            # (_show_marker_context_menu), not a replacement for it.
-            # start/end aren't markers and can't be deleted this way (or
-            # any way - they're the region's own edges, not a slice
-            # boundary), so double-clicking one does nothing, same as
-            # before this existed.
-            if kind == "marker":
-                self.remove_marker(key)
-            return
-        frame = self._frame_for(x)
-        if self._start < frame < self._end:
-            self.add_marker(frame)
-        # no super() call - unlike WaveformView (which forwards for a
-        # placeholder-state load_requested to still propagate normally),
-        # there's nothing else here that depends on QWidget's own default
-        # double-click handling
+        # this whole widget is new/unshipped and does materially more
+        # per-pixel hit-testing/index math than WaveformView's own longer-
+        # proven equivalent - wrapped the same way AGENTS.md describes that
+        # one being fixed after a real, hard-to-repro user bug (see its
+        # "Diagnosing a load that silently does nothing" section): an
+        # uncaught exception from a Qt mouse handler is otherwise invisible
+        # in a packaged build with no console, not just here but for every
+        # mouse handler below
+        try:
+            self._cancel_pending_preview()
+            if self._frame_count == 0:
+                return
+            x = event.position().x()
+            target = self._nearest_hit_target(x)
+            if target is not None:
+                kind, key = target
+                # double-clicking a slice marker deletes it - a quicker
+                # alternative to the right-click context menu
+                # (_show_marker_context_menu), not a replacement for it.
+                # start/end aren't markers and can't be deleted this way (or
+                # any way - they're the region's own edges, not a slice
+                # boundary), so double-clicking one does nothing, same as
+                # before this existed.
+                if kind == "marker":
+                    self.remove_marker(key)
+                return
+            frame = self._frame_for(x)
+            if self._start < frame < self._end:
+                self.add_marker(frame)
+            # no super() call - unlike WaveformView (which forwards for a
+            # placeholder-state load_requested to still propagate normally),
+            # there's nothing else here that depends on QWidget's own
+            # default double-click handling
+        except Exception:
+            debug_log.get_logger().error(
+                "SliceWaveformView.mouseDoubleClickEvent: unexpected error",
+                exc_info=True,
+            )
 
     def mousePressEvent(self, event):
-        if self._frame_count == 0:
-            return
-        x = event.position().x()
-        target = self._nearest_hit_target(x)
-        if target is None:
-            if event.button() == Qt.MouseButton.LeftButton:
-                self._schedule_preview_click(self._frame_for(x))
-            return
-        kind, key = target
-        if event.button() == Qt.MouseButton.RightButton:
-            if kind == "marker":
-                self._show_marker_context_menu(key, event.globalPosition().toPoint())
-            return
-        self._cancel_pending_preview()
-        self._dragging = target
-        self._drag_anchor_x = x
-        self._drag_value = float(self._start if kind == "start" else
-                                  self._end if kind == "end" else key)
+        try:
+            if self._frame_count == 0:
+                return
+            x = event.position().x()
+            target = self._nearest_hit_target(x)
+            if target is None:
+                if event.button() == Qt.MouseButton.LeftButton:
+                    self._schedule_preview_click(self._frame_for(x))
+                return
+            kind, key = target
+            if event.button() == Qt.MouseButton.RightButton:
+                if kind == "marker":
+                    self._show_marker_context_menu(
+                        key, event.globalPosition().toPoint()
+                    )
+                return
+            self._cancel_pending_preview()
+            self._dragging = target
+            self._drag_anchor_x = x
+            self._drag_value = float(self._start if kind == "start" else
+                                      self._end if kind == "end" else key)
+        except Exception:
+            debug_log.get_logger().error(
+                "SliceWaveformView.mousePressEvent: unexpected error",
+                exc_info=True,
+            )
+            self._dragging = None
 
     # --- click-to-preview --------------------------------------------------
 
@@ -577,49 +601,63 @@ class SliceWaveformView(QWidget):
     def mouseMoveEvent(self, event):
         if self._dragging is None:
             return
-        fine = bool(event.modifiers() & Qt.KeyboardModifier.ShiftModifier)
-        if fine and not self._fine_active:
-            self._enter_fine_drag()
-        elif not fine and self._fine_active:
-            self._exit_fine_drag()
+        try:
+            fine = bool(event.modifiers() & Qt.KeyboardModifier.ShiftModifier)
+            if fine and not self._fine_active:
+                self._enter_fine_drag()
+            elif not fine and self._fine_active:
+                self._exit_fine_drag()
 
-        if self._fine_active:
-            current = event.globalPosition()
-            anchor = self._warp_anchor_global
-            if (round(current.x()), round(current.y())) == (
-                round(anchor.x()),
-                round(anchor.y()),
-            ):
-                return
-            dx = (current.x() - anchor.x()) / _FINE_DRAG_DIVISOR
-            QCursor.setPos(anchor)
-        else:
-            x = event.position().x()
-            dx = x - self._drag_anchor_x
-            self._drag_anchor_x = x
+            if self._fine_active:
+                current = event.globalPosition()
+                anchor = self._warp_anchor_global
+                if (round(current.x()), round(current.y())) == (
+                    round(anchor.x()),
+                    round(anchor.y()),
+                ):
+                    return
+                dx = (current.x() - anchor.x()) / _FINE_DRAG_DIVISOR
+                QCursor.setPos(anchor)
+            else:
+                x = event.position().x()
+                dx = x - self._drag_anchor_x
+                self._drag_anchor_x = x
 
-        view_length = self._view_length()
-        frames_per_px = (view_length - 1) / max(1, self.width() - 1)
-        self._drag_value += dx * frames_per_px
-        frame = int(round(self._drag_value))
+            view_length = self._view_length()
+            frames_per_px = (view_length - 1) / max(1, self.width() - 1)
+            self._drag_value += dx * frames_per_px
+            frame = int(round(self._drag_value))
 
-        lower, upper = self._drag_bounds()
-        clamped = max(lower, min(upper, frame))
-        if clamped != frame:
-            self._drag_value = clamped  # resync accumulator only at the true bound
+            lower, upper = self._drag_bounds()
+            clamped = max(lower, min(upper, frame))
+            if clamped != frame:
+                self._drag_value = clamped  # resync accumulator only at the true bound
 
-        kind, key = self._dragging
-        if kind == "start":
-            self._start = clamped
-        elif kind == "end":
-            self._end = clamped
-        else:
-            idx = self._markers.index(key)
-            self._markers[idx] = clamped
-            self._dragging = ("marker", clamped)  # key tracks the live position
+            kind, key = self._dragging
+            if kind == "start":
+                self._start = clamped
+            elif kind == "end":
+                self._end = clamped
+            else:
+                idx = self._markers.index(key)
+                self._markers[idx] = clamped
+                self._dragging = ("marker", clamped)  # key tracks the live position
 
-        self.update()
-        self._emit_markers_changed()
+            self.update()
+            self._emit_markers_changed()
+        except Exception:
+            # a stuck self._dragging would otherwise keep swallowing every
+            # further mouse-move on this widget with no visible cause -
+            # logging AND clearing it here means at worst a drag ends
+            # early, not a widget that silently stops responding to the
+            # mouse for the rest of the session
+            debug_log.get_logger().error(
+                "SliceWaveformView.mouseMoveEvent: unexpected error",
+                exc_info=True,
+            )
+            if self._fine_active:
+                self._exit_fine_drag()
+            self._dragging = None
 
     def _enter_fine_drag(self):
         self._fine_active = True
@@ -638,37 +676,47 @@ class SliceWaveformView(QWidget):
             self._exit_fine_drag()
         kind, key = self._dragging
         self._dragging = None
-        # snap to the nearest zero crossing only on release (not live during
-        # the drag) - continuous snapping would make the marker visibly
-        # jump around mid-drag instead of tracking the cursor smoothly, the
-        # same "redraw live, commit on release" split WaveformView's own
-        # marker_committed already uses for its hardware writes
-        if kind == "start":
-            snapped = find_nearest_zero_crossing(
-                self._samples, self._start, _ZERO_CROSSING_SEARCH_RADIUS
+        try:
+            # snap to the nearest zero crossing only on release (not live
+            # during the drag) - continuous snapping would make the marker
+            # visibly jump around mid-drag instead of tracking the cursor
+            # smoothly, the same "redraw live, commit on release" split
+            # WaveformView's own marker_committed already uses for its
+            # hardware writes
+            if kind == "start":
+                snapped = find_nearest_zero_crossing(
+                    self._samples, self._start, _ZERO_CROSSING_SEARCH_RADIUS
+                )
+                upper = (min(self._markers) if self._markers else self._end) - 1
+                self._start = max(0, min(max(0, upper), snapped))
+            elif kind == "end":
+                snapped = find_nearest_zero_crossing(
+                    self._samples, self._end, _ZERO_CROSSING_SEARCH_RADIUS
+                )
+                lower = (max(self._markers) if self._markers else self._start) + 1
+                self._end = min(self._frame_count - 1, max(lower, snapped))
+            else:
+                idx = self._markers.index(key)
+                lower = (self._markers[idx - 1] if idx > 0 else self._start) + 1
+                upper = (
+                    self._markers[idx + 1]
+                    if idx < len(self._markers) - 1
+                    else self._end
+                ) - 1
+                snapped = find_nearest_zero_crossing(
+                    self._samples, key, _ZERO_CROSSING_SEARCH_RADIUS
+                )
+                self._markers[idx] = max(lower, min(upper, snapped))
+            self.update()
+            self._emit_markers_changed()
+        except Exception:
+            # self._dragging is already cleared above regardless of this -
+            # logged so a snap-on-release failure (e.g. a marker removed
+            # out from under a drag) doesn't just vanish
+            debug_log.get_logger().error(
+                "SliceWaveformView.mouseReleaseEvent: unexpected error",
+                exc_info=True,
             )
-            upper = (min(self._markers) if self._markers else self._end) - 1
-            self._start = max(0, min(max(0, upper), snapped))
-        elif kind == "end":
-            snapped = find_nearest_zero_crossing(
-                self._samples, self._end, _ZERO_CROSSING_SEARCH_RADIUS
-            )
-            lower = (max(self._markers) if self._markers else self._start) + 1
-            self._end = min(self._frame_count - 1, max(lower, snapped))
-        else:
-            idx = self._markers.index(key)
-            lower = (self._markers[idx - 1] if idx > 0 else self._start) + 1
-            upper = (
-                self._markers[idx + 1]
-                if idx < len(self._markers) - 1
-                else self._end
-            ) - 1
-            snapped = find_nearest_zero_crossing(
-                self._samples, key, _ZERO_CROSSING_SEARCH_RADIUS
-            )
-            self._markers[idx] = max(lower, min(upper, snapped))
-        self.update()
-        self._emit_markers_changed()
 
     def hideEvent(self, event):
         if self._fine_active:

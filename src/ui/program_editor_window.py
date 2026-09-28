@@ -3083,6 +3083,24 @@ class ProgramEditorWindow(QMainWindow):
                 final_samples = args[0]
                 if new_name in final_samples:
                     self.sample_list_widget.setCurrentRow(final_samples.index(new_name))
+        except Exception:
+            # this whole function was, until now, only ever guarded against
+            # the specific failures it already anticipates (a refused send,
+            # a missing name after reload, etc - each already handled and
+            # logged above) - anything else (e.g. a bug in write_wav_file,
+            # an unexpected sampler_controller exception) would otherwise
+            # propagate straight out of this Qt slot uncaught. There's no
+            # global exception hook anywhere in this app, so in a packaged
+            # build that's silent - exactly the failure class
+            # BridgeWorker._safe_dispatch exists to prevent for the worker
+            # thread (see AGENTS.md), just never extended to this call path.
+            logger.error(
+                "_perform_duplicate_sample_real: unexpected error", exc_info=True
+            )
+            self.status_bar.showMessage(
+                f'Duplicate failed - unexpected error, see {debug_log.LOG_PATH} '
+                "for details"
+            )
         finally:
             try:
                 os.remove(temp_path)
@@ -3312,6 +3330,18 @@ class ProgramEditorWindow(QMainWindow):
                     "directly."
                 )
             return True, f"Export complete: {len(names)} slices sent as {names[0]}..{names[-1]}"
+        except Exception:
+            # same reasoning as _perform_duplicate_sample_real/
+            # _perform_sample_edit_real's own matching except clauses -
+            # every anticipated failure above is already handled and
+            # logged; this is the backstop for anything else (a bug in
+            # write_wav_file, an unexpected sampler_controller exception)
+            # that would otherwise propagate out of this Qt slot uncaught
+            logger.error("_export_slices: unexpected error", exc_info=True)
+            return False, (
+                f"Export failed - unexpected error, see {debug_log.LOG_PATH} "
+                "for details"
+            )
         finally:
             for path in temp_paths:
                 try:
@@ -6023,13 +6053,28 @@ class ProgramEditorWindow(QMainWindow):
         # (permanently moving) the actual stored loop points the way
         # turning the loop back on does.
         markers = self.waveform_view.markers_with_loop_in_range()
-        new_samples, new_start, new_loop_start, new_loop_end, new_end = transform(
-            entry["samples"],
-            markers["start"],
-            markers["loop_start"],
-            markers["loop_end"],
-            markers["end"],
-        )
+        try:
+            new_samples, new_start, new_loop_start, new_loop_end, new_end = transform(
+                entry["samples"],
+                markers["start"],
+                markers["loop_start"],
+                markers["loop_end"],
+                markers["end"],
+            )
+        except Exception:
+            # the pure transform (core/sample_editing.py) runs before
+            # anything hardware-facing even starts - nothing else here
+            # catches a failure this early, so without this it would
+            # propagate out of this Qt slot silently in a packaged build
+            debug_log.get_logger().error(
+                f"_perform_sample_edit: {transform.__name__} raised",
+                exc_info=True,
+            )
+            self.status_bar.showMessage(
+                f"{action_label} failed - unexpected error, see "
+                f"{debug_log.LOG_PATH} for details"
+            )
+            return
         framerate = entry["framerate"]
 
         demo_mode = bool(os.environ.get("AKAISDS_DEMO_SAMPLER"))
@@ -6308,6 +6353,20 @@ class ProgramEditorWindow(QMainWindow):
                     self.sample_list_widget.setCurrentRow(
                         final_samples.index(original_name)
                     )
+        except Exception:
+            # same reasoning as _perform_duplicate_sample_real's own
+            # matching except clause - this function already handles every
+            # anticipated failure above (a refused send, a missing name
+            # after reload, a failed delete); anything else would otherwise
+            # propagate out of this Qt slot uncaught and invisible in a
+            # packaged build with no console/exception hook
+            logger.error(
+                "_perform_sample_edit_real: unexpected error", exc_info=True
+            )
+            self.status_bar.showMessage(
+                f"{action_label} failed - unexpected error, see "
+                f"{debug_log.LOG_PATH} for details"
+            )
         finally:
             try:
                 os.remove(temp_path)

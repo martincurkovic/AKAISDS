@@ -374,6 +374,16 @@ class MidiSettingsDialog(QDialog):
                 midi_id_input.close()
                 midi_id_output.close()
         except Exception as e:
+            # same gap _apply_and_close's own comment above describes -
+            # this is literally the built-in "diagnose my MIDI connection"
+            # tool, so a failure IN the tool itself needs to be as visible
+            # in the log as everything else, not just a dialog the user has
+            # to transcribe by hand
+            debug_log.get_logger().error(
+                "MidiSettingsDialog: identity request failed "
+                f"(input={input_name!r}, output={output_name!r})",
+                exc_info=True,
+            )
             self.id_progress.setVisible(False)
             QMessageBox.critical(
                 self, "Identity Request", f"Couldn't run the test: {e}"
@@ -477,6 +487,14 @@ class MidiSettingsDialog(QDialog):
                 test_input.close()
                 test_output.close()
         except Exception as e:
+            # same reasoning as _run_identity_request's own matching log
+            # call - this is one of the two built-in hardware diagnostic
+            # tools, so its own failures need to reach the log too
+            debug_log.get_logger().error(
+                "MidiSettingsDialog: loopback test failed "
+                f"(input={input_name!r}, output={output_name!r})",
+                exc_info=True,
+            )
             self.loopback_progress.setVisible(False)
             QMessageBox.critical(self, "Loopback Test", f"Couldn't run the test: {e}")
             results = None

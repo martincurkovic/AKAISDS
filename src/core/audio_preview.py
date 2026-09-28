@@ -166,18 +166,36 @@ class SlicePreviewPlayer(QObject):
             # primed with an empty yield first - see miniaudio's own
             # stream_raw_pcm_memory, this is its documented generator
             # protocol, not specific to this app
-            required_frames = yield b""
-            pos = 0
-            while pos < len(pcm_bytes):
-                end = pos + required_frames * _BYTES_PER_FRAME
-                out = pcm_bytes[pos:end]
-                pos += len(out)
-                self._frames_sent = pos // _BYTES_PER_FRAME
-                required_frames = yield out
-            # exhausted: from here the device just keeps calling back for
-            # more (StopIteration) and gets silence, harmless - self._on_tick
-            # is what actually notices self._frames_sent caught up to
-            # self._total_frames and stops the device for real
+            try:
+                required_frames = yield b""
+                pos = 0
+                while pos < len(pcm_bytes):
+                    end = pos + required_frames * _BYTES_PER_FRAME
+                    out = pcm_bytes[pos:end]
+                    pos += len(out)
+                    self._frames_sent = pos // _BYTES_PER_FRAME
+                    required_frames = yield out
+                # exhausted: from here the device just keeps calling back
+                # for more (StopIteration) and gets silence, harmless -
+                # self._on_tick is what actually notices self._frames_sent
+                # caught up to self._total_frames and stops the device for
+                # real
+            except Exception:
+                # this runs on miniaudio's own native real-time audio
+                # thread, invoked through a cffi callback - an uncaught
+                # exception here doesn't reach this app's normal call
+                # stack at all (miniaudio.PlaybackDevice._data_callback
+                # re-raises it straight into the cffi boundary), so
+                # without this it's either silently swallowed by cffi's
+                # own default callback error handling or, worst case,
+                # takes the process down - either way invisible in a
+                # packaged build with no console. Logging and returning
+                # (ending the generator, same as the exhausted case above)
+                # just stops this preview cleanly instead.
+                debug_log.get_logger().error(
+                    "SlicePreviewPlayer: playback generator raised",
+                    exc_info=True,
+                )
 
         gen = generator()
         next(gen)  # prime it per the protocol above

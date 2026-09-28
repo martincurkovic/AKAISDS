@@ -91,7 +91,19 @@ class LoggingBridge:
                         # FAILED logging as everything else on this
                         # connection rather than being invisible to
                         # ~/.akaisds/akaisds.log
-                        "get_header_bytes", "send_and_receive")
+                        "get_header_bytes", "send_and_receive",
+                        # delete_program/delete_keygroup/delete_sample were
+                        # missing from this list entirely - a failed delete
+                        # produced no trace at all in ~/.akaisds/akaisds.log,
+                        # only a transient str(e) shown in the UI. These are
+                        # some of the most likely destructive actions a
+                        # remote user hits and reports as "it didn't work".
+                        # (renumber_programs is deliberately NOT wrapped the
+                        # same way - see _handle_program_change's own
+                        # getattr(..., None) check below, which needs to
+                        # keep telling a demo bridge without this method
+                        # apart from a real one that has it and failed.)
+                        "delete_program", "delete_keygroup", "delete_sample")
 
     def __init__(self, bridge, logger=None):
         self._bridge = bridge
@@ -734,7 +746,28 @@ class BridgeWorker(QThread):
                 # its own distinct number before the first change is sent
                 renumber = getattr(self._bridge, "renumber_programs", None)
                 if renumber is not None:
-                    renumber()
+                    # not one of LoggingBridge's wrapped methods (its
+                    # existence has to stay tellable-apart from a demo
+                    # bridge that simply lacks it - see the comment on
+                    # LoggingBridge._WRAPPED_METHODS), so it gets its own
+                    # explicit START/FAILED logging here instead. A failed
+                    # renumber silently breaks every Program Change sent
+                    # afterward (every program can go back to colliding on
+                    # PRGNUM==0 - see this method's own docstring above),
+                    # so this needs to be visible on its own, not just
+                    # inferred from the Program Change itself failing.
+                    thread_name = threading.current_thread().name
+                    logger = debug_log.get_logger()
+                    logger.debug(f"[{thread_name}] START renumber_programs()")
+                    try:
+                        renumber()
+                    except Exception:
+                        logger.error(
+                            f"[{thread_name}] FAILED renumber_programs()",
+                            exc_info=True,
+                        )
+                        raise
+                    logger.debug(f"[{thread_name}] END renumber_programs()")
                 self._programs_renumbered = True
             # get_parameter applies PRGNUM's display_offset (the panel's
             # 1-based numbering, since s3ked's params table declared it -
