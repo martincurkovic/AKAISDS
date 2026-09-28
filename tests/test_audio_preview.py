@@ -150,13 +150,63 @@ def test_play_retriggers_instead_of_overlapping(qapp):
 
 
 @_requires_audio_device
-def test_play_advances_frames_sent_over_time(qapp):
+def test_play_advances_current_frame_over_time(qapp):
     # the generator's own progress counter is what _on_tick polls for the
     # playhead/end-of-playback - confirm it actually advances during real
-    # playback rather than staying pinned at 0
+    # playback rather than staying pinned at the start
     player = audio_preview.SlicePreviewPlayer()
     samples = [1000 if i % 2 == 0 else -1000 for i in range(44100)]
     player.play(samples, 0, len(samples) - 1, 44100)
     time.sleep(0.2)
-    assert player._frames_sent > 0
+    assert player._current_frame > 0
     player.stop()
+
+
+# --- SlicePreviewPlayer.play_loop(): simulated loop preview ----------------
+# _finished is set by the generator itself, on miniaudio's own real-time
+# thread, independent of the Qt _timer - so it can be polled directly after
+# a plain time.sleep() without needing a running Qt event loop, same as
+# _current_frame above.
+
+
+def _tone(n_frames, value=1000):
+    return [value if i % 2 == 0 else -value for i in range(n_frames)]
+
+
+@_requires_audio_device
+def test_play_loop_with_degenerate_region_falls_back_to_plain_play(qapp):
+    # loop_end <= loop_start - nothing to repeat
+    player = audio_preview.SlicePreviewPlayer()
+    samples = _tone(4410)
+    player.play_loop(samples, 0, 2000, 2000, len(samples) - 1, 44100, dwell_ms=50)
+    assert player._device is not None
+    player.stop()
+
+
+@_requires_audio_device
+def test_play_loop_with_a_finite_dwell_eventually_finishes_on_its_own(qapp):
+    player = audio_preview.SlicePreviewPlayer()
+    samples = _tone(4410)
+    player.play_loop(
+        samples, 0, 1000, 2000, len(samples) - 1, 44100, dwell_ms=10
+    )
+    assert player._device is not None
+    assert player._finished is False
+    time.sleep(0.5)
+    assert player._finished is True
+    player.stop()
+
+
+@_requires_audio_device
+def test_play_loop_hold_does_not_finish_on_its_own(qapp):
+    # dwell_ms=None ("Hold") - several loop passes' worth of real time
+    # should NOT be enough to naturally end it; only an explicit stop()
+    # (e.g. the user clicking the waveform again) does
+    player = audio_preview.SlicePreviewPlayer()
+    samples = _tone(4410)
+    player.play_loop(samples, 0, 1000, 2000, len(samples) - 1, 44100, dwell_ms=None)
+    time.sleep(0.3)
+    assert player._finished is False
+    assert player._device is not None
+    player.stop()
+    assert player._device is None

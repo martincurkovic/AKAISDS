@@ -380,6 +380,9 @@ class _FakePressEvent:
     def position(self):
         return _FakeXPos(self._x)
 
+    def button(self):
+        return Qt.MouseButton.LeftButton
+
 
 class _FakeMoveEvent(_FakePressEvent):
     # mouseMoveEvent also reads .modifiers() (for Shift-held fine dragging)
@@ -997,3 +1000,99 @@ def test_progressive_fill_scales_to_any_sample_length(qapp, frame_count, chunk_s
     assert all(w <= view.width() for w in widths)
     assert all(a <= b for a, b in zip(widths, widths[1:]))  # monotonically grows
     assert widths[-1] == view.width()
+
+
+# --- click-to-preview (WaveformView.preview_requested) ----------------------
+# same single-vs-double-click disambiguation SliceWaveformView's own
+# _schedule_preview_click uses - a click on empty waveform space starts a
+# deferred timer rather than firing immediately, cancelled by a genuine
+# double-click. _preview_timer.timeout.emit() is called directly rather than
+# waiting out the real interval, same reasoning
+# tests/test_slice_waveform_view.py's own click-to-preview tests give for
+# calling _fire_preview() directly.
+
+
+def _preview_ready_waveform_view(frame_count=10000):
+    view = WaveformView()
+    view.resize(400, 180)
+    view.set_waveform([0] * frame_count, 0, 2500, 7500, frame_count - 1)
+    return view
+
+
+def test_click_on_empty_space_without_a_waveform_does_not_schedule_a_preview(qapp):
+    # header-only (set_header, not set_waveform) - has_waveform() is False,
+    # nothing real to play
+    view = _stacked_waveform_view()
+    view.mousePressEvent(_FakePressEvent(view._x_for("start") + 200))
+    assert view._preview_timer.isActive() is False
+
+
+def test_click_on_empty_space_with_a_waveform_schedules_a_preview(qapp):
+    view = _preview_ready_waveform_view()
+    view.mousePressEvent(_FakePressEvent(200))  # nowhere near a marker
+    assert view._preview_timer.isActive() is True
+
+
+def test_clicking_a_marker_does_not_schedule_a_preview(qapp):
+    view = _preview_ready_waveform_view()
+    view.mousePressEvent(_FakePressEvent(view._x_for("start")))
+    assert view._preview_timer.isActive() is False
+
+
+def test_preview_timer_firing_emits_preview_requested(qapp):
+    view = _preview_ready_waveform_view()
+    received = []
+    view.preview_requested.connect(lambda: received.append(True))
+    view.mousePressEvent(_FakePressEvent(200))
+    view._preview_timer.timeout.emit()
+    assert received == [True]
+
+
+def test_double_click_cancels_a_pending_preview(qapp):
+    # a real QMouseEvent, not _FakePressEvent - unlike SliceWaveformView's
+    # own mouseDoubleClickEvent, WaveformView's still calls
+    # super().mouseDoubleClickEvent(event) at the end (see its own
+    # comment), which requires an actual QMouseEvent
+    from PySide6.QtCore import QEvent, QPointF
+    from PySide6.QtGui import QMouseEvent
+
+    view = _preview_ready_waveform_view()
+    view.mousePressEvent(_FakePressEvent(200))
+    assert view._preview_timer.isActive() is True
+
+    point = QPointF(200, 10)
+    event = QMouseEvent(
+        QEvent.Type.MouseButtonDblClick,
+        point,
+        point,
+        Qt.MouseButton.LeftButton,
+        Qt.MouseButton.LeftButton,
+        Qt.KeyboardModifier.NoModifier,
+    )
+    view.mouseDoubleClickEvent(event)
+    assert view._preview_timer.isActive() is False
+
+
+def test_empty_space_click_still_resets_the_marker_click_cycle(qapp):
+    # regression guard: click-to-preview's early return must not skip the
+    # existing overlapping-marker click-cycle reset (see
+    # test_pressing_elsewhere_then_back_on_the_stack_restarts_the_cycle,
+    # which already covers the full user-facing behaviour this pins down
+    # at the state level instead)
+    view = _stacked_waveform_view()
+    view._press_cycle_candidates = ["start", "loop_start", "loop_end", "end"]
+    view._press_cycle_index = 2
+    view.mousePressEvent(_FakePressEvent(view._x_for("start") + 200))
+    assert view._press_cycle_candidates == []
+    assert view._press_cycle_index == 0
+
+
+# --- playhead (click-to-preview visual feedback) ----------------------------
+
+
+def test_set_playhead_and_clear_playhead(qapp):
+    view = _preview_ready_waveform_view()
+    view.set_playhead(1234)
+    assert view._playhead_frame == 1234
+    view.clear_playhead()
+    assert view._playhead_frame is None

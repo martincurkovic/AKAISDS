@@ -81,30 +81,31 @@ def resolve_output_device():
 
 
 class SlicePreviewPlayer(QObject):
-    """Plays one mono 16-bit PCM slice at a time out the user's chosen audio
+    """Plays one mono 16-bit PCM region at a time out the user's chosen audio
     output device (Settings > Audio Preview), via a miniaudio.PlaybackDevice.
-    Owns exactly one device at a time - a new play() call always stops
-    whatever's already playing first (retrigger, not queue/overlap) -
+    Owns exactly one device at a time - a new play()/play_loop() call always
+    stops whatever's already playing first (retrigger, not queue/overlap) -
     matches how a user actually clicks through slices while chopping a
     break, quickly and repeatedly.
 
     miniaudio pulls audio through a plain Python generator, invoked from
     its own native, high-priority real-time audio thread (not the Qt/GUI
-    thread) every time it needs more frames - so the generator closure
-    below must not do anything slow or blocking. It tracks its own
-    progress (self._frames_sent) as a plain int; the GUI-thread poll timer
-    below only ever READS that int, never writes it, so there's nothing to
-    lock (Python attribute assignment/read is already atomic enough for a
-    polled progress counter like this - a torn read would at worst show a
+    thread) every time it needs more frames - so a generator closure below
+    must not do anything slow or blocking. It tracks its own progress
+    (self._current_frame, self._finished) as plain attributes; the
+    GUI-thread poll timer below only ever READS them, never writes them, so
+    there's nothing to lock (Python attribute assignment/read is already
+    atomic enough for polling like this - a torn read would at worst show a
     playhead one tick stale, not a crash).
 
-    Also drives the Slice Editor's playhead: while a slice is sounding,
+    Also drives a waveform's playhead: while something is sounding,
     position_changed(frame) fires roughly every _PLAYHEAD_TICK_MS with the
     current absolute frame position (same indexing as the source *samples*
-    passed to play()), and finished() fires once when playback stops for
-    any reason (ran off the end of the slice, or a caller/retrigger cut it
-    off) - SliceEditorWindow wires both straight into SliceWaveformView's
-    own set_playhead()/clear_playhead().
+    passed in), and finished() fires once when playback stops for any
+    reason (ran off the end, or a caller/retrigger/click-to-stop cut it
+    off) - callers wire both straight into a waveform view's own
+    set_playhead()/clear_playhead() (SliceWaveformView for play(),
+    WaveformView for play_loop() - see program_editor_window.py).
     """
 
     position_changed = Signal(int)
@@ -113,13 +114,72 @@ class SlicePreviewPlayer(QObject):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._device = None
-        self._play_start_frame = 0
-        self._play_end_frame = 0
-        self._total_frames = 0
-        self._frames_sent = 0
+        self._current_frame = 0
+        # set True by a generator right before it ends, for any reason
+        # (ran off the end, or an internal error - see each generator's own
+        # try/finally) - _on_tick is what actually notices and stops the
+        # device. Stays False indefinitely for play_loop()'s own "Hold"
+        # case (dwell_ms=None) - that generator never reaches its own end
+        # on its own, only via an external stop() call (e.g. the user
+        # clicking the waveform again to stop it - see WaveformView's own
+        # preview_requested).
+        self._finished = False
         self._timer = QTimer(self)
         self._timer.setInterval(_PLAYHEAD_TICK_MS)
         self._timer.timeout.connect(self._on_tick)
+
+    def is_playing(self):
+        return self._device is not None
+
+    def _open_device(self, framerate):
+        # shared by play()/play_loop() - resolves the configured output
+        # device/buffer size the same way for both; returns None (having
+        # already logged) on failure, never raises
+        device_entry = resolve_output_device()
+        device_id = device_entry["id"] if device_entry is not None else None
+
+        # app_config stores this as a frame count (see its own comment,
+        # matching an Ableton-style buffer-size dropdown), but miniaudio
+        # wants milliseconds - converted against THIS sound's own rate,
+        # same reasoning core/audio_preview.py always used framerate (not a
+        # fixed 44100) for anything time-based here.
+        buffer_frames = app_config.get_saved_audio_buffer_samples()
+        buffersize_msec = max(1, round(buffer_frames / framerate * 1000))
+
+        try:
+            return miniaudio.PlaybackDevice(
+                output_format=_SAMPLE_FORMAT,
+                nchannels=1,
+                sample_rate=framerate,
+                buffersize_msec=buffersize_msec,
+                device_id=device_id,
+            )
+        except miniaudio.MiniaudioError:
+            debug_log.get_logger().error(
+                "SlicePreviewPlayer: couldn't open output device", exc_info=True
+            )
+            return None
+
+    def _start(self, device, generator_fn, start_frame):
+        # primed with an empty yield first - see miniaudio's own
+        # stream_raw_pcm_memory, this is its documented generator protocol,
+        # not specific to this app
+        gen = generator_fn()
+        next(gen)
+
+        try:
+            device.start(gen)
+        except Exception:
+            debug_log.get_logger().error(
+                "SlicePreviewPlayer: couldn't start playback", exc_info=True
+            )
+            device.close()
+            return
+
+        self._device = device
+        self._current_frame = start_frame
+        self._finished = False
+        self._timer.start()
 
     def play(self, samples, start_frame, end_frame, framerate):
         """samples: the full mono int16 sample list/array already loaded for
@@ -135,37 +195,11 @@ class SlicePreviewPlayer(QObject):
             return
         pcm_bytes = struct.pack("<" + "h" * len(chunk), *chunk)
 
-        device_entry = resolve_output_device()
-        device_id = device_entry["id"] if device_entry is not None else None
-
-        # app_config stores this as a frame count (see its own comment,
-        # matching an Ableton-style buffer-size dropdown), but miniaudio
-        # wants milliseconds - converted against THIS slice's own rate,
-        # same reasoning core/audio_preview.py always used framerate (not a
-        # fixed 44100) for anything time-based here.
-        buffer_frames = app_config.get_saved_audio_buffer_samples()
-        buffersize_msec = max(1, round(buffer_frames / framerate * 1000))
-
-        try:
-            device = miniaudio.PlaybackDevice(
-                output_format=_SAMPLE_FORMAT,
-                nchannels=1,
-                sample_rate=framerate,
-                buffersize_msec=buffersize_msec,
-                device_id=device_id,
-            )
-        except miniaudio.MiniaudioError:
-            debug_log.get_logger().error(
-                "SlicePreviewPlayer: couldn't open output device", exc_info=True
-            )
+        device = self._open_device(framerate)
+        if device is None:
             return
 
-        self._frames_sent = 0
-
         def generator():
-            # primed with an empty yield first - see miniaudio's own
-            # stream_raw_pcm_memory, this is its documented generator
-            # protocol, not specific to this app
             try:
                 required_frames = yield b""
                 pos = 0
@@ -173,13 +207,12 @@ class SlicePreviewPlayer(QObject):
                     end = pos + required_frames * _BYTES_PER_FRAME
                     out = pcm_bytes[pos:end]
                     pos += len(out)
-                    self._frames_sent = pos // _BYTES_PER_FRAME
+                    self._current_frame = start_frame + pos // _BYTES_PER_FRAME
                     required_frames = yield out
                 # exhausted: from here the device just keeps calling back
                 # for more (StopIteration) and gets silence, harmless -
-                # self._on_tick is what actually notices self._frames_sent
-                # caught up to self._total_frames and stops the device for
-                # real
+                # the finally below is what actually gets _on_tick to stop
+                # the device for real
             except Exception:
                 # this runs on miniaudio's own native real-time audio
                 # thread, invoked through a cffi callback - an uncaught
@@ -189,31 +222,113 @@ class SlicePreviewPlayer(QObject):
                 # without this it's either silently swallowed by cffi's
                 # own default callback error handling or, worst case,
                 # takes the process down - either way invisible in a
-                # packaged build with no console. Logging and returning
-                # (ending the generator, same as the exhausted case above)
-                # just stops this preview cleanly instead.
+                # packaged build with no console. Logging (and letting the
+                # finally below end the preview cleanly) avoids that.
                 debug_log.get_logger().error(
                     "SlicePreviewPlayer: playback generator raised",
                     exc_info=True,
                 )
+            finally:
+                self._finished = True
 
-        gen = generator()
-        next(gen)  # prime it per the protocol above
+        self._start(device, generator, start_frame)
 
-        try:
-            device.start(gen)
-        except Exception:
-            debug_log.get_logger().error(
-                "SlicePreviewPlayer: couldn't start playback", exc_info=True
-            )
-            device.close()
+    def play_loop(
+        self,
+        samples,
+        start_frame,
+        loop_start_frame,
+        loop_end_frame,
+        end_frame,
+        framerate,
+        dwell_ms=None,
+    ):
+        """Simulates a sample's own loop settings for a single click preview
+        (the Program Editor's Samples tab waveform - see
+        program_editor_window.py's _on_waveform_preview_requested): plays
+        the attack once ([start_frame, loop_end_frame]), then repeats the
+        loop region ([loop_start_frame, loop_end_frame]) either for
+        dwell_ms milliseconds or, if dwell_ms is None ("Hold"),
+        indefinitely - never stopping on its own, only via a later stop()
+        call (e.g. the user clicking the waveform again) - then plays the
+        release tail ([loop_end_frame, end_frame]) once and stops on its
+        own. A dwell that doesn't divide evenly into the loop region's own
+        length always finishes its CURRENT pass before moving on to the
+        tail, rather than cutting off mid-loop - matches "Loop in
+        release"'s own real hardware behaviour, and avoids an audible glitch
+        either way.
+
+        Callers decide whether a loop applies at ALL (a "No looping"/
+        "One-shot" SPTYPE, or a dwell of 0/"Off", should call plain play()
+        instead) - this method always assumes there IS one to repeat.
+        """
+        self.stop()
+
+        if loop_end_frame <= loop_start_frame:
+            # degenerate/zero-length loop region - nothing to repeat, falls
+            # back to playing the whole range once rather than looping an
+            # empty buffer forever
+            self.play(samples, start_frame, end_frame, framerate)
             return
 
-        self._device = device
-        self._play_start_frame = start_frame
-        self._play_end_frame = end_frame
-        self._total_frames = len(chunk)
-        self._timer.start()
+        attack = samples[start_frame : loop_end_frame + 1]
+        loop_region = samples[loop_start_frame : loop_end_frame + 1]
+        tail = samples[loop_end_frame : end_frame + 1]
+        attack_bytes = struct.pack("<" + "h" * len(attack), *attack) if attack else b""
+        loop_bytes = struct.pack("<" + "h" * len(loop_region), *loop_region)
+        tail_bytes = struct.pack("<" + "h" * len(tail), *tail) if tail else b""
+
+        loop_frame_budget = (
+            None if dwell_ms is None else max(0, round(dwell_ms / 1000 * framerate))
+        )
+
+        device = self._open_device(framerate)
+        if device is None:
+            return
+
+        def generator():
+            try:
+                required_frames = yield b""
+                # attack, once
+                pos = 0
+                while pos < len(attack_bytes):
+                    end = pos + required_frames * _BYTES_PER_FRAME
+                    out = attack_bytes[pos:end]
+                    pos += len(out)
+                    self._current_frame = start_frame + pos // _BYTES_PER_FRAME
+                    required_frames = yield out
+                # loop region, repeated for loop_frame_budget frames, or
+                # forever ("Hold") if loop_frame_budget is None - rechecked
+                # only between full passes, never mid-pass (see docstring)
+                looped_frames = 0
+                while loop_frame_budget is None or looped_frames < loop_frame_budget:
+                    pos = 0
+                    while pos < len(loop_bytes):
+                        end = pos + required_frames * _BYTES_PER_FRAME
+                        out = loop_bytes[pos:end]
+                        pos += len(out)
+                        looped_frames += len(out) // _BYTES_PER_FRAME
+                        self._current_frame = loop_start_frame + pos // _BYTES_PER_FRAME
+                        required_frames = yield out
+                # release tail, once
+                pos = 0
+                while pos < len(tail_bytes):
+                    end = pos + required_frames * _BYTES_PER_FRAME
+                    out = tail_bytes[pos:end]
+                    pos += len(out)
+                    self._current_frame = loop_end_frame + pos // _BYTES_PER_FRAME
+                    required_frames = yield out
+            except Exception:
+                # see play()'s own generator for why this is caught/logged
+                # here rather than left to escape into the cffi boundary
+                debug_log.get_logger().error(
+                    "SlicePreviewPlayer: playback generator raised",
+                    exc_info=True,
+                )
+            finally:
+                self._finished = True
+
+        self._start(device, generator, start_frame)
 
     def stop(self):
         was_playing = self._device is not None
@@ -228,8 +343,7 @@ class SlicePreviewPlayer(QObject):
     def _on_tick(self):
         if self._device is None:
             return
-        frame = self._play_start_frame + self._frames_sent
-        if self._frames_sent >= self._total_frames:
+        if self._finished:
             self.stop()
             return
-        self.position_changed.emit(frame)
+        self.position_changed.emit(self._current_frame)

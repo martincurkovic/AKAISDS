@@ -55,6 +55,7 @@ from ui.envelope_graph import ADSREnvelopeGraph, Envelope2Graph
 from ui.keygroup_range_bar import KeygroupRangeBar, keygroup_color
 from ui.waveform_view import WaveformView
 from ui.slice_editor_window import SliceEditorWindow
+from core.audio_preview import SlicePreviewPlayer
 from ui import theme
 from ui.about_dialog import AboutDialog
 from ui.quickstart_dialog import show_quickstart_dialog
@@ -455,6 +456,13 @@ class ProgramEditorWindow(QMainWindow):
         self._busy_hide_timer.setSingleShot(True)
         self._busy_hide_timer.setInterval(150)
         self._busy_hide_timer.timeout.connect(self._confirm_worker_idle)
+
+        # Samples tab's own single-click-to-preview (see WaveformView's
+        # preview_requested and _on_waveform_preview_requested below) -
+        # separate instance from SliceEditorWindow's own SlicePreviewPlayer
+        # (that one's scoped to the Slice Editor dialog's own lifetime);
+        # this one lives as long as the editor window itself does.
+        self._sample_preview_player = SlicePreviewPlayer(self)
 
         self._worker = BridgeWorker(self._bridge)
         self._worker.busy_changed.connect(self._on_worker_busy_changed)
@@ -2109,6 +2117,13 @@ class ProgramEditorWindow(QMainWindow):
         self.waveform_view.marker_committed.connect(self._on_waveform_marker_committed)
         self.waveform_view.markers_changed.connect(self._update_marker_spinboxes)
         self.waveform_view.view_changed.connect(self._on_waveform_view_changed)
+        self.waveform_view.preview_requested.connect(
+            self._on_waveform_preview_requested
+        )
+        self._sample_preview_player.position_changed.connect(
+            self.waveform_view.set_playhead
+        )
+        self._sample_preview_player.finished.connect(self.waveform_view.clear_playhead)
         self.waveform_scrollbar.valueChanged.connect(self._on_waveform_scrollbar_moved)
         self._worker.submit_program_list()
 
@@ -3483,6 +3498,11 @@ class ProgramEditorWindow(QMainWindow):
             self.status_bar.showMessage(f"Couldn't load detail: {error_message}")
 
     def closeEvent(self, event):
+        # a "Hold" preview loop never stops on its own (see
+        # _on_waveform_preview_requested) - closing the window must not
+        # leave it sounding forever in the background
+        self._sample_preview_player.stop()
+
         # runs regardless of how the window closes (close button, command + w,
         # etc) - stop() lets anything already queued (in particular, pending
         # writes) drain before the worker thread actually exits, then wait()
@@ -4955,6 +4975,10 @@ class ProgramEditorWindow(QMainWindow):
             )  # this is what triggers keygroup loading for the first program
 
     def _on_main_tab_changed(self, index):
+        # a sample preview left playing (especially a "Hold" loop, which
+        # never stops on its own) shouldn't keep sounding once the user's
+        # navigated away from the tab that shows/controls it
+        self._sample_preview_player.stop()
         # select the first sample by default the first time the user
         # switches to the Samples tab, same as the Programs tab already
         # auto-selects its own first row on load (_on_programs_loaded) -
@@ -4968,6 +4992,11 @@ class ProgramEditorWindow(QMainWindow):
             self.sample_list_widget.setCurrentRow(0)
 
     def _on_sample_selected(self, current, previous):
+        # a preview mid-flight for the OLD selection (most importantly a
+        # "Hold" loop, which otherwise keeps sounding indefinitely - see
+        # _on_waveform_preview_requested) must not keep playing once the
+        # waveform underneath it changes to a different sample
+        self._sample_preview_player.stop()
         if current is None:
             self._clear_waveform_view()
             return
@@ -6495,6 +6524,54 @@ class ProgramEditorWindow(QMainWindow):
 
     def _on_waveform_scrollbar_moved(self, value):
         self.waveform_view.set_view_start(value)
+
+    def _on_waveform_preview_requested(self):
+        # WaveformView.preview_requested - a single click on empty
+        # waveform space. A click while something's already sounding stops
+        # it outright rather than restarting (the user's own "click again
+        # to stop" request) - this is also the ONLY way a "Hold" loop
+        # (see below) ever stops, since that mode never ends on its own.
+        if self._sample_preview_player.is_playing():
+            self._sample_preview_player.stop()
+            return
+
+        sample_index = self.sample_list_widget.currentRow()
+        entry = self._sample_waveform_cache.get(sample_index)
+        if entry is None or entry["samples"] is None:
+            return  # header-only or nothing loaded - nothing to play
+
+        samples = entry["samples"]
+        framerate = entry["framerate"]
+        markers = self.waveform_view.markers()
+
+        # SPTYPE (sample_loop_type_combo) and LDWELL1 (sample_loop_hold_
+        # knob) aren't gated on each other anywhere in this UI (see
+        # _update_sample_meta_controls) - a "No looping"/"One-shot" SPTYPE
+        # leaves the Loop Hold knob fully interactive even though it'd be
+        # meaningless hardware-side, and nothing stops LDWELL1 sitting at
+        # "Off" while SPTYPE nominally loops either way. Reconciled here
+        # rather than trusting either control alone: SPTYPE 2/3 has no
+        # loop region to repeat at all, and dwell "Off" means no repeat
+        # regardless of SPTYPE (confirmed with the user directly) - both
+        # fall through to a plain one-shot playback of [start, end].
+        sptype = self.sample_loop_type_combo.currentIndex()
+        dwell = self.sample_loop_hold_knob.value()
+        if sptype in _SPTYPE_VALUES_WITHOUT_LOOP or dwell == _LOOP_HOLD_OFF_VALUE:
+            self._sample_preview_player.play(
+                samples, markers["start"], markers["end"], framerate
+            )
+            return
+
+        dwell_ms = None if dwell == _LOOP_HOLD_HOLD_VALUE else dwell
+        self._sample_preview_player.play_loop(
+            samples,
+            markers["start"],
+            markers["loop_start"],
+            markers["loop_end"],
+            markers["end"],
+            framerate,
+            dwell_ms=dwell_ms,
+        )
 
     def _on_zone_sample_changed(self, field, zone_idx):
         text = self._zone_combos[zone_idx].currentText()

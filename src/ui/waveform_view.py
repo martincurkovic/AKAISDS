@@ -1,6 +1,6 @@
 from PySide6.QtWidgets import QApplication, QWidget, QSizePolicy
 from PySide6.QtGui import QCursor, QPainter, QPen, QColor, QPolygonF
-from PySide6.QtCore import Qt, QEvent, QRectF, QPointF, Signal
+from PySide6.QtCore import Qt, QEvent, QRectF, QPointF, QTimer, Signal
 
 from core import debug_log
 from ui import theme
@@ -200,6 +200,14 @@ class WaveformView(QWidget):
     # QScrollBar to size and position itself. Emitted whenever zoom or pan
     # changes, including indirectly (a new sample loading resets the view).
     view_changed = Signal(int, int, int)
+    # emitted on a single click on empty waveform space (not near any
+    # marker) once real audio is loaded - a plain toggle, no payload, since
+    # unlike SliceWaveformView's own click-to-preview (which previews
+    # whichever SLICE the click landed in) there's only ever one thing to
+    # preview here: the sample currently shown, played per its own loop
+    # settings. program_editor_window.py owns the actual SlicePreviewPlayer
+    # and decides start-vs-stop; this widget only ever asks.
+    preview_requested = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -241,12 +249,36 @@ class WaveformView(QWidget):
         # waveform's loop-region tint, and excludes loop_start/loop_end from
         # hit-testing so they can't be dragged, when False.
         self._loop_enabled = True
+        # click-to-preview visual feedback (set_playhead/clear_playhead) -
+        # None whenever nothing is currently sounding
+        self._playhead_frame = None
+        # single-vs-double-click disambiguation, same mechanism/reasoning
+        # as SliceWaveformView's own _schedule_preview_click: Qt delivers
+        # press->release->doubleClick->release for a genuine double-click,
+        # so firing a preview on the bare first press would also play a
+        # stray blip every time a double-click loads a new sample. Deferred
+        # to the platform's own doubleClickInterval() instead, cancelled by
+        # mouseDoubleClickEvent if a second click actually follows in time.
+        self._preview_timer = QTimer(self)
+        self._preview_timer.setSingleShot(True)
+        self._preview_timer.timeout.connect(self.preview_requested.emit)
 
     def has_waveform(self):
         return self._samples is not None
 
     def frame_count(self):
         return self._frame_count
+
+    # --- playhead (click-to-preview visual feedback) ------------------------
+
+    def set_playhead(self, frame):
+        self._playhead_frame = frame
+        self.update()
+
+    def clear_playhead(self):
+        if self._playhead_frame is not None:
+            self._playhead_frame = None
+            self.update()
 
     def markers(self):
         return dict(self._markers)
@@ -806,6 +838,23 @@ class WaveformView(QWidget):
                 _LOADING_TEXT if self._loading else _PLACEHOLDER_TEXT,
             )
 
+        self._draw_playhead(painter, palette, view_start, view_length)
+
+    def _draw_playhead(self, painter, palette, view_start, view_length):
+        # drawn last, on top of everything else - a solid, undashed line
+        # (unlike every marker's own dashed line above), same visual
+        # language SliceWaveformView's own playhead uses, so "this is where
+        # playback currently is" never reads as just another marker
+        if self._playhead_frame is None:
+            return
+        if self._playhead_frame < view_start or self._playhead_frame > view_start + view_length - 1:
+            return  # scrolled/zoomed off screen - draw nothing rather than clamp to an edge
+        x = x_for_frame(self._playhead_frame, self.width(), view_start, view_length)
+        pen = QPen(QColor(palette["text_bright"]))
+        pen.setWidthF(2.0)
+        painter.setPen(pen)
+        painter.drawLine(QPointF(x, 0), QPointF(x, self.height()))
+
     def _markers_within_hit_radius(self, x):
         # every visible marker within _HIT_RADIUS_PX of x, closest first
         # (ties - genuinely equal distance, e.g. several markers pushed
@@ -852,6 +901,17 @@ class WaveformView(QWidget):
                 f"(has_waveform={self._samples is not None}, loading={self._loading})"
             )
         super().mouseDoubleClickEvent(event)
+        # AFTER super(), not before: QWidget's own default
+        # mouseDoubleClickEvent implementation calls mousePressEvent() -
+        # which, for a double-click landing on empty waveform space, is
+        # exactly what just re-armed _preview_timer a second time (see
+        # mousePressEvent's own click-to-preview branch). Stopping it only
+        # BEFORE super() (the first, seemingly obvious place) gets
+        # silently undone by that re-entrant call - confirmed by a real
+        # test failure, not a hypothetical - so a genuine double-click
+        # would otherwise still fire a stray preview shortly afterward
+        # despite "cancelling" it a moment earlier.
+        self._preview_timer.stop()
 
     def mousePressEvent(self, event):
         # frame_count, not samples - dragging must work in header-only
@@ -860,7 +920,25 @@ class WaveformView(QWidget):
             return
         x = event.position().x()
         candidates = self._markers_within_hit_radius(x)
-        if candidates and candidates == self._press_cycle_candidates:
+        if not candidates:
+            # empty space, no marker grabbed - click-to-preview territory
+            # (see preview_requested's own docstring). Deferred via
+            # _preview_timer rather than fired immediately, same
+            # single-vs-double-click disambiguation SliceWaveformView's
+            # own _schedule_preview_click uses - see __init__'s comment.
+            # Needs real audio (has_waveform()), not just a header - there
+            # would be nothing to actually play otherwise.
+            if event.button() == Qt.MouseButton.LeftButton and self.has_waveform():
+                self._preview_timer.start(QApplication.doubleClickInterval())
+            # matches the original (pre-click-to-preview) behaviour: an
+            # empty-space click resets the overlapping-marker click-cycle,
+            # so a later click back on the same stack restarts from the
+            # closest marker rather than resuming wherever it left off
+            self._press_cycle_candidates = []
+            self._press_cycle_index = 0
+            self._dragging = None
+            return
+        if candidates == self._press_cycle_candidates:
             # same stack of overlapping markers as last press (order-
             # sensitive on purpose - candidates is always sorted the same
             # way for the same stack, so this only matches a genuine
@@ -984,6 +1062,7 @@ class WaveformView(QWidget):
         # sure the app isn't left with a stuck invisible cursor
         if self._fine_active:
             self._exit_fine_drag()
+        self._preview_timer.stop()
         super().hideEvent(event)
 
     def wheelEvent(self, event):

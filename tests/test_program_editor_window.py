@@ -2693,6 +2693,169 @@ def _select_sample_with_full_audio(editor, qapp, sample_index, samples, markers)
     }
 
 
+# --- Samples tab: click-to-preview (WaveformView.preview_requested) --------
+# real audio output isn't exercised here at all - the SlicePreviewPlayer
+# instance's own play()/play_loop()/stop()/is_playing() are monkeypatched
+# with a lightweight recorder/state stub (miniaudio and a real device are
+# already covered directly in tests/test_audio_preview.py), so these tests
+# are purely about _on_waveform_preview_requested's OWN dispatch logic:
+# reconciling SPTYPE and Loop Hold/Dwell (which aren't gated on each other
+# in the UI - see that method's own comment) into the right play()/
+# play_loop() call, and the toggle-to-stop behaviour.
+
+
+def _fake_preview_player(editor, monkeypatch):
+    calls = []
+    state = {"playing": False}
+
+    def fake_play(*args, **kwargs):
+        calls.append(("play", args, kwargs))
+        state["playing"] = True
+
+    def fake_play_loop(*args, **kwargs):
+        calls.append(("play_loop", args, kwargs))
+        state["playing"] = True
+
+    def fake_stop():
+        calls.append(("stop", (), {}))
+        state["playing"] = False
+
+    monkeypatch.setattr(editor._sample_preview_player, "play", fake_play)
+    monkeypatch.setattr(editor._sample_preview_player, "play_loop", fake_play_loop)
+    monkeypatch.setattr(editor._sample_preview_player, "stop", fake_stop)
+    monkeypatch.setattr(
+        editor._sample_preview_player, "is_playing", lambda: state["playing"]
+    )
+    return calls
+
+
+def test_preview_requested_with_nothing_loaded_does_nothing(editor, qapp, monkeypatch):
+    calls = _fake_preview_player(editor, monkeypatch)
+    editor.sample_list_widget.setCurrentRow(-1)
+    editor._on_waveform_preview_requested()
+    assert calls == []
+
+
+def test_preview_requested_one_shot_sptype_plays_once_regardless_of_dwell(
+    editor, qapp, monkeypatch
+):
+    calls = _fake_preview_player(editor, monkeypatch)
+    samples = [0] * 10000
+    markers = {"start": 0, "loop_start": 2500, "loop_end": 7500, "end": 9999}
+    _select_sample_with_full_audio(editor, qapp, 0, samples, markers)
+    editor.sample_loop_type_combo.setCurrentIndex(3)  # "One-shot"
+    editor.sample_loop_hold_knob.setValue(500)  # would otherwise mean "loop"
+    calls.clear()  # discard the stop() from selecting the sample above
+
+    editor._on_waveform_preview_requested()
+
+    assert calls == [("play", (samples, 0, 9999, 44100), {})]
+
+
+def test_preview_requested_looping_sptype_with_a_finite_dwell_plays_loop(
+    editor, qapp, monkeypatch
+):
+    calls = _fake_preview_player(editor, monkeypatch)
+    samples = [0] * 10000
+    markers = {"start": 0, "loop_start": 2500, "loop_end": 7500, "end": 9999}
+    _select_sample_with_full_audio(editor, qapp, 0, samples, markers)
+    editor.sample_loop_type_combo.setCurrentIndex(1)  # "Loop til release"
+    editor.sample_loop_hold_knob.setValue(500)  # 500ms dwell
+    calls.clear()  # discard the stop() from selecting the sample above
+
+    editor._on_waveform_preview_requested()
+
+    assert calls == [
+        ("play_loop", (samples, 0, 2500, 7500, 9999, 44100), {"dwell_ms": 500})
+    ]
+
+
+def test_preview_requested_looping_sptype_with_hold_loops_forever(
+    editor, qapp, monkeypatch
+):
+    from ui.program_editor_window import _LOOP_HOLD_HOLD_VALUE
+
+    calls = _fake_preview_player(editor, monkeypatch)
+    samples = [0] * 10000
+    markers = {"start": 0, "loop_start": 2500, "loop_end": 7500, "end": 9999}
+    _select_sample_with_full_audio(editor, qapp, 0, samples, markers)
+    editor.sample_loop_type_combo.setCurrentIndex(0)  # "Loop in release"
+    editor.sample_loop_hold_knob.setValue(_LOOP_HOLD_HOLD_VALUE)  # "Hold"
+    calls.clear()  # discard the stop() from selecting the sample above
+
+    editor._on_waveform_preview_requested()
+
+    assert calls == [
+        ("play_loop", (samples, 0, 2500, 7500, 9999, 44100), {"dwell_ms": None})
+    ]
+
+
+def test_preview_requested_looping_sptype_with_dwell_off_plays_once(
+    editor, qapp, monkeypatch
+):
+    # confirmed with the user directly: dwell "Off" means no loop at all,
+    # regardless of what SPTYPE nominally says - the two controls aren't
+    # gated on each other anywhere in the UI (see
+    # _update_sample_meta_controls)
+    calls = _fake_preview_player(editor, monkeypatch)
+    samples = [0] * 10000
+    markers = {"start": 0, "loop_start": 2500, "loop_end": 7500, "end": 9999}
+    _select_sample_with_full_audio(editor, qapp, 0, samples, markers)
+    editor.sample_loop_type_combo.setCurrentIndex(0)  # "Loop in release"
+    editor.sample_loop_hold_knob.setValue(0)  # "Off"
+    calls.clear()  # discard the stop() from selecting the sample above
+
+    editor._on_waveform_preview_requested()
+
+    assert calls == [("play", (samples, 0, 9999, 44100), {})]
+
+
+def test_preview_requested_while_playing_stops_instead_of_restarting(
+    editor, qapp, monkeypatch
+):
+    calls = _fake_preview_player(editor, monkeypatch)
+    samples = [0] * 10000
+    markers = {"start": 0, "loop_start": 2500, "loop_end": 7500, "end": 9999}
+    _select_sample_with_full_audio(editor, qapp, 0, samples, markers)
+    editor.sample_loop_type_combo.setCurrentIndex(3)  # "One-shot"
+    calls.clear()  # discard the stop() from selecting the sample above
+
+    editor._on_waveform_preview_requested()  # starts
+    editor._on_waveform_preview_requested()  # click again - stops
+
+    assert [c[0] for c in calls] == ["play", "stop"]
+
+
+def test_selecting_a_different_sample_stops_a_playing_preview(editor, qapp, monkeypatch):
+    calls = _fake_preview_player(editor, monkeypatch)
+    samples = [0] * 10000
+    markers = {"start": 0, "loop_start": 2500, "loop_end": 7500, "end": 9999}
+    _select_sample_with_full_audio(editor, qapp, 0, samples, markers)
+    editor.sample_loop_type_combo.setCurrentIndex(3)
+    editor._on_waveform_preview_requested()
+    assert editor._sample_preview_player.is_playing() is True
+
+    _select_sample_with_full_audio(editor, qapp, 1, samples, markers)
+
+    assert editor._sample_preview_player.is_playing() is False
+    assert calls[-1][0] == "stop"
+
+
+def test_switching_main_tabs_stops_a_playing_preview(editor, qapp, monkeypatch):
+    calls = _fake_preview_player(editor, monkeypatch)
+    samples = [0] * 10000
+    markers = {"start": 0, "loop_start": 2500, "loop_end": 7500, "end": 9999}
+    _select_sample_with_full_audio(editor, qapp, 0, samples, markers)
+    editor.sample_loop_type_combo.setCurrentIndex(3)
+    editor._on_waveform_preview_requested()
+    assert editor._sample_preview_player.is_playing() is True
+
+    editor.main_tabs.setCurrentIndex(0)  # Multis tab
+
+    assert editor._sample_preview_player.is_playing() is False
+    assert calls[-1][0] == "stop"
+
+
 def test_reverse_sample_real_mode_happy_path_sends_deletes_and_renames(
     editor, qapp, monkeypatch
 ):
