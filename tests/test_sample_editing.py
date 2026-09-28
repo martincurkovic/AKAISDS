@@ -1,9 +1,14 @@
 # tests for core/sample_editing.py - pure sample-buffer math, no Qt/MIDI/
 # hardware needed, should be instant
 
+import math
+
+import pytest
+
 from core.sample_editing import (
     _MAX_AMPLITUDE,
     fade_in_out_samples,
+    filter_samples,
     normalize_samples,
     trim_samples,
     reverse_samples,
@@ -269,3 +274,105 @@ def test_normalize_keeps_every_marker_unchanged():
         samples, start=0, loop_start=1, loop_end=2, end=2
     )
     assert (start, loop_start, loop_end, end) == (0, 1, 2, 2)
+
+
+# --- filter_samples (highpass/lowpass biquad) --------------------------------
+
+
+def _sine(freq_hz, framerate, n_frames, amplitude=10000):
+    return [
+        int(round(amplitude * math.sin(2 * math.pi * freq_hz * i / framerate)))
+        for i in range(n_frames)
+    ]
+
+
+def _rms(samples):
+    return math.sqrt(sum(s * s for s in samples) / len(samples))
+
+
+# every RMS comparison below skips the filter's own settling transient at
+# the very start of the buffer (the biquad's internal state starts at
+# zero, so the first handful of samples don't yet reflect its steady-state
+# response) - comparing only the settled tail is what actually isolates
+# "does this filter do what a highpass/lowpass should," not an artifact of
+# where the buffer happens to start
+_SETTLE = 500
+
+
+def test_lowpass_attenuates_a_tone_well_above_cutoff():
+    framerate = 44100
+    tone = _sine(8000, framerate, 4410)  # 8kHz tone
+    filtered, *_ = filter_samples(
+        tone, 0, 0, len(tone) - 1, len(tone) - 1, "lowpass", 1000, framerate
+    )
+    assert _rms(filtered[_SETTLE:]) < _rms(tone[_SETTLE:]) * 0.5
+
+
+def test_lowpass_mostly_passes_a_tone_well_below_cutoff():
+    framerate = 44100
+    tone = _sine(100, framerate, 4410)  # 100Hz tone
+    filtered, *_ = filter_samples(
+        tone, 0, 0, len(tone) - 1, len(tone) - 1, "lowpass", 5000, framerate
+    )
+    assert _rms(filtered[_SETTLE:]) > _rms(tone[_SETTLE:]) * 0.8
+
+
+def test_highpass_attenuates_a_tone_well_below_cutoff():
+    framerate = 44100
+    tone = _sine(100, framerate, 4410)  # 100Hz tone
+    filtered, *_ = filter_samples(
+        tone, 0, 0, len(tone) - 1, len(tone) - 1, "highpass", 2000, framerate
+    )
+    assert _rms(filtered[_SETTLE:]) < _rms(tone[_SETTLE:]) * 0.5
+
+
+def test_highpass_mostly_passes_a_tone_well_above_cutoff():
+    framerate = 44100
+    tone = _sine(8000, framerate, 4410)  # 8kHz tone
+    filtered, *_ = filter_samples(
+        tone, 0, 0, len(tone) - 1, len(tone) - 1, "highpass", 500, framerate
+    )
+    assert _rms(filtered[_SETTLE:]) > _rms(tone[_SETTLE:]) * 0.8
+
+
+def test_filter_keeps_every_marker_unchanged():
+    samples = [100, -200, 300, -400]
+    _new_samples, start, loop_start, loop_end, end = filter_samples(
+        samples, 0, 1, 2, 3, "lowpass", 1000, 44100
+    )
+    assert (start, loop_start, loop_end, end) == (0, 1, 2, 3)
+
+
+def test_filter_output_length_matches_input():
+    samples = list(range(-500, 500))
+    new_samples, *_ = filter_samples(
+        samples, 0, 0, len(samples) - 1, len(samples) - 1, "highpass", 1000, 44100
+    )
+    assert len(new_samples) == len(samples)
+
+
+def test_filter_output_stays_within_int16_range():
+    samples = [32767, -32768] * 500
+    new_samples, *_ = filter_samples(
+        samples, 0, 0, len(samples) - 1, len(samples) - 1, "lowpass", 5000, 44100
+    )
+    assert all(-32768 <= v <= 32767 for v in new_samples)
+
+
+def test_filter_touches_the_whole_buffer_not_just_start_end():
+    # same whole-buffer scope as reverse_samples/normalize_samples - a
+    # high-frequency tone entirely OUTSIDE [start, end] must still get
+    # attenuated by a lowpass, not left untouched
+    framerate = 44100
+    tone = _sine(8000, framerate, 4410)
+    filtered, *_ = filter_samples(
+        tone, 2000, 2000, 2000, 2200, "lowpass", 1000, framerate
+    )
+    outside_start_original = tone[:2000]
+    outside_start_filtered = filtered[:2000]
+    assert _rms(outside_start_filtered[_SETTLE:]) < _rms(outside_start_original[_SETTLE:]) * 0.5
+
+
+def test_filter_rejects_an_unknown_filter_type():
+    with pytest.raises(ValueError):
+        filter_samples([0] * 10, 0, 0, 9, 9, "bandpass", 1000, 44100)

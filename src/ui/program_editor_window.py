@@ -1,3 +1,4 @@
+import functools
 import math
 import os
 import random
@@ -56,6 +57,7 @@ from ui.envelope_graph import ADSREnvelopeGraph, Envelope2Graph
 from ui.keygroup_range_bar import KeygroupRangeBar, keygroup_color
 from ui.waveform_view import WaveformView
 from ui.slice_editor_window import SliceEditorWindow
+from ui.filter_sample_dialog import FilterSampleDialog
 from core.audio_preview import SlicePreviewPlayer
 from ui import theme
 from ui.about_dialog import AboutDialog
@@ -4408,10 +4410,24 @@ class ProgramEditorWindow(QMainWindow):
         )
         self.normalize_sample_button.setEnabled(False)
         self.normalize_sample_button.clicked.connect(self._confirm_normalize_sample)
+        # unlike the other four transforms here, this one has an actual
+        # PARAMETER (filter type + cutoff frequency) - opens a small
+        # dialog (ui/filter_sample_dialog.py) with a Preview button rather
+        # than a plain QMessageBox.question, same has_waveform() gating
+        # (enabled/disabled alongside the other four - see
+        # _set_sample_edit_buttons_enabled)
+        self.filter_sample_button = QPushButton("Filter Sample…")
+        self.filter_sample_button.setToolTip(
+            "Apply a highpass or lowpass filter to the whole sample, "
+            "overwriting it on the sampler. Cannot be undone."
+        )
+        self.filter_sample_button.setEnabled(False)
+        self.filter_sample_button.clicked.connect(self._confirm_filter_sample)
         sample_edit_row.addWidget(self.trim_sample_button)
         sample_edit_row.addWidget(self.reverse_sample_button)
         sample_edit_row.addWidget(self.fade_sample_button)
         sample_edit_row.addWidget(self.normalize_sample_button)
+        sample_edit_row.addWidget(self.filter_sample_button)
         sample_edit_row.addStretch()
         # right-aligned, and its own thing rather than a 5th button
         # grouped with the four above - unlike them it never touches the
@@ -5138,7 +5154,7 @@ class ProgramEditorWindow(QMainWindow):
         self._set_sample_edit_buttons_enabled(False)
 
     def _set_sample_edit_buttons_enabled(self, enabled):
-        # Trim/Reverse/Fade/Normalise need real audio in memory to
+        # Trim/Reverse/Fade/Normalise/Filter need real audio in memory to
         # transform, not just header-only markers - has_waveform(), same
         # gate mouseDoubleClickEvent uses to decide whether a double-click
         # should even try loading audio again
@@ -5146,6 +5162,7 @@ class ProgramEditorWindow(QMainWindow):
         self.reverse_sample_button.setEnabled(enabled)
         self.fade_sample_button.setEnabled(enabled)
         self.normalize_sample_button.setEnabled(enabled)
+        self.filter_sample_button.setEnabled(enabled)
         # Duplicate Sample needs the same loaded audio (it re-sends it
         # under a new name - see its own construction comment) AND is
         # unavailable in demo mode (DemoBridge has no add-sample
@@ -6101,9 +6118,47 @@ class ProgramEditorWindow(QMainWindow):
             sample_index, sample_editing.normalize_samples, "Normalise"
         )
 
+    def _confirm_filter_sample(self):
+        # unlike Trim/Reverse/Fade/Normalise (a plain QMessageBox.question,
+        # no parameters), this needs an actual filter type + cutoff
+        # frequency from the user first - FilterSampleDialog owns that UI
+        # (plus its own Preview button/player) and IS the confirmation
+        # step (its warning label + OK button), so there's no second
+        # QMessageBox.question after it closes accepted - that would just
+        # be a redundant extra click after an already-deliberate dialog.
+        sample_index = self.sample_list_widget.currentRow()
+        if sample_index < 0 or not self.waveform_view.has_waveform():
+            return
+        entry = self._sample_waveform_cache.get(sample_index)
+        if entry is None or entry["samples"] is None:
+            return
+        item = self.sample_list_widget.currentItem()
+        sample_name = item.text() if item is not None else ""
+
+        dialog = FilterSampleDialog(
+            self, sample_name, entry["samples"], entry["framerate"]
+        )
+        if not dialog.exec():
+            return
+
+        # filter_samples needs filter_type/cutoff_hz/framerate on top of
+        # the standard (samples, start, loop_start, loop_end, end) shape
+        # _perform_sample_edit's transform(...) call always uses - bound
+        # here via functools.partial so the extra arguments never need to
+        # be visible to that shared dispatcher (see filter_samples' own
+        # docstring)
+        transform = functools.partial(
+            sample_editing.filter_samples,
+            filter_type=dialog.filter_type(),
+            cutoff_hz=dialog.cutoff_hz(),
+            framerate=entry["framerate"],
+        )
+        self._perform_sample_edit(sample_index, transform, "Filter")
+
     def _perform_sample_edit(self, sample_index, transform, action_label):
         # shared by _confirm_trim_sample/_confirm_reverse_sample/
-        # _confirm_fade_sample/_confirm_normalize_sample - all four are
+        # _confirm_fade_sample/_confirm_normalize_sample/
+        # _confirm_filter_sample - all five are
         # "take the samples already in memory, transform them with a pure
         # function from core/sample_editing.py, then get the result onto
         # the hardware" with nothing else actually different between them
@@ -6134,9 +6189,17 @@ class ProgramEditorWindow(QMainWindow):
             # the pure transform (core/sample_editing.py) runs before
             # anything hardware-facing even starts - nothing else here
             # catches a failure this early, so without this it would
-            # propagate out of this Qt slot silently in a packaged build
+            # propagate out of this Qt slot silently in a packaged build.
+            # transform is a functools.partial for _confirm_filter_sample
+            # (binds filter_type/cutoff_hz/framerate - see its own
+            # comment), which has no __name__ of its own, unlike the
+            # plain function every other caller passes - getattr falls
+            # back to partial's own repr (still names the wrapped
+            # function) rather than raising a second, more confusing
+            # AttributeError on top of whatever actually failed
+            transform_name = getattr(transform, "__name__", repr(transform))
             debug_log.get_logger().error(
-                f"_perform_sample_edit: {transform.__name__} raised",
+                f"_perform_sample_edit: {transform_name} raised",
                 exc_info=True,
             )
             self.status_bar.showMessage(

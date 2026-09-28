@@ -2183,7 +2183,7 @@ def _stub_demo_audio(editor, monkeypatch, samples, framerate=44100):
     )
 
 
-def test_trim_reverse_fade_and_normalize_buttons_disabled_until_audio_loaded(
+def test_trim_reverse_fade_normalize_and_filter_buttons_disabled_until_audio_loaded(
     editor, qapp, monkeypatch
 ):
     editor.sample_list_widget.setCurrentRow(0)
@@ -2194,6 +2194,7 @@ def test_trim_reverse_fade_and_normalize_buttons_disabled_until_audio_loaded(
     assert editor.reverse_sample_button.isEnabled() is False
     assert editor.fade_sample_button.isEnabled() is False
     assert editor.normalize_sample_button.isEnabled() is False
+    assert editor.filter_sample_button.isEnabled() is False
 
     monkeypatch.setenv("AKAISDS_DEMO_SAMPLER", "1")
     _stub_demo_audio(editor, monkeypatch, [0] * 500)
@@ -2203,6 +2204,7 @@ def test_trim_reverse_fade_and_normalize_buttons_disabled_until_audio_loaded(
     assert editor.reverse_sample_button.isEnabled() is True
     assert editor.fade_sample_button.isEnabled() is True
     assert editor.normalize_sample_button.isEnabled() is True
+    assert editor.filter_sample_button.isEnabled() is True
 
     editor.sample_list_widget.setCurrentRow(-1)
 
@@ -2210,6 +2212,7 @@ def test_trim_reverse_fade_and_normalize_buttons_disabled_until_audio_loaded(
     assert editor.reverse_sample_button.isEnabled() is False
     assert editor.fade_sample_button.isEnabled() is False
     assert editor.normalize_sample_button.isEnabled() is False
+    assert editor.filter_sample_button.isEnabled() is False
 
 
 def test_confirm_trim_sample_does_nothing_when_markers_cover_whole_sample(
@@ -3266,6 +3269,132 @@ def test_open_slice_editor_does_nothing_while_a_transfer_is_busy(editor, qapp):
     )
     editor._open_slice_editor()  # must return early, not open a modal dialog
     assert "already in progress" in editor.status_bar.currentMessage()
+
+
+# --- Filter Sample (Samples tab) --------------------------------------------
+# a real FilterSampleDialog.exec() would hang an offscreen test (same
+# reasoning as the Slice Editor's own modal dialog above) - the dialog
+# itself (default values, Preview retriggering, accept/reject stopping the
+# preview player) is covered instead in tests/test_filter_sample_dialog.py.
+# Here, _confirm_filter_sample's own wiring is what's under test: does it
+# open the dialog with the right sample data, and does an accepted dialog
+# hand _perform_sample_edit a transform that actually applies
+# sample_editing.filter_samples with the dialog's own chosen settings.
+
+
+class _FakeFilterSampleDialog:
+    def __init__(self, parent, sample_name, samples, framerate, *, accept=True):
+        self.parent = parent
+        self.sample_name = sample_name
+        self.samples = samples
+        self.framerate = framerate
+        self._accept = accept
+
+    def exec(self):
+        return self._accept
+
+    def filter_type(self):
+        return "highpass"
+
+    def cutoff_hz(self):
+        return 500
+
+
+def test_confirm_filter_sample_passes_the_right_sample_data_to_the_dialog(
+    editor, qapp, monkeypatch
+):
+    captured = {}
+
+    class _CapturingFakeDialog(_FakeFilterSampleDialog):
+        def __init__(self, parent, sample_name, samples, framerate):
+            captured["sample_name"] = sample_name
+            captured["samples"] = samples
+            captured["framerate"] = framerate
+            super().__init__(parent, sample_name, samples, framerate, accept=False)
+
+    monkeypatch.setattr(
+        "ui.program_editor_window.FilterSampleDialog", _CapturingFakeDialog
+    )
+    samples = list(range(-500, 500))
+    markers = {"start": 0, "loop_start": 100, "loop_end": 900, "end": 999}
+    _select_sample_with_full_audio(editor, qapp, 0, samples, markers)
+
+    editor._confirm_filter_sample()
+
+    assert captured["sample_name"] == "SQUARE"
+    assert captured["samples"] == samples
+    assert captured["framerate"] == 44100
+
+
+def test_confirm_filter_sample_declined_does_not_call_perform_sample_edit(
+    editor, qapp, monkeypatch
+):
+    monkeypatch.setattr(
+        "ui.program_editor_window.FilterSampleDialog",
+        lambda *a, **k: _FakeFilterSampleDialog(*a, **k, accept=False),
+    )
+    calls = []
+    monkeypatch.setattr(
+        editor, "_perform_sample_edit", lambda *a, **k: calls.append((a, k))
+    )
+    samples = list(range(-500, 500))
+    markers = {"start": 0, "loop_start": 100, "loop_end": 900, "end": 999}
+    _select_sample_with_full_audio(editor, qapp, 0, samples, markers)
+
+    editor._confirm_filter_sample()
+
+    assert calls == []
+
+
+def test_confirm_filter_sample_accepted_calls_perform_sample_edit_with_a_working_transform(
+    editor, qapp, monkeypatch
+):
+    monkeypatch.setattr(
+        "ui.program_editor_window.FilterSampleDialog",
+        lambda *a, **k: _FakeFilterSampleDialog(*a, **k, accept=True),
+    )
+    calls = []
+    monkeypatch.setattr(
+        editor, "_perform_sample_edit", lambda *a, **k: calls.append((a, k))
+    )
+    samples = list(range(-500, 500))
+    markers = {"start": 0, "loop_start": 100, "loop_end": 900, "end": 999}
+    _select_sample_with_full_audio(editor, qapp, 0, samples, markers)
+
+    editor._confirm_filter_sample()
+
+    assert len(calls) == 1
+    (sample_index, transform, action_label), _kwargs = calls[0]
+    assert sample_index == 0
+    assert action_label == "Filter"
+    # the bound transform must behave exactly like a direct
+    # sample_editing.filter_samples("highpass", 500, 44100) call - the
+    # dialog's own chosen values (see _FakeFilterSampleDialog) actually
+    # made it through the functools.partial binding
+    import core.sample_editing as sample_editing_module
+
+    expected = sample_editing_module.filter_samples(
+        samples, markers["start"], markers["loop_start"], markers["loop_end"],
+        markers["end"], "highpass", 500, 44100,
+    )
+    actual = transform(
+        samples, markers["start"], markers["loop_start"], markers["loop_end"],
+        markers["end"],
+    )
+    assert actual == expected
+
+
+def test_confirm_filter_sample_with_nothing_loaded_does_nothing(editor, qapp, monkeypatch):
+    opened = []
+    monkeypatch.setattr(
+        "ui.program_editor_window.FilterSampleDialog",
+        lambda *a, **k: opened.append(True),
+    )
+    editor.sample_list_widget.setCurrentRow(-1)
+
+    editor._confirm_filter_sample()
+
+    assert opened == []
 
 
 def test_export_slices_real_mode_happy_path_sends_batch_and_writes_headers(
