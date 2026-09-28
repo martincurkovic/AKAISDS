@@ -23,6 +23,7 @@ from PySide6.QtGui import (
 )
 from PySide6.QtCore import QEventLoop, QTimer, QRegularExpression
 from PySide6.QtWidgets import (
+    QAbstractSpinBox,
     QApplication,
     QGridLayout,
     QHBoxLayout,
@@ -3297,10 +3298,11 @@ class ProgramEditorWindow(QMainWindow):
 
             which, args = self._reload_sample_list_with_retries()
             if which != 0:
+                sent = f'"{names[0]}"' if len(names) == 1 else f"{len(names)} slices"
                 return False, (
-                    f"{len(names)} slices were sent, but the sample list "
-                    "couldn't be refreshed to set their header fields - "
-                    "refresh manually and check the sampler directly."
+                    f"{sent} sent, but the sample list couldn't be "
+                    "refreshed to set the header fields - refresh manually "
+                    "and check the sampler directly."
                 )
             samples_after_send = args[0]
             landed = [n for n in names if n in samples_after_send]
@@ -3340,10 +3342,12 @@ class ProgramEditorWindow(QMainWindow):
 
             if missing:
                 return False, (
-                    f"Sent {len(landed)}/{len(names)} slices; missing from the "
+                    f"Sent {len(landed)}/{len(names)} slice(s); missing from the "
                     f"reloaded list: {', '.join(missing)} - check the sampler "
                     "directly."
                 )
+            if len(names) == 1:
+                return True, f'Export complete: "{names[0]}" sent'
             return True, f"Export complete: {len(names)} slices sent as {names[0]}..{names[-1]}"
         except Exception:
             # same reasoning as _perform_duplicate_sample_real/
@@ -3496,6 +3500,31 @@ class ProgramEditorWindow(QMainWindow):
             and keygroup_index == self.keygroup_list.currentRow()
         ):
             self.status_bar.showMessage(f"Couldn't load detail: {error_message}")
+
+    def keyPressEvent(self, event):
+        # Spacebar toggles the Samples tab's own click-to-preview (see
+        # _on_waveform_preview_requested) - scoped to the Samples tab only
+        # (Program tab/Keygroup tab/Multis tab have nothing analogous to
+        # preview) and backs off whenever a text-entry widget currently has
+        # focus, so this can never steal a literal space character out of
+        # the sample rename field, a marker spinbox, or a combo box's own
+        # search-by-typing. isAutoRepeat() is excluded too - holding the
+        # key down would otherwise toggle play/stop repeatedly as the OS
+        # sends repeat key events, which is not what "hold spacebar" reads
+        # as to a user (nothing else in this app treats a held key as
+        # repeated discrete presses).
+        if (
+            event.key() == Qt.Key.Key_Space
+            and not event.isAutoRepeat()
+            and self.main_tabs.currentIndex() == self._samples_tab_index
+            and not isinstance(
+                QApplication.focusWidget(), (QLineEdit, QAbstractSpinBox, QComboBox)
+            )
+        ):
+            self._on_waveform_preview_requested()
+            event.accept()
+            return
+        super().keyPressEvent(event)
 
     def closeEvent(self, event):
         # a "Hold" preview loop never stops on its own (see

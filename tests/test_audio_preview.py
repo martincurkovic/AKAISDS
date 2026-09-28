@@ -7,6 +7,14 @@
 # tests/test_dashboard.py etc. use for anything that would otherwise need
 # real hardware.
 
+import os
+
+# must be set BEFORE the first QApplication() call below - see
+# test_slice_editor_window.py's own comment on this exact guard for why a
+# file lacking it only runs offscreen by accident (whichever OTHER test
+# module happens to get collected first)
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
 import time
 
 import pytest

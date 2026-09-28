@@ -6,6 +6,22 @@
 # exists there: this widget's job ends at "call export_callback with the
 # right arguments," not at actually talking to a sampler.
 
+import os
+
+# must be set BEFORE the first QApplication() call (below), not just before
+# QMessageBox usage - otherwise this file only ever runs offscreen by
+# accident, when some OTHER test module happens to get collected first and
+# sets this same var process-wide. Standalone (`pytest test_slice_editor_
+# window.py`), or first in collection order, it wouldn't be set at all: a
+# real QMessageBox (export confirmation, several tests below mock it, but
+# the mock only replaces the call - nothing stops the window itself trying
+# to show on whatever platform is active) would pop up on a real desktop,
+# or QApplication() could fail to construct at all on a genuinely headless
+# CI runner with no display server. Same guard several sibling test files
+# already use (test_program_editor_window.py, test_knob.py, etc) - this
+# file was just missing it.
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
 import pytest
 from PySide6.QtWidgets import QApplication
 
@@ -51,6 +67,12 @@ def test_slice_export_names_uppercases_and_strips():
 def test_slice_export_names_are_all_unique_at_the_max_supported_count():
     names = slice_export_names("X", 64)
     assert len(set(names)) == 64
+
+
+def test_slice_export_names_count_one_skips_the_numeric_suffix():
+    # a plain trim/crop (no slice markers) isn't "slice 1 of 1" - see the
+    # function's own docstring
+    assert slice_export_names("break", 1) == ["BREAK"]
 
 
 # --- window construction / info label ---------------------------------------
@@ -159,14 +181,30 @@ def test_generate_equal_slices_confirmed_replaces_existing_markers(qapp, monkeyp
 # --- export guards -----------------------------------------------------------
 
 
-def test_export_with_no_slice_markers_shows_a_message_and_does_not_export(
+def test_export_with_no_slice_markers_exports_the_whole_range_as_one_trim(
     qapp, monkeypatch
 ):
+    # per direct user request: doubles as a plain trimmer - exporting with
+    # NO slice markers at all sends the whole [start, end] region as ONE
+    # sample, not an error case (see SliceEditorWindow's own class
+    # docstring)
     calls = []
-    window = _build_window(export_calls=calls)
+    samples = list(range(-5000, 5000))
+    window = _build_window(samples=samples, export_calls=calls)
+    monkeypatch.setattr(
+        sew.QMessageBox, "question", lambda *a, **k: sew.QMessageBox.StandardButton.Yes
+    )
     monkeypatch.setattr(sew.QMessageBox, "information", lambda *a, **k: None)
+
     window._confirm_export()
-    assert calls == []
+
+    assert len(calls) == 1
+    names, slices, *_ = calls[0]
+    # no "-1" suffix for a single trim - see slice_export_names' own
+    # comment on why
+    assert names == ["SQUARE"]
+    assert len(slices) == 1
+    assert len(slices[0]) == len(samples)
 
 
 def test_export_with_empty_name_shows_a_warning_and_does_not_export(qapp, monkeypatch):

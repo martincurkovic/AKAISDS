@@ -46,7 +46,15 @@ def slice_export_names(base_name, count):
     character longer than slice 10's, an inconsistency nobody asked for and
     that would look like a bug the moment two names in the same export
     don't share a common prefix.
+
+    count == 1 is a plain trim/crop (no slice markers at all - the whole
+    [start, end] region exported as one sample - see SliceEditorWindow's
+    own class docstring on doubling as a trimmer) rather than "slice 1 of
+    1", so it skips the numeric suffix entirely and just returns the
+    base name itself, truncated/uppercased the same way.
     """
+    if count == 1:
+        return [base_name.strip().upper()[:NAME_LENGTH]]
     width = len(str(count))
     suffixes = [f"-{i:0{width}d}" for i in range(1, count + 1)]
     max_suffix_len = max(len(s) for s in suffixes)
@@ -83,6 +91,18 @@ class SliceEditorWindow(QDialog):
     # _open_slice_editor - only enables once has_waveform() is true, the
     # same gate Duplicate Sample uses), plus an "Equal Slices" quick-start
     # and a batch export back to the sampler as one-shot samples.
+    #
+    # Also doubles as a plain trimmer: exporting with NO slice markers at
+    # all (just the start/end trim handles adjusted) sends the whole
+    # [start, end] region as ONE sample, not an error case - per direct
+    # user request, for a quick "just crop this and send it" without
+    # bothering to place any slice markers. slice_export_names skips the
+    # usual "-01" numeric suffix in this case (a single trim isn't "slice
+    # 1 of 1"), and _default_export_confirm_message reads "send X" rather
+    # than "send N slices". core.sample_slicing.slice_samples already
+    # returned exactly this (one slice covering the whole region) for a
+    # markerless export from the start - the only change needed here was
+    # actually letting the call through, not new slicing math.
     #
     # Deliberately an APPLICATION-modal QDialog (opened via .exec(), not
     # .show()) rather than a second free-floating top-level window: the
@@ -321,6 +341,14 @@ class SliceEditorWindow(QDialog):
 
     @staticmethod
     def _default_export_confirm_message(slice_count, names):
+        if slice_count == 1:
+            # no slice markers at all - a plain trim/crop of [start, end],
+            # not "1 slice" (see slice_export_names' own comment on why
+            # this gets no numeric suffix either)
+            return (
+                f'Send "{names[0]}" to the sampler as a new sample? This '
+                "can take a while and will freeze the interface."
+            )
         return (
             f'Send {slice_count} slices to the sampler as new samples '
             f'("{names[0]}".."{names[-1]}")? This can take a while and will '
@@ -328,16 +356,16 @@ class SliceEditorWindow(QDialog):
         )
 
     def _confirm_export(self):
+        # slice_count == 1 (no interior markers at all) is a valid, if
+        # degenerate, export - the whole [start, end] region as a single
+        # plain trim/crop rather than an error case. See this window's own
+        # class docstring on doubling as a trimmer, slice_export_names'
+        # own comment on why that case gets no "-1" suffix, and
+        # core.sample_slicing.slice_samples' own docstring, which already
+        # documented "no markers -> one slice covering the whole region"
+        # as a real, intended case long before anything actually used it.
         markers = self.waveform.slice_markers()
         slice_count = len(markers) + 1
-        if slice_count < 2:
-            QMessageBox.information(
-                self,
-                "Export Slices",
-                "Add at least one slice marker (double-click the waveform, "
-                "or use Equal Slices) before exporting.",
-            )
-            return
 
         base_name = self.name_edit.text().strip()
         if not base_name:
@@ -391,7 +419,10 @@ class SliceEditorWindow(QDialog):
         self._exporting = True
         self.export_progress.setVisible(True)
         self.export_progress.setValue(0)
-        self.status_label.setText(f"Exporting {slice_count} slices...")
+        self.status_label.setText(
+            f'Sending "{names[0]}"...' if slice_count == 1
+            else f"Exporting {slice_count} slices..."
+        )
         QApplication.processEvents()
         try:
             success, message = self._export_callback(
