@@ -532,6 +532,39 @@ def test_a_new_busy_true_during_the_hide_grace_period_cancels_the_hide(editor):
     assert not editor._loading_progress.isHidden()  # never actually hid
 
 
+def test_stale_busy_false_is_ignored_while_the_worker_is_actually_busy_again(
+    editor, monkeypatch
+):
+    # regression test for a real, confirmed UI bug: the progress bar could
+    # show for one frame (or not at all) on the editor's own FIRST load
+    # and then vanish before the load was actually done - the exact
+    # symptom reported, worst on first open specifically. __init__'s own
+    # submit_program_list() chains into _on_programs_loaded, which submits
+    # sample_list/multi_parts from WITHIN its own handler. programs_loaded
+    # and that first job's OWN busy_changed(False) are both emitted from
+    # the worker thread and queued for GUI-thread delivery in that order -
+    # but _on_programs_loaded's submit_*() calls run ON the GUI thread, so
+    # THEIR busy_changed(True) fires synchronously (a same-thread direct
+    # connection needs no queuing) and is handled immediately, jumping
+    # ahead of the already-queued-but-undelivered busy_changed(False).
+    # That stale False then arrives here, after the worker is genuinely
+    # busy again, and used to start the hide countdown anyway -
+    # _busy_hide_timer (150ms) reliably beat the already-running
+    # _busy_show_timer (200ms) and cancelled it outright, hiding the bar
+    # before it ever had a chance to show. is_idle() is stubbed rather
+    # than racing a real background thread to land a submit_*() call
+    # before this check runs, to keep this deterministic.
+    editor._on_worker_busy_changed(True)
+    editor._busy_show_timer.timeout.emit()
+    assert not editor._loading_progress.isHidden()
+
+    monkeypatch.setattr(editor._worker, "is_idle", lambda: False)
+    editor._on_worker_busy_changed(False)  # the stale False
+
+    assert not editor._busy_hide_timer.isActive()
+    assert not editor._loading_progress.isHidden()  # never hid
+
+
 def test_refreshing_from_hardware_reports_one_continuous_busy_span(editor, qapp):
     # regression check for the real worry with this feature: on a fast
     # bridge (fake or demo), the worker thread can race ahead and briefly

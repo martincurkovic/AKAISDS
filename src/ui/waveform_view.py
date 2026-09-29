@@ -1,3 +1,5 @@
+import sys
+
 from PySide6.QtWidgets import QApplication, QWidget, QSizePolicy
 from PySide6.QtGui import QCursor, QPainter, QPen, QColor, QPolygonF
 from PySide6.QtCore import Qt, QEvent, QRectF, QPointF, QTimer, Signal
@@ -10,6 +12,17 @@ _HIT_RADIUS_PX = 6  # how close a click has to land to a marker to grab it
 _HANDLE_SIZE = 5  # the little triangle at each marker line's own end (top
 # for start/end, bottom for loop_start/loop_end - see paintEvent)
 _FINE_DRAG_DIVISOR = 8  # how much slower a Shift-held drag moves
+
+_MACOS = sys.platform == "darwin"
+# macOS fights the warp-the-cursor-back-every-event trick below: the OS
+# re-centers/coalesces cursor-position events shortly after QCursor.setPos()
+# runs, so the drag felt like it had "inertia" and only gained a little
+# extra precision instead of the intended 1/_FINE_DRAG_DIVISOR. Rather than
+# warp at all here, macOS just applies a much bigger plain divisor straight
+# to the raw on-screen delta - less precise than a true infinite-range warp
+# (a very large fine-adjustment can run out of screen space to keep
+# dragging), but it actually behaves the way Shift-drag is supposed to feel.
+_FINE_DRAG_DIVISOR_MACOS = 40
 
 _MIN_ZOOM = 1.0  # the whole sample visible at once
 _ZOOM_STEP = 1.6  # multiplicative factor per wheel notch / zoom button click
@@ -288,6 +301,18 @@ class WaveformView(QWidget):
         # (QCursor.setPos() needs global, not widget-local, coordinates).
         self._fine_active = False
         self._warp_anchor_global = None
+        # safety net alongside hideEvent's own below: if the whole
+        # application loses focus mid-fine-drag (Cmd-Tab, a system dialog,
+        # a second monitor) with no mouseReleaseEvent/hideEvent ever
+        # arriving for this widget, the override cursor _enter_fine_drag
+        # set would otherwise stay stuck on QApplication's global cursor
+        # stack forever, masking every OTHER widget's own setCursor()
+        # app-wide - reported once as "this other widget's hover cursor
+        # is just gone", which wasn't a bug there at all, this is what was
+        # actually hiding it.
+        QApplication.instance().applicationStateChanged.connect(
+            self._on_application_state_changed
+        )
         self._loading = False
         self._zoom = _MIN_ZOOM
         self._view_start = 0
@@ -1114,7 +1139,14 @@ class WaveformView(QWidget):
             elif not fine and self._fine_active:
                 self._exit_fine_drag()
 
-            if self._fine_active:
+            if self._fine_active and _MACOS:
+                # no warp on macOS - see _MACOS's own comment. Just a plain,
+                # larger-divisor delta off the same anchor a non-fine drag
+                # would use.
+                x = event.position().x()
+                dx = (x - self._drag_anchor_x) / _FINE_DRAG_DIVISOR_MACOS
+                self._drag_anchor_x = x
+            elif self._fine_active:
                 # the cursor gets warped back to _warp_anchor_global at the end
                 # of every move event below, so THIS event's global position is
                 # already the delta since the last one - not since drag start.
@@ -1196,6 +1228,9 @@ class WaveformView(QWidget):
         # the user can keep moving the mouse in one direction indefinitely
         # instead of running out of screen and stalling at the edge.
         self._fine_active = True
+        if _MACOS:
+            # no cursor warp/hide on macOS - see _MACOS's own comment
+            return
         self._warp_anchor_global = QCursor.pos()
         QApplication.setOverrideCursor(Qt.CursorShape.BlankCursor)
 
@@ -1204,6 +1239,8 @@ class WaveformView(QWidget):
         # _enter_fine_drag's setOverrideCursor so the app is never left
         # with a permanently invisible cursor
         self._fine_active = False
+        if _MACOS:
+            return
         self._warp_anchor_global = None
         QApplication.restoreOverrideCursor()
 
@@ -1254,6 +1291,12 @@ class WaveformView(QWidget):
             self._exit_fine_drag()
         self._preview_timer.stop()
         super().hideEvent(event)
+
+    def _on_application_state_changed(self, state):
+        # the OTHER safety net - see __init__'s own comment on why this
+        # exists alongside hideEvent above
+        if state != Qt.ApplicationState.ApplicationActive and self._fine_active:
+            self._exit_fine_drag()
 
     def wheelEvent(self, event):
         # frame_count, not samples - zoom/pan are useful in header-only

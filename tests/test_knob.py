@@ -18,7 +18,13 @@ from PySide6.QtWidgets import QApplication
 import math
 
 import ui.knob as knob_module
-from ui.knob import Knob, LogKnob, _DRAG_SENSITIVITY_PX, _FINE_DRAG_DIVISOR
+from ui.knob import (
+    Knob,
+    LogKnob,
+    _DRAG_SENSITIVITY_PX,
+    _FINE_DRAG_DIVISOR,
+    _FINE_DRAG_DIVISOR_MACOS,
+)
 
 
 @pytest.fixture(scope="session")
@@ -158,6 +164,10 @@ def _drag_fine(knob, global_travel, *, anchor_y=1000):
 
 
 def test_fine_drag_needs_far_more_travel_for_the_same_change(qapp, monkeypatch):
+    # forces the warp-based (non-macOS) code path regardless of the host
+    # platform these tests actually run on - see the _MACOS-forced tests
+    # below for the macOS no-warp path's own coverage
+    monkeypatch.setattr(knob_module, "_MACOS", False)
     monkeypatch.setattr(knob_module, "QCursor", _FakeCursor)
     knob = Knob()
     knob.setRange(0, 100)
@@ -172,6 +182,7 @@ def test_fine_drag_needs_far_more_travel_for_the_same_change(qapp, monkeypatch):
 
 
 def test_fine_drag_divisor_times_the_travel_matches_a_normal_drag(qapp, monkeypatch):
+    monkeypatch.setattr(knob_module, "_MACOS", False)
     monkeypatch.setattr(knob_module, "QCursor", _FakeCursor)
     knob = Knob()
     knob.setRange(0, 100)
@@ -183,6 +194,7 @@ def test_fine_drag_divisor_times_the_travel_matches_a_normal_drag(qapp, monkeypa
 
 
 def test_entering_fine_drag_hides_the_cursor_and_releasing_restores_it(qapp, monkeypatch):
+    monkeypatch.setattr(knob_module, "_MACOS", False)
     monkeypatch.setattr(knob_module, "QCursor", _FakeCursor)
     knob = Knob()
     knob.setRange(0, 100)
@@ -205,6 +217,7 @@ def test_entering_fine_drag_hides_the_cursor_and_releasing_restores_it(qapp, mon
 
 
 def test_releasing_shift_mid_drag_exits_fine_mode(qapp, monkeypatch):
+    monkeypatch.setattr(knob_module, "_MACOS", False)
     monkeypatch.setattr(knob_module, "QCursor", _FakeCursor)
     knob = Knob()
     knob.setRange(0, 100)
@@ -227,6 +240,7 @@ def test_releasing_shift_mid_drag_exits_fine_mode(qapp, monkeypatch):
 
 
 def test_hiding_the_knob_mid_fine_drag_restores_the_cursor(qapp, monkeypatch):
+    monkeypatch.setattr(knob_module, "_MACOS", False)
     monkeypatch.setattr(knob_module, "QCursor", _FakeCursor)
     knob = Knob()
     knob.setRange(0, 100)
@@ -243,6 +257,60 @@ def test_hiding_the_knob_mid_fine_drag_restores_the_cursor(qapp, monkeypatch):
     assert QApplication.overrideCursor() is not None
 
     knob.hide()
+
+    assert QApplication.overrideCursor() is None
+
+
+def test_macos_fine_drag_needs_far_more_travel_for_the_same_change(qapp, monkeypatch):
+    # macOS skips the warp-the-cursor-back trick entirely (see
+    # ui/knob.py's own _MACOS comment) - forced here regardless of the
+    # host platform these tests actually run on, same reasoning as the
+    # warp-mode tests above forcing _MACOS False
+    monkeypatch.setattr(knob_module, "_MACOS", True)
+    knob = Knob()
+    knob.setRange(0, 100)
+    knob.setValue(50)
+
+    knob.mousePressEvent(_FakeMouseEvent(1000))
+    shift = Qt.KeyboardModifier.ShiftModifier
+    knob.mouseMoveEvent(_FakeMouseEvent(1000, modifiers=shift))
+    knob.mouseMoveEvent(_FakeMouseEvent(1000 - _DRAG_SENSITIVITY_PX, modifiers=shift))
+    knob.mouseReleaseEvent(_FakeMouseEvent(0))
+
+    assert 50 < knob.value() < 70
+
+
+def test_macos_fine_drag_divisor_times_the_travel_matches_a_normal_drag(qapp, monkeypatch):
+    monkeypatch.setattr(knob_module, "_MACOS", True)
+    knob = Knob()
+    knob.setRange(0, 100)
+    knob.setValue(50)
+
+    knob.mousePressEvent(_FakeMouseEvent(1000))
+    shift = Qt.KeyboardModifier.ShiftModifier
+    knob.mouseMoveEvent(_FakeMouseEvent(1000, modifiers=shift))
+    knob.mouseMoveEvent(
+        _FakeMouseEvent(1000 - _DRAG_SENSITIVITY_PX * _FINE_DRAG_DIVISOR_MACOS, modifiers=shift)
+    )
+    knob.mouseReleaseEvent(_FakeMouseEvent(0))
+
+    assert knob.value() == 100
+
+
+def test_macos_fine_drag_does_not_hide_or_warp_the_cursor(qapp, monkeypatch):
+    monkeypatch.setattr(knob_module, "_MACOS", True)
+    knob = Knob()
+    knob.setRange(0, 100)
+    knob.setValue(50)
+
+    knob.mousePressEvent(_FakeMouseEvent(100))
+    knob.mouseMoveEvent(
+        _FakeMouseEvent(100, modifiers=Qt.KeyboardModifier.ShiftModifier)
+    )
+
+    assert QApplication.overrideCursor() is None
+
+    knob.mouseReleaseEvent(_FakeMouseEvent(0))
 
     assert QApplication.overrideCursor() is None
 

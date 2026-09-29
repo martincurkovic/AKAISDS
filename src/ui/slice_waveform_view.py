@@ -7,6 +7,8 @@ from core.sample_slicing import find_nearest_zero_crossing
 from core.sample_slicing import slice_bounds as _slice_bounds_fn
 from ui import theme
 from ui.waveform_view import (
+    _FINE_DRAG_DIVISOR_MACOS,
+    _MACOS,
     _MIN_ZOOM,
     brighten_for_hover,
     build_envelope,
@@ -91,6 +93,16 @@ class SliceWaveformView(QWidget):
         self._drag_value = 0.0  # float accumulator, same reasoning as WaveformView
         self._fine_active = False
         self._warp_anchor_global = None
+        # safety net alongside hideEvent's own below: if the whole
+        # application loses focus mid-fine-drag (Cmd-Tab, a system dialog,
+        # a second monitor) with no mouseReleaseEvent/hideEvent ever
+        # arriving for this widget, the override cursor _enter_fine_drag
+        # set would otherwise stay stuck on QApplication's global cursor
+        # stack forever, masking every OTHER widget's own setCursor()
+        # app-wide.
+        QApplication.instance().applicationStateChanged.connect(
+            self._on_application_state_changed
+        )
         # click-to-preview: a plain click in empty space (no handle nearby)
         # schedules a preview instead of firing it immediately, deferred by
         # Qt's own double-click interval so that double-clicking to add a
@@ -642,7 +654,12 @@ class SliceWaveformView(QWidget):
             elif not fine and self._fine_active:
                 self._exit_fine_drag()
 
-            if self._fine_active:
+            if self._fine_active and _MACOS:
+                # no warp on macOS - see waveform_view._MACOS's own comment
+                x = event.position().x()
+                dx = (x - self._drag_anchor_x) / _FINE_DRAG_DIVISOR_MACOS
+                self._drag_anchor_x = x
+            elif self._fine_active:
                 current = event.globalPosition()
                 anchor = self._warp_anchor_global
                 if (round(current.x()), round(current.y())) == (
@@ -695,11 +712,15 @@ class SliceWaveformView(QWidget):
 
     def _enter_fine_drag(self):
         self._fine_active = True
+        if _MACOS:
+            return
         self._warp_anchor_global = QCursor.pos()
         QApplication.setOverrideCursor(Qt.CursorShape.BlankCursor)
 
     def _exit_fine_drag(self):
         self._fine_active = False
+        if _MACOS:
+            return
         self._warp_anchor_global = None
         QApplication.restoreOverrideCursor()
 
@@ -776,6 +797,12 @@ class SliceWaveformView(QWidget):
             self._exit_fine_drag()
         self._cancel_pending_preview()
         super().hideEvent(event)
+
+    def _on_application_state_changed(self, state):
+        # the OTHER safety net - see __init__'s own comment on why this
+        # exists alongside hideEvent above
+        if state != Qt.ApplicationState.ApplicationActive and self._fine_active:
+            self._exit_fine_drag()
 
     def wheelEvent(self, event):
         if self._frame_count == 0:

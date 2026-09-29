@@ -2492,6 +2492,32 @@ class ProgramEditorWindow(QMainWindow):
             ):
                 self._busy_show_timer.start()
         else:
+            # a STALE False, already overtaken by real work - ignore it
+            # rather than start the hide countdown at all. This is
+            # reachable, not hypothetical: the very first load
+            # (__init__'s submit_program_list()) chains straight into
+            # _on_programs_loaded submitting sample_list AND multi_parts
+            # from within its own handler. programs_loaded and this job's
+            # own busy_changed(False) are both emitted from the WORKER
+            # thread and queued in that order for GUI-thread delivery -
+            # but _on_programs_loaded's submit_sample_list() call happens
+            # ON the GUI thread, so ITS busy_changed(True) fires
+            # SYNCHRONOUSLY (a same-thread direct connection, no queuing)
+            # and is handled immediately, jumping ahead of the
+            # already-queued-but-not-yet-delivered busy_changed(False)
+            # from program_list's own completion. That stale False then
+            # arrives here, after the worker is legitimately busy again,
+            # and would start the hide countdown anyway - _busy_hide_timer
+            # (150ms) reliably beats _busy_show_timer (200ms, already
+            # running) to the finish line and cancels it outright, so the
+            # bar never gets a chance to show at all for the very
+            # sequence a user most wants to see it for (the editor's own
+            # first load). is_idle() is checked live here rather than
+            # trusted from the event's own stale payload, same reasoning
+            # ProgramEditorWindow._reconnect_shared_bridge already uses it
+            # for.
+            if not self._worker.is_idle():
+                return
             # not hidden immediately - _confirm_worker_idle only actually
             # hides once this fires without a new busy_changed(True)
             # cancelling it first (see the comment on these two timers above)

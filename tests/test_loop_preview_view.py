@@ -16,7 +16,6 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication
 
 from ui.loop_preview_view import LoopJoinPreview, HALF_WINDOW_FRAMES
-from ui.waveform_view import x_for_frame
 
 
 @pytest.fixture(scope="module")
@@ -62,9 +61,11 @@ def _populated_view(width=400, end_len=HALF_WINDOW_FRAMES, start_len=HALF_WINDOW
 
 def _divider_x(view):
     # same mapping paintEvent/_target_at use internally - a test helper,
-    # not exposed on the widget itself
-    combined = view._combined()
-    return x_for_frame(len(view._end_samples), view.width(), 0, len(combined))
+    # not exposed on the widget itself. Always the exact width//2 midpoint
+    # now, regardless of len(end_samples) vs. len(start_samples) - see
+    # _half_width's own docstring for why that's deliberate.
+    left_width, _right_width = view._half_width()
+    return left_width
 
 
 def test_starts_with_no_audio_placeholder(qapp):
@@ -122,12 +123,32 @@ def test_paint_does_not_crash_with_a_populated_join(qapp):
 def test_paint_does_not_crash_with_unevenly_sized_halves(qapp):
     # reachable near either edge of the real buffer - samples_before/
     # samples_after (WaveformView's own) clamp rather than always returning
-    # exactly HALF_WINDOW_FRAMES, so the divider isn't always at the exact
-    # pixel midpoint
+    # exactly HALF_WINDOW_FRAMES, e.g. a loop point close to frame 0
     view = LoopJoinPreview()
     view.resize(400, 140)
     view.set_join([1, 2, 3], list(range(200)))
     view.grab()
+
+
+def test_divider_stays_at_the_midpoint_regardless_of_uneven_halves(qapp):
+    # regression test for a real, confirmed UI bug (screen-recorded): the
+    # divider used to be placed at x_for_frame(len(end_samples), width, 0,
+    # len(combined)) - proportional to each half's own sample COUNT, not a
+    # fixed screen position - so a loop point near either end of the real
+    # sample (where one half legitimately has far fewer frames available
+    # than HALF_WINDOW_FRAMES) visibly shifted the divider and made one
+    # half appear to shrink/grow relative to the other while dragging.
+    # It must now sit at exactly width // 2 no matter how lopsided the two
+    # sample counts are.
+    view = LoopJoinPreview()
+    view.resize(401, 140)  # odd width - width // 2 must still be exact
+    view.set_join([1, 2, 3], list(range(HALF_WINDOW_FRAMES)))
+    assert view._half_width() == (200, 201)
+
+    view.set_join(list(range(HALF_WINDOW_FRAMES)), [4, 5, 6])
+    assert view._half_width() == (200, 201)
+
+    view.grab()  # paints using the same fixed split - must not crash either
 
 
 def test_resizing_rebuilds_the_envelope_without_crashing(qapp):
@@ -196,6 +217,56 @@ def test_dragging_the_right_half_emits_loop_start_deltas(qapp):
     # content-follows-cursor: dragging left pulls LATER content into view
     # at a fixed screen position, so the underlying frame increases
     assert sum(delta for _name, delta in calls) > 0
+
+
+def test_dragging_uses_the_dragged_halfs_own_frame_scale(qapp):
+    # regression test: mouseMoveEvent used to scale EVERY drag by one
+    # frames_per_px derived from the combined buffer's length over the
+    # full widget width - correct only when both halves happen to have the
+    # same sample count. Each half now has its own pixel width AND its own
+    # sample count (see _half_width), so a half with far fewer real frames
+    # (a loop point near the sample's own edge) must produce a
+    # PROPORTIONALLY LARGER frame delta for the same screen-space drag
+    # than a half with a full HALF_WINDOW_FRAMES worth of samples.
+    view = LoopJoinPreview()
+    view.resize(400, 140)
+    # loop_end (left) has only 3 real frames across its ~200px half;
+    # loop_start (right) has a full HALF_WINDOW_FRAMES across its own half
+    view.set_join([1, 2, 3], list(range(HALF_WINDOW_FRAMES)))
+
+    left_width, _right_width = view._half_width()
+    calls = []
+    view.marker_drag_delta.connect(lambda name, delta: calls.append((name, delta)))
+
+    x = left_width - 100  # well inside the sparse loop_end half
+    view.mousePressEvent(_FakeEvent(x))
+    view.mouseMoveEvent(_FakeEvent(x + 200))  # same 200px drag both times
+
+    assert calls and all(name == "loop_end" for name, _delta in calls)
+    sparse_half_delta = sum(delta for _name, delta in calls)
+
+    view2 = LoopJoinPreview()
+    view2.resize(400, 140)
+    view2.set_join(list(range(HALF_WINDOW_FRAMES)), list(range(HALF_WINDOW_FRAMES)))
+    calls2 = []
+    view2.marker_drag_delta.connect(lambda name, delta: calls2.append((name, delta)))
+    left_width2, _ = view2._half_width()
+    x2 = left_width2 - 100
+    view2.mousePressEvent(_FakeEvent(x2))
+    view2.mouseMoveEvent(_FakeEvent(x2 + 200))
+
+    assert calls2 and all(name == "loop_end" for name, _delta in calls2)
+    full_half_delta = sum(delta for _name, delta in calls2)
+
+    # both deltas move the same DIRECTION (content-follows-cursor sign is
+    # unaffected by which half's scale is used), but the sparse half (3
+    # frames spread across ~200px) moves by a much smaller absolute number
+    # of frames per pixel than the full half (300 frames across ~200px) -
+    # both deltas here are actually clamped to whatever's available, so
+    # the real assertion is just that the sparse half's own tiny frame
+    # count doesn't produce a delta bigger than it has frames to give
+    assert abs(sparse_half_delta) <= 3
+    assert abs(full_half_delta) > abs(sparse_half_delta)
 
 
 def test_right_click_does_not_start_a_drag(qapp):

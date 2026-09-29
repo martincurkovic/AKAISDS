@@ -1,4 +1,5 @@
 import math
+import sys
 from PySide6.QtWidgets import QApplication, QDial, QLineEdit
 from PySide6.QtGui import QCursor, QPainter, QPen, QColor, QIntValidator
 from PySide6.QtCore import Qt, QPointF
@@ -15,6 +16,14 @@ _DRAG_SENSITIVITY_PX = 150
 # independent constant here rather than a shared import so this widget
 # doesn't need to depend on that module for one number
 _FINE_DRAG_DIVISOR = 8
+
+_MACOS = sys.platform == "darwin"
+# no cursor-warp on macOS - same reasoning as WaveformView's own _MACOS/
+# _FINE_DRAG_DIVISOR_MACOS (ui/waveform_view.py): the OS fights the
+# warp-back-every-event trick, which is what made this feel like it had
+# "inertia" with barely any extra precision. A plain, much larger divisor
+# on the raw delta instead.
+_FINE_DRAG_DIVISOR_MACOS = 40
 
 _TYPE_EDIT_SIZE = (52, 22)
 
@@ -72,6 +81,16 @@ class Knob(QDial):
         # mechanism/reasoning as WaveformView's own fine-drag marker editing
         self._fine_active = False
         self._warp_anchor_global = None
+        # safety net alongside hideEvent's own below: if the whole
+        # application loses focus mid-fine-drag (Cmd-Tab, a system dialog,
+        # a second monitor) with no mouseReleaseEvent/hideEvent ever
+        # arriving for this widget, the override cursor _enter_fine_drag
+        # set would otherwise stay stuck on QApplication's global cursor
+        # stack forever, masking every OTHER widget's own setCursor()
+        # app-wide.
+        QApplication.instance().applicationStateChanged.connect(
+            self._on_application_state_changed
+        )
 
     def _value_to_fraction(self, value):
         # linear by default - LogKnob overrides this (and its inverse
@@ -164,7 +183,12 @@ class Knob(QDial):
         elif not fine and self._fine_active:
             self._exit_fine_drag()
 
-        if self._fine_active:
+        if self._fine_active and _MACOS:
+            # no warp on macOS - see _MACOS's own comment above
+            y = event.position().y()
+            dy = (self._drag_anchor_y - y) / _FINE_DRAG_DIVISOR_MACOS
+            self._drag_anchor_y = y
+        elif self._fine_active:
             # the cursor gets warped back to _warp_anchor_global at the end
             # of this branch, so THIS event's global position is already
             # the delta since the last one - not since drag start. The warp
@@ -218,6 +242,8 @@ class Knob(QDial):
         # is the same trick WaveformView's own fine-drag marker editing
         # uses, so the mouse never runs out of screen and stalls mid-drag.
         self._fine_active = True
+        if _MACOS:
+            return
         self._warp_anchor_global = QCursor.pos()
         QApplication.setOverrideCursor(Qt.CursorShape.BlankCursor)
 
@@ -226,6 +252,8 @@ class Knob(QDial):
         # _enter_fine_drag's setOverrideCursor so the app is never left
         # with a permanently invisible cursor
         self._fine_active = False
+        if _MACOS:
+            return
         self._warp_anchor_global = None
         QApplication.restoreOverrideCursor()
 
@@ -245,6 +273,12 @@ class Knob(QDial):
         if self._fine_active:
             self._exit_fine_drag()
         super().hideEvent(event)
+
+    def _on_application_state_changed(self, state):
+        # the OTHER safety net - see __init__'s own comment on why this
+        # exists alongside hideEvent above
+        if state != Qt.ApplicationState.ApplicationActive and self._fine_active:
+            self._exit_fine_drag()
 
     def wheelEvent(self, event):
         # QAbstractSlider's own wheelEvent (inherited via QDial) only
