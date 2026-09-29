@@ -24,11 +24,46 @@ from ui.waveform_view import (
     _MARKER_ORDER,
     WaveformView,
     _bridge_envelope_gaps,
+    brighten_for_hover,
     build_envelope,
     frame_for_x,
     push_marker,
     x_for_frame,
 )
+
+
+# --- brighten_for_hover -------------------------------------------------------
+# used by both WaveformView and SliceWaveformView (imported there) for
+# marker hover/drag feedback - pure QColor-in/QColor-out, no widget needed.
+
+
+def test_brighten_for_hover_lightens_in_dark_mode():
+    dark_bg_palette = {"bg_input": "#2a2a35"}  # theme.DARK_PALETTE's own value
+    base = QColor("#199e70")  # keygroup_color_3, dark theme
+    brighter = brighten_for_hover(base, dark_bg_palette)
+    assert brighter.lightness() > base.lightness()
+
+
+def test_brighten_for_hover_darkens_in_light_mode():
+    # the mirror image is correct here, not a bug - lightening further
+    # against an already-light background would wash the colour out
+    # instead of making it pop (see the function's own docstring)
+    light_bg_palette = {"bg_input": "#ffffff"}  # theme.LIGHT_PALETTE's own value
+    base = QColor("#1baf7a")  # keygroup_color_3, light theme
+    darker = brighten_for_hover(base, light_bg_palette)
+    assert darker.lightness() < base.lightness()
+
+
+def test_brighten_for_hover_never_clips_a_light_colour_to_solid_white():
+    # a flat lightness multiplier used to blow an already-fairly-light
+    # colour straight to #ffffff, losing its own hue entirely - blending
+    # only ever approaches white asymptotically, so it never fully gets
+    # there
+    dark_bg_palette = {"bg_input": "#2a2a35"}
+    base = QColor("#9085e9")  # keygroup_color_7, dark theme - already fairly light
+    brighter = brighten_for_hover(base, dark_bg_palette)
+    assert brighter != QColor("#ffffff")
+    assert brighter.hue() == base.hue()  # hue survives - same colour, just brighter
 
 
 # --- build_envelope ------------------------------------------------------------
@@ -458,6 +493,75 @@ def test_cycling_only_covers_markers_actually_in_the_stack(qapp):
     assert first != second
 
 
+# --- WaveformView: hover feedback -------------------------------------------
+# "if you click now, this is what you'll grab" - a marker near enough to the
+# cursor to be draggable should look different (brighter, solid line, bigger
+# handle - see paintEvent) before the user ever actually clicks.
+
+
+def test_hovering_near_a_marker_sets_hover_marker(qapp):
+    view = WaveformView()
+    view.resize(400, 180)
+    view.set_header(10000, start=0, loop_start=3000, loop_end=7000, end=9999)
+    view.mouseMoveEvent(_FakeMoveEvent(view._x_for("start")))
+    assert view._hover_marker == "start"
+
+
+def test_hovering_empty_space_clears_hover_marker(qapp):
+    view = WaveformView()
+    view.resize(400, 180)
+    view.set_header(10000, start=0, loop_start=3000, loop_end=7000, end=9999)
+    view.mouseMoveEvent(_FakeMoveEvent(view._x_for("start")))
+    assert view._hover_marker == "start"
+    view.mouseMoveEvent(_FakeMoveEvent(200))  # nowhere near a marker
+    assert view._hover_marker is None
+
+
+def test_hover_does_not_fire_while_dragging_a_different_marker(qapp):
+    # mouseMoveEvent's hover branch only runs when NOT dragging - moving the
+    # mouse mid-drag must keep updating the DRAGGED marker, never silently
+    # swap in a hover read instead
+    view = WaveformView()
+    view.resize(400, 180)
+    view.set_header(10000, start=0, loop_start=3000, loop_end=7000, end=9999)
+    view.mousePressEvent(_FakePressEvent(view._x_for("start")))
+    assert view._dragging == "start"
+    view.mouseMoveEvent(_FakeMoveEvent(view._x_for("end")))
+    assert view._hover_marker is None  # untouched - the move fed the drag instead
+    assert view._dragging == "start"
+
+
+def test_leave_event_clears_hover_marker(qapp):
+    view = WaveformView()
+    view.resize(400, 180)
+    view.set_header(10000, start=0, loop_start=3000, loop_end=7000, end=9999)
+    view.mouseMoveEvent(_FakeMoveEvent(view._x_for("start")))
+    assert view._hover_marker == "start"
+    view.leaveEvent(None)
+    assert view._hover_marker is None
+
+
+def test_release_sets_hover_marker_to_the_just_released_one(qapp):
+    # so it doesn't flash back to the dim/dashed look for one repaint before
+    # the next real mouseMoveEvent notices the cursor is still right there
+    view = WaveformView()
+    view.resize(400, 180)
+    view.set_header(10000, start=0, loop_start=3000, loop_end=7000, end=9999)
+    x = view._x_for("loop_start")
+    view.mousePressEvent(_FakePressEvent(x))
+    view.mouseReleaseEvent(_FakePressEvent(x))
+    assert view._hover_marker == "loop_start"
+
+
+def test_paint_does_not_crash_with_a_marker_hovered(qapp):
+    view = WaveformView()
+    view.resize(400, 180)
+    view.set_header(10000, start=0, loop_start=3000, loop_end=7000, end=9999)
+    view.mouseMoveEvent(_FakeMoveEvent(view._x_for("loop_end")))
+    assert view._hover_marker == "loop_end"
+    view.grab()
+
+
 def test_dragging_a_marker_away_and_pressing_the_stack_again_finds_the_rest(qapp):
     # the actual escape hatch this feature exists for: peel one marker off
     # a stack, then the remaining ones must still be reachable
@@ -776,6 +880,22 @@ def test_paint_does_not_crash_at_high_zoom_with_only_one_sample_loaded(qapp):
         view.zoom_in()
     view.begin_live_capture()
     view.append_live_samples([100])
+    view.grab()
+
+
+def test_paint_does_not_crash_with_all_markers_stacked_on_the_default_header(qapp):
+    # real hardware's own default header - start=0, end=last frame, and
+    # BOTH loop markers on top of end too - used to be genuinely invisible
+    # (all four markers drew an identical full-height line + top handle at
+    # the same x, so three of the four were completely hidden behind
+    # whichever _MARKER_ORDER happened to paint last). See paintEvent's own
+    # comment on why loop markers now get a bottom-anchored handle/line
+    # segment instead, painted after start/end so it stays visible even
+    # fully stacked - this is a crash-guard for that new code path,
+    # exercising the exact reported scenario.
+    view = WaveformView()
+    view.resize(400, 180)
+    view.set_header(1000, start=0, loop_start=999, loop_end=999, end=999)
     view.grab()
 
 

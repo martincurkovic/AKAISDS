@@ -202,6 +202,70 @@ def test_double_click_on_start_or_end_does_not_delete_the_edge(qapp):
     assert view.slice_markers() == [2000]
 
 
+# --- hover feedback ----------------------------------------------------------
+# "if you click now, this is what you'll grab" - same feature/reasoning as
+# WaveformView's own (see its test file's own section comment), reusing the
+# same brighten_for_hover helper.
+
+
+def test_hovering_near_start_sets_hover_target(qapp):
+    view = _view(1000)
+    view.mouseMoveEvent(_FakeEvent(view._x_for(0)))
+    assert view._hover_target == ("start", None)
+
+
+def test_hovering_near_a_marker_sets_hover_target(qapp):
+    view = _view(1000, markers=[500])
+    view.mouseMoveEvent(_FakeEvent(view._x_for(500)))
+    assert view._hover_target == ("marker", 500)
+
+
+def test_hovering_empty_space_clears_hover_target(qapp):
+    view = _view(1000, markers=[500])
+    view.mouseMoveEvent(_FakeEvent(view._x_for(500)))
+    assert view._hover_target == ("marker", 500)
+    view.mouseMoveEvent(_FakeEvent(view._x_for(200)))  # nowhere near a target
+    assert view._hover_target is None
+
+
+def test_hover_does_not_fire_while_dragging(qapp):
+    view = _view(1000, markers=[500])
+    view.mousePressEvent(_FakeEvent(view._x_for(500)))
+    assert view._dragging == ("marker", 500)
+    view.mouseMoveEvent(_FakeEvent(view._x_for(0)))
+    assert view._hover_target is None  # untouched - the move fed the drag instead
+
+
+def test_leave_event_clears_hover_target(qapp):
+    view = _view(1000, markers=[500])
+    view.mouseMoveEvent(_FakeEvent(view._x_for(500)))
+    assert view._hover_target == ("marker", 500)
+    view.leaveEvent(None)
+    assert view._hover_target is None
+
+
+def test_release_sets_hover_target_to_the_just_released_marker(qapp):
+    # using its POST-snap position, not the raw pre-release one - see
+    # mouseReleaseEvent's own comment
+    samples = _sine(4000, period=200)
+    view = SliceWaveformView()
+    view.resize(400, 220)
+    view.set_waveform(samples, 0, 3999, [1000])
+    x = view._x_for(1000)
+    view.mousePressEvent(_FakeEvent(x))
+    view.mouseMoveEvent(_FakeEvent(x + 1))
+    view.mouseReleaseEvent(_FakeEvent(x + 1))
+    landed = view.slice_markers()[0]
+    assert view._hover_target == ("marker", landed)
+
+
+def test_paint_does_not_crash_with_a_target_hovered(qapp):
+    view = _view(1000, markers=[500])
+    view.mouseMoveEvent(_FakeEvent(view._x_for(500)))
+    assert view._hover_target == ("marker", 500)
+    view.grab()
+
+
 # --- dragging: start/end edges never cross a marker, markers never cross ---
 # their neighbours - a clamp, not a push (see the widget's own docstring)
 

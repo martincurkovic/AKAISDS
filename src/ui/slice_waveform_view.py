@@ -6,7 +6,13 @@ from core import debug_log
 from core.sample_slicing import find_nearest_zero_crossing
 from core.sample_slicing import slice_bounds as _slice_bounds_fn
 from ui import theme
-from ui.waveform_view import _MIN_ZOOM, build_envelope, frame_for_x, x_for_frame
+from ui.waveform_view import (
+    _MIN_ZOOM,
+    brighten_for_hover,
+    build_envelope,
+    frame_for_x,
+    x_for_frame,
+)
 
 # Loop-editor look-and-feel constants mirrored from waveform_view.py (kept
 # separate rather than imported - this widget's marker model is genuinely
@@ -73,6 +79,14 @@ class SliceWaveformView(QWidget):
         self._zoom = _MIN_ZOOM
         self._view_start = 0
         self._dragging = None  # "start" / "end" / ("marker", index) / None
+        # which (kind, key) target - same shape _nearest_hit_target returns -
+        # the cursor is currently near enough to grab, updated on every
+        # mouseMoveEvent while NOT dragging (setMouseTracking above is what
+        # makes move events arrive with no button held at all), cleared on
+        # leaveEvent. Purely a paintEvent hint (brighter, solid line instead
+        # of dashed - see _draw_marker_line) - _nearest_hit_target is still
+        # the actual authority mousePressEvent itself consults.
+        self._hover_target = None
         self._drag_anchor_x = 0.0
         self._drag_value = 0.0  # float accumulator, same reasoning as WaveformView
         self._fine_active = False
@@ -128,6 +142,7 @@ class SliceWaveformView(QWidget):
         self._zoom = _MIN_ZOOM
         self._view_start = 0
         self._dragging = None
+        self._hover_target = None
         self._rebuild_envelope()
         self.update()
         self._emit_markers_changed()
@@ -297,13 +312,20 @@ class SliceWaveformView(QWidget):
         painter.setPen(pen)
         painter.drawLine(QPointF(0, mid_y), QPointF(self.width(), mid_y))
 
-    def _draw_marker_line(self, painter, frame, color):
+    def _draw_marker_line(self, painter, frame, color, target, palette):
         if not self._visible(frame):
             return
         x = self._x_for(frame)
+        # "you can grab this" feedback - active while actually being dragged
+        # too, not just hovered (same reasoning as WaveformView's own
+        # is_active - see its own comment)
+        is_active = target == self._hover_target or target == self._dragging
+        if is_active:
+            color = brighten_for_hover(color, palette)
+        handle_size = _HANDLE_SIZE * 1.5 if is_active else _HANDLE_SIZE
         pen = QPen(color)
-        pen.setWidthF(1.5)
-        pen.setStyle(Qt.PenStyle.DashLine)
+        pen.setWidthF(2.0 if is_active else 1.5)
+        pen.setStyle(Qt.PenStyle.SolidLine if is_active else Qt.PenStyle.DashLine)
         painter.setPen(pen)
         painter.drawLine(QPointF(x, 0), QPointF(x, self.height()))
         painter.setBrush(color)
@@ -311,9 +333,9 @@ class SliceWaveformView(QWidget):
         painter.drawPolygon(
             QPolygonF(
                 [
-                    QPointF(x - _HANDLE_SIZE, 0),
-                    QPointF(x + _HANDLE_SIZE, 0),
-                    QPointF(x, _HANDLE_SIZE * 1.6),
+                    QPointF(x - handle_size, 0),
+                    QPointF(x + handle_size, 0),
+                    QPointF(x, handle_size * 1.6),
                 ]
             )
         )
@@ -400,10 +422,14 @@ class SliceWaveformView(QWidget):
 
         boundary_color = QColor(palette["keygroup_color_2"])
         marker_color = QColor(palette["keygroup_color_7"])
-        self._draw_marker_line(painter, self._start, boundary_color)
-        self._draw_marker_line(painter, self._end, boundary_color)
+        self._draw_marker_line(
+            painter, self._start, boundary_color, ("start", None), palette
+        )
+        self._draw_marker_line(
+            painter, self._end, boundary_color, ("end", None), palette
+        )
         for m in self._markers:
-            self._draw_marker_line(painter, m, marker_color)
+            self._draw_marker_line(painter, m, marker_color, ("marker", m), palette)
 
         self._draw_slice_labels(painter, palette)
         self._draw_playhead_line(painter, palette)
@@ -600,6 +626,14 @@ class SliceWaveformView(QWidget):
 
     def mouseMoveEvent(self, event):
         if self._dragging is None:
+            # not dragging - just update the hover hint (see _hover_target's
+            # own comment). Reuses the exact same hit-test mousePressEvent
+            # itself consults, so hovering always agrees with what clicking
+            # would do.
+            hovered = self._nearest_hit_target(event.position().x())
+            if hovered != self._hover_target:
+                self._hover_target = hovered
+                self.update()
             return
         try:
             fine = bool(event.modifiers() & Qt.KeyboardModifier.ShiftModifier)
@@ -689,12 +723,14 @@ class SliceWaveformView(QWidget):
                 )
                 upper = (min(self._markers) if self._markers else self._end) - 1
                 self._start = max(0, min(max(0, upper), snapped))
+                final_target = ("start", None)
             elif kind == "end":
                 snapped = find_nearest_zero_crossing(
                     self._samples, self._end, _ZERO_CROSSING_SEARCH_RADIUS
                 )
                 lower = (max(self._markers) if self._markers else self._start) + 1
                 self._end = min(self._frame_count - 1, max(lower, snapped))
+                final_target = ("end", None)
             else:
                 idx = self._markers.index(key)
                 lower = (self._markers[idx - 1] if idx > 0 else self._start) + 1
@@ -707,6 +743,14 @@ class SliceWaveformView(QWidget):
                     self._samples, key, _ZERO_CROSSING_SEARCH_RADIUS
                 )
                 self._markers[idx] = max(lower, min(upper, snapped))
+                final_target = ("marker", self._markers[idx])
+            # the just-released marker is still (most likely) right under
+            # the cursor - reflects that immediately using its POST-snap
+            # position, rather than waiting for the next mouseMoveEvent to
+            # notice (which would otherwise leave it looking neither
+            # dragged nor hovered for one repaint - same reasoning as
+            # WaveformView's own mouseReleaseEvent)
+            self._hover_target = final_target
             self.update()
             self._emit_markers_changed()
         except Exception:
@@ -717,6 +761,15 @@ class SliceWaveformView(QWidget):
                 "SliceWaveformView.mouseReleaseEvent: unexpected error",
                 exc_info=True,
             )
+
+    def leaveEvent(self, event):
+        # the mouse left the widget entirely - mouseMoveEvent won't fire
+        # again to naturally clear a stale hover highlight, so this is the
+        # only place that can
+        if self._hover_target is not None:
+            self._hover_target = None
+            self.update()
+        super().leaveEvent(event)
 
     def hideEvent(self, event):
         if self._fine_active:

@@ -7,7 +7,8 @@ from ui import theme
 
 _BORDER_RADIUS = 4  # matches envelope_graph.py's own card-edge radius
 _HIT_RADIUS_PX = 6  # how close a click has to land to a marker to grab it
-_HANDLE_SIZE = 5  # the little triangle at the top of each marker line
+_HANDLE_SIZE = 5  # the little triangle at each marker line's own end (top
+# for start/end, bottom for loop_start/loop_end - see paintEvent)
 _FINE_DRAG_DIVISOR = 8  # how much slower a Shift-held drag moves
 
 _MIN_ZOOM = 1.0  # the whole sample visible at once
@@ -117,6 +118,45 @@ def x_for_frame(frame, width, view_start, view_length):
     return ((frame - view_start) / (view_length - 1)) * (width - 1)
 
 
+def brighten_for_hover(color, palette):
+    """A vivid variant of *color*, for "you can grab this" hover/drag
+    feedback on a marker - reused by SliceWaveformView too (imported
+    alongside build_envelope/frame_for_x/x_for_frame) rather than each
+    widget hand-picking its own hover colour per marker colour per theme,
+    since between the two widgets there are four distinct base marker
+    colours (this file's own boundary/loop colours, SliceWaveformView's
+    start-end/interior-marker colours) - a computed adjustment covers all
+    of them without four hand-tuned hex pairs to keep in sync.
+
+    Brightening only reads as "lit up" in a dark UI - the same lightness
+    bump in a LIGHT UI would wash the colour out against the already-light
+    background instead, so which direction actually increases contrast
+    depends on the palette currently in use, not a fixed formula. Detected
+    from the palette's own bg_input lightness (never re-derived from the
+    OS colour scheme directly - see theme.current_palette's own docstring
+    on why there is exactly one source of truth for that).
+    """
+    is_dark = QColor(palette["bg_input"]).lightness() < 128
+    c = QColor(color)
+    h, s, l, a = c.getHsl()
+    if is_dark:
+        # blend PARTWAY toward white rather than a flat multiplier - a
+        # multiplier on lightness alone clips an already-fairly-light
+        # colour (e.g. the purple-ish keygroup_color_7) straight to solid
+        # white, losing its own hue entirely; blending only ever approaches
+        # white asymptotically, so the base colour's own identity survives
+        l = int(l + (255 - l) * 0.35)
+        s = min(255, int(s * 1.15) + 10)
+    else:
+        # mirror image for a light UI: blending toward WHITE here would
+        # wash a colour out against an already-light background instead of
+        # making it pop, so this blends partway toward black instead
+        l = int(l * 0.65)
+        s = min(255, int(s * 1.2) + 10)
+    c.setHsl(h, s, l, a)
+    return c
+
+
 def push_marker(order, index, frame, values, frame_count):
     """Moves the marker at order[index] to frame (clamped to the whole
     sample's own bounds, [0, frame_count - 1] - independent of the current
@@ -223,6 +263,14 @@ class WaveformView(QWidget):
         self._frame_count = 0
         self._markers = {name: 0 for name in _MARKER_ORDER}
         self._dragging = None
+        # which marker (if any) the cursor is currently near enough to grab -
+        # updated on every mouseMoveEvent while NOT dragging (setMouseTracking
+        # above is what makes move events arrive with no button held at all),
+        # cleared on leaveEvent. Purely a paintEvent hint (brighter, solid
+        # line instead of dashed - see _marker_colors/paintEvent) for "if you
+        # click now, this is what you'll grab" - _markers_within_hit_radius
+        # is still the actual authority mousePressEvent itself consults.
+        self._hover_marker = None
         self._drag_anchor_x = 0.0
         self._drag_value = 0.0  # float accumulator - see mouseMoveEvent
         # click-to-cycle: which marker a press near this same stack of
@@ -791,7 +839,31 @@ class WaveformView(QWidget):
         colors = self._marker_colors(palette)
         view_start = self._view_start
         view_length = self._view_length()
-        for name in _MARKER_ORDER:
+        # real hardware's own default header is start=0, end=last frame,
+        # loop_start=loop_end=end - all four markers stacked on the exact
+        # same frame, which used to be genuinely invisible: every marker
+        # drew the same full-height dashed line and a handle triangle at
+        # the same spot (the top), so three of the four markers were
+        # completely hidden behind whichever one _MARKER_ORDER happened to
+        # paint last, with nothing on screen to suggest they were even
+        # there. Reported directly - a real "why can't I see the loop
+        # markers" case, not a hit-testing bug (_markers_within_hit_radius/
+        # the click-to-cycle behaviour already handled the stacked case
+        # fine; only the PAINT side had nothing to show for it).
+        #
+        # Fixed by giving loop_start/loop_end a visually distinct anchor
+        # from start/end, always (not just when they happen to coincide) -
+        # both marker kinds draw the same full-height dashed line, but
+        # boundary markers get a handle triangle at the TOP while loop
+        # markers get one at the BOTTOM. Painting boundary markers first,
+        # THEN loop markers (regardless of _MARKER_ORDER's own start/
+        # loop_start/loop_end/end sequence, which stays as-is for
+        # push_marker/hit-testing tie-breaking) means a loop marker's
+        # handle is always drawn on top rather than getting painted over -
+        # so even fully stacked, the loop marker's own colour and handle
+        # remain visible at the bottom instead of disappearing behind
+        # "end"'s handle at the top.
+        for name in ("start", "end", "loop_start", "loop_end"):
             # no loop on the current sample's SPTYPE - see set_loop_enabled
             # - the loop markers don't just grey out, they don't draw at
             # all, same as they can't be dragged (_markers_within_hit_
@@ -804,19 +876,32 @@ class WaveformView(QWidget):
             if frame < view_start or frame > view_start + view_length - 1:
                 continue
             x = self._x_for(name)
-            pen = QPen(colors[name])
-            pen.setWidthF(1.5)
-            pen.setStyle(Qt.PenStyle.DashLine)
+            is_loop = name in ("loop_start", "loop_end")
+            # "you can grab this" feedback - active while actually being
+            # dragged too, not just hovered, so releasing without first
+            # moving the mouse again doesn't flash back to the dim/dashed
+            # look for one frame (mouseReleaseEvent sets _hover_marker to
+            # match for exactly this reason)
+            is_active = name == self._hover_marker or name == self._dragging
+            color = brighten_for_hover(colors[name], palette) if is_active else colors[name]
+            handle_size = _HANDLE_SIZE * 1.5 if is_active else _HANDLE_SIZE
+            pen = QPen(color)
+            pen.setWidthF(2.0 if is_active else 1.5)
+            pen.setStyle(Qt.PenStyle.SolidLine if is_active else Qt.PenStyle.DashLine)
             painter.setPen(pen)
             painter.drawLine(QPointF(x, 0), QPointF(x, self.height()))
-            painter.setBrush(colors[name])
+            painter.setBrush(color)
             painter.setPen(Qt.PenStyle.NoPen)
+            handle_y = self.height() if is_loop else 0
+            handle_tip_y = (
+                self.height() - handle_size * 1.6 if is_loop else handle_size * 1.6
+            )
             painter.drawPolygon(
                 QPolygonF(
                     [
-                        QPointF(x - _HANDLE_SIZE, 0),
-                        QPointF(x + _HANDLE_SIZE, 0),
-                        QPointF(x, _HANDLE_SIZE * 1.6),
+                        QPointF(x - handle_size, handle_y),
+                        QPointF(x + handle_size, handle_y),
+                        QPointF(x, handle_tip_y),
                     ]
                 )
             )
@@ -957,6 +1042,15 @@ class WaveformView(QWidget):
 
     def mouseMoveEvent(self, event):
         if self._dragging is None:
+            # not dragging - just update the hover hint (see _hover_marker's
+            # own comment). Closest candidate within the same hit radius a
+            # click would actually grab, same helper mousePressEvent uses,
+            # so hovering always agrees with what clicking would do.
+            candidates = self._markers_within_hit_radius(event.position().x())
+            hovered = candidates[0] if candidates else None
+            if hovered != self._hover_marker:
+                self._hover_marker = hovered
+                self.update()
             return
         fine = bool(event.modifiers() & Qt.KeyboardModifier.ShiftModifier)
 
@@ -1051,10 +1145,25 @@ class WaveformView(QWidget):
             self._exit_fine_drag()
         which = self._dragging
         self._dragging = None
+        # the just-released marker is still (most likely) right under the
+        # cursor - reflects that immediately rather than waiting for the
+        # next mouseMoveEvent to notice, which would otherwise leave the
+        # marker looking neither dragged nor hovered for one repaint
+        self._hover_marker = which
+        self.update()
         m = self._markers
         self.marker_committed.emit(
             which, m["start"], m["loop_start"], m["loop_end"], m["end"]
         )
+
+    def leaveEvent(self, event):
+        # the mouse left the widget entirely - mouseMoveEvent won't fire
+        # again to naturally clear a stale hover highlight, so this is the
+        # only place that can
+        if self._hover_marker is not None:
+            self._hover_marker = None
+            self.update()
+        super().leaveEvent(event)
 
     def hideEvent(self, event):
         # safety net: if this widget is hidden mid-drag (switching tabs,
