@@ -47,6 +47,9 @@ class _FakeEvent:
     def button(self):
         return self._button
 
+    def modifiers(self):
+        return Qt.KeyboardModifier.NoModifier
+
 
 def _populated_view(width=400, end_len=HALF_WINDOW_FRAMES, start_len=HALF_WINDOW_FRAMES):
     view = LoopJoinPreview()
@@ -173,7 +176,10 @@ def test_dragging_the_left_half_emits_loop_end_deltas(qapp):
 
     assert calls
     assert all(name == "loop_end" for name, _delta in calls)
-    assert sum(delta for _name, delta in calls) > 0  # dragged right -> increases
+    # content-follows-cursor: dragging right pulls EARLIER content into
+    # view at a fixed screen position, so the underlying frame decreases -
+    # see mouseMoveEvent's own comment on the sign derivation
+    assert sum(delta for _name, delta in calls) < 0
 
 
 def test_dragging_the_right_half_emits_loop_start_deltas(qapp):
@@ -187,7 +193,9 @@ def test_dragging_the_right_half_emits_loop_start_deltas(qapp):
 
     assert calls
     assert all(name == "loop_start" for name, _delta in calls)
-    assert sum(delta for _name, delta in calls) < 0  # dragged left -> decreases
+    # content-follows-cursor: dragging left pulls LATER content into view
+    # at a fixed screen position, so the underlying frame increases
+    assert sum(delta for _name, delta in calls) > 0
 
 
 def test_right_click_does_not_start_a_drag(qapp):
@@ -241,7 +249,9 @@ def test_slow_drag_accumulates_many_small_moves_into_real_progress(qapp):
         x += 1
         view.mouseMoveEvent(_FakeEvent(x))
 
-    assert sum(delta for _name, delta in calls) > 0
+    # dragging right on the loop_end (left) half decreases the value under
+    # the content-follows-cursor convention - see the two tests above
+    assert sum(delta for _name, delta in calls) < 0
 
 
 def test_mouse_move_with_no_data_stops_the_drag_without_crashing(qapp):

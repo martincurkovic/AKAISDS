@@ -1,5 +1,5 @@
-from PySide6.QtWidgets import QWidget, QSizePolicy
-from PySide6.QtGui import QPainter, QPen, QColor
+from PySide6.QtWidgets import QApplication, QWidget, QSizePolicy
+from PySide6.QtGui import QCursor, QPainter, QPen, QColor
 from PySide6.QtCore import Qt, QRectF, QPointF, Signal
 
 from ui import theme
@@ -10,6 +10,7 @@ from ui.waveform_view import build_envelope, frame_for_x, x_for_frame
 # lifetimes together (same reasoning slice_waveform_view.py's own module
 # docstring gives for its own mirrored constants)
 _BORDER_RADIUS = 4
+_FINE_DRAG_DIVISOR = 8  # how much slower a Shift-held drag moves
 
 # how many frames either side of the loop point this widget shows - fixed,
 # not tied to the main WaveformView's own zoom level (a user could be
@@ -37,11 +38,24 @@ class LoopJoinPreview(QWidget):
     seam - not just look at each edge in its own isolated context.
 
     Dragging the LEFT half (loop-out audio) moves loop_end; dragging the
-    RIGHT half (loop-in audio) moves loop_start - either way, dragging left/
-    right shifts that marker earlier/later the same direction dragging it on
-    the main WaveformView would, just at THIS widget's own much tighter
-    zoom (a fixed ~600-frame window vs. however zoomed-out the main view
-    happens to be), for finer per-pixel control - per direct user request.
+    RIGHT half (loop-in audio) moves loop_start, at THIS widget's own much
+    tighter zoom (a fixed ~600-frame window vs. however zoomed-out the main
+    view happens to be), for finer per-pixel control - per direct user
+    request. Unlike WaveformView's own marker drag, there's no marker glyph
+    tracking the cursor here - the divider stays fixed on screen and the
+    WAVEFORM CONTENT around it updates each step, so the natural feel is
+    "grab and pan the content" (drag left -> content follows the cursor
+    left, same as dragging a photo/map), which is the OPPOSITE sign
+    relationship a naive port of WaveformView's own dx-to-delta mapping
+    would give - confirmed by direct user testing after an initial version
+    had this backwards. See mouseMoveEvent's own comment for the sign
+    derivation.
+    Holding Shift while dragging slows that down further still (same
+    _FINE_DRAG_DIVISOR/warp-the-cursor-back trick WaveformView's own
+    mouseMoveEvent uses, mirrored rather than shared - see this widget's
+    own class docstring elsewhere on why this file mirrors rather than
+    imports that widget's constants), for the finest per-pixel adjustment
+    this page offers anywhere.
     This widget owns no marker state itself and never writes anything -
     it only emits a frame DELTA (marker_drag_delta) for whoever owns the
     real value (ProgramEditorWindow) to apply via WaveformView.set_marker,
@@ -82,6 +96,12 @@ class LoopJoinPreview(QWidget):
         self._dragging = None  # "loop_end" / "loop_start" / None
         self._drag_anchor_x = 0.0
         self._drag_value = 0.0  # float accumulator - same reasoning as WaveformView
+        # Shift-held fine drag - same "warp the (hidden) cursor back to a
+        # fixed point every event" trick WaveformView's own mouseMoveEvent
+        # uses, so a large fine-adjustment move never runs out of screen to
+        # keep crawling across (see _enter_fine_drag's own comment)
+        self._fine_active = False
+        self._warp_anchor_global = None
 
     def set_join(self, end_samples, start_samples):
         self._end_samples = end_samples
@@ -227,16 +247,58 @@ class LoopJoinPreview(QWidget):
             # drag (selecting a different sample, say) - nothing left to
             # scale against, so just stop rather than dividing by a stale
             # length
+            if self._fine_active:
+                self._exit_fine_drag()
             self._dragging = None
             return
-        x = event.position().x()
-        dx = x - self._drag_anchor_x
-        self._drag_anchor_x = x
+
+        fine = bool(event.modifiers() & Qt.KeyboardModifier.ShiftModifier)
+        if fine and not self._fine_active:
+            self._enter_fine_drag()
+        elif not fine and self._fine_active:
+            self._exit_fine_drag()
+
+        if self._fine_active:
+            # the cursor gets warped back to _warp_anchor_global at the end
+            # of every move event below, so THIS event's global position is
+            # already the delta since the last one - not since drag start.
+            # Same reasoning/mechanics as WaveformView's own mouseMoveEvent -
+            # see its own comment on why (the warp itself generates its own
+            # synthetic move event landing exactly on the anchor, which
+            # this skips rather than reading as a zero-length real move)
+            current = event.globalPosition()
+            anchor = self._warp_anchor_global
+            if (round(current.x()), round(current.y())) == (
+                round(anchor.x()),
+                round(anchor.y()),
+            ):
+                return
+            dx = (anchor.x() - current.x()) / _FINE_DRAG_DIVISOR
+            QCursor.setPos(anchor)  # QCursor.pos() is already a QPoint
+        else:
+            x = event.position().x()
+            dx = self._drag_anchor_x - x
+            self._drag_anchor_x = x
+
         length = len(combined)
         # ONE uniform scale across the whole widget - both halves are
         # painted through the SAME x_for_frame(frame, width, 0, length)
         # mapping, so frames-per-pixel is identical everywhere in it
-        # regardless of which half is actually being dragged
+        # regardless of which half is actually being dragged. dx is
+        # measured as "anchor minus current" (inverted from a plain
+        # screen-space delta) because this widget has no marker glyph
+        # that tracks the cursor the way WaveformView's own drag does -
+        # what the user is actually grabbing is the WAVEFORM CONTENT
+        # itself, and the divider stays fixed on screen while the content
+        # around it updates each step. Content follows the cursor (drag
+        # left -> the feature under the cursor moves left, same as
+        # dragging a photo/map) only when increasing loop_end/loop_start
+        # shifts the combined buffer's coordinate mapping so that a fixed
+        # source frame's screen x decreases - i.e. the frame delta must
+        # be the OPPOSITE sign of the raw screen dx. Confirmed backwards
+        # or by direct user testing on real hardware-adjacent use - don't
+        # "simplify" this back to a plain `x - anchor` without re-deriving
+        # the sign first.
         frames_per_px = (length - 1) / max(1, self.width() - 1)
         # a float accumulator carries the sub-frame remainder between
         # events instead of rounding it away each time - same "slow drag
@@ -249,4 +311,34 @@ class LoopJoinPreview(QWidget):
             self._drag_value -= delta
 
     def mouseReleaseEvent(self, event):
+        if self._fine_active:
+            self._exit_fine_drag()
         self._dragging = None
+
+    def _enter_fine_drag(self):
+        # same trick WaveformView._enter_fine_drag uses: hide the cursor
+        # and warp it back to a fixed point every event, so the user can
+        # keep moving the mouse in one direction indefinitely (at 1/
+        # _FINE_DRAG_DIVISOR the effective speed) instead of running out of
+        # screen and stalling at the edge partway through a big fine move
+        self._fine_active = True
+        self._warp_anchor_global = QCursor.pos()
+        QApplication.setOverrideCursor(Qt.CursorShape.BlankCursor)
+
+    def _exit_fine_drag(self):
+        # Shift released mid-drag, or the drag ending some other way -
+        # always paired with _enter_fine_drag's own setOverrideCursor so
+        # the app is never left with a permanently invisible cursor
+        self._fine_active = False
+        self._warp_anchor_global = None
+        QApplication.restoreOverrideCursor()
+
+    def hideEvent(self, event):
+        # safety net: if this widget is hidden mid-drag (switching away
+        # from the Samples tab, the window closing) with no
+        # mouseReleaseEvent ever arriving, make sure the app isn't left
+        # with a stuck invisible cursor - same reasoning as WaveformView's
+        # own hideEvent
+        if self._fine_active:
+            self._exit_fine_drag()
+        super().hideEvent(event)
