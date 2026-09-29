@@ -899,6 +899,78 @@ def test_paint_does_not_crash_with_all_markers_stacked_on_the_default_header(qap
     view.grab()
 
 
+# --- WaveformView.samples_before / samples_after -----------------------------
+# for LoopJoinPreview (ui/loop_preview_view.py's "Loop Preview" card) - the
+# audio leading into/out of a loop point, clamped to the buffer's own bounds
+# rather than the whole envelope this widget itself renders.
+
+
+def test_samples_before_returns_none_without_audio(qapp):
+    view = WaveformView()
+    view.set_header(1000, start=0, loop_start=300, loop_end=700, end=999)
+    assert view.samples_before(500, 100) is None
+
+
+def test_samples_before_ends_at_and_includes_the_given_frame(qapp):
+    view = WaveformView()
+    samples = list(range(1000))
+    view.set_waveform(samples, start=0, loop_start=300, loop_end=700, end=999)
+    window = view.samples_before(500, 100)
+    assert window == samples[401:501]
+
+
+def test_samples_before_clamps_at_the_low_edge(qapp):
+    view = WaveformView()
+    samples = list(range(1000))
+    view.set_waveform(samples, start=0, loop_start=300, loop_end=700, end=999)
+    window = view.samples_before(20, 100)
+    assert window == samples[0:21]
+
+
+def test_samples_before_returns_none_when_the_frame_is_beyond_whats_loaded_so_far(qapp):
+    # reachable mid-progressive-load (begin_live_capture/append_live_samples)
+    # if the loop point sits further into the sample than the transfer has
+    # reached yet - nothing to show until more arrives, not a crash
+    view = WaveformView()
+    view.set_header(2000, start=0, loop_start=500, loop_end=1500, end=1999)
+    view.begin_live_capture()
+    view.append_live_samples(list(range(50)))  # far short of frame 1500
+    assert view.samples_before(1500, 100) is None
+    # still works fine for a point ALREADY within what's loaded
+    assert view.samples_before(20, 10) == list(range(11, 21))
+
+
+def test_samples_after_returns_none_without_audio(qapp):
+    view = WaveformView()
+    view.set_header(1000, start=0, loop_start=300, loop_end=700, end=999)
+    assert view.samples_after(500, 100) is None
+
+
+def test_samples_after_starts_at_and_includes_the_given_frame(qapp):
+    view = WaveformView()
+    samples = list(range(1000))
+    view.set_waveform(samples, start=0, loop_start=300, loop_end=700, end=999)
+    window = view.samples_after(500, 100)
+    assert window == samples[500:600]
+
+
+def test_samples_after_clamps_at_the_high_edge(qapp):
+    view = WaveformView()
+    samples = list(range(1000))
+    view.set_waveform(samples, start=0, loop_start=300, loop_end=700, end=999)
+    window = view.samples_after(980, 100)
+    assert window == samples[980:1000]
+
+
+def test_samples_after_returns_none_when_the_frame_is_beyond_whats_loaded_so_far(qapp):
+    view = WaveformView()
+    view.set_header(2000, start=0, loop_start=500, loop_end=1500, end=1999)
+    view.begin_live_capture()
+    view.append_live_samples(list(range(50)))
+    assert view.samples_after(1500, 100) is None
+    assert view.samples_after(20, 10) == list(range(20, 30))
+
+
 # --- WaveformView.set_header: editable markers without audio -----------------
 # A real SDS sample dump can take minutes; the header alone (a handful of
 # fast get_parameter reads) is comparatively instant. set_header lets a

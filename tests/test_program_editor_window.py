@@ -2933,6 +2933,94 @@ def test_markers_changed_with_no_preview_playing_forwards_nothing(editor, qapp, 
     assert calls == []
 
 
+# --- Loop Preview card (LoopJoinPreview) ------------------------------------
+# the S3000XL front panel's own LOOP screen is a single widget with one
+# dividing line at the loop's own seam (loop-out audio on the left, loop-in
+# audio on the right) - see ui/loop_preview_view.py's own class docstring.
+# Kept live in sync with the main waveform view via the SAME markers_changed
+# signal the audio live-preview feature above already uses. samples is a
+# plain identity ramp (samples[i] == i) in these tests specifically so a
+# slice's own VALUES reveal exactly which frames got captured, rather than
+# needing a separate anchor-frame accessor on the merged widget.
+
+
+def test_selecting_a_sample_populates_the_loop_preview(editor, qapp):
+    samples = list(range(10000))
+    markers = {"start": 0, "loop_start": 2500, "loop_end": 7500, "end": 9999}
+    _select_sample_with_full_audio(editor, qapp, 0, samples, markers)
+
+    assert editor.loop_preview._end_samples == list(range(7201, 7501))  # up to loop_end
+    assert editor.loop_preview._start_samples == list(range(2500, 2800))  # from loop_start
+
+
+def test_dragging_a_loop_marker_live_updates_the_preview(editor, qapp):
+    samples = list(range(10000))
+    markers = {"start": 0, "loop_start": 2500, "loop_end": 7500, "end": 9999}
+    _select_sample_with_full_audio(editor, qapp, 0, samples, markers)
+
+    editor.waveform_view.markers_changed.emit(0, 3000, 7500, 9999)  # dragged loop_start
+
+    assert editor.loop_preview._start_samples == list(range(3000, 3300))
+    assert editor.loop_preview._end_samples == list(range(7201, 7501))  # untouched
+
+
+def test_no_loop_sptype_shows_the_no_loop_placeholder(editor, qapp):
+    samples = [0] * 10000
+    markers = {"start": 0, "loop_start": 2500, "loop_end": 7500, "end": 9999}
+    _select_sample_with_full_audio(editor, qapp, 0, samples, markers)
+
+    editor.sample_loop_type_combo.setCurrentIndex(2)  # "No looping"
+
+    assert editor.loop_preview._combined() is None
+    assert editor.loop_preview._placeholder == "No loop on this sample"
+
+
+def test_switching_back_to_a_looping_sptype_repopulates_the_preview(editor, qapp):
+    # _refresh_loop_preview is called explicitly from _set_loop_markers_
+    # enabled - set_loop_enabled(True) only emits markers_changed itself if
+    # re-enabling actually MOVED loop_start/loop_end (see its own comment),
+    # so this must not depend on that emission to repopulate
+    samples = list(range(10000))
+    markers = {"start": 0, "loop_start": 2500, "loop_end": 7500, "end": 9999}
+    _select_sample_with_full_audio(editor, qapp, 0, samples, markers)
+    editor.sample_loop_type_combo.setCurrentIndex(2)  # "No looping"
+    assert editor.loop_preview._combined() is None
+
+    editor.sample_loop_type_combo.setCurrentIndex(0)  # "Loop in release" - re-enable
+
+    assert editor.loop_preview._end_samples == list(range(7201, 7501))
+    assert editor.loop_preview._start_samples == list(range(2500, 2800))
+
+
+def test_dragging_the_loop_preview_moves_the_named_marker_and_schedules_a_write(
+    editor, qapp
+):
+    # LoopJoinPreview owns no marker state itself - _on_loop_preview_marker_
+    # dragged is what actually applies the delta, by reusing _on_marker_
+    # spinbox_changed wholesale (see its own comment) - so this exercises
+    # the exact same push/sync/write pipeline the spinboxes already use,
+    # just reached through the drag signal instead
+    editor.sample_list_widget.setCurrentRow(0)
+    editor._worker.wait_until_idle()
+    _pump_until(qapp, lambda: editor.waveform_view.has_header())
+    bridge = editor._bridge
+    # FakeBridge sample 0: start=100, loop_start=5000, loop_end=8000, end=9999
+    before = editor.waveform_view.markers()["loop_end"]
+
+    editor._on_loop_preview_marker_dragged("loop_end", 25)
+    editor._flush_marker_write()
+    editor._worker.wait_until_idle()
+    _pump_until(qapp, lambda: bridge.set_parameter_calls)
+
+    assert editor.waveform_view.markers()["loop_end"] == before + 25
+    assert "LOOPAT1" in [c[0] for c in bridge.set_parameter_calls]
+
+
+def test_dragging_the_loop_preview_with_nothing_loaded_does_nothing(editor):
+    editor.sample_list_widget.setCurrentRow(-1)
+    editor._on_loop_preview_marker_dragged("loop_end", 25)  # must not raise
+
+
 def test_reverse_sample_real_mode_happy_path_sends_deletes_and_renames(
     editor, qapp, monkeypatch
 ):

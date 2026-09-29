@@ -56,6 +56,7 @@ from ui.qt_helpers import FullWidthTabBar, build_scroll_area, build_section_card
 from ui.envelope_graph import ADSREnvelopeGraph, Envelope2Graph
 from ui.keygroup_range_bar import KeygroupRangeBar, keygroup_color
 from ui.waveform_view import WaveformView
+from ui.loop_preview_view import LoopJoinPreview, HALF_WINDOW_FRAMES
 from ui.slice_editor_window import SliceEditorWindow
 from ui.filter_sample_dialog import FilterSampleDialog
 from core.audio_preview import SlicePreviewPlayer
@@ -2180,6 +2181,12 @@ class ProgramEditorWindow(QMainWindow):
         self.waveform_view.markers_changed.connect(self._update_marker_spinboxes)
         self.waveform_view.markers_changed.connect(
             self._on_waveform_markers_changed_live_preview
+        )
+        self.waveform_view.markers_changed.connect(
+            self._on_waveform_markers_changed_loop_preview
+        )
+        self.loop_preview.marker_drag_delta.connect(
+            self._on_loop_preview_marker_dragged
         )
         self.waveform_view.view_changed.connect(self._on_waveform_view_changed)
         self.waveform_view.preview_requested.connect(
@@ -4722,12 +4729,26 @@ class ProgramEditorWindow(QMainWindow):
         loop_controls_card = self._build_section_card(
             "Loop Controls", loop_controls_content
         )
+
+        # a small, read-only pane showing the actual SPLICE a loop makes -
+        # the real S3000XL's own LOOP screen is a single widget with one
+        # dividing line (loop-out audio on the left, loop-in audio on the
+        # right), not two independently-zoomed views - see
+        # ui/loop_preview_view.py's own class docstring. Kept live in sync
+        # with the main waveform view's own markers - see
+        # _on_waveform_markers_changed_loop_preview.
+        self.loop_preview = LoopJoinPreview()
+        loop_preview_row = QHBoxLayout()
+        loop_preview_row.addWidget(self.loop_preview)
+        loop_preview_card = self._build_section_card("Loop Preview", loop_preview_row)
+
         tune_card = self._build_section_card("Root Note & Tune", tune_meta_row)
 
         waveform_column = QVBoxLayout()
         waveform_column.setContentsMargins(0, 0, 0, 0)
         waveform_column.setSpacing(10)
         waveform_column.addWidget(loop_controls_card)
+        waveform_column.addWidget(loop_preview_card)
         waveform_column.addWidget(tune_card)
         waveform_column.addStretch()
         waveform_container = QWidget()
@@ -5634,6 +5655,54 @@ class ProgramEditorWindow(QMainWindow):
             if entry is not None:
                 entry.update(new_markers)
             self._schedule_marker_write(sample_index, old_markers, new_markers)
+        # set_loop_enabled(True) only emits markers_changed itself if
+        # re-enabling actually MOVED loop_start/loop_end (see its own
+        # comment) - explicitly refreshed here too so toggling the loop off
+        # (or back on with nothing to reconcile) still switches the Loop
+        # Preview card's placeholder immediately, not just on the next drag
+        current_markers = self.waveform_view.markers()
+        self._refresh_loop_preview(
+            current_markers["loop_start"], current_markers["loop_end"]
+        )
+
+    def _on_waveform_markers_changed_loop_preview(self, start, loop_start, loop_end, end):
+        # WaveformView.markers_changed fires continuously during a drag
+        # (not just on release), AND whenever a new sample's markers load -
+        # same signal _on_waveform_markers_changed_live_preview already
+        # uses for the analogous AUDIO live-preview feature. This is what
+        # lets the Loop Preview card track a loop_start/loop_end drag live,
+        # the same way the S3000XL's own LOOP screen updates as you nudge a
+        # loop point on the front panel.
+        self._refresh_loop_preview(loop_start, loop_end)
+
+    def _refresh_loop_preview(self, loop_start, loop_end):
+        if not self._loop_markers_enabled:
+            # SPTYPE "No looping"/"One-shot" - same gate the main
+            # WaveformView's own loop markers use (they don't just grey
+            # out, they don't draw at all - see set_loop_enabled)
+            self.loop_preview.clear_no_loop()
+            return
+        end_samples = self.waveform_view.samples_before(loop_end, HALF_WINDOW_FRAMES)
+        start_samples = self.waveform_view.samples_after(loop_start, HALF_WINDOW_FRAMES)
+        if end_samples is None or start_samples is None:
+            self.loop_preview.clear()
+        else:
+            self.loop_preview.set_join(end_samples, start_samples)
+
+    def _on_loop_preview_marker_dragged(self, name, delta):
+        # LoopJoinPreview owns no marker state itself - it only measures a
+        # drag against its OWN (much tighter) zoom and reports a frame
+        # DELTA (see its own class docstring on why). Reusing
+        # _on_marker_spinbox_changed wholesale - not reimplementing the
+        # push/sync/write-scheduling dance here - keeps WaveformView the
+        # one place that ever actually decides a marker's new value; this
+        # is just another caller of the exact same entry point the
+        # spinboxes already use, the same way canvas dragging and typing a
+        # value both funnel through their own single entry points too.
+        if not self.waveform_view.has_header():
+            return
+        current = self.waveform_view.markers()[name]
+        self._on_marker_spinbox_changed(name, current + delta)
 
     def _update_marker_spinboxes(self, start, loop_start, loop_end, end):
         # kept in sync with the waveform view live in both directions -

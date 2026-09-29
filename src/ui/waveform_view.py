@@ -317,6 +317,36 @@ class WaveformView(QWidget):
     def frame_count(self):
         return self._frame_count
 
+    def samples_before(self, frame, count):
+        """Up to *count* samples ending at (and including) *frame* - the
+        audio leading INTO a loop point, for LoopJoinPreview (see
+        program_editor_window.py's Loop Preview card) - its own "loop out"
+        half. None if no audio has loaded yet, or if *frame* itself is
+        beyond what's loaded so far (reachable mid-progressive-load - see
+        begin_live_capture/append_live_samples - nothing meaningful to show
+        until more of the transfer arrives).
+        """
+        if not self._samples:
+            return None
+        length = len(self._samples)
+        if frame < 0 or frame > length - 1:
+            return None
+        lo = max(0, frame - count + 1)
+        return self._samples[lo : frame + 1]
+
+    def samples_after(self, frame, count):
+        """Up to *count* samples starting at (and including) *frame* - the
+        audio leading OUT of a loop point, for LoopJoinPreview's own "loop
+        in" half. Same None cases as samples_before.
+        """
+        if not self._samples:
+            return None
+        length = len(self._samples)
+        if frame < 0 or frame > length - 1:
+            return None
+        hi = min(length - 1, frame + count - 1)
+        return self._samples[frame : hi + 1]
+
     # --- playhead (click-to-preview visual feedback) ------------------------
 
     def set_playhead(self, frame):
