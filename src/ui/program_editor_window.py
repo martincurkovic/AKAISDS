@@ -2086,6 +2086,27 @@ class ProgramEditorWindow(QMainWindow):
             if shortcut_text:
                 button.setToolTip(f"{button.toolTip()} ({shortcut_text})")
 
+        # these act on self.waveform_view (the Samples tab's own waveform),
+        # so they're meaningless - and, worse, silently confusing - while
+        # some OTHER tab is showing: without this, Ctrl+=/Ctrl+-/Ctrl+0
+        # would zoom a waveform the user can't currently see, and they'd
+        # only discover it was already zoomed the next time they switched
+        # back to Samples. Disabling a QAction disables its shortcut too
+        # (Qt's own behaviour, not something this app has to enforce by
+        # hand), so this greys out the &View menu items AND stops the
+        # keyboard shortcuts from firing, in one call each - see
+        # _update_zoom_actions_enabled/_on_main_tab_changed for the other
+        # half (keeping this in sync as the user actually switches tabs).
+        # Deliberately separate from ui/slice_editor_window.py's OWN
+        # Ctrl+=/Ctrl+-/Ctrl+0 zoom shortcuts (see that file - plain
+        # QShortcuts on the Slice Editor dialog itself, not QActions on
+        # this window's menu bar) - those are already naturally scoped to
+        # whichever window has focus (the modal Slice Editor, opened either
+        # from this window's own Samples tab or from the Transfer
+        # Dashboard's own file queue - see dashboard.py), so they're
+        # unaffected by this window's own tab-based gating either way.
+        self._update_zoom_actions_enabled()
+
         # only one of {dashboard, program editor} is ever open at a time -
         # two simultaneous MIDI connections to the hardware is untested and
         # may not be safe - mirrors the dashboard's own "&Window" menu
@@ -5304,6 +5325,18 @@ class ProgramEditorWindow(QMainWindow):
             and self.sample_list_widget.count() > 0
         ):
             self.sample_list_widget.setCurrentRow(0)
+        self._update_zoom_actions_enabled()
+
+    def _update_zoom_actions_enabled(self):
+        # the &View menu's Zoom In/Out/to Fit act on self.waveform_view
+        # (the Samples tab's own waveform) - greyed out (and their
+        # keyboard shortcuts inert - see this method's own call site in
+        # __init__) on every other tab, where they'd otherwise silently
+        # zoom a waveform the user can't currently see
+        is_samples_tab = self.main_tabs.currentIndex() == self._samples_tab_index
+        self.zoom_in_action.setEnabled(is_samples_tab)
+        self.zoom_out_action.setEnabled(is_samples_tab)
+        self.zoom_fit_action.setEnabled(is_samples_tab)
 
     def _on_sample_selected(self, current, previous):
         # a preview mid-flight for the OLD selection (most importantly a

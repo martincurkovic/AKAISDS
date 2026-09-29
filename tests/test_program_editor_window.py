@@ -1361,6 +1361,43 @@ def test_switching_to_samples_tab_selects_first_sample_only_once(editor, qapp):
     assert editor.sample_list_widget.currentRow() == 2
 
 
+# --- &View menu's zoom actions are only meaningful on the Samples tab ------
+# they act on self.waveform_view, which only the Samples tab shows - see
+# _update_zoom_actions_enabled. Disabling a QAction disables its keyboard
+# shortcut too (plain Qt behaviour), so these tests only need to check
+# isEnabled() - not that Ctrl+=/Ctrl+-/Ctrl+0 themselves are inert, which
+# would just be re-testing Qt's own guarantee.
+
+
+def test_zoom_actions_disabled_by_default_on_the_programs_tab(editor):
+    # the editor fixture opens on the Programs tab, not Samples (see
+    # __init__'s own "Multis stays the first tab... open on Programs
+    # instead" comment) - this exercises the INITIAL state set right after
+    # the actions are constructed, not just a later tab-change update
+    assert editor.main_tabs.currentIndex() != editor._samples_tab_index
+    assert editor.zoom_in_action.isEnabled() is False
+    assert editor.zoom_out_action.isEnabled() is False
+    assert editor.zoom_fit_action.isEnabled() is False
+
+
+def test_zoom_actions_enabled_on_switching_to_samples_tab(editor):
+    editor.main_tabs.setCurrentIndex(editor._samples_tab_index)
+    assert editor.zoom_in_action.isEnabled() is True
+    assert editor.zoom_out_action.isEnabled() is True
+    assert editor.zoom_fit_action.isEnabled() is True
+
+
+def test_zoom_actions_disabled_again_on_switching_away_from_samples_tab(editor):
+    editor.main_tabs.setCurrentIndex(editor._samples_tab_index)
+    assert editor.zoom_in_action.isEnabled() is True
+
+    editor.main_tabs.setCurrentIndex(0)  # Multis
+
+    assert editor.zoom_in_action.isEnabled() is False
+    assert editor.zoom_out_action.isEnabled() is False
+    assert editor.zoom_fit_action.isEnabled() is False
+
+
 def test_load_sample_waveform_preserves_header_only_edits(editor, qapp, monkeypatch):
     # regression test for the exact bug this whole feature is built to
     # avoid: editing a marker while only the header is loaded must survive
