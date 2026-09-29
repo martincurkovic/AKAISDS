@@ -21,9 +21,10 @@ _MACOS = sys.platform == "darwin"
 # no cursor-warp on macOS - same reasoning as WaveformView's own _MACOS/
 # _FINE_DRAG_DIVISOR_MACOS (ui/waveform_view.py): the OS fights the
 # warp-back-every-event trick, which is what made this feel like it had
-# "inertia" with barely any extra precision. A plain, much larger divisor
-# on the raw delta instead.
-_FINE_DRAG_DIVISOR_MACOS = 40
+# "inertia" with barely any extra precision. A plain, modestly larger
+# divisor on the raw delta instead (1.5x the warp-mode divisor - see
+# waveform_view.py's own comment on why this is kept modest, not large)
+_FINE_DRAG_DIVISOR_MACOS = 12
 
 _TYPE_EDIT_SIZE = (52, 22)
 

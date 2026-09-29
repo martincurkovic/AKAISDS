@@ -18,11 +18,14 @@ _MACOS = sys.platform == "darwin"
 # re-centers/coalesces cursor-position events shortly after QCursor.setPos()
 # runs, so the drag felt like it had "inertia" and only gained a little
 # extra precision instead of the intended 1/_FINE_DRAG_DIVISOR. Rather than
-# warp at all here, macOS just applies a much bigger plain divisor straight
-# to the raw on-screen delta - less precise than a true infinite-range warp
-# (a very large fine-adjustment can run out of screen space to keep
-# dragging), but it actually behaves the way Shift-drag is supposed to feel.
-_FINE_DRAG_DIVISOR_MACOS = 40
+# warp at all here, macOS just applies a bigger plain divisor straight to
+# the raw on-screen delta - less precise than a true infinite-range warp
+# (a large fine-adjustment can run out of screen space to keep dragging),
+# but it actually behaves the way Shift-drag is supposed to feel. Kept
+# modest (1.5x the warp-mode divisor) rather than large - a much bigger
+# divisor technically gives finer control but needs many multiples of the
+# screen's width in physical travel to use, which just feels unresponsive.
+_FINE_DRAG_DIVISOR_MACOS = 12
 
 _MIN_ZOOM = 1.0  # the whole sample visible at once
 _ZOOM_STEP = 1.6  # multiplicative factor per wheel notch / zoom button click
