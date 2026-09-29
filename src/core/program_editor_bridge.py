@@ -5,7 +5,7 @@ import time
 from collections import deque
 
 from core import akai_sysex, app_config, debug_log
-from s3k.bridge import DeviceError, S3kBridge
+from s3k.bridge import DeviceError, S3kBridge, ThrottledOut
 from PySide6.QtCore import QThread, Signal
 import s3k.messages as m
 import s3k.params as p
@@ -149,16 +149,54 @@ for _name in LoggingBridge._WRAPPED_METHODS:
 del _name
 
 
-def connect():
+def connect(midi_manager=None):
     # lets the editor be developed away from the hardware sampler - same
     # dummy sampler s3ked itself ships for its --demo flag, duck-typing the
     # slice of S3kBridge this module's loaders/writers actually call
+    logger = debug_log.get_logger()
     if os.environ.get("AKAISDS_DEMO_SAMPLER"):
         from s3ked.demo import DemoBridge
 
+        logger.info("program_editor_bridge.connect(): demo bridge")
         bridge = DemoBridge()
+    elif (
+        os.environ.get("AKAISDS_SHARED_MIDI_TRANSPORT")
+        and midi_manager is not None
+        and midi_manager.raw_input is not None
+        and midi_manager.raw_output is not None
+    ):
+        # the Transfer Dashboard's own MidiManager already has a shared
+        # raw-rtmidi connection open (see core/midi_manager.py) - build the
+        # Program Editor's S3kBridge from THOSE same ports instead of
+        # opening a second, independent connection to the same physical
+        # device. ThrottledOut still wraps the shared output here exactly
+        # as S3kBridge.standard() would wrap its own - the shared transport
+        # only changes WHERE the raw port comes from, not S3kBridge's own
+        # pacing behaviour. See core/midi_transport.py's own module
+        # docstring and test_scripts/midi_transport_consolidation_test_
+        # plan.md - this path is not yet validated on real hardware, hence
+        # gated behind AKAISDS_SHARED_MIDI_TRANSPORT rather than being the
+        # default.
+        logger.info(
+            "program_editor_bridge.connect(): shared transport "
+            f"({midi_manager.output_name!r})"
+        )
+        bridge = S3kBridge(
+            ThrottledOut(midi_manager.raw_output),
+            midi_manager.raw_input,
+            f"{midi_manager.output_name} (shared)",
+        )
     else:
+        # AKAISDS_SHARED_MIDI_TRANSPORT=1 alone doesn't guarantee the
+        # branch above - falls through here too if midi_manager is None or
+        # its raw ports aren't open yet (e.g. the Dashboard's own
+        # connection hasn't been established), which is exactly the kind
+        # of silent fallback worth being able to see in the log rather
+        # than guess at during hardware testing
         _input_name, output_name = app_config.get_saved_ports()
+        logger.info(
+            f"program_editor_bridge.connect(): standard connection ({output_name!r})"
+        )
         bridge = S3kBridge.standard(output_name)  # type: ignore
     return LoggingBridge(bridge)
 

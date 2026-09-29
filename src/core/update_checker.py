@@ -13,6 +13,8 @@ import urllib.request
 
 from PySide6.QtCore import QThread, Signal
 
+from core import debug_log
+
 try:
     from ui._version import APP_VERSION
 except ImportError:
@@ -93,6 +95,14 @@ class UpdateCheckWorker(QThread):
         try:
             info = check_for_update()
         except Exception as exc:  # network errors, bad JSON, etc.
+            # already surfaced to the user via failed.emit below - logged
+            # too so a report of "update check never works for me" has a
+            # trace to actually diagnose (same debug_log convention every
+            # other unhandled-exception backstop in this app already uses -
+            # see AGENTS.md)
+            debug_log.get_logger().error(
+                "UpdateCheckWorker: check_for_update failed", exc_info=True
+            )
             self.failed.emit(str(exc))
             return
         self.succeeded.emit(info)

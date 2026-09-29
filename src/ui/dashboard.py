@@ -319,7 +319,7 @@ class TransferDashboard(QWidget):
         # menu-wired dashboard methods
         main_window = self.window()
         try:
-            bridge = program_editor_bridge.connect()
+            bridge = program_editor_bridge.connect(self.midi_manager)
         except Exception as e:
             # connect() failures happen before LoggingBridge ever wraps
             # anything, so without this they're invisible to
