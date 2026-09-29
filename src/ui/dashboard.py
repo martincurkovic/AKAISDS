@@ -26,6 +26,7 @@ from ui.sample_settings_dialog import SampleSettingsDialog
 from ui.sample_info_dialog import SampleInfoDialog
 from ui.slice_editor_window import SliceEditorWindow
 from ui.ascii_logo import LOGO
+from ui import tooltips
 
 SETTINGS_ROLE = Qt.ItemDataRole.UserRole + 1
 
@@ -428,12 +429,10 @@ class TransferDashboard(QWidget):
         if has_ports and is_akai:
             self.btn_open_editor.setToolTip("")
         elif not has_ports:
-            self.btn_open_editor.setToolTip(
-                "Select both a MIDI Input and MIDI Output in Settings first"
-            )
+            self.btn_open_editor.setToolTip(tooltips.OPEN_EDITOR_NEEDS_MIDI_PORTS)
         else:
             self.btn_open_editor.setToolTip(
-                'Set Sampler Type to "Akai Sampler" in Settings first'
+                tooltips.OPEN_EDITOR_NEEDS_AKAI_DEVICE_TYPE
             )
 
     def _update_device_type_ui(self):

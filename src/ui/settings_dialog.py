@@ -21,6 +21,7 @@ from ui.qt_helpers import (
     build_section_card,
     widen_popup_to_fit_items,
 )
+from ui import tooltips
 import time
 import mido
 
@@ -103,12 +104,7 @@ class MidiSettingsDialog(QDialog):
         self.spin_channel = QSpinBox()
         self.spin_channel.setRange(0, 127)
         self.spin_channel.setValue(self.sampler_controller.channel)
-        self.spin_channel.setToolTip(
-            "The SysEx device ID your hardware is set to (0-127)\n"
-            "Only matters if you have more than one sampler on the\n"
-            "same MIDI chain. Note that some hardware may report\n"
-            "SysEx channels to be 1-128 instead of 0-127."
-        )
+        self.spin_channel.setToolTip(tooltips.DEVICE_ID_CHANNEL)
         midi_form.addRow(
             QLabel("Device ID (SysEx channel 0-127):"), self.spin_channel
         )
@@ -121,13 +117,7 @@ class MidiSettingsDialog(QDialog):
         idx = self.combo_device_type.findData(self.sampler_controller.device_type)
         if idx >= 0:
             self.combo_device_type.setCurrentIndex(idx)
-        self.combo_device_type.setToolTip(
-            "Akai Sampler unlocks browsing/renaming/deleting samples on\n"
-            "the hardware (Akai-specific extension to the SDS standard).\n"
-            "Generic SDS uses only the universal standard - sending and\n"
-            "receiving still work, but by sample number only, with no way\n"
-            "to browse, rename or delete what's on the device."
-        )
+        self.combo_device_type.setToolTip(tooltips.SAMPLER_TYPE)
         midi_form.addRow(QLabel("Sampler Type:"), self.combo_device_type)
 
         midi_card = build_section_card("MIDI Input/Output", midi_form)
@@ -170,12 +160,7 @@ class MidiSettingsDialog(QDialog):
         saved_buffer_samples = app_config.get_saved_audio_buffer_samples()
         idx = self.combo_audio_buffer.findData(saved_buffer_samples)
         self.combo_audio_buffer.setCurrentIndex(idx if idx >= 0 else 0)
-        self.combo_audio_buffer.setToolTip(
-            "How much audio is buffered ahead during preview playback.\n"
-            "Lower values react faster but may click/pop on a slower\n"
-            "output device or interface; higher values are more reliable\n"
-            "but add latency before playback audibly starts."
-        )
+        self.combo_audio_buffer.setToolTip(tooltips.AUDIO_PREVIEW_BUFFER_SIZE)
         audio_form.addRow(QLabel("Buffer Size:"), self.combo_audio_buffer)
 
         audio_card = build_section_card(
@@ -210,6 +195,7 @@ class MidiSettingsDialog(QDialog):
         hardware_test_layout.addWidget(self.id_results_label)
 
         self.btn_run_id_request = QPushButton("Run Hardware Test")
+        self.btn_run_id_request.setToolTip(tooltips.HARDWARE_TEST_BUTTON)
         self.btn_run_id_request.clicked.connect(self._run_identity_request)
         hardware_test_layout.addWidget(self.btn_run_id_request)
 
@@ -234,6 +220,7 @@ class MidiSettingsDialog(QDialog):
         interface_test_layout.addWidget(loopback_note)
 
         self.btn_loopback_test = QPushButton("Run Loopback Test")
+        self.btn_loopback_test.setToolTip(tooltips.LOOPBACK_TEST_BUTTON)
         self.btn_loopback_test.clicked.connect(self._run_loopback_test)
         interface_test_layout.addWidget(self.btn_loopback_test)
 

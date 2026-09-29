@@ -64,6 +64,7 @@ from ui import theme
 from ui.about_dialog import AboutDialog
 from ui.quickstart_dialog import show_quickstart_dialog
 from ui.update_helper import UpdateCheckRunner
+from ui import tooltips as tt
 from core import debug_log
 from core import sample_editing
 from core import sds_encoder
@@ -91,32 +92,11 @@ _FIRST_SLICE_NOTE = 36
 # each actually does on playback. Module-level (not just __init__-local)
 # since both the zone-building loop and _update_zone_panels need it.
 _LOOP_TYPE_OPTIONS = [
-    (
-        "As sample",
-        "Uses whichever loop points and loop type are already stored "
-        "on the sample itself, rather than overriding them for this zone.",
-    ),
-    (
-        "Loop in release",
-        "Loops continuously while the note is held, then finishes the "
-        "current loop pass before moving into the amp envelope's "
-        "release stage - avoids cutting off mid-loop on note-off.",
-    ),
-    (
-        "Loop til release",
-        "Loops continuously until note-off, then jumps straight into "
-        "the release stage from wherever the loop currently is.",
-    ),
-    (
-        "No loops",
-        "Ignores the sample's loop points and plays straight through "
-        "once, gated by the amp envelope as usual.",
-    ),
-    (
-        "One-shot",
-        "Ignores note-off and always plays through to the physical "
-        "end of the sample, regardless of when the key is released.",
-    ),
+    ("As sample", tt.LOOP_TYPE_AS_SAMPLE),
+    ("Loop in release", tt.LOOP_TYPE_LOOP_IN_RELEASE),
+    ("Loop til release", tt.LOOP_TYPE_LOOP_TIL_RELEASE),
+    ("No loops", tt.LOOP_TYPE_NO_LOOPS),
+    ("One-shot", tt.LOOP_TYPE_ONE_SHOT),
 ]
 
 # (label, tooltip) per SPTYPE value, in raw-byte order (0-3) - SPTYPE is the
@@ -168,18 +148,8 @@ def _format_loop_hold(value):
 # or documented mapping. Module-level for the same reason as
 # _LOOP_TYPE_OPTIONS above - both __init__ and the load path need it.
 _PORTAMENTO_TYPE_OPTIONS = [
-    (
-        "Rate",
-        "The pitch glide always moves at a fixed speed, so a wider "
-        "interval between notes takes proportionally longer to glide "
-        "through.",
-    ),
-    (
-        "Time",
-        "The pitch glide always takes the same amount of time to "
-        "complete, so a wider interval between notes glides faster to "
-        "still finish in that time.",
-    ),
+    ("Rate", tt.PORTAMENTO_TYPE_RATE),
+    ("Time", tt.PORTAMENTO_TYPE_TIME),
 ]
 
 # Raw values 0-13 of s3k.params.MOD_SOURCES, in combo-index order - shared
@@ -601,10 +571,7 @@ class ProgramEditorWindow(QMainWindow):
         self._duplicate_program_action = QAction(
             "Duplicate Program...", self.program_list
         )
-        self._duplicate_program_action.setToolTip(
-            "Not available in demo mode - the fake sampler has no way to "
-            "create new programs"
-        )
+        self._duplicate_program_action.setToolTip(tt.DUPLICATE_PROGRAM_DEMO_MODE)
         self._duplicate_program_action.triggered.connect(
             self._confirm_duplicate_program
         )
@@ -629,10 +596,7 @@ class ProgramEditorWindow(QMainWindow):
         self._duplicate_keygroup_action = QAction(
             "Duplicate Keygroup...", self.keygroup_list
         )
-        self._duplicate_keygroup_action.setToolTip(
-            "Not available in demo mode - the fake sampler has no way to "
-            "create new keygroups"
-        )
+        self._duplicate_keygroup_action.setToolTip(tt.DUPLICATE_KEYGROUP_DEMO_MODE)
         self._duplicate_keygroup_action.triggered.connect(
             self._confirm_duplicate_keygroup
         )
@@ -687,10 +651,12 @@ class ProgramEditorWindow(QMainWindow):
         self.cutoff_knob.setRange(0, 99)
         self.cutoff_knob.setDefaultValue(99)  # fully open - no filtering
         self.cutoff_knob.setFixedSize(56, 56)
+        self.cutoff_knob.setToolTip(tt.FILTER_CUTOFF_KNOB)
         self.resonance_knob = Knob()
         self.resonance_knob.setRange(0, 15)
         self.resonance_knob.setDefaultValue(0)  # no resonance
         self.resonance_knob.setFixedSize(56, 56)
+        self.resonance_knob.setToolTip(tt.FILTER_RESONANCE_KNOB)
         self.key_filter_track_knob = Knob()
         # s3k.params declares K_FREQ's range as -30..99 (its own notes cite
         # a 2026-08-24 hardware sweep finding no clamp at 12 or 24 either),
@@ -702,6 +668,7 @@ class ProgramEditorWindow(QMainWindow):
         self.key_filter_track_knob.setRange(-24, 24)
         self.key_filter_track_knob.setDefaultValue(0)  # no key tracking
         self.key_filter_track_knob.setFixedSize(56, 56)
+        self.key_filter_track_knob.setToolTip(tt.FILTER_KEY_TRACK_KNOB)
 
         self.env1_graph = ADSREnvelopeGraph()
         self.env1_graph.setFixedSize(200, 90)
@@ -716,18 +683,22 @@ class ProgramEditorWindow(QMainWindow):
         self.attack1_knob.setRange(0, 99)
         self.attack1_knob.setDefaultValue(25)
         self.attack1_knob.setFixedSize(40, 40)
+        self.attack1_knob.setToolTip(tt.ENV1_ATTACK_KNOB)
         self.decay1_knob = Knob()
         self.decay1_knob.setRange(0, 99)
         self.decay1_knob.setDefaultValue(50)
         self.decay1_knob.setFixedSize(40, 40)
+        self.decay1_knob.setToolTip(tt.ENV1_DECAY_KNOB)
         self.sustain1_knob = Knob()
         self.sustain1_knob.setRange(0, 99)
         self.sustain1_knob.setDefaultValue(99)
         self.sustain1_knob.setFixedSize(40, 40)
+        self.sustain1_knob.setToolTip(tt.ENV1_SUSTAIN_KNOB)
         self.release1_knob = Knob()
         self.release1_knob.setRange(0, 99)
         self.release1_knob.setDefaultValue(45)
         self.release1_knob.setFixedSize(40, 40)
+        self.release1_knob.setToolTip(tt.ENV1_RELEASE_KNOB)
 
         attack1_col, self.attack1_value_label = self._build_knob_column(
             "Attack", self.attack1_knob
@@ -796,9 +767,11 @@ class ProgramEditorWindow(QMainWindow):
             rate_knob.setRange(0, 99)
             rate_knob.setDefaultValue(_ENV2_RATE_DEFAULTS[i - 1])
             rate_knob.setFixedSize(32, 32)
+            rate_knob.setToolTip(tt.ENV2_RATE_KNOB.format(stage=i))
             level_knob.setRange(0, 99)
             level_knob.setDefaultValue(_ENV2_LEVEL_DEFAULTS[i - 1])
             level_knob.setFixedSize(32, 32)
+            level_knob.setToolTip(tt.ENV2_LEVEL_KNOB.format(stage=i))
 
             rate_layout, rate_value_label = self._build_knob_value_row(rate_knob)
             level_layout, level_value_label = self._build_knob_value_row(level_knob)
@@ -946,6 +919,7 @@ class ProgramEditorWindow(QMainWindow):
             cp,
         ) in enumerate(_ZONE_FIELDS):
             btn = QPushButton(f"Zone {zone_idx + 1}")
+            btn.setToolTip(tt.ZONE_TAB.format(zone_number=zone_idx + 1))
             btn.setCheckable(True)
             btn.setChecked(zone_idx == 0)
             self._zone_button_group.addButton(btn, zone_idx)
@@ -978,10 +952,12 @@ class ProgramEditorWindow(QMainWindow):
             loud_knob.setRange(-50, 50)
             loud_knob.setFixedSize(28, 28)
             loud_knob.setEnabled(True)
+            loud_knob.setToolTip(tt.ZONE_LOUDNESS_KNOB)
             pan_knob = Knob()
             pan_knob.setRange(-50, 50)
             pan_knob.setFixedSize(28, 28)
             pan_knob.setEnabled(True)
+            pan_knob.setToolTip(tt.ZONE_PAN_KNOB)
 
             loud_col, loud_val_label = self._build_labeled_knob_value_column(
                 "<b>Loud</b>", loud_knob, center=False
@@ -1368,12 +1344,14 @@ class ProgramEditorWindow(QMainWindow):
         self.pan_knob = Knob()
         self.pan_knob.setRange(-50, 50)
         self.pan_knob.setFixedSize(56, 56)
+        self.pan_knob.setToolTip(tt.PROGRAM_PAN_KNOB)
         pan_column, self.pan_value_label = self._build_knob_column("Pan", self.pan_knob)
 
         self.loud_knob = Knob()
         self.loud_knob.setRange(0, 99)
         self.loud_knob.setDefaultValue(80)
         self.loud_knob.setFixedSize(56, 56)
+        self.loud_knob.setToolTip(tt.PROGRAM_LOUDNESS_KNOB)
         loud_column, self.loud_value_label = self._build_knob_column(
             "Loud", self.loud_knob
         )
@@ -1382,6 +1360,7 @@ class ProgramEditorWindow(QMainWindow):
         self.velocity_knob.setRange(-50, 50)
         self.velocity_knob.setDefaultValue(20)
         self.velocity_knob.setFixedSize(56, 56)
+        self.velocity_knob.setToolTip(tt.PROGRAM_VELOCITY_KNOB)
         velocity_column, self.velocity_value_label = self._build_knob_column(
             "Velocity", self.velocity_knob
         )
@@ -1390,18 +1369,22 @@ class ProgramEditorWindow(QMainWindow):
         self.lfo_rate_knob.setRange(0, 99)
         self.lfo_rate_knob.setDefaultValue(0)  # no modulation without depth anyway
         self.lfo_rate_knob.setFixedSize(56, 56)
+        self.lfo_rate_knob.setToolTip(tt.LFO1_RATE_KNOB)
         self.lfo_depth_knob = Knob()
         self.lfo_depth_knob.setRange(0, 99)
         self.lfo_depth_knob.setDefaultValue(0)  # no modulation
         self.lfo_depth_knob.setFixedSize(56, 56)
+        self.lfo_depth_knob.setToolTip(tt.LFO1_DEPTH_KNOB)
         self.lfo_delay_knob = Knob()
         self.lfo_delay_knob.setRange(0, 99)
         self.lfo_delay_knob.setDefaultValue(0)  # no delay before the LFO starts
         self.lfo_delay_knob.setFixedSize(56, 56)
+        self.lfo_delay_knob.setToolTip(tt.LFO1_DELAY_KNOB)
 
         self.lfo_shape_combo = QComboBox()
         self.lfo_shape_combo.addItems(["Triangle", "Sawtooth", "Square", "Random"])
         self.lfo_shape_combo.setEnabled(True)
+        self.lfo_shape_combo.setToolTip(tt.LFO1_SHAPE_COMBO)
         self.lfo_shape_combo.currentIndexChanged.connect(
             lambda i: self._schedule_write("LFO1WAVE", "program", i)
         )
@@ -1429,6 +1412,7 @@ class ProgramEditorWindow(QMainWindow):
         # without also checking this still lines up.
         self.lfo1_sync_combo = QComboBox()
         self.lfo1_sync_combo.addItems(["On", "Off"])
+        self.lfo1_sync_combo.setToolTip(tt.LFO1_SYNC_COMBO)
         lfo1_sync_column = self._build_labeled_combo_column(
             "LFO1 sync", self.lfo1_sync_combo
         )
@@ -1453,14 +1437,17 @@ class ProgramEditorWindow(QMainWindow):
         self.lfo2_rate_knob.setRange(0, 99)
         self.lfo2_rate_knob.setDefaultValue(0)
         self.lfo2_rate_knob.setFixedSize(56, 56)
+        self.lfo2_rate_knob.setToolTip(tt.LFO2_RATE_KNOB)
         self.lfo2_depth_knob = Knob()
         self.lfo2_depth_knob.setRange(0, 99)
         self.lfo2_depth_knob.setDefaultValue(0)
         self.lfo2_depth_knob.setFixedSize(56, 56)
+        self.lfo2_depth_knob.setToolTip(tt.LFO2_DEPTH_KNOB)
         self.lfo2_delay_knob = Knob()
         self.lfo2_delay_knob.setRange(0, 99)
         self.lfo2_delay_knob.setDefaultValue(0)
         self.lfo2_delay_knob.setFixedSize(56, 56)
+        self.lfo2_delay_knob.setToolTip(tt.LFO2_DELAY_KNOB)
 
         self.lfo2_shape_combo = QComboBox()
         # only 3 shapes, not LFO1's 4 - LFO1WAVE's 4th ("Random") value was
@@ -1469,6 +1456,7 @@ class ProgramEditorWindow(QMainWindow):
         # the same way, so this offers only what s3k.params' LFO2WAVE desc
         # actually documents rather than assuming the same hidden 4th shape
         self.lfo2_shape_combo.addItems(["Triangle", "Sawtooth", "Square"])
+        self.lfo2_shape_combo.setToolTip(tt.LFO2_SHAPE_COMBO)
         self.lfo2_shape_combo.currentIndexChanged.connect(
             lambda i: self._schedule_write("LFO2WAVE", "program", i)
         )
@@ -1491,6 +1479,7 @@ class ProgramEditorWindow(QMainWindow):
         # K_FREQ/B_PTCHD (AGENTS.md) - a third field in that list now.
         self.lfo2_trig_combo = QComboBox()
         self.lfo2_trig_combo.addItems(["Off", "On"])
+        self.lfo2_trig_combo.setToolTip(tt.LFO2_TRIG_COMBO)
         lfo2_trig_column = self._build_labeled_combo_column(
             "LFO2 retrig", self.lfo2_trig_combo
         )
@@ -1509,6 +1498,7 @@ class ProgramEditorWindow(QMainWindow):
         for voices in range(1, 33):  # 1-32 voices - the sampler's full range
             self.polyph_combo.addItem(str(voices), voices)
         self.polyph_combo.setEnabled(True)
+        self.polyph_combo.setToolTip(tt.POLYPHONY_COMBO)
         self.polyph_combo.currentIndexChanged.connect(
             lambda i: self._schedule_write(
                 "POLYPH", "program", self.polyph_combo.itemData(i)
@@ -1528,6 +1518,7 @@ class ProgramEditorWindow(QMainWindow):
         # lfo_shape_combo/LFO1WAVE above, no itemData needed
         self.note_priority_combo.addItems(["Low", "Normal", "High", "Hold"])
         self.note_priority_combo.setEnabled(True)
+        self.note_priority_combo.setToolTip(tt.NOTE_PRIORITY_COMBO)
         self.note_priority_combo.currentIndexChanged.connect(
             lambda i: self._schedule_write("PRIORT", "program", i)
         )
@@ -1551,6 +1542,7 @@ class ProgramEditorWindow(QMainWindow):
         # 255 as a real OMNI sentinel for this region, so it's offered here
         self.midi_channel_combo.addItem("Omni", 255)
         self.midi_channel_combo.setEnabled(True)
+        self.midi_channel_combo.setToolTip(tt.MIDI_CHANNEL_COMBO)
         self.midi_channel_combo.currentIndexChanged.connect(
             lambda i: self._schedule_write(
                 "PMCHAN", "program", self.midi_channel_combo.itemData(i)
@@ -1595,6 +1587,7 @@ class ProgramEditorWindow(QMainWindow):
         self.bend_up_combo = QComboBox()
         self.bend_up_combo.addItems([f"{i} st" for i in range(25)])
         self.bend_up_combo.setMaximumWidth(70)
+        self.bend_up_combo.setToolTip(tt.BEND_UP_COMBO)
         bend_up_column = self._build_labeled_combo_column("Bend up", self.bend_up_combo)
 
         self.bend_down_combo = QComboBox()
@@ -1606,6 +1599,7 @@ class ProgramEditorWindow(QMainWindow):
         # edit the dependency (AGENTS.md)
         self.bend_down_combo.addItems([f"{i} st" for i in range(25)])
         self.bend_down_combo.setMaximumWidth(70)
+        self.bend_down_combo.setToolTip(tt.BEND_DOWN_COMBO)
         bend_down_column = self._build_labeled_combo_column(
             "Bend down", self.bend_down_combo
         )
@@ -1634,6 +1628,7 @@ class ProgramEditorWindow(QMainWindow):
         self.portamento_rate_knob.setRange(0, 99)
         self.portamento_rate_knob.setDefaultValue(0)  # no known factory default
         self.portamento_rate_knob.setFixedSize(28, 28)
+        self.portamento_rate_knob.setToolTip(tt.PORTAMENTO_RATE_KNOB)
         portamento_rate_column, self.portamento_rate_value_label = (
             self._build_labeled_knob_value_column("Rate", self.portamento_rate_knob)
         )
@@ -1975,12 +1970,14 @@ class ProgramEditorWindow(QMainWindow):
         close_button = QPushButton("Close")
         close_button.clicked.connect(self.close)
 
-        refresh_button = QPushButton("⟳ Refresh")
-        refresh_button.setToolTip(
-            "Reload the current program/keygroup from the hardware (⌘R) - "
-            "use this if you've changed something on the sampler's own front panel"
-        )
-        refresh_button.clicked.connect(self._refresh_from_hardware)
+        # tooltip is finished off with its resolved keyboard shortcut once
+        # refresh_action exists (built later in __init__, alongside the
+        # zoom buttons' own equivalent finishing step) - see the comment
+        # there for why this can't just be hardcoded to one platform's
+        # symbol
+        self.refresh_button = QPushButton("⟳ Refresh")
+        self.refresh_button.setToolTip(tt.REFRESH_BUTTON)
+        self.refresh_button.clicked.connect(self._refresh_from_hardware)
 
         content_layout = QHBoxLayout()
         content_layout.addWidget(programs_container)
@@ -2005,7 +2002,7 @@ class ProgramEditorWindow(QMainWindow):
         self.main_tabs.currentChanged.connect(self._on_main_tab_changed)
 
         bottom_row = QHBoxLayout()
-        bottom_row.addWidget(refresh_button)
+        bottom_row.addWidget(self.refresh_button)
         # ties the loading indicator to the action that most often triggers
         # a hardware sync, rather than tucking it into the status bar
         bottom_row.addWidget(self._loading_progress)
@@ -2025,6 +2022,16 @@ class ProgramEditorWindow(QMainWindow):
         refresh_action.triggered.connect(self._refresh_from_hardware)
         hardware_menu = self.menuBar().addMenu("&Hardware")
         hardware_menu.addAction(refresh_action)
+        # same "append the resolved, platform-native shortcut rather than
+        # hardcoding one platform's symbol" fix-up the zoom buttons get
+        # further down - see that block's own comment for why
+        refresh_shortcut_text = refresh_action.shortcut().toString(
+            QKeySequence.SequenceFormat.NativeText
+        )
+        if refresh_shortcut_text:
+            self.refresh_button.setToolTip(
+                f"{self.refresh_button.toolTip()} ({refresh_shortcut_text})"
+            )
 
         # zoom for the Samples tab's waveform view. "Ctrl+=" is the primary
         # zoom-in binding (auto-translates to "Cmd+=" on macOS via Qt's own
@@ -3906,6 +3913,7 @@ class ProgramEditorWindow(QMainWindow):
         knob.setRange(-50, 50)
         knob.setDefaultValue(0)
         knob.setFixedSize(28, 28)
+        knob.setToolTip(tt.MOD_MATRIX_AMOUNT_KNOB)
         # enabled here rather than in __init__'s later "enable knobs" block
         # (see Knob.__init__ - it starts disabled) - unlike every other
         # knob on this page, these are built AND wired together by one
@@ -4361,14 +4369,14 @@ class ProgramEditorWindow(QMainWindow):
         # _update_zoom_button_tooltips.
         self.zoom_out_button = QPushButton("-")
         self.zoom_out_button.setFixedWidth(36)
-        self.zoom_out_button.setToolTip("Zoom out (Ctrl+scroll on the waveform also works)")
+        self.zoom_out_button.setToolTip(tt.SAMPLE_ZOOM_OUT)
         self.zoom_out_button.clicked.connect(self.waveform_view.zoom_out)
         self.zoom_in_button = QPushButton("+")
         self.zoom_in_button.setFixedWidth(36)
-        self.zoom_in_button.setToolTip("Zoom in (Ctrl+scroll on the waveform also works)")
+        self.zoom_in_button.setToolTip(tt.SAMPLE_ZOOM_IN)
         self.zoom_in_button.clicked.connect(self.waveform_view.zoom_in)
         self.zoom_fit_button = QPushButton("Fit")
-        self.zoom_fit_button.setToolTip("Reset zoom to show the whole sample")
+        self.zoom_fit_button.setToolTip(tt.SAMPLE_ZOOM_FIT)
         self.zoom_fit_button.clicked.connect(self.waveform_view.reset_zoom)
         # small, unobtrusive progress indicator for Trim/Reverse/Fade
         # specifically (see _perform_sample_edit/_on_sample_edit_progress) -
@@ -4537,11 +4545,7 @@ class ProgramEditorWindow(QMainWindow):
         self.sample_loop_hold_knob.sliderReleased.connect(
             self._commit_sample_loop_hold
         )
-        self.sample_loop_hold_knob.setToolTip(
-            "How long the loop dwells before releasing: Off (no loop, far "
-            "left), Hold (loops forever, far right), or a 1-9998ms dwell "
-            "time in between. Click then type a number for an exact value."
-        )
+        self.sample_loop_hold_knob.setToolTip(tt.SAMPLE_LOOP_HOLD_KNOB)
 
         root_note_label = QLabel("Root Note")
         root_note_label.setFixedWidth(70)
@@ -4579,6 +4583,7 @@ class ProgramEditorWindow(QMainWindow):
             loop_tune_widget,
         ) = self._build_multi_part_knob(-50, 50, default=0)
         self.sample_loop_tune_knob.setEnabled(False)
+        self.sample_loop_tune_knob.setToolTip(tt.SAMPLE_LOOP_TUNE_KNOB)
         # unlike _build_knob_column, _build_multi_part_knob does NOT wire
         # the value label itself (see the Multis tab's own level_knob/
         # pan_knob, which connect this by hand right after calling it too)
@@ -4641,32 +4646,19 @@ class ProgramEditorWindow(QMainWindow):
         sample_edit_row = QHBoxLayout()
         sample_edit_row.setSpacing(8)
         self.trim_sample_button = QPushButton("Trim to Markers")
-        self.trim_sample_button.setToolTip(
-            "Cut the sample down to the current Start/End markers, "
-            "overwriting it on the sampler. Cannot be undone."
-        )
+        self.trim_sample_button.setToolTip(tt.TRIM_SAMPLE_BUTTON)
         self.trim_sample_button.setEnabled(False)
         self.trim_sample_button.clicked.connect(self._confirm_trim_sample)
         self.reverse_sample_button = QPushButton("Reverse sample")
-        self.reverse_sample_button.setToolTip(
-            "Play the sample backwards, overwriting it on the sampler. "
-            "Cannot be undone."
-        )
+        self.reverse_sample_button.setToolTip(tt.REVERSE_SAMPLE_BUTTON)
         self.reverse_sample_button.setEnabled(False)
         self.reverse_sample_button.clicked.connect(self._confirm_reverse_sample)
         self.fade_sample_button = QPushButton("Fade In/Out")
-        self.fade_sample_button.setToolTip(
-            "Linearly fade in from frame 0 up to the Start marker, and "
-            "fade out from the End marker to the last frame, overwriting "
-            "the sample on the sampler. Cannot be undone."
-        )
+        self.fade_sample_button.setToolTip(tt.FADE_SAMPLE_BUTTON)
         self.fade_sample_button.setEnabled(False)
         self.fade_sample_button.clicked.connect(self._confirm_fade_sample)
         self.normalize_sample_button = QPushButton("Normalise Sample")
-        self.normalize_sample_button.setToolTip(
-            "Gain up the whole sample until its loudest point hits maximum "
-            "amplitude, overwriting it on the sampler. Cannot be undone."
-        )
+        self.normalize_sample_button.setToolTip(tt.NORMALIZE_SAMPLE_BUTTON)
         self.normalize_sample_button.setEnabled(False)
         self.normalize_sample_button.clicked.connect(self._confirm_normalize_sample)
         # unlike the other four transforms here, this one has an actual
@@ -4676,10 +4668,7 @@ class ProgramEditorWindow(QMainWindow):
         # (enabled/disabled alongside the other four - see
         # _set_sample_edit_buttons_enabled)
         self.filter_sample_button = QPushButton("Filter Sample…")
-        self.filter_sample_button.setToolTip(
-            "Apply a highpass or lowpass filter to the whole sample, "
-            "overwriting it on the sampler. Cannot be undone."
-        )
+        self.filter_sample_button.setToolTip(tt.FILTER_SAMPLE_BUTTON)
         self.filter_sample_button.setEnabled(False)
         self.filter_sample_button.clicked.connect(self._confirm_filter_sample)
         sample_edit_row.addWidget(self.trim_sample_button)
@@ -4694,10 +4683,7 @@ class ProgramEditorWindow(QMainWindow):
         # comment), it ADDS a new one, so it's not "cannot be undone" in
         # the same destructive sense those four are
         self.duplicate_sample_button = QPushButton("Duplicate Sample")
-        self.duplicate_sample_button.setToolTip(
-            "Send this sample's already-loaded audio to the sampler under "
-            "a new name, copying its loop points and tuning across."
-        )
+        self.duplicate_sample_button.setToolTip(tt.DUPLICATE_SAMPLE_BUTTON)
         self.duplicate_sample_button.setEnabled(False)
         self.duplicate_sample_button.clicked.connect(self._confirm_duplicate_sample)
         sample_edit_row.addWidget(self.duplicate_sample_button)
@@ -4707,10 +4693,7 @@ class ProgramEditorWindow(QMainWindow):
         # page. Same demo-mode/has_waveform() gating as Duplicate Sample -
         # see _open_slice_editor/_set_sample_edit_buttons_enabled.
         self.slice_editor_button = QPushButton("Slice Editor…")
-        self.slice_editor_button.setToolTip(
-            "Manually chop this sample's already-loaded audio into slices "
-            "and export them back to the sampler as new one-shot samples."
-        )
+        self.slice_editor_button.setToolTip(tt.SLICE_EDITOR_BUTTON)
         self.slice_editor_button.setEnabled(False)
         self.slice_editor_button.clicked.connect(self._open_slice_editor)
         sample_edit_row.addWidget(self.slice_editor_button)
@@ -4839,9 +4822,11 @@ class ProgramEditorWindow(QMainWindow):
             level_knob, level_value_label, level_widget = self._build_multi_part_knob(
                 0, 99, default=99
             )
+            level_knob.setToolTip(tt.MULTI_PART_LEVEL_KNOB)
             pan_knob, pan_value_label, pan_widget = self._build_multi_part_knob(
                 -50, 50, default=0
             )
+            pan_knob.setToolTip(tt.MULTI_PART_PAN_KNOB)
 
             row.addWidget(part_label)
             row.addWidget(program_combo, stretch=1)

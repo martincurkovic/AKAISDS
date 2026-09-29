@@ -14,6 +14,7 @@ from PySide6.QtCore import Qt
 from core import sample_editing
 from core.audio_preview import SlicePreviewPlayer
 from ui.knob import LogKnob
+from ui import tooltips
 
 # dB/octave -> cascaded biquad stage count - each stage is a fixed 12dB/
 # octave (see sample_editing._biquad_coefficients/_stages_for_slope), so
@@ -164,6 +165,7 @@ class FilterSampleDialog(QDialog):
         sections_row.addWidget(self.lp_group)
 
         self.preview_button = QPushButton("Preview")
+        self.preview_button.setToolTip(tooltips.FILTER_PREVIEW_BUTTON)
         self.preview_button.clicked.connect(self._preview)
 
         warning_label = QLabel(

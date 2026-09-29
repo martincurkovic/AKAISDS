@@ -22,6 +22,7 @@ from s3k.messages import AKAI_CHARSET, NAME_LENGTH
 from ui.qt_helpers import widen_popup_to_fit_items
 from ui.sample_settings_dialog import _BIT_DEPTH_OPTIONS, _RATE_OPTIONS
 from ui.slice_waveform_view import SliceWaveformView
+from ui import tooltips
 
 # same shape as program_editor_window.py's own _NAME_INPUT_PATTERN
 # (AKAI_CHARSET/NAME_LENGTH-based) - duplicated rather than imported to
@@ -250,9 +251,9 @@ class SliceEditorWindow(QDialog):
         zoom_fit_key = _bind_all([QKeySequence("Ctrl+0")], self.waveform.reset_zoom)
 
         for button, key, tooltip in (
-            (self.zoom_out_button, zoom_out_key, "Zoom out"),
-            (self.zoom_in_button, zoom_in_key, "Zoom in"),
-            (self.zoom_fit_button, zoom_fit_key, "Zoom to fit the whole sample"),
+            (self.zoom_out_button, zoom_out_key, tooltips.ZOOM_OUT),
+            (self.zoom_in_button, zoom_in_key, tooltips.ZOOM_IN),
+            (self.zoom_fit_button, zoom_fit_key, tooltips.ZOOM_FIT),
         ):
             shortcut_text = key.toString(QKeySequence.SequenceFormat.NativeText)
             button.setToolTip(f"{tooltip} ({shortcut_text})" if shortcut_text else tooltip)
@@ -282,6 +283,7 @@ class SliceEditorWindow(QDialog):
         self.equal_count_spin.setRange(_EQUAL_SLICE_MIN, _EQUAL_SLICE_MAX)
         self.equal_count_spin.setValue(_EQUAL_SLICE_DEFAULT)
         self.equal_slices_button = QPushButton("Generate Equal Slices")
+        self.equal_slices_button.setToolTip(tooltips.EQUAL_SLICES_BUTTON)
         self.equal_slices_button.clicked.connect(self._generate_equal_slices)
         equal_row.addWidget(QLabel("Equal slices:"))
         equal_row.addWidget(self.equal_count_spin)
@@ -305,6 +307,7 @@ class SliceEditorWindow(QDialog):
 
         export_row = QHBoxLayout()
         self.export_button = QPushButton("Export Slices")
+        self.export_button.setToolTip(tooltips.EXPORT_SLICES_BUTTON)
         self.export_button.clicked.connect(self._confirm_export)
         if demo_mode:
             # unlike Duplicate Sample/Program/Keygroup (fully disabled in
@@ -313,11 +316,7 @@ class SliceEditorWindow(QDialog):
             # fine without hardware, so only THIS button - the one step
             # that actually writes new samples to the sampler - is disabled
             self.export_button.setEnabled(False)
-            self.export_button.setToolTip(
-                "Exporting slices to the sampler needs a real hardware "
-                "connection - not available in demo mode. Marker placement "
-                "and click-to-preview still work fully."
-            )
+            self.export_button.setToolTip(tooltips.EXPORT_SLICES_DEMO_MODE)
         export_row.addWidget(self.export_button)
 
         # ReCycle-style "export to Akai sampler format": in addition to
@@ -341,6 +340,7 @@ class SliceEditorWindow(QDialog):
         if program_names_provider is not None and create_program_callback is not None:
             program_names = program_names_provider()
             self.create_program_checkbox = QCheckBox("Create new program with slices")
+            self.create_program_checkbox.setToolTip(tooltips.CREATE_PROGRAM_CHECKBOX)
             self._template_program_label = QLabel("Template:")
             self.template_program_combo = QComboBox()
             self.template_program_combo.addItems(program_names)
@@ -364,16 +364,12 @@ class SliceEditorWindow(QDialog):
                 # above - DemoBridge has no add-program primitive either
                 self._create_program_checkbox_allowed = False
                 self.create_program_checkbox.setEnabled(False)
-                self.create_program_checkbox.setToolTip(
-                    "Creating a program needs a real hardware connection - "
-                    "not available in demo mode."
-                )
+                self.create_program_checkbox.setToolTip(tooltips.CREATE_PROGRAM_DEMO_MODE)
             elif not program_names:
                 self._create_program_checkbox_allowed = False
                 self.create_program_checkbox.setEnabled(False)
                 self.create_program_checkbox.setToolTip(
-                    "No resident program is available to use as a starting "
-                    "template for the new program."
+                    tooltips.CREATE_PROGRAM_NO_TEMPLATE
                 )
             export_row.addWidget(self.create_program_checkbox)
             export_row.addWidget(self._template_program_label)
