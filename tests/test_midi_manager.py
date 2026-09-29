@@ -241,3 +241,176 @@ def test_on_message_ignores_non_sysex_messages(manager):
     callback(fake_message)
 
     assert received == []
+
+
+# --- AKAISDS_SHARED_MIDI_TRANSPORT=1 (see core/midi_transport.py) ----------
+# core.midi_transport itself is NOT faked out here (unlike mido above) -
+# it's real, dependency-light code already covered directly by
+# tests/test_midi_transport.py. Only SharedMidiInput/SharedMidiOutput/
+# list_input_names/list_output_names are monkeypatched with fakes, so these
+# tests never need a real MIDI backend/port either - they're checking
+# MidiManager's OWN wiring (which branch it takes, how it frames/unframes
+# SysEx bytes by hand), not core.midi_transport's own internals again.
+
+
+class _FakeSharedInput:
+    instances = []
+
+    def __init__(self, name):
+        self.name = name
+        self.callback = None
+        self.closed = False
+        _FakeSharedInput.instances.append(self)
+
+    def set_message_callback(self, callback):
+        self.callback = callback
+
+    def close_port(self):
+        self.closed = True
+
+
+class _FakeSharedOutput:
+    instances = []
+
+    def __init__(self, name):
+        self.name = name
+        self.sent = []
+        self.closed = False
+        _FakeSharedOutput.instances.append(self)
+
+    def send_message(self, message):
+        self.sent.append(list(message))
+
+    def close_port(self):
+        self.closed = True
+
+
+@pytest.fixture
+def shared_manager(midi_manager_module, monkeypatch):
+    module, _fake_mido = midi_manager_module
+    monkeypatch.setenv("AKAISDS_SHARED_MIDI_TRANSPORT", "1")
+    _FakeSharedInput.instances = []
+    _FakeSharedOutput.instances = []
+    monkeypatch.setattr(module.midi_transport, "SharedMidiInput", _FakeSharedInput)
+    monkeypatch.setattr(module.midi_transport, "SharedMidiOutput", _FakeSharedOutput)
+    monkeypatch.setattr(
+        module.midi_transport, "list_input_names", lambda: ["Shared In A"]
+    )
+    monkeypatch.setattr(
+        module.midi_transport, "list_output_names", lambda: ["Shared Out A"]
+    )
+    return module.MidiManager()
+
+
+def test_shared_transport_list_inputs_and_outputs_use_midi_transport(shared_manager):
+    mgr = shared_manager
+    assert mgr.list_inputs() == ["Shared In A"]
+    assert mgr.list_outputs() == ["Shared Out A"]
+
+
+def test_shared_transport_open_input_builds_a_shared_midi_input(shared_manager):
+    mgr = shared_manager
+    mgr.open_input("Shared In A")
+    assert mgr.raw_input is _FakeSharedInput.instances[-1]
+    assert mgr.raw_input.name == "Shared In A"
+    assert mgr.input_name == "Shared In A"
+    assert mgr.input_port is None  # the mido-backed slot stays unused
+
+
+def test_shared_transport_open_output_builds_a_shared_midi_output(shared_manager):
+    mgr = shared_manager
+    mgr.open_output("Shared Out A")
+    assert mgr.raw_output is _FakeSharedOutput.instances[-1]
+    assert mgr.output_name == "Shared Out A"
+    assert mgr.output_port is None
+
+
+def test_shared_transport_close_input_closes_the_raw_port(shared_manager):
+    mgr = shared_manager
+    mgr.open_input("Shared In A")
+    raw = mgr.raw_input
+    mgr.close_input()
+    assert raw.closed is True
+    assert mgr.raw_input is None
+    assert mgr.input_name is None
+
+
+def test_shared_transport_close_output_closes_the_raw_port(shared_manager):
+    mgr = shared_manager
+    mgr.open_output("Shared Out A")
+    raw = mgr.raw_output
+    mgr.close_output()
+    assert raw.closed is True
+    assert mgr.raw_output is None
+
+
+def test_shared_transport_send_sysex_frames_with_sox_and_eox(shared_manager):
+    mgr = shared_manager
+    mgr.open_output("Shared Out A")
+    mgr.send_sysex([0x01, 0x02, 0x03])
+    assert mgr.raw_output.sent == [[0xF0, 0x01, 0x02, 0x03, 0xF7]]
+
+
+def test_shared_transport_send_sysex_without_output_raises(shared_manager):
+    with pytest.raises(RuntimeError):
+        shared_manager.send_sysex([0x01])
+
+
+def test_shared_transport_send_control_change_frames_correctly(shared_manager):
+    mgr = shared_manager
+    mgr.open_output("Shared Out A")
+    mgr.send_control_change(channel=2, control=7, value=100)
+    assert mgr.raw_output.sent == [[0xB2, 7, 100]]
+
+
+def test_shared_transport_send_control_change_without_output_raises(shared_manager):
+    with pytest.raises(RuntimeError):
+        shared_manager.send_control_change(0, 1, 127)
+
+
+def test_shared_transport_on_raw_message_strips_sox_and_eox(shared_manager):
+    mgr = shared_manager
+    received = []
+    mgr.sysex_received.connect(lambda data: received.append(data))
+    mgr.open_input("Shared In A")
+
+    mgr.raw_input.callback([0xF0, 0x7E, 0x00, 0x01, 0xF7])
+
+    assert received == [bytes([0x7E, 0x00, 0x01])]
+
+
+def test_shared_transport_on_raw_message_without_trailing_eox_still_strips_sox(
+    shared_manager,
+):
+    # rtmidi callbacks are not guaranteed to deliver a trimmed-to-exactly-
+    # one-frame buffer - tolerate a missing EOX rather than mis-framing
+    mgr = shared_manager
+    received = []
+    mgr.sysex_received.connect(lambda data: received.append(data))
+    mgr.open_input("Shared In A")
+
+    mgr.raw_input.callback([0xF0, 0x7E, 0x00, 0x01])
+
+    assert received == [bytes([0x7E, 0x00, 0x01])]
+
+
+def test_shared_transport_on_raw_message_ignores_non_sysex(shared_manager):
+    mgr = shared_manager
+    received = []
+    mgr.sysex_received.connect(lambda data: received.append(data))
+    mgr.open_input("Shared In A")
+
+    mgr.raw_input.callback([0x90, 60, 100])
+
+    assert received == []
+
+
+def test_shared_transport_on_raw_message_ignores_empty_message(shared_manager):
+    mgr = shared_manager
+    received = []
+    mgr.sysex_received.connect(lambda data: received.append(data))
+    mgr.open_input("Shared In A")
+
+    mgr.raw_input.callback([])
+
+    assert received == []

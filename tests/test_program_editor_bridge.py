@@ -58,6 +58,114 @@ def test_connect_opens_saved_output_port_when_not_demo(monkeypatch):
     assert calls == ["Some Output"]
 
 
+# --- connect(): AKAISDS_SHARED_MIDI_TRANSPORT=1 (see core/midi_transport.py) -
+# builds the Program Editor's own S3kBridge from a MidiManager's already-open
+# raw ports instead of opening a second, independent connection - one real
+# connection instead of two. See test_scripts/midi_transport_consolidation_
+# test_plan.md - this path is not yet validated on real hardware.
+
+
+class _FakeMidiManagerWithRawPorts:
+    def __init__(self, raw_input=None, raw_output=None, output_name="Shared Out"):
+        self.raw_input = raw_input
+        self.raw_output = raw_output
+        self.output_name = output_name
+
+
+def test_connect_uses_shared_transport_when_flag_set_and_ports_open(monkeypatch):
+    monkeypatch.delenv("AKAISDS_DEMO_SAMPLER", raising=False)
+    monkeypatch.setenv("AKAISDS_SHARED_MIDI_TRANSPORT", "1")
+    raw_in = object()
+    raw_out = object()
+    midi_manager = _FakeMidiManagerWithRawPorts(raw_in, raw_out, "Shared Out")
+
+    calls = []
+    sentinel = object()
+
+    def fake_s3kbridge(midi_out, midi_in, description, **kwargs):
+        calls.append((midi_out, midi_in, description))
+        return sentinel
+
+    def fake_throttled_out(port):
+        return ("throttled", port)
+
+    monkeypatch.setattr(program_editor_bridge, "S3kBridge", fake_s3kbridge)
+    monkeypatch.setattr(program_editor_bridge, "ThrottledOut", fake_throttled_out)
+
+    bridge = program_editor_bridge.connect(midi_manager)
+
+    assert isinstance(bridge, LoggingBridge)
+    assert bridge._bridge is sentinel
+    assert len(calls) == 1
+    midi_out, midi_in, description = calls[0]
+    assert midi_out == ("throttled", raw_out)
+    assert midi_in is raw_in
+    assert description == "Shared Out (shared)"
+
+
+def test_connect_falls_back_to_standard_when_flag_set_but_ports_not_open(monkeypatch):
+    # AKAISDS_SHARED_MIDI_TRANSPORT=1 alone isn't enough - the MidiManager
+    # passed in must actually have its raw ports open already (e.g. the
+    # Dashboard's own connection hasn't been established yet)
+    monkeypatch.delenv("AKAISDS_DEMO_SAMPLER", raising=False)
+    monkeypatch.setenv("AKAISDS_SHARED_MIDI_TRANSPORT", "1")
+    monkeypatch.setattr(
+        program_editor_bridge.app_config,
+        "get_saved_ports",
+        lambda: ("Some Input", "Some Output"),
+    )
+    sentinel = object()
+    monkeypatch.setattr(
+        program_editor_bridge.S3kBridge, "standard", lambda output_name: sentinel
+    )
+    midi_manager = _FakeMidiManagerWithRawPorts(raw_input=None, raw_output=None)
+
+    bridge = program_editor_bridge.connect(midi_manager)
+
+    assert bridge._bridge is sentinel
+
+
+def test_connect_falls_back_to_standard_when_flag_set_but_no_midi_manager_given(
+    monkeypatch,
+):
+    monkeypatch.delenv("AKAISDS_DEMO_SAMPLER", raising=False)
+    monkeypatch.setenv("AKAISDS_SHARED_MIDI_TRANSPORT", "1")
+    monkeypatch.setattr(
+        program_editor_bridge.app_config,
+        "get_saved_ports",
+        lambda: ("Some Input", "Some Output"),
+    )
+    sentinel = object()
+    monkeypatch.setattr(
+        program_editor_bridge.S3kBridge, "standard", lambda output_name: sentinel
+    )
+
+    bridge = program_editor_bridge.connect()  # no midi_manager at all
+
+    assert bridge._bridge is sentinel
+
+
+def test_connect_ignores_shared_transport_when_flag_is_unset(monkeypatch):
+    # a MidiManager with open raw ports handed in, but the flag itself is
+    # off - must still take the ordinary S3kBridge.standard() path
+    monkeypatch.delenv("AKAISDS_DEMO_SAMPLER", raising=False)
+    monkeypatch.delenv("AKAISDS_SHARED_MIDI_TRANSPORT", raising=False)
+    monkeypatch.setattr(
+        program_editor_bridge.app_config,
+        "get_saved_ports",
+        lambda: ("Some Input", "Some Output"),
+    )
+    sentinel = object()
+    monkeypatch.setattr(
+        program_editor_bridge.S3kBridge, "standard", lambda output_name: sentinel
+    )
+    midi_manager = _FakeMidiManagerWithRawPorts(object(), object())
+
+    bridge = program_editor_bridge.connect(midi_manager)
+
+    assert bridge._bridge is sentinel
+
+
 # --- BridgeWorker: program/sample lists ---------------------------------------
 
 

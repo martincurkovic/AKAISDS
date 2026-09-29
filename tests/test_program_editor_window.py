@@ -3016,6 +3016,38 @@ def test_dragging_the_loop_preview_moves_the_named_marker_and_schedules_a_write(
     assert "LOOPAT1" in [c[0] for c in bridge.set_parameter_calls]
 
 
+def test_dragging_the_loop_preview_past_start_pushes_start_along_too(editor, qapp):
+    # an extreme delta - _on_loop_preview_marker_dragged goes through
+    # WaveformView.set_marker, so the ordinary push_marker cascade applies
+    # here exactly as it does for a canvas drag or a spinbox edit: dragging
+    # loop_start far enough left must shove "start" along with it (down to
+    # 0, both clamped at the buffer's own first frame) rather than just
+    # refusing to cross it - and _schedule_marker_write must write BOTH
+    # fields that actually moved, not just the one named in the drag
+    # signal (see its own comment on why "which marker did the user grab"
+    # isn't enough anymore)
+    editor.sample_list_widget.setCurrentRow(0)
+    editor._worker.wait_until_idle()
+    _pump_until(qapp, lambda: editor.waveform_view.has_header())
+    bridge = editor._bridge
+    # FakeBridge sample 0: start=100, loop_start=5000, loop_end=8000, end=9999
+    # - "start" begins away from the buffer's own edge (0), so a push that
+    # lands it there is a genuine, observable move, not a no-op clamp
+    assert editor.waveform_view.markers()["start"] == 100
+
+    editor._on_loop_preview_marker_dragged("loop_start", -50000)  # way past start
+    editor._flush_marker_write()
+    editor._worker.wait_until_idle()
+    _pump_until(qapp, lambda: bridge.set_parameter_calls)
+
+    markers = editor.waveform_view.markers()
+    assert markers["loop_start"] == 0
+    assert markers["start"] == 0  # pushed along, not left behind
+    written_fields = [c[0] for c in bridge.set_parameter_calls]
+    assert "LOOPAT1" in written_fields
+    assert "SSTART" in written_fields  # "start"'s own field - also moved, also written
+
+
 def test_dragging_the_loop_preview_with_nothing_loaded_does_nothing(editor):
     editor.sample_list_widget.setCurrentRow(-1)
     editor._on_loop_preview_marker_dragged("loop_end", 25)  # must not raise
