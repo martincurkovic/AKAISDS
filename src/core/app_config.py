@@ -90,6 +90,36 @@ def save_device_type(device_type):
     save_config(config)
 
 
+# default as of the shared MIDI transport (core/midi_transport.py) becoming
+# the default connection mode - see core/midi_manager.py's own
+# shared_transport_enabled(). Manual-edit-only by design: there's
+# deliberately no Settings UI for this (an end user having a problem with
+# it edits config.json by hand and sets this to false), so unlike the
+# other settings below, ensure_shared_midi_transport_key_saved() writes
+# this key to disk unconditionally rather than only implicitly defaulting
+# it in the getter - a hand-editing user needs to actually find the key
+# there to know it exists
+_DEFAULT_SHARED_MIDI_TRANSPORT = True
+
+
+def get_shared_midi_transport_enabled():
+    config = load_config()
+    return config.get("shared_midi_transport", _DEFAULT_SHARED_MIDI_TRANSPORT)
+
+
+def ensure_shared_midi_transport_key_saved():
+    # writes "shared_midi_transport" into config.json if it isn't already
+    # there - covers both a brand new install (load_config() returns {},
+    # nothing on disk yet) and a user upgrading from a version before this
+    # setting existed (an existing config.json missing just this one key).
+    # Call once at startup, before anything reads the live value - see
+    # ui/main_window.py's own call site.
+    config = load_config()
+    if "shared_midi_transport" not in config:
+        config["shared_midi_transport"] = _DEFAULT_SHARED_MIDI_TRANSPORT
+        save_config(config)
+
+
 # samples, not ms/bytes - same unit an Ableton-style buffer-size combobox
 # shows (see ui/settings_dialog.py's _BUFFER_SIZE_OPTIONS), converted to
 # milliseconds at playback time (see core/audio_preview.py, which passes

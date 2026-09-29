@@ -341,6 +341,26 @@ class SliceEditorWindow(QDialog):
             self.export_button.setToolTip(tooltips.EXPORT_SLICES_DEMO_MODE)
         export_row.addWidget(self.export_button)
 
+        # only built when there's actually something to cancel - None for
+        # dashboard.py's own reuse of this window (see cancel_callback's
+        # own docstring above). Only shown while self._exporting is True
+        # (see _confirm_export/_on_cancel_export_shortcut) - deliberately
+        # left OUT of _set_controls_enabled's own widget list below, same
+        # "has to stay reachable while everything else freezes" reasoning
+        # as program_editor_window.py's own cancel_transfer_button
+        self.cancel_export_button = None
+        if cancel_callback is not None:
+            self.cancel_export_button = QPushButton("Cancel Transfer")
+            self.cancel_export_button.setToolTip(
+                f"{tooltips.CANCEL_TRANSFER_BUTTON} "
+                f"({self._cancel_export_shortcut.key().toString(QKeySequence.SequenceFormat.NativeText)})"
+            )
+            self.cancel_export_button.clicked.connect(
+                self._on_cancel_export_shortcut
+            )
+            self.cancel_export_button.setVisible(False)
+            export_row.addWidget(self.cancel_export_button)
+
         # ReCycle-style "export to Akai sampler format": in addition to
         # sending each slice as its own one-shot sample (above), optionally
         # create a whole new PROGRAM with one keygroup per slice, each
@@ -604,6 +624,8 @@ class SliceEditorWindow(QDialog):
         self._preview_player.stop()
         self._set_controls_enabled(False)
         self._exporting = True
+        if self.cancel_export_button is not None:
+            self.cancel_export_button.setVisible(True)
         self.export_progress.setVisible(True)
         self.export_progress.setValue(0)
         self.status_label.setText(
@@ -640,6 +662,8 @@ class SliceEditorWindow(QDialog):
                 message = f"{message}\n{prog_message}"
         finally:
             self._exporting = False
+            if self.cancel_export_button is not None:
+                self.cancel_export_button.setVisible(False)
             self._set_controls_enabled(True)
             self.export_progress.setVisible(False)
 

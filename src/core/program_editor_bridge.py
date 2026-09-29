@@ -5,6 +5,7 @@ import time
 from collections import deque
 
 from core import akai_sysex, app_config, debug_log
+from core import midi_manager as midi_manager_module
 from s3k.bridge import DeviceError, S3kBridge, ThrottledOut
 from PySide6.QtCore import QThread, Signal
 import s3k.messages as m
@@ -160,7 +161,7 @@ def connect(midi_manager=None):
         logger.info("program_editor_bridge.connect(): demo bridge")
         bridge = DemoBridge()
     elif (
-        os.environ.get("AKAISDS_SHARED_MIDI_TRANSPORT")
+        midi_manager_module.shared_transport_enabled()
         and midi_manager is not None
         and midi_manager.raw_input is not None
         and midi_manager.raw_output is not None
@@ -173,10 +174,13 @@ def connect(midi_manager=None):
         # as S3kBridge.standard() would wrap its own - the shared transport
         # only changes WHERE the raw port comes from, not S3kBridge's own
         # pacing behaviour. See core/midi_transport.py's own module
-        # docstring and test_scripts/midi_transport_consolidation_test_
-        # plan.md - this path is not yet validated on real hardware, hence
-        # gated behind AKAISDS_SHARED_MIDI_TRANSPORT rather than being the
-        # default.
+        # docstring and tests/midi_transport_consolidation_test_plan.md.
+        # midi_manager.raw_input/raw_output are only ever non-None if
+        # MidiManager itself already decided shared_transport_enabled() was
+        # true when it opened them - re-checking it here too is deliberate
+        # belt-and-braces, not redundant: see this module's own connect()
+        # tests for exactly the scenario (a stubbed MidiManager with raw
+        # ports set but the flag off) this second check exists to catch.
         logger.info(
             "program_editor_bridge.connect(): shared transport "
             f"({midi_manager.output_name!r})"
@@ -576,6 +580,36 @@ class BridgeWorker(QThread):
             return self._idle.wait_for(
                 lambda: not self._queue and not self._busy, timeout
             )
+
+    def is_idle(self):
+        # non-blocking snapshot - safe to call from the GUI thread any
+        # time. Pairs with busy_changed(False): a caller on the GUI thread
+        # that needs to wait for idle WITHOUT freezing the UI (unlike
+        # wait_until_idle() - see its own docstring) checks this first to
+        # skip waiting entirely if already idle, then waits for
+        # busy_changed(False) (via a QEventLoop-pumping wait, e.g.
+        # ProgramEditorWindow._wait_for_any_signal) otherwise -
+        # busy_changed(False) only fires once the whole queue drains, not
+        # once already-idle, so skipping ahead of time is required, not
+        # just an optimization.
+        with self._idle:
+            return not self._queue and not self._busy
+
+    def set_bridge(self, bridge):
+        # swaps the underlying bridge run() dispatches every job to -
+        # lets ui/program_editor_window.py rebuild its connection in place
+        # (e.g. after the shared MIDI ports get reopened out from under it
+        # by a MidiSettingsDialog Apply/diagnostic elsewhere - see
+        # MidiManager.connection_changed's own docstring there) without
+        # tearing down and recreating this QThread, which would mean
+        # reconnecting every one of its Signals by hand at every call site
+        # in that file. CALLER'S responsibility to have already confirmed
+        # the worker is idle first (wait_until_idle()) - same
+        # single-job-at-a-time assumption run() already makes about
+        # self._bridge everywhere else, just not one this method can
+        # enforce on its own from the calling (GUI) thread.
+        with self._idle:
+            self._bridge = bridge
 
     def run(self):
         while True:

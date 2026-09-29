@@ -162,6 +162,36 @@ def test_shared_midi_input_close_port_closes_and_deletes_the_real_port():
     assert fake_port.deleted is True
 
 
+def test_shared_midi_input_close_port_acquires_the_same_lock_as_the_callback():
+    # regression test for a confirmed real-hardware crash: close_port()
+    # used to delete the real port with no lock at all, so a concurrent
+    # rtmidi callback (its own native thread) invoking _on_rtmidi_message
+    # could run mid-delete. See SharedMidiOutput's own equivalent test
+    # below for the actual SIGSEGV this class of bug produced on the
+    # output side - same fix (reuse the one lock that already serializes
+    # against self._port), applied here too for the same reason.
+    fake_port = _FakeInPort()
+    view = SharedMidiInput("Fake In", _port_factory=lambda name: fake_port)
+    calls = []
+    real_lock = view._port_lock
+
+    class _SpyLock:
+        def __enter__(self):
+            calls.append("acquire")
+            return real_lock.__enter__()
+
+        def __exit__(self, *exc_info):
+            calls.append("release")
+            return real_lock.__exit__(*exc_info)
+
+    view._port_lock = _SpyLock()
+
+    view.close_port()
+
+    assert calls == ["acquire", "release"]
+    assert fake_port.closed is True
+
+
 # --- SharedMidiOutput (real port opening replaced with a fake factory) -----
 
 
@@ -194,6 +224,41 @@ def test_shared_midi_output_close_port_closes_and_deletes_the_real_port():
     output.close_port()
     assert fake_port.closed is True
     assert fake_port.deleted is True
+
+
+def test_shared_midi_output_close_port_acquires_the_write_lock():
+    # regression test for a confirmed real-hardware crash: close_port()
+    # used to delete the real port with no lock at all. MidiSettingsDialog's
+    # Apply/Identity Request/Loopback Test (ui/settings_dialog.py) all call
+    # MidiManager.open_input(None)/open_output(None) - close_port() - from
+    # the GUI thread, while BridgeWorker's background thread can be
+    # concurrently mid-send_message() on the SAME SharedMidiOutput under
+    # the shared transport. With no lock, close_port() could delete the
+    # native rtmidi object while send_message()'s call into it was still
+    # in flight - SIGSEGV in RtMidiOut::sendMessage, observed for real on
+    # the BridgeWorker thread. Reusing _write_lock (already held by
+    # send_message() for a different reason - see this class's own
+    # docstring) for close_port() too is the fix.
+    fake_port = _FakeOutPort()
+    output = SharedMidiOutput("Fake Out", _port_factory=lambda name: fake_port)
+    calls = []
+    real_lock = output._write_lock
+
+    class _SpyLock:
+        def __enter__(self):
+            calls.append("acquire")
+            return real_lock.__enter__()
+
+        def __exit__(self, *exc_info):
+            calls.append("release")
+            return real_lock.__exit__(*exc_info)
+
+    output._write_lock = _SpyLock()
+
+    output.close_port()
+
+    assert calls == ["acquire", "release"]
+    assert fake_port.closed is True
 
 
 def test_shared_midi_output_send_message_acquires_the_write_lock():

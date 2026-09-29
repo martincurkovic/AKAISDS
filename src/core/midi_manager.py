@@ -2,29 +2,50 @@ import os
 
 import mido
 
-from core import debug_log
+from core import app_config, debug_log
 from core import midi_transport
 from PySide6.QtCore import QObject, Signal
 
 
-def _shared_transport_enabled():
-    # AKAISDS_SHARED_MIDI_TRANSPORT=1: MidiManager opens its ports through
-    # core/midi_transport.py's raw-rtmidi SharedMidiInput/SharedMidiOutput
-    # instead of mido, and exposes them (as raw_input/raw_output below) for
+def shared_transport_enabled():
+    # public (no leading underscore) - core/program_editor_bridge.py's
+    # connect() and ui/program_editor_window.py's own conditional Settings
+    # menu item both need this exact same answer, not just MidiManager
+    # itself, so this is the one place it's decided.
+    #
+    # MidiManager opens its ports through core/midi_transport.py's
+    # raw-rtmidi SharedMidiInput/SharedMidiOutput instead of mido, and
+    # exposes them (as raw_input/raw_output below) for
     # program_editor_bridge.connect() to build the Program Editor's own
-    # S3kBridge from directly - one real connection instead of two. OFF by
-    # default: this is new, not-yet-hardware-validated code - see
-    # test_scripts/midi_transport_consolidation_test_plan.md. Read live
-    # (not cached), matching AKAISDS_DEMO_SAMPLER/AKAISDS_DEMO_INSTANT's own
-    # convention elsewhere in this app, so tests can flip it per-case.
-    return bool(os.environ.get("AKAISDS_SHARED_MIDI_TRANSPORT"))
+    # S3kBridge from directly - one real connection instead of two.
+    #
+    # ON by default as of real-hardware validation (see AGENTS.md's "MIDI
+    # transport consolidation" section and tests/midi_transport_
+    # consolidation_test_plan.md) - config.json's "shared_midi_transport"
+    # key is the persisted, manually-editable-by-hand override for an end
+    # user who hits a problem with it (see app_config.get_shared_midi_
+    # transport_enabled/ensure_shared_midi_transport_key_saved - there's no
+    # Settings UI for this on purpose). AKAISDS_SHARED_MIDI_TRANSPORT, if
+    # explicitly set in the environment, takes priority over that - a
+    # developer/tester override, same convention AKAISDS_DEMO_SAMPLER/
+    # AKAISDS_DEMO_INSTANT already use elsewhere in this app. Recognizes
+    # "0"/"false"/"no"/"off" (case-insensitive) as an explicit OFF, not
+    # just an unset/empty check - bool(os.environ.get(...)) used to treat
+    # the STRING "0" as truthy (any non-empty string is truthy in Python),
+    # so AKAISDS_SHARED_MIDI_TRANSPORT=0 silently did nothing.
+    #
+    # Read live (not cached) either way, matching AKAISDS_DEMO_SAMPLER/
+    # AKAISDS_DEMO_INSTANT's own convention, so tests can flip it per-case.
+    env_value = os.environ.get("AKAISDS_SHARED_MIDI_TRANSPORT")
+    if env_value is not None:
+        return env_value.strip().lower() not in ("", "0", "false", "no", "off")
+    return app_config.get_shared_midi_transport_enabled()
 
 
 class MidiManager(QObject):
-    # owns the real MIDI input/output ports - mido-backed by default, or
-    # (AKAISDS_SHARED_MIDI_TRANSPORT=1) raw-rtmidi-backed and shared with
-    # the Program Editor's own connection - see _shared_transport_enabled
-    # above
+    # owns the real MIDI input/output ports - raw-rtmidi-backed and shared
+    # with the Program Editor's own connection by default, or mido-backed
+    # if shared_transport_enabled() above says otherwise
 
     sysex_received = Signal(bytes)
     connection_changed = Signal()
@@ -35,7 +56,7 @@ class MidiManager(QObject):
         self.output_port = None
         self.input_name = None
         self.output_name = None
-        # only ever non-None under AKAISDS_SHARED_MIDI_TRANSPORT=1, and only
+        # only ever non-None while shared_transport_enabled(), and only
         # once a connection is actually open - the raw port objects
         # program_editor_bridge.connect() builds its own S3kBridge from
         self.raw_input = None
@@ -43,13 +64,13 @@ class MidiManager(QObject):
 
     @staticmethod
     def list_inputs():
-        if _shared_transport_enabled():
+        if shared_transport_enabled():
             return midi_transport.list_input_names()
         return mido.get_input_names()
 
     @staticmethod
     def list_outputs():
-        if _shared_transport_enabled():
+        if shared_transport_enabled():
             return midi_transport.list_output_names()
         return mido.get_output_names()
 
@@ -57,7 +78,7 @@ class MidiManager(QObject):
         self.close_input()
         if name:
             try:
-                if _shared_transport_enabled():
+                if shared_transport_enabled():
                     self.raw_input = midi_transport.SharedMidiInput(name)
                     self.raw_input.set_message_callback(self._on_raw_message)
                 else:
@@ -84,7 +105,7 @@ class MidiManager(QObject):
         self.close_output()
         if name:
             try:
-                if _shared_transport_enabled():
+                if shared_transport_enabled():
                     self.raw_output = midi_transport.SharedMidiOutput(name)
                 else:
                     self.output_port = mido.open_output(name)
@@ -128,7 +149,7 @@ class MidiManager(QObject):
         self.sysex_received.emit(bytes(payload))
 
     def send_sysex(self, data_bytes):
-        if _shared_transport_enabled():
+        if shared_transport_enabled():
             if self.raw_output is None:
                 raise RuntimeError("No MIDI output port is open")
             try:
@@ -155,7 +176,7 @@ class MidiManager(QObject):
             raise
 
     def send_control_change(self, channel, control, value):
-        if _shared_transport_enabled():
+        if shared_transport_enabled():
             if self.raw_output is None:
                 raise RuntimeError("No MIDI output port is open")
             self.raw_output.send_message(

@@ -4,10 +4,11 @@ SamplerController) and a poll-style consumer (s3k.bridge.S3kBridge, for the
 Program Editor) at once - instead of two independent connections to the
 same physical device.
 
-Gated behind the AKAISDS_SHARED_MIDI_TRANSPORT env var (see
-core/midi_manager.py) - OFF by default. This is new, not-yet-hardware-
-validated code; see test_scripts/midi_transport_consolidation_test_plan.md
-for exactly what real-hardware testing it needs before that default flips.
+Decided by core.midi_manager.shared_transport_enabled() - ON by default as
+of real-hardware validation against tests/midi_transport_consolidation_
+test_plan.md's numbered tests; config.json's "shared_midi_transport" key
+(manual-edit-only, see core/app_config.py) or the AKAISDS_SHARED_MIDI_
+TRANSPORT env var (a developer/tester override) can still turn it off.
 
 Split into two layers on purpose:
   - _MessageFanout / the write-lock logic in SharedMidiOutput.send_message
@@ -142,6 +143,18 @@ class SharedMidiInput:
 
     def __init__(self, port_name, *, _port_factory=_default_input_port_factory):
         self._logger = debug_log.get_logger()
+        # same reasoning as SharedMidiOutput's own _write_lock (see its own
+        # close_port() comment for the confirmed crash that motivated it) -
+        # rtmidi's native callback thread can invoke _on_rtmidi_message at
+        # any moment, including while close_port() (called from the GUI
+        # thread, e.g. by MidiSettingsDialog's Apply/diagnostics) is
+        # deleting self._port out from under it. Held around BOTH the
+        # callback body and the close/delete, so one can't run mid-way
+        # through the other. Deliberately a separate lock from _fanout's
+        # own _callback_lock (a different object, guarding a different
+        # thing - which consumer callback is currently registered) - named
+        # differently here so the two are never confused for each other.
+        self._port_lock = threading.Lock()
         self._port = _port_factory(port_name)
         self._fanout = _MessageFanout()
         self._port.set_callback(self._on_rtmidi_message)
@@ -152,8 +165,9 @@ class SharedMidiInput:
 
     def _on_rtmidi_message(self, event, _data=None):
         # rtmidi's own callback shape: event = (message: list[int], delta_time)
-        message, delta_time = event
-        self._fanout.push(message, delta_time, logger=self._logger)
+        with self._port_lock:
+            message, delta_time = event
+            self._fanout.push(message, delta_time, logger=self._logger)
 
     # -- s3k.bridge.MultiIn-compatible poll interface (the ONLY two methods
     # S3kBridge itself actually calls on self.inp: get_message() from
@@ -163,8 +177,9 @@ class SharedMidiInput:
         return self._fanout.get_message()
 
     def close_port(self):
-        self._port.close_port()
-        _delete_quiet(self._port)
+        with self._port_lock:
+            self._port.close_port()
+            _delete_quiet(self._port)
         self._logger.info("SharedMidiInput: closed input")
 
 
@@ -193,6 +208,22 @@ class SharedMidiOutput:
             self._port.send_message(message)
 
     def close_port(self):
-        self._port.close_port()
-        _delete_quiet(self._port)
+        # MUST take the same lock send_message() does - a real, confirmed
+        # crash (SIGSEGV in RtMidiOut::sendMessage, BridgeWorker's thread)
+        # came from this NOT doing so: MidiManager.open_input(None)/
+        # open_output(None) (which every one of MidiSettingsDialog's Apply/
+        # Identity Request/Loopback Test calls - see ui/settings_dialog.py)
+        # runs close_port() on the GUI thread while BridgeWorker's
+        # background thread can be concurrently mid-send_message() on the
+        # SAME SharedMidiOutput - deleting the native rtmidi object out
+        # from under an in-flight native call. The write lock already
+        # exists for a DIFFERENT reason (serializing two logical senders
+        # against each other so a SysEx frame can't interleave - see this
+        # class's own docstring); this reuses it to also serialize against
+        # the port being deleted entirely, which is the same "don't touch
+        # self._port from two threads without the lock" invariant, just a
+        # more destructive way of not following it.
+        with self._write_lock:
+            self._port.close_port()
+            _delete_quiet(self._port)
         self._logger.info("SharedMidiOutput: closed output")

@@ -105,6 +105,61 @@ def test_save_and_get_audio_buffer_samples_round_trip(monkeypatch, tmp_path):
     assert app_config.get_saved_audio_buffer_samples() == 1024
 
 
+def test_get_shared_midi_transport_enabled_defaults_to_true(monkeypatch, tmp_path):
+    _use_temp_config(monkeypatch, tmp_path)
+    assert app_config.get_shared_midi_transport_enabled() is True
+
+
+def test_ensure_shared_midi_transport_key_saved_writes_default_on_fresh_config(
+    monkeypatch, tmp_path
+):
+    # no config file at all yet (a brand new install) - CONFIG_PATH.exists()
+    # is False, load_config() returns {}
+    _use_temp_config(monkeypatch, tmp_path)
+    assert not app_config.CONFIG_PATH.exists()
+
+    app_config.ensure_shared_midi_transport_key_saved()
+
+    assert app_config.CONFIG_PATH.exists()
+    assert app_config.load_config()["shared_midi_transport"] is True
+
+
+def test_ensure_shared_midi_transport_key_saved_adds_missing_key_without_touching_rest(
+    monkeypatch, tmp_path
+):
+    # simulates a user upgrading from a version before this setting
+    # existed - an existing config.json with OTHER settings already saved,
+    # just missing this one key
+    _use_temp_config(monkeypatch, tmp_path)
+    app_config.save_ports("My Input", "My Output")
+    app_config.save_channel(7)
+    assert "shared_midi_transport" not in app_config.load_config()
+
+    app_config.ensure_shared_midi_transport_key_saved()
+
+    config = app_config.load_config()
+    assert config["shared_midi_transport"] is True
+    assert config["midi_input_port"] == "My Input"
+    assert config["midi_output_port"] == "My Output"
+    assert config["midi_channel"] == 7
+
+
+def test_ensure_shared_midi_transport_key_saved_leaves_existing_value_alone(
+    monkeypatch, tmp_path
+):
+    # a user who already hand-edited this key (e.g. set it to false after
+    # hitting a problem) must not have that choice silently overwritten on
+    # the next launch
+    _use_temp_config(monkeypatch, tmp_path)
+    config = app_config.load_config()
+    config["shared_midi_transport"] = False
+    app_config.save_config(config)
+
+    app_config.ensure_shared_midi_transport_key_saved()
+
+    assert app_config.get_shared_midi_transport_enabled() is False
+
+
 def test_settings_saved_independently_dont_clobber_each_other(monkeypatch, tmp_path):
     # save ports/channel/device type each read, modify, write the same config file
     # confirm whether saving ONE doesnt wipe out something saved earlier

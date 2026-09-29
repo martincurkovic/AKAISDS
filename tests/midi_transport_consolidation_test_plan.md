@@ -1,39 +1,48 @@
 # MIDI transport consolidation - real-hardware test plan
 
+**Status: validated and now the default** (see the sign-off note at the
+bottom). This document is kept as the record of what was tested before that
+happened, and as the plan to re-run (at least the relevant tests) after any
+future change to `core/midi_transport.py`, `core/midi_manager.py`'s
+`shared_transport_enabled()`/port-opening, or `program_editor_bridge.py`'s
+`connect()`/`BridgeWorker`.
+
 ## What this is testing
 
-Right now, the Transfer Dashboard (`SamplerController`, via `MidiManager`,
+Before this, the Transfer Dashboard (`SamplerController`, via `MidiManager`,
 via `mido`) and the Program Editor (`BridgeWorker`, via `S3kBridge`, via
-`python-rtmidi`) open two **independent** connections to the same physical
-MIDI port whenever the editor is open. This is a real, already-confirmed
+`python-rtmidi`) opened two **independent** connections to the same physical
+MIDI port whenever the editor was open. This was a real, already-confirmed
 source of bugs - see AGENTS.md's "Follow-up, first real-hardware session: a
-confirmed dual-connection MIDI race" - and it's also what makes it unsafe to
-add a "Settings" menu to the Program Editor today (`ui/settings_dialog.py`'s
-own diagnostics already have to release/reopen `MidiManager`'s ports before
+confirmed dual-connection MIDI race" - and it's also what made it unsafe to
+add a "Settings" menu to the Program Editor (`ui/settings_dialog.py`'s own
+diagnostics already have to release/reopen `MidiManager`'s ports before
 running a test, precisely because two open connections to one port is
-already known to be unsafe).
+unsafe).
 
-This branch adds an **opt-in** consolidated transport
-(`core/midi_transport.py`) that lets both sides share ONE real connection
-instead. It is gated behind an environment variable and is **OFF by
-default** - none of this code runs, and nothing changes, unless you
-explicitly set:
+`core/midi_transport.py` adds a **consolidated** transport that lets both
+sides share ONE real connection instead. It's decided by
+`core.midi_manager.shared_transport_enabled()`, now **ON by default**
+(config.json's `"shared_midi_transport"` key - manual-edit-only, no
+Settings UI for it on purpose). `AKAISDS_SHARED_MIDI_TRANSPORT`, if
+explicitly set in the environment, overrides that either direction - this
+is your instant way to test the OFF path as a control, or force ON
+regardless of config:
 
 ```sh
-export AKAISDS_SHARED_MIDI_TRANSPORT=1
+export AKAISDS_SHARED_MIDI_TRANSPORT=1   # force on
+export AKAISDS_SHARED_MIDI_TRANSPORT=0   # force off (the pre-default-flip behaviour)
+unset AKAISDS_SHARED_MIDI_TRANSPORT      # defer to config.json (now on by default)
 ```
-
-before launching the app. Unset (or set to anything falsy), the app behaves
-exactly as it does on `master` today - this is your instant rollback if
-anything below goes wrong: **just don't set the env var.**
 
 The automated test suite (`uv run pytest tests/`) already covers the pure
 logic - `tests/test_midi_transport.py`, `tests/test_midi_manager.py`,
-`tests/test_program_editor_bridge.py`'s new `connect()` tests. **None of
-that touches real hardware or a real rtmidi backend for anything
-timing-sensitive** - it can't. This document is what closes that gap. Don't
-flip the default on (or merge this if the default is going to change) until
-everything below passes.
+`tests/test_program_editor_bridge.py`'s `connect()`/`set_bridge()` tests,
+`tests/test_app_config.py`'s shared-transport-key tests. **None of that
+touches real hardware or a real rtmidi backend for anything
+timing-sensitive** - it can't. This document is what closes that gap - the
+numbered tests below are what was actually run before flipping the
+default.
 
 ## Before you start
 
@@ -47,11 +56,10 @@ everything below passes.
       worth saving a copy of alongside your notes for that test.
 - [ ] Confirm which two things you're actually testing don't get confused
       with each other: (1) the shared-transport connection layer itself
-      (this document), and (2) an actual "Settings menu in the editor" UI
-      feature - **that UI doesn't exist yet.** Nothing in this test plan
-      involves clicking a Settings button from inside the Program Editor.
-      This is purely about proving the ONE-connection foundation is solid
-      before that UI ever gets built on top of it.
+      (this document, Tests 1-6/8), and (2) the Program Editor's own
+      `&Hardware > Settings...` menu item, which only exists when the
+      shared transport is active and is specifically what Test 7 covers -
+      see that test's own description for what it's checking.
 - [ ] Run the automated suite once first as a sanity check before touching
       hardware: `uv run pytest tests/ -q` should show all tests passing
       (874 at the time of writing). If this fails, stop - something's
@@ -265,30 +273,69 @@ worth doing on any platform.
 
 ---
 
-## Test 7 - Settings dialog's own diagnostics against the shared connection
+## Test 7 - Settings dialog against the shared connection
 
-The Settings dialog's Identity Request / Loopback Test already have a
-release-then-restore pattern around `MidiManager`'s ports (see
-`ui/settings_dialog.py`). With the shared transport, this dialog is still
-only reachable from the Dashboard today (no Program Editor Settings menu
-yet - see the note at the top of this document) - so this test is about
-confirming that existing pattern still works correctly against the NEW
-kind of connection it's now releasing/restoring.
+The Settings dialog's Apply/OK and its Identity Request/Loopback Test
+diagnostics all call `MidiManager.open_input`/`open_output` again (the
+diagnostics via their own release-then-restore pattern - see
+`ui/settings_dialog.py`), which under the shared transport REPLACES
+`midi_manager.raw_input`/`raw_output` with new objects rather than mutating
+the old ones. The Program Editor's own `S3kBridge` was built from whichever
+objects were open at connect() time, so without a fix it would silently
+keep talking to now-closed ports the instant any of this happens.
+`ProgramEditorWindow._open_settings_dialog` calls `_reconnect_shared_bridge`
+once, unconditionally, right after the dialog closes - that's the fix.
+Only reachable from the Program Editor's own `&Hardware > Settings...`
+menu, since Dashboard and Program Editor are mutually exclusive (only one
+visible at a time), so the Dashboard's own Settings action is never
+actually reachable while the editor is the active window.
 
-1. Flag on, Dashboard connected, Program Editor ALSO open (so there's
-   something that would notice if the shared connection got left in a bad
-   state).
-2. From the Dashboard, open Settings and run the Identity Request test (or
-   whichever hardware test this build offers). Confirm it succeeds.
-3. Close Settings. Go back to the Program Editor - confirm it's STILL
-   working (load a sample, browse keygroups) - the diagnostic's own
-   release/restore shouldn't have broken the editor's own access to the
-   shared connection.
-4. Repeat with the Loopback Test too, and repeat the whole sequence 2-3
-   times.
+**This is also a regression test for TWO real, confirmed crashes** (not
+hypothetical - both happened during this feature's own real-hardware
+testing, same `RtMidiOut::sendMessage` SIGSEGV signature on the
+`BridgeWorker` thread, two different triggers):
 
-**Pass**: diagnostics succeed, and the Program Editor's own connection
-comes back fully working afterward every time.
+- **Crash 1**: an earlier version reacted to `MidiManager.connection_
+  changed` directly instead of once after the dialog closes, which
+  rebuilt the bridge from a transient PARTIAL port state mid-diagnostic
+  and briefly opened a THIRD connection to the same port while
+  `BridgeWorker` could still be mid-send on the one being closed - fixed
+  by reacting once, after the dialog fully closes (`_reconnect_shared_
+  bridge`), plus `core/midi_transport.py`'s `SharedMidiOutput`/
+  `SharedMidiInput` `close_port()` now taking the same lock `send_
+  message()`/the message callback do. Also fixed the UI freezing solid
+  during a diagnostic (a raw blocking wait with no event-loop pumping) -
+  the reconnect now waits via `busy_changed`, not `wait_until_idle()`.
+- **Crash 2**: found even AFTER fixing Crash 1, from the most ordinary
+  path possible - open Settings, change nothing, click OK. `main_tabs`
+  wasn't frozen while Settings was merely open, only during the
+  reconnect afterward - closing the dialog let a deferred sample-list
+  selection event through, submitting a new `BridgeWorker` job that
+  dispatched against the OLD (already-deleted) bridge in the gap before
+  the reconnect got a chance to run. Fixed by freezing the window (and
+  confirming `BridgeWorker` is actually idle) BEFORE the dialog ever
+  opens, not just after it closes - see `_open_settings_dialog`'s own
+  comment.
+
+1. Flag on (or just the new default), Program Editor open.
+2. **The exact Crash 2 repro - do this first**: open a sample's waveform
+   in the Samples tab, open `&Hardware > Settings...`, change NOTHING,
+   click OK. No crash is the pass condition - this is the simplest
+   possible case and the one that actually segfaulted.
+3. Open `&Hardware > Settings...`, run the Identity Request test (or
+   whichever hardware test this build offers). Confirm the UI stays
+   RESPONSIVE the whole time (this used to freeze solid - if it does
+   again, that's Crash 1 regressing), then close Settings. Confirm the
+   editor is STILL working immediately after (load a sample, browse
+   keygroups) - watch for the brief "Waiting for pending hardware
+   requests..."/"Reconnecting to the sampler..." status messages.
+4. Repeat step 3 but with Apply/OK (change nothing, or actually change a
+   port) instead of a diagnostic.
+5. Repeat both with the Loopback Test too, and repeat the whole sequence
+   2-3 times. No crash, ever, is the actual pass condition here.
+
+**Pass**: no crash, no freeze, diagnostics succeed, and the Program
+Editor's own connection comes back fully working afterward every time.
 
 ---
 
@@ -344,6 +391,15 @@ Copy this table and fill it in as you go tonight:
 | 7. Settings diagnostics | | | |
 | 8. Generic MIDI SDS (if available) | | | |
 
-**Do not flip `AKAISDS_SHARED_MIDI_TRANSPORT` to default-on, and don't build
-the Program Editor's own Settings menu on top of this, until every test
-above is a clean Pass.**
+**Sign-off**: the default flipped to on (`app_config`'s
+`_DEFAULT_SHARED_MIDI_TRANSPORT`/`"shared_midi_transport"`, see
+`core/midi_manager.shared_transport_enabled()`) once Tests 1-6/8 came back
+clean. The Program Editor's own `&Hardware > Settings...` menu item
+(Test 7) went through TWO real-hardware rounds, each finding a genuine
+SIGSEGV (plus a UI freeze on the first) - see that test's own writeup for
+both. Fixed in `core/midi_transport.py`'s `close_port()` methods and
+`ProgramEditorWindow._open_settings_dialog`/`_reconnect_shared_bridge`.
+**Test 7 needs a clean re-run against both fixes before this whole
+feature is actually signed off** - if you're reading this before that
+re-run happened, treat the Settings-in-editor menu item as unverified
+even though the default is already on.

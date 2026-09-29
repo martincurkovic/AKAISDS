@@ -104,10 +104,14 @@ def midi_manager_module(monkeypatch):
     monkeypatch.setitem(sys.modules, "PySide6.QtCore", fake_qtcore)
     monkeypatch.delitem(sys.modules, "core.midi_manager", raising=False)
     # these tests exercise the mido-backed path and assume shared-transport
-    # is off; _shared_transport_enabled() reads the env var live, so an
-    # ambient AKAISDS_SHARED_MIDI_TRANSPORT=1 in the caller's shell would
-    # otherwise leak in and send these through the real rtmidi path instead
-    monkeypatch.delenv("AKAISDS_SHARED_MIDI_TRANSPORT", raising=False)
+    # is off; shared_transport_enabled() reads the env var live, falling
+    # back to config.json's "shared_midi_transport" (default True as of
+    # the shared transport becoming the default) if the env var is unset -
+    # so an ambient AKAISDS_SHARED_MIDI_TRANSPORT=1 in the caller's shell,
+    # OR simply the new default with nothing set, would otherwise leak in
+    # and send these through the real rtmidi path instead. Explicitly "0"
+    # (not delenv) so this is deterministic regardless of either one.
+    monkeypatch.setenv("AKAISDS_SHARED_MIDI_TRANSPORT", "0")
 
     module = importlib.import_module("core.midi_manager")
     yield module, fake_mido
@@ -119,6 +123,50 @@ def midi_manager_module(monkeypatch):
 def manager(midi_manager_module):
     module, fake_mido = midi_manager_module
     return module.MidiManager(), fake_mido
+
+
+# --- shared_transport_enabled(): env var vs config.json precedence ---------
+
+
+@pytest.mark.parametrize(
+    "env_value,expected",
+    [
+        ("1", True),
+        ("true", True),
+        ("yes", True),
+        ("0", False),
+        ("false", False),
+        ("FALSE", False),
+        ("no", False),
+        ("off", False),
+    ],
+)
+def test_shared_transport_enabled_env_var_overrides_config(
+    midi_manager_module, monkeypatch, env_value, expected
+):
+    module, _fake_mido = midi_manager_module
+    monkeypatch.setenv("AKAISDS_SHARED_MIDI_TRANSPORT", env_value)
+    # opposite of expected, to prove the env var - not this - decided it
+    monkeypatch.setattr(
+        module.app_config, "get_shared_midi_transport_enabled", lambda: not expected
+    )
+    assert module.shared_transport_enabled() is expected
+
+
+def test_shared_transport_enabled_falls_back_to_config_when_env_var_unset(
+    midi_manager_module, monkeypatch
+):
+    module, _fake_mido = midi_manager_module
+    monkeypatch.delenv("AKAISDS_SHARED_MIDI_TRANSPORT", raising=False)
+    monkeypatch.setattr(
+        module.app_config, "get_shared_midi_transport_enabled", lambda: False
+    )
+    assert module.shared_transport_enabled() is False
+
+    monkeypatch.setattr(
+        module.app_config, "get_shared_midi_transport_enabled", lambda: True
+    )
+    assert module.shared_transport_enabled() is True
 
 
 def test_list_inputs_and_outputs(manager):

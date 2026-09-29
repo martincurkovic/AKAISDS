@@ -66,10 +66,13 @@ from ui.quickstart_dialog import show_quickstart_dialog
 from ui.update_helper import UpdateCheckRunner
 from ui import tooltips as tt
 from core import debug_log
+from core import midi_manager as midi_manager_module
+from core import program_editor_bridge
 from core import sample_editing
 from core import sds_encoder
 from core.midi_notes import midi_note_to_name
 from core.program_editor_bridge import BridgeWorker, MULTI_PART_COUNT
+from ui.settings_dialog import MidiSettingsDialog
 
 # shared by every list's "Delete ..." QAction (program/keygroup/sample) -
 # see the construction comment where the program/keygroup ones are built
@@ -2072,6 +2075,30 @@ class ProgramEditorWindow(QMainWindow):
                 f"{self.cancel_transfer_button.toolTip()} ({cancel_shortcut_text})"
             )
 
+        # only offered here at all when the shared MIDI transport is
+        # active (config.json's "shared_midi_transport", or
+        # AKAISDS_SHARED_MIDI_TRANSPORT - see midi_manager.shared_transport_
+        # enabled()'s own docstring) - opening Settings used to mean a
+        # SECOND independent connection to the sampler while this window's
+        # own connection is also open, which is exactly the confirmed
+        # dual-connection race AGENTS.md's "MIDI transport consolidation"
+        # section describes; safe now only because both windows share ONE
+        # real connection, and Settings reopening it is something this
+        # window can actually notice and recover from - see
+        # _open_settings_dialog/_reconnect_shared_bridge, which is what
+        # actually rebuilds this window's own bridge afterward.
+        self._settings_action = None
+        if midi_manager_module.shared_transport_enabled():
+            self._settings_action = QAction("Settings...", self)
+            self._settings_action.setMenuRole(QAction.MenuRole.PreferencesRole)
+            self._settings_action.setShortcut(
+                QKeySequence.StandardKey.Preferences
+                if sys.platform == "darwin"
+                else "Ctrl+,"
+            )
+            self._settings_action.triggered.connect(self._open_settings_dialog)
+            hardware_menu.addAction(self._settings_action)
+
         # zoom for the Samples tab's waveform view. "Ctrl+=" is the primary
         # zoom-in binding (auto-translates to "Cmd+=" on macOS via Qt's own
         # Ctrl->Cmd substitution, same as every other shortcut string in
@@ -2582,6 +2609,226 @@ class ProgramEditorWindow(QMainWindow):
         sampler_controller = getattr(self._main_window, "sampler_controller", None)
         if sampler_controller is not None:
             sampler_controller.cancel_transfer()
+
+    def _open_settings_dialog(self):
+        # only ever wired up (see __init__) when shared_transport_enabled()
+        # was true at construction - _sync_window_menu_busy_state already
+        # disables the action while busy, this is the same belt-and-braces
+        # re-check dashboard.py's own open_settings_dialog/open_program_
+        # editor use for their own menu actions, for a direct call that
+        # bypasses the disabled action (there isn't one today, but matching
+        # the established pattern here costs nothing)
+        logger = debug_log.get_logger()
+        logger.debug("ProgramEditorWindow._open_settings_dialog: entered")
+        # re-entrancy guard - _settings_action itself is never disabled by
+        # _set_hardware_busy_ui (unlike refresh/tab-switch), so nothing
+        # currently stops this method being entered a second time while an
+        # earlier call is still between dialog.exec() and
+        # _reconnect_shared_bridge finishing. Two real, confirmed
+        # unexplained crashes happened with no trace of why
+        # _reconnect_shared_bridge's own program_editor_bridge.connect()
+        # call never ran - this closes the one re-entrancy gap found by
+        # inspection while that investigation continues (see this method's
+        # own debug logging above/below, added at the same time, to pin
+        # down the real cause if it happens again)
+        if getattr(self, "_settings_dialog_active", False):
+            logger.error(
+                "ProgramEditorWindow._open_settings_dialog: re-entered "
+                "while already active - ignoring this call"
+            )
+            return
+        sampler_controller = getattr(self._main_window, "sampler_controller", None)
+        midi_manager = getattr(self._main_window, "midi_manager", None)
+        if sampler_controller is None or midi_manager is None:
+            self.status_bar.showMessage(
+                "Can't open Settings - no Transfer Dashboard connection available"
+            )
+            return
+        if sampler_controller.is_transfer_busy():
+            self.status_bar.showMessage(
+                "Can't open Settings - a MIDI transfer is already in progress"
+            )
+            return
+        self._settings_dialog_active = True
+        # frozen BEFORE the dialog ever opens, not just while
+        # _reconnect_shared_bridge runs afterward - a second, real,
+        # confirmed crash (same SIGSEGV signature, different trigger) came
+        # from main_tabs still being interactive the whole time Settings
+        # was open: closing the dialog let a deferred sample-list
+        # selection event through, which submitted a new BridgeWorker job
+        # that got dispatched against the OLD (already-deleted) bridge
+        # before _reconnect_shared_bridge's own dialog.exec()-then-rebuild
+        # sequence ever got a chance to run. Freezing here closes that
+        # window entirely: nothing can submit a new job for the whole time
+        # Settings is up, and is_idle()/the busy_changed wait below (not
+        # wait_until_idle() - see that method's own docstring) drains
+        # anything already queued from BEFORE Settings opened, so
+        # BridgeWorker is guaranteed genuinely idle before Apply/either
+        # diagnostic ever touches the ports.
+        self.status_bar.showMessage("Waiting for pending hardware requests to finish...")
+        self._set_hardware_busy_ui(True)
+        QApplication.processEvents()
+        if not self._worker.is_idle():
+            logger.debug(
+                "ProgramEditorWindow._open_settings_dialog: worker busy, "
+                "waiting for busy_changed(False) before opening the dialog"
+            )
+            self._wait_for_any_signal(
+                [self._worker.busy_changed], start=lambda: None, timeout_ms=30000
+            )
+            logger.debug(
+                "ProgramEditorWindow._open_settings_dialog: wait finished "
+                f"(is_idle()={self._worker.is_idle()})"
+            )
+        logger.debug("ProgramEditorWindow._open_settings_dialog: opening MidiSettingsDialog")
+        dialog = MidiSettingsDialog(midi_manager, sampler_controller, self)
+        dialog.exec()
+        logger.debug(
+            "ProgramEditorWindow._open_settings_dialog: dialog.exec() returned, "
+            "calling _reconnect_shared_bridge"
+        )
+        # unconditional, not just on Accept - Identity Request/Loopback
+        # Test both release-then-restore MidiManager's ports WHILE the
+        # dialog is still open (see ui/settings_dialog.py), so even a
+        # Cancel can leave the ports reopened. See _reconnect_shared_bridge
+        # for why this has to happen exactly ONCE, here, rather than
+        # reacting to MidiManager.connection_changed directly. Also what
+        # un-freezes what this method froze above, on every path (success
+        # or the close()-back-to-Dashboard fallback).
+        self._reconnect_shared_bridge()
+        self._settings_dialog_active = False
+        logger.debug("ProgramEditorWindow._open_settings_dialog: finished")
+
+    def _reconnect_shared_bridge(self):
+        # rebuilds this window's bridge against midi_manager's CURRENT
+        # raw ports - needed because, under shared transport, a reopen
+        # (MidiManager.open_input/open_output - Apply, or either
+        # diagnostic's own release-then-restore dance, all in
+        # ui/settings_dialog.py) REPLACES midi_manager.raw_input/
+        # raw_output with new objects rather than mutating the old ones in
+        # place. This window's own S3kBridge was built
+        # (program_editor_bridge.connect()) from whichever objects were
+        # open at THAT moment, so without this it would silently keep
+        # talking to now-closed ports.
+        #
+        # Called exactly once, after _open_settings_dialog's dialog.exec()
+        # returns - NOT wired to MidiManager.connection_changed directly.
+        # That was tried first and produced a real, confirmed bug on real
+        # hardware: connection_changed fires separately for EACH of
+        # open_input()/open_output() (and a diagnostic's release calls
+        # both, then its own restore calls both again - up to 4 emissions
+        # per diagnostic run), each one synchronously, nested inside
+        # ui/settings_dialog.py's own still-executing code. Reacting to
+        # each one individually rebuilds the bridge from a PARTIAL,
+        # transient state (e.g. raw_input already None, raw_output not
+        # closed yet) - which falls through to program_editor_bridge.
+        # connect()'s "standard connection" branch, briefly opening a
+        # THIRD independent connection to the same physical port (exactly
+        # the dual-connection hazard this whole feature exists to
+        # prevent), repeatedly, while the diagnostic is still running on
+        # its own separate temporary ports. Reacting once, after
+        # dialog.exec() returns, only ever sees the final settled state.
+        #
+        # This also means the Dashboard's own Settings dialog reopening
+        # the ports while this window merely exists in the background
+        # (tests/midi_transport_consolidation_test_plan.md's own Test 7)
+        # is NOT covered here - deliberately: this app hides the Dashboard
+        # whenever this window is open (see main_window.py's own "&Window"
+        # menu comment), so the Dashboard's Settings action is never
+        # actually reachable while this window is the active one; the only
+        # real path to a port reopen while this window is active is its
+        # own Settings action above.
+        # _open_settings_dialog already froze the UI before ever opening the
+        # dialog (see its own comment) - every exit path below must
+        # unfreeze it again, including these two early-return guards, or
+        # the window is left permanently frozen.
+        #
+        # Both guards below FAIL SAFE by closing the editor back to the
+        # Dashboard, same as the "couldn't rebuild" exception path further
+        # down - deliberately NOT "unfreeze and carry on with the OLD
+        # bridge still in place", which was this method's first version
+        # and produced a real, confirmed SIGSEGV on real hardware: leaving
+        # main_tabs interactive again with a bridge still pointed at
+        # already-closed ports means the very next BridgeWorker job (a
+        # sample selection, a refresh, anything) dispatches against a
+        # deleted native port. Logged at ERROR (not silently) specifically
+        # so a future occurrence is immediately diagnosable from
+        # ~/.akaisds/akaisds.log rather than inferred from the ABSENCE of
+        # a program_editor_bridge.connect() log line, the way this one was.
+        logger = debug_log.get_logger()
+        logger.debug("ProgramEditorWindow._reconnect_shared_bridge: entered")
+        sampler_controller = getattr(self._main_window, "sampler_controller", None)
+        midi_manager = getattr(self._main_window, "midi_manager", None)
+        if midi_manager is None:
+            logger.error(
+                "ProgramEditorWindow: _reconnect_shared_bridge found no "
+                "midi_manager on the main window - returning to the "
+                "Transfer Dashboard rather than risk using a stale bridge"
+            )
+            self._set_hardware_busy_ui(False)
+            self.close()
+            return
+        if sampler_controller is not None and sampler_controller.is_transfer_busy():
+            # shouldn't be reachable (Settings itself refuses to open while
+            # busy - see _open_settings_dialog/dashboard.py's own matching
+            # guard)
+            logger.error(
+                "ProgramEditorWindow: _reconnect_shared_bridge found "
+                "sampler_controller busy right after Settings closed (was "
+                "not expected to be reachable) - returning to the Transfer "
+                "Dashboard rather than risk using a stale bridge"
+            )
+            self._set_hardware_busy_ui(False)
+            self.close()
+            return
+        self.status_bar.showMessage("Reconnecting to the sampler...")
+        self._set_hardware_busy_ui(True)
+        QApplication.processEvents()
+        # event-pumping wait (same pattern as _wait_for_any_signal, used
+        # everywhere else in this file for this) - NOT wait_until_idle(),
+        # whose own docstring already says not to call it from the GUI
+        # thread: a raw threading.Condition wait with no event-loop
+        # pumping at all, which froze this window's UI solid for as long
+        # as BridgeWorker took to drain on the first version of this fix.
+        # is_idle() skips the wait entirely when there's nothing to wait
+        # for, since busy_changed(False) won't fire again until the worker
+        # goes busy then idle a NEXT time.
+        if not self._worker.is_idle():
+            logger.debug(
+                "ProgramEditorWindow._reconnect_shared_bridge: worker busy, "
+                "waiting for busy_changed(False) before rebuilding"
+            )
+            self._wait_for_any_signal(
+                [self._worker.busy_changed], start=lambda: None, timeout_ms=30000
+            )
+            logger.debug(
+                "ProgramEditorWindow._reconnect_shared_bridge: wait finished "
+                f"(is_idle()={self._worker.is_idle()})"
+            )
+        logger.debug(
+            "ProgramEditorWindow._reconnect_shared_bridge: calling "
+            "program_editor_bridge.connect()"
+        )
+        try:
+            new_bridge = program_editor_bridge.connect(midi_manager)
+        except Exception:
+            logger.error(
+                "ProgramEditorWindow: couldn't rebuild the bridge after "
+                "Settings changed the shared MIDI ports - returning to the "
+                "Transfer Dashboard",
+                exc_info=True,
+            )
+            self._set_hardware_busy_ui(False)
+            self.close()
+            return
+        logger.debug(
+            "ProgramEditorWindow._reconnect_shared_bridge: got new bridge, "
+            "calling set_bridge()"
+        )
+        self._worker.set_bridge(new_bridge)
+        self._set_hardware_busy_ui(False)
+        logger.debug("ProgramEditorWindow._reconnect_shared_bridge: finished")
+        self._refresh_from_hardware()
 
     def _on_program_selected(self, current, previous):
         self.keygroup_list.clear()
@@ -3933,6 +4180,15 @@ class ProgramEditorWindow(QMainWindow):
         busy = sampler_controller is not None and sampler_controller.is_transfer_busy()
         self._dashboard_action.setEnabled(not busy)
         self._dashboard_action.setToolTip(tt.BUSY_BLOCKS_OTHER_WINDOWS if busy else "")
+        # same reasoning as dashboard.py's own btn_settings guard - Settings
+        # can reopen the shared ports out from under an in-flight transfer.
+        # None when shared_transport_enabled() was false at construction
+        # (see this action's own build-time comment) - nothing to disable
+        if self._settings_action is not None:
+            self._settings_action.setEnabled(not busy)
+            self._settings_action.setToolTip(
+                tt.BUSY_BLOCKS_OTHER_WINDOWS if busy else ""
+            )
 
     def closeEvent(self, event):
         # refuse to switch back to the Dashboard (whether via Ctrl+T, the
