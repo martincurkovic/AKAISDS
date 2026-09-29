@@ -79,6 +79,12 @@ _DELETE_SHORTCUTS = [
     QKeySequence("Ctrl+Backspace"),
 ]
 
+# the Slice Editor's ReCycle-style "export + create program" feature (see
+# _create_program_from_slices) maps its first slice's keygroup to this MIDI
+# note - raw note 36, which is "C1" under THIS app's own C3-at-60 octave
+# convention (core/midi_notes.py), not general MIDI's C1 (24)
+_FIRST_SLICE_NOTE = 36
+
 # (label, tooltip) per ZPLAY value, in raw-byte order (0-4) - labels are the
 # abbreviated forms the front panel itself uses; tooltips spell out what
 # each actually does on playback. Module-level (not just __init__-local)
@@ -3214,6 +3220,12 @@ class ProgramEditorWindow(QMainWindow):
                 for i in range(self.sample_list_widget.count())
             ]
 
+        def _existing_program_names():
+            return [
+                self.program_list.item(i).text()
+                for i in range(self.program_list.count())
+            ]
+
         dialog = SliceEditorWindow(
             self,
             sample_name,
@@ -3225,6 +3237,8 @@ class ProgramEditorWindow(QMainWindow):
             _existing_names,
             self._export_slices,
             demo_mode=bool(os.environ.get("AKAISDS_DEMO_SAMPLER")),
+            program_names_provider=_existing_program_names,
+            create_program_callback=self._create_program_from_slices,
         )
         dialog.exec()
         # slice export can add several new resident samples - refresh so
@@ -3433,6 +3447,187 @@ class ProgramEditorWindow(QMainWindow):
                     os.remove(path)
                 except OSError:
                     pass
+
+    def _create_program_from_slices(
+        self,
+        names,
+        template_program_index,
+        program_name,
+        progress_callback,
+        status_callback,
+    ):
+        # the "ReCycle-style export" half of the Slice Editor's
+        # create-program checkbox (see ui/slice_editor_window.py) - called
+        # AFTER _export_slices has already landed every slice as a
+        # resident one-shot sample. Only ever needs the slice sample
+        # NAMES, never their indices - a keygroup's SNAME1 addresses a
+        # sample by name string, so there's no index to re-look-up here.
+        #
+        # Creating a program means CLONING an existing resident one (there
+        # is no from-scratch "blank program" primitive - see
+        # BridgeWorker._handle_create_program's own comment), which also
+        # clones every one of ITS keygroups - so the shape here is: patch
+        # keygroup 0 into the first slice's mapping (this also makes it the
+        # correctly-configured clone SOURCE for every keygroup added
+        # below), delete whatever OTHER keygroups the template came with,
+        # then add one freshly-cloned keygroup per remaining slice.
+        #
+        # Like _export_slices' own batch send, this submits optimistically
+        # and leans on BridgeWorker's strict FIFO queue (AGENTS.md's
+        # "BridgeWorker" section) for correctness rather than waiting on
+        # every single write/create - only the program creation itself and
+        # the keygroup COUNT are actually waited on and verified, the same
+        # "submit fast, verify once via a final reload" shape
+        # _export_slices already uses for its own per-sample header fixups.
+        slice_count = len(names)
+        if slice_count > 99:
+            # same ceiling SliceEditorWindow already checks client-side
+            # before ever calling this - re-checked here since this method
+            # has no other caller today, but shouldn't silently trust one
+            return False, (
+                f"Can't create a program - {slice_count} keygroups "
+                "requested, but a program can only hold 99."
+            )
+
+        # _on_program_created/_on_keygroup_created (see __init__) are
+        # permanently wired for the INTERACTIVE "Duplicate Program/
+        # Keygroup" UI, but they react to the exact same program_created/
+        # keygroup_created signals this method also waits on below - and
+        # _on_program_created's own side effect (jumping the Programs
+        # tab's selection onto the brand new program, so a subsequent
+        # reload lands on it) can make _on_program_selected/
+        # _on_keygroup_created start reacting to THIS method's own
+        # create/keygroup calls too, firing extra, PREMATURE
+        # submit_keygroups() reloads for the very same program while this
+        # method is still mid-batch. _wait_for_any_signal has no way to
+        # tell those apart from the result this method actually asked for
+        # (confirmed as a real, reproducible race, not just a theoretical
+        # one - see the test that caught it). Disconnecting both for the
+        # duration of this method removes the race at its source, rather
+        # than trying to filter or retry around noisy results afterward;
+        # reconnected in every exit path via the try/finally below.
+        self._worker.program_created.disconnect(self._on_program_created)
+        self._worker.keygroup_created.disconnect(self._on_keygroup_created)
+        try:
+            return self._create_program_from_slices_locked(
+                names, template_program_index, program_name,
+                progress_callback, status_callback, slice_count,
+            )
+        finally:
+            self._worker.program_created.connect(self._on_program_created)
+            self._worker.keygroup_created.connect(self._on_keygroup_created)
+
+    def _create_program_from_slices_locked(
+        self,
+        names,
+        template_program_index,
+        program_name,
+        progress_callback,
+        status_callback,
+        slice_count,
+    ):
+        logger = debug_log.get_logger()
+        status_callback(f'Creating program "{program_name}"...')
+        which, args = self._wait_for_any_signal(
+            [self._worker.program_created, self._worker.program_create_failed],
+            start=lambda: self._worker.submit_create_program(
+                template_program_index, program_name
+            ),
+            timeout_ms=20000,
+        )
+        if which != 0:
+            message = args[1] if args else "timed out"
+            logger.error(
+                "_create_program_from_slices: program creation failed: %s", message
+            )
+            return False, f'Failed to create program "{program_name}": {message}'
+        _source_index, new_index = args
+
+        which, args = self._wait_for_any_signal(
+            [self._worker.keygroups_loaded, self._worker.keygroups_load_failed],
+            start=lambda: self._worker.submit_keygroups(new_index),
+            timeout_ms=20000,
+        )
+        if which != 0:
+            return False, (
+                f'Program "{program_name}" created, but its keygroup count '
+                "couldn't be read to finish setting it up - check the "
+                "sampler directly."
+            )
+        template_group_count = len(args[1])
+
+        # keygroup 0 first, into its final configured shape - LONOTE/HINOTE
+        # map it to the first slice at _FIRST_SLICE_NOTE ("C1"), CP1 forces
+        # Const Pitch (no key tracking - the sample always plays at its own
+        # recorded pitch), ZPLAY1 explicitly reset to "As sample" (0, cheap
+        # insurance - the sample's own SPTYPE is already forced to one-shot
+        # by _export_slices), and SNAME2..4 cleared so no OTHER sample
+        # plays from a velocity zone this feature isn't using. Every
+        # keygroup created further down clones THIS keygroup, so
+        # CP1/ZPLAY1/the cleared zones only need writing once, here.
+        for param_name, value in (
+            ("SNAME1", names[0]),
+            ("SNAME2", ""),
+            ("SNAME3", ""),
+            ("SNAME4", ""),
+            ("CP1", 1),
+            ("ZPLAY1", 0),
+            ("LONOTE", _FIRST_SLICE_NOTE),
+            ("HINOTE", _FIRST_SLICE_NOTE),
+        ):
+            self._write_knob_value(
+                param_name, "keygroup", value, keygroup_index=0, index=new_index
+            )
+
+        # drop every OTHER keygroup the template came with - this program
+        # should end up with exactly one keygroup per slice. Highest index
+        # first: deletion may shift every index above it down, so working
+        # backward never moves the next target out from under this loop
+        # (same reasoning as sample delete elsewhere in this file)
+        for keygroup_index in range(template_group_count - 1, 0, -1):
+            self._worker.submit_delete_keygroup(new_index, keygroup_index)
+
+        # one new keygroup per remaining slice, cloned from the now
+        # fully-configured keygroup 0 (inherits CP1/ZPLAY1/the cleared
+        # zones for free) - the LONOTE/HINOTE/SNAME1 overrides queued right
+        # after each create are guaranteed to land on THAT keygroup without
+        # waiting on keygroup_created in between, since BridgeWorker
+        # processes its queue strictly one job at a time in submission
+        # order (see this method's own docstring-style comment above)
+        for slice_index in range(1, slice_count):
+            self._worker.submit_create_keygroup(new_index, 0)
+            for param_name, value in (
+                ("SNAME1", names[slice_index]),
+                ("LONOTE", _FIRST_SLICE_NOTE + slice_index),
+                ("HINOTE", _FIRST_SLICE_NOTE + slice_index),
+            ):
+                self._write_knob_value(
+                    param_name,
+                    "keygroup",
+                    value,
+                    keygroup_index=slice_index,
+                    index=new_index,
+                )
+            progress_callback(slice_index, slice_count)
+
+        which, args = self._wait_for_any_signal(
+            [self._worker.keygroups_loaded, self._worker.keygroups_load_failed],
+            start=lambda: self._worker.submit_keygroups(new_index),
+            timeout_ms=20000,
+        )
+        self._worker.submit_program_list()
+        if which != 0 or len(args[1]) != slice_count:
+            actual = len(args[1]) if which == 0 else "unknown"
+            return False, (
+                f'Program "{program_name}" created, but ended up with '
+                f"{actual}/{slice_count} keygroups - check the sampler "
+                "directly."
+            )
+        return True, (
+            f'Program "{program_name}" created with {slice_count} '
+            f"keygroup{'s' if slice_count != 1 else ''}, mapped from "
+            f"{midi_note_to_name(_FIRST_SLICE_NOTE)} upward."
+        )
 
     def _on_keygroup_selected(self, current, previous):
         if current is None:

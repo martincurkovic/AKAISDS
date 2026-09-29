@@ -84,6 +84,9 @@ def _build_window(
     existing_names=(),
     export_calls=None,
     demo_mode=False,
+    program_names=None,
+    create_program_result=(True, "program created"),
+    create_program_calls=None,
 ):
     samples = samples if samples is not None else list(range(-5000, 5000))
 
@@ -91,6 +94,21 @@ def _build_window(
         if export_calls is not None:
             export_calls.append(args)
         return export_result
+
+    def create_program_callback(*args):
+        if create_program_calls is not None:
+            create_program_calls.append(args)
+        return create_program_result
+
+    # program_names=None (the default) omits both the provider and the
+    # callback entirely, exactly like dashboard.py's own reuse of this
+    # window (nothing resident yet to build a program from) - see this
+    # window's own construction comment on why the row isn't built at all
+    # in that case, not just disabled
+    extra_kwargs = {}
+    if program_names is not None:
+        extra_kwargs["program_names_provider"] = lambda: list(program_names)
+        extra_kwargs["create_program_callback"] = create_program_callback
 
     return SliceEditorWindow(
         None,
@@ -103,6 +121,7 @@ def _build_window(
         lambda: list(existing_names),
         export_callback,
         demo_mode=demo_mode,
+        **extra_kwargs,
     )
 
 
@@ -226,6 +245,170 @@ def test_export_refuses_a_name_collision(qapp, monkeypatch):
     monkeypatch.setattr(sew.QMessageBox, "warning", lambda *a, **k: None)
     window._confirm_export()
     assert calls == []
+
+
+# --- ReCycle-style "export + create program" --------------------------------
+
+
+def test_create_program_row_not_built_without_a_provider(qapp):
+    # dashboard.py's own reuse of this window (slicing a queued local file -
+    # nothing resident yet to build a program from) - the row must not
+    # exist at all, not just be disabled
+    window = _build_window()
+    assert window.create_program_checkbox is None
+    assert window.template_program_combo is None
+
+
+def test_create_program_checkbox_present_with_a_provider(qapp):
+    window = _build_window(program_names=["Bass stab", "EPiano warm"])
+    assert window.create_program_checkbox is not None
+    assert window.create_program_checkbox.isEnabled() is True
+    assert window.template_program_combo.count() == 2
+    assert window.template_program_combo.itemText(0) == "Bass stab"
+
+
+def test_create_program_checkbox_disabled_in_demo_mode(qapp):
+    window = _build_window(program_names=["Bass stab"], demo_mode=True)
+    assert window.create_program_checkbox.isEnabled() is False
+    assert window.create_program_checkbox.toolTip() != ""
+
+
+def test_create_program_checkbox_disabled_with_no_resident_programs(qapp):
+    window = _build_window(program_names=[])
+    assert window.create_program_checkbox.isEnabled() is False
+    assert window.create_program_checkbox.toolTip() != ""
+
+
+def test_create_program_combo_only_enabled_while_checkbox_checked(qapp):
+    window = _build_window(program_names=["Bass stab"])
+    assert window.template_program_combo.isEnabled() is False
+    window.create_program_checkbox.setChecked(True)
+    assert window.template_program_combo.isEnabled() is True
+    window.create_program_checkbox.setChecked(False)
+    assert window.template_program_combo.isEnabled() is False
+
+
+def test_create_program_combo_only_visible_while_checkbox_checked(qapp):
+    # per direct user request: the Template combo doesn't just sit there
+    # greyed out - it doesn't appear at all until the checkbox is checked
+    window = _build_window(program_names=["Bass stab"])
+    assert window.template_program_combo.isHidden() is True
+    assert window._template_program_label.isHidden() is True
+    window.create_program_checkbox.setChecked(True)
+    assert window.template_program_combo.isHidden() is False
+    assert window._template_program_label.isHidden() is False
+    window.create_program_checkbox.setChecked(False)
+    assert window.template_program_combo.isHidden() is True
+    assert window._template_program_label.isHidden() is True
+
+
+def test_export_with_create_program_unchecked_does_not_call_the_callback(
+    qapp, monkeypatch
+):
+    create_calls = []
+    window = _build_window(
+        program_names=["Bass stab"], create_program_calls=create_calls
+    )
+    monkeypatch.setattr(
+        sew.QMessageBox, "question", lambda *a, **k: sew.QMessageBox.StandardButton.Yes
+    )
+    monkeypatch.setattr(sew.QMessageBox, "information", lambda *a, **k: None)
+    window._confirm_export()
+    assert create_calls == []
+
+
+def test_export_with_create_program_checked_calls_the_callback(qapp, monkeypatch):
+    export_calls = []
+    create_calls = []
+    window = _build_window(
+        export_calls=export_calls,
+        create_program_calls=create_calls,
+        program_names=["Bass stab"],
+    )
+    window.waveform.set_markers([2000])  # -> 2 slices: SQUARE-1, SQUARE-2
+    window.create_program_checkbox.setChecked(True)
+    monkeypatch.setattr(
+        sew.QMessageBox, "question", lambda *a, **k: sew.QMessageBox.StandardButton.Yes
+    )
+    monkeypatch.setattr(sew.QMessageBox, "information", lambda *a, **k: None)
+
+    window._confirm_export()
+
+    assert len(export_calls) == 1
+    assert len(create_calls) == 1
+    names, template_index, program_name, _progress, _status = create_calls[0]
+    assert names == ["SQUARE-1", "SQUARE-2"]
+    assert template_index == 0  # only one template program - "Bass stab"
+    assert program_name == "SQUARE"
+    assert window.export_succeeded is True
+
+
+def test_export_refuses_a_program_name_collision(qapp, monkeypatch):
+    export_calls = []
+    create_calls = []
+    window = _build_window(
+        export_calls=export_calls,
+        create_program_calls=create_calls,
+        program_names=["SQUARE", "Bass stab"],
+    )
+    window.create_program_checkbox.setChecked(True)
+    monkeypatch.setattr(sew.QMessageBox, "warning", lambda *a, **k: None)
+
+    window._confirm_export()
+
+    # blocked before even the base sample export starts - same "PDATA
+    # silently overwrites a same-named program" hazard
+    # ProgramEditorWindow._confirm_duplicate_program already guards against
+    assert export_calls == []
+    assert create_calls == []
+
+
+def test_export_more_than_99_slices_with_create_program_is_refused(qapp, monkeypatch):
+    export_calls = []
+    create_calls = []
+    window = _build_window(
+        samples=list(range(-200, 30000)),
+        export_calls=export_calls,
+        create_program_calls=create_calls,
+        program_names=["Bass stab"],
+    )
+    window.create_program_checkbox.setChecked(True)
+    markers = sew.sample_slicing.equal_slice_markers(
+        window.waveform.start(), window.waveform.end(), 100
+    )
+    window.waveform.set_markers(markers)
+    monkeypatch.setattr(sew.QMessageBox, "warning", lambda *a, **k: None)
+
+    window._confirm_export()
+
+    assert export_calls == []
+    assert create_calls == []
+
+
+def test_export_program_creation_failure_marks_the_whole_export_failed(
+    qapp, monkeypatch
+):
+    export_calls = []
+    warnings = []
+    window = _build_window(
+        export_calls=export_calls,
+        program_names=["Bass stab"],
+        create_program_result=(False, "boom"),
+    )
+    window.create_program_checkbox.setChecked(True)
+    monkeypatch.setattr(
+        sew.QMessageBox, "question", lambda *a, **k: sew.QMessageBox.StandardButton.Yes
+    )
+    monkeypatch.setattr(
+        sew.QMessageBox, "warning", lambda *a: warnings.append(a[-1])
+    )
+    monkeypatch.setattr(sew.QMessageBox, "information", lambda *a, **k: None)
+
+    window._confirm_export()
+
+    assert len(export_calls) == 1  # the sample export itself still ran
+    assert any("boom" in w for w in warnings)
+    assert window.export_succeeded is False
 
 
 def test_export_declined_at_the_confirmation_prompt_does_not_export(qapp, monkeypatch):

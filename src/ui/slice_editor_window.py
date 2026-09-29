@@ -2,6 +2,7 @@ from PySide6.QtCore import QRegularExpression, Qt
 from PySide6.QtGui import QKeySequence, QRegularExpressionValidator, QShortcut
 from PySide6.QtWidgets import (
     QApplication,
+    QCheckBox,
     QComboBox,
     QDialog,
     QHBoxLayout,
@@ -135,6 +136,8 @@ class SliceEditorWindow(QDialog):
         export_callback,
         demo_mode=False,
         export_confirm_message=None,
+        program_names_provider=None,
+        create_program_callback=None,
     ):
         super().__init__(parent)
         self.setWindowTitle(f'Slice Editor - "{sample_name}"')
@@ -147,6 +150,12 @@ class SliceEditorWindow(QDialog):
         self._shlto = shlto
         self._existing_names_provider = existing_names_provider
         self._export_callback = export_callback
+        # both None for dashboard.py's own reuse of this window (slicing a
+        # queued local file - nothing resident on the sampler yet to clone a
+        # program from), which is why the checkbox/combo below are built
+        # only when both are actually supplied
+        self._program_names_provider = program_names_provider
+        self._create_program_callback = create_program_callback
         # (slice_count, names) -> str, shown in the Export confirmation
         # dialog - defaults to the original "send to the sampler" wording
         # (Program Editor's own use, unchanged), but the Transfer
@@ -309,6 +318,67 @@ class SliceEditorWindow(QDialog):
                 "connection - not available in demo mode. Marker placement "
                 "and click-to-preview still work fully."
             )
+        export_row.addWidget(self.export_button)
+
+        # ReCycle-style "export to Akai sampler format": in addition to
+        # sending each slice as its own one-shot sample (above), optionally
+        # create a whole new PROGRAM with one keygroup per slice, each
+        # mapped to its own key starting at C1 (MIDI note 36 - see
+        # core/midi_notes.py's own C3-at-60 convention), Const Pitch (no key
+        # tracking - the sample always plays at its own recorded pitch
+        # regardless of which key triggered it). Creating a program needs
+        # an existing resident program to clone as a structural template
+        # (filter/envelope/MIDI channel/etc. - see
+        # ProgramEditorWindow._create_program_from_slices) - there's no
+        # from-scratch "blank program" primitive - hence the Template combo.
+        # program_names_provider/create_program_callback are both None for
+        # dashboard.py's own reuse of this window, which has nothing
+        # resident yet to build a program from - neither widget is built
+        # there, rather than being built and disabled.
+        self.create_program_checkbox = None
+        self.template_program_combo = None
+        self._template_program_label = None
+        if program_names_provider is not None and create_program_callback is not None:
+            program_names = program_names_provider()
+            self.create_program_checkbox = QCheckBox("Create new program with slices")
+            self._template_program_label = QLabel("Template:")
+            self.template_program_combo = QComboBox()
+            self.template_program_combo.addItems(program_names)
+            # the combo (and its label) only ever APPEAR once the checkbox
+            # is checked - per direct user request, rather than sitting
+            # there always-visible-but-greyed-out
+            self._template_program_label.setVisible(False)
+            self.template_program_combo.setVisible(False)
+            self.template_program_combo.setEnabled(False)
+            self.create_program_checkbox.toggled.connect(
+                self._on_create_program_toggled
+            )
+            # _set_controls_enabled(True) (after an export finishes) must
+            # NOT blindly re-enable this checkbox if it was permanently
+            # disabled for one of these two reasons - remembered here so
+            # that method can restore the right state rather than the
+            # demo-mode/no-template tooltip silently becoming re-enabled
+            self._create_program_checkbox_allowed = True
+            if demo_mode:
+                # same reasoning as export_button's own demo-mode disable
+                # above - DemoBridge has no add-program primitive either
+                self._create_program_checkbox_allowed = False
+                self.create_program_checkbox.setEnabled(False)
+                self.create_program_checkbox.setToolTip(
+                    "Creating a program needs a real hardware connection - "
+                    "not available in demo mode."
+                )
+            elif not program_names:
+                self._create_program_checkbox_allowed = False
+                self.create_program_checkbox.setEnabled(False)
+                self.create_program_checkbox.setToolTip(
+                    "No resident program is available to use as a starting "
+                    "template for the new program."
+                )
+            export_row.addWidget(self.create_program_checkbox)
+            export_row.addWidget(self._template_program_label)
+            export_row.addWidget(self.template_program_combo)
+
         self.export_progress = QProgressBar()
         self.export_progress.setRange(0, 100)
         self.export_progress.setFixedWidth(160)
@@ -316,7 +386,6 @@ class SliceEditorWindow(QDialog):
         self.status_label = QLabel("")
         self.close_button = QPushButton("Close")
         self.close_button.clicked.connect(self.reject)
-        export_row.addWidget(self.export_button)
         export_row.addWidget(self.export_progress)
         export_row.addWidget(self.status_label, stretch=1)
         export_row.addWidget(self.close_button)
@@ -451,10 +520,58 @@ class SliceEditorWindow(QDialog):
             )
             return
 
+        create_program = (
+            self.create_program_checkbox is not None
+            and self.create_program_checkbox.isChecked()
+        )
+        program_name = None
+        template_index = None
+        if create_program:
+            # same 99-keygroup ceiling _handle_create_keygroup guards
+            # hardware-side (matches GROUPS's own declared 1..99 range) -
+            # checked here too so a doomed export never even starts
+            # (see ProgramEditorWindow._create_program_from_slices)
+            if slice_count > 99:
+                QMessageBox.warning(
+                    self,
+                    "Export Slices",
+                    f"Can't create a program - {slice_count} keygroups "
+                    "requested, but a program can only hold 99. Uncheck "
+                    '"Also create a new program..." or reduce the number '
+                    "of slices.",
+                )
+                return
+            program_name = base_name.strip().upper()[:NAME_LENGTH]
+            template_index = self.template_program_combo.currentIndex()
+            # same "PDATA silently overwrites a same-named program" hazard
+            # ProgramEditorWindow._confirm_duplicate_program already guards
+            # against - re-queried fresh rather than a stale snapshot, same
+            # reasoning as the sample-name collision check just above
+            if program_name in set(self._program_names_provider()):
+                QMessageBox.warning(
+                    self,
+                    "Export Slices",
+                    f'A program named "{program_name}" already exists. '
+                    "Creating a program with the same name would overwrite "
+                    "it on the sampler.\n\nPick a different base name, or "
+                    "rename/delete the existing program, then try again.",
+                )
+                return
+
+        confirm_message = self._export_confirm_message(slice_count, names)
+        if create_program:
+            template_name = self.template_program_combo.currentText()
+            confirm_message += (
+                f'\n\nAlso create a new program "{program_name}" with '
+                f"{slice_count} keygroup{'s' if slice_count != 1 else ''} "
+                f'(cloned from "{template_name}"), mapping each slice to '
+                "its own key starting at C1, in Const Pitch / one-shot mode."
+            )
+
         reply = QMessageBox.question(
             self,
             "Export Slices",
-            self._export_confirm_message(slice_count, names),
+            confirm_message,
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
         )
         if reply != QMessageBox.StandardButton.Yes:
@@ -489,6 +606,20 @@ class SliceEditorWindow(QDialog):
                 self._on_export_progress,
                 self._on_export_status,
             )
+            if success and create_program:
+                # runs AFTER every slice has actually landed as a resident
+                # sample - SNAME1 addresses a keygroup's zone by NAME, so
+                # this step only ever needs `names`, never a sample index
+                self._on_export_status(f'Creating program "{program_name}"...')
+                prog_success, prog_message = self._create_program_callback(
+                    names,
+                    template_index,
+                    program_name,
+                    self._on_export_progress,
+                    self._on_export_status,
+                )
+                success = success and prog_success
+                message = f"{message}\n{prog_message}"
         finally:
             self._exporting = False
             self._set_controls_enabled(True)
@@ -514,6 +645,13 @@ class SliceEditorWindow(QDialog):
     def _mark_dirty(self):
         self._dirty = True
 
+    def _on_create_program_toggled(self, checked):
+        # the Template combo (and its label) only exist visually once the
+        # checkbox is checked - see this window's own construction comment
+        self._template_program_label.setVisible(checked)
+        self.template_program_combo.setVisible(checked)
+        self.template_program_combo.setEnabled(checked)
+
     def _set_controls_enabled(self, enabled):
         for widget in (
             self.waveform,
@@ -530,6 +668,16 @@ class SliceEditorWindow(QDialog):
             self.close_button,
         ):
             widget.setEnabled(enabled)
+        if self.create_program_checkbox is not None:
+            self.create_program_checkbox.setEnabled(
+                enabled and self._create_program_checkbox_allowed
+            )
+            # the combo's own enabled state is otherwise driven by the
+            # checkbox's toggled signal - re-enabling unconditionally here
+            # would un-grey it even while the checkbox is unchecked
+            self.template_program_combo.setEnabled(
+                enabled and self.create_program_checkbox.isChecked()
+            )
 
     def _confirm_discard(self):
         # shared by reject()/closeEvent() below - True means "go ahead and

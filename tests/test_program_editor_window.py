@@ -76,6 +76,9 @@ class FakeBridge:
     def program_list(self):
         return self._programs
 
+    def delete_keygroup(self, program_index, keygroup_index):
+        del self._keygroups[program_index][keygroup_index]
+
     # -- create program/keygroup (PDATA/KDATA) -------------------------------
     #
     # unlike this class's other fakes, get_header_bytes/send_and_receive
@@ -192,7 +195,12 @@ class FakeBridge:
         if param.name == "PRGNUM":
             return 42
         if param.name == "PANPOS":
-            return self._pan[program_index]
+            # .get(..., 0), not [program_index] - a program CREATED by a
+            # test (see test_create_program_from_slices_*) has no entry
+            # here; real hardware would have cloned this field from the
+            # template same as every other program-level field, this fake
+            # just never modeled that for a field nothing else here needs
+            return self._pan.get(program_index, 0)
         if param.name == "PRLOUD":
             return 65
         if param.name == "V_LOUD":
@@ -3502,6 +3510,104 @@ def test_export_slices_returns_false_while_a_transfer_is_busy(editor):
     )
     assert success is False
     assert "already in progress" in message
+
+
+# --- _create_program_from_slices (Slice Editor's "ReCycle-style export") ----
+# FakeBridge's program 0 comes with 2 keygroups ((24, 60), (61, 96)) - a
+# template with MORE than one keygroup, so these tests also exercise the
+# "delete every extra cloned keygroup" step, not just the "add one per
+# slice" one.
+
+
+def test_create_program_from_slices_happy_path_maps_from_c1(editor, qapp):
+    bridge = editor._bridge
+    names = ["BREAK-01", "BREAK-02", "BREAK-03"]
+    progress_calls = []
+    status_calls = []
+
+    success, message = editor._create_program_from_slices(
+        names, 0, "BREAK",
+        lambda cur, total: progress_calls.append((cur, total)),
+        lambda text: status_calls.append(text),
+    )
+
+    assert success is True
+    assert "3" in message
+    new_index = bridge.program_list().index("BREAK")
+    assert new_index == 2  # appended after the 2 programs FakeBridge starts with
+
+    # exactly one keygroup per slice - the template's own 2nd keygroup
+    # ((61, 96)) must have been deleted, not left dangling alongside 3 new
+    # ones. FakeBridge's own set_parameter fake doesn't mutate _keygroups
+    # for a plain LONOTE/HINOTE write (only the KDATA-based create/delete
+    # path does), so the note RANGE values are checked below via
+    # set_parameter_calls instead - this only confirms the final COUNT,
+    # exactly what _create_program_from_slices' own final verification
+    # step checks too.
+    assert len(bridge._keygroups[new_index]) == 3
+
+    keygroup_writes = {
+        (keygroup, param): value
+        for param, index, value, keygroup in bridge.set_parameter_calls
+        if index == new_index
+    }
+    for i, name in enumerate(names):
+        assert keygroup_writes[(i, "SNAME1")] == name
+        assert keygroup_writes[(i, "LONOTE")] == 36 + i
+        assert keygroup_writes[(i, "HINOTE")] == 36 + i
+    # CP1 (Const Pitch)/ZPLAY1/cleared zones 2-4 are only ever written on
+    # keygroup 0 - every other keygroup inherits them by being CLONED from
+    # it (see _create_program_from_slices' own comment on why)
+    assert keygroup_writes[(0, "CP1")] == 1
+    assert keygroup_writes[(0, "ZPLAY1")] == 0
+    assert keygroup_writes[(0, "SNAME2")] == ""
+    assert keygroup_writes[(0, "SNAME3")] == ""
+    assert keygroup_writes[(0, "SNAME4")] == ""
+    assert (1, "CP1") not in keygroup_writes
+    assert (2, "CP1") not in keygroup_writes
+
+
+def test_create_program_from_slices_single_slice_maps_only_c1(editor, qapp):
+    bridge = editor._bridge
+    success, message = editor._create_program_from_slices(
+        ["TRIM"], 0, "TRIM PROG", lambda *a: None, lambda *a: None,
+    )
+    assert success is True
+    new_index = bridge.program_list().index("TRIM PROG")
+    # template had 2 keygroups - both extras deleted down to exactly 1
+    assert len(bridge._keygroups[new_index]) == 1
+    keygroup_writes = {
+        (keygroup, param): value
+        for param, index, value, keygroup in bridge.set_parameter_calls
+        if index == new_index
+    }
+    assert keygroup_writes[(0, "LONOTE")] == 36
+    assert keygroup_writes[(0, "HINOTE")] == 36
+    assert keygroup_writes[(0, "SNAME1")] == "TRIM"
+
+
+def test_create_program_from_slices_refuses_more_than_99_keygroups(editor):
+    bridge = editor._bridge
+    programs_before = list(bridge.program_list())
+    success, message = editor._create_program_from_slices(
+        [f"S-{i}" for i in range(100)], 0, "TOO BIG",
+        lambda *a: None, lambda *a: None,
+    )
+    assert success is False
+    assert "99" in message
+    assert bridge.program_list() == programs_before  # never even started
+
+
+def test_create_program_from_slices_reports_failure_when_creation_fails(editor):
+    # an out-of-range template index makes BridgeWorker._handle_create_
+    # program's own get_header_bytes call raise (FakeBridge's own
+    # self._programs[index] IndexError), which should surface as a clean
+    # failure message rather than an unhandled exception
+    success, message = editor._create_program_from_slices(
+        ["BREAK-01"], 999, "BREAK", lambda *a: None, lambda *a: None,
+    )
+    assert success is False
+    assert "Failed to create program" in message
 
 
 # --- _reload_sample_list_with_retries ----------------------------------------
