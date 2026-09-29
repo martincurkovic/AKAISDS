@@ -12,6 +12,7 @@ import s3k.messages as s3k_messages
 import s3k.params as s3k_params
 from PySide6.QtCore import Qt, QObject, QTimer, Signal
 from PySide6.QtWidgets import QApplication, QLabel, QWidget
+from ui.loop_preview_view import HALF_WINDOW_FRAMES
 from ui.program_editor_window import ProgramEditorWindow, _LOOP_TYPE_OPTIONS
 from core.program_editor_bridge import MULTI_PART_COUNT
 
@@ -3037,8 +3038,12 @@ def test_selecting_a_sample_populates_the_loop_preview(editor, qapp):
     markers = {"start": 0, "loop_start": 2500, "loop_end": 7500, "end": 9999}
     _select_sample_with_full_audio(editor, qapp, 0, samples, markers)
 
-    assert editor.loop_preview._end_samples == list(range(7201, 7501))  # up to loop_end
-    assert editor.loop_preview._start_samples == list(range(2500, 2800))  # from loop_start
+    assert editor.loop_preview._end_samples == list(
+        range(7500 - HALF_WINDOW_FRAMES + 1, 7501)
+    )  # up to loop_end
+    assert editor.loop_preview._start_samples == list(
+        range(2500, 2500 + HALF_WINDOW_FRAMES)
+    )  # from loop_start
 
 
 def test_dragging_a_loop_marker_live_updates_the_preview(editor, qapp):
@@ -3048,8 +3053,12 @@ def test_dragging_a_loop_marker_live_updates_the_preview(editor, qapp):
 
     editor.waveform_view.markers_changed.emit(0, 3000, 7500, 9999)  # dragged loop_start
 
-    assert editor.loop_preview._start_samples == list(range(3000, 3300))
-    assert editor.loop_preview._end_samples == list(range(7201, 7501))  # untouched
+    assert editor.loop_preview._start_samples == list(
+        range(3000, 3000 + HALF_WINDOW_FRAMES)
+    )
+    assert editor.loop_preview._end_samples == list(
+        range(7500 - HALF_WINDOW_FRAMES + 1, 7501)
+    )  # untouched
 
 
 def test_no_loop_sptype_shows_the_no_loop_placeholder(editor, qapp):
@@ -3076,8 +3085,32 @@ def test_switching_back_to_a_looping_sptype_repopulates_the_preview(editor, qapp
 
     editor.sample_loop_type_combo.setCurrentIndex(0)  # "Loop in release" - re-enable
 
-    assert editor.loop_preview._end_samples == list(range(7201, 7501))
-    assert editor.loop_preview._start_samples == list(range(2500, 2800))
+    assert editor.loop_preview._end_samples == list(
+        range(7500 - HALF_WINDOW_FRAMES + 1, 7501)
+    )
+    assert editor.loop_preview._start_samples == list(
+        range(2500, 2500 + HALF_WINDOW_FRAMES)
+    )
+
+
+def test_a_degenerate_loop_at_the_samples_own_end_still_populates_the_preview(
+    editor, qapp
+):
+    # regression test for a real, reported bug: a fresh/never-looped
+    # sample's loop points default to the very end of the sample (loop_
+    # start == loop_end == the last frame) - the Loop Preview card showed
+    # "No audio loaded" for this even though audio was plainly loaded,
+    # only recovering once the user dragged a loop point off that exact
+    # boundary (see WaveformView.samples_before/samples_after's own fix)
+    samples = list(range(10000))
+    markers = {"start": 0, "loop_start": 9999, "loop_end": 9999, "end": 9999}
+    _select_sample_with_full_audio(editor, qapp, 0, samples, markers)
+
+    assert editor.loop_preview._combined() is not None
+    assert editor.loop_preview._end_samples == list(
+        range(10000 - HALF_WINDOW_FRAMES, 10000)
+    )
+    assert editor.loop_preview._start_samples == [9999]
 
 
 def test_dragging_the_loop_preview_moves_the_named_marker_and_schedules_a_write(
@@ -3905,3 +3938,4 @@ def test_export_slices_uses_the_retrying_reload_not_a_single_attempt(
     )
     assert success is True
     assert calls["n"] >= 2
+

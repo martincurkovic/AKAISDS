@@ -21,11 +21,11 @@ _FINE_DRAG_DIVISOR = 8  # how much slower a Shift-held drag moves
 # not tied to the main WaveformView's own zoom level (a user could be
 # looking at the whole multi-minute sample zoomed out, which would make a
 # same-zoom preview either show nothing useful or need an enormous window) -
-# per direct user request. 300 frames reads as "tightly zoomed in on the
-# transition" without being so small a real loop's own period doesn't fit
-# (or so large the shape either side of the seam gets lost among a lot of
-# irrelevant context) at ordinary sample rates.
-HALF_WINDOW_FRAMES = 300
+# per direct user request. Halved from an original 300 (still per direct
+# user request - 300 read as "a tad too zoomed out") to 150, tight enough to
+# actually read the seam's own shape at ordinary sample rates without
+# needing to zoom the main waveform in first.
+HALF_WINDOW_FRAMES = 150
 
 _PLACEHOLDER_NO_AUDIO = "No audio loaded"
 _PLACEHOLDER_NO_LOOP = "No loop on this sample"

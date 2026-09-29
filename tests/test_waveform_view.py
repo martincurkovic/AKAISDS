@@ -940,6 +940,23 @@ def test_samples_before_returns_none_when_the_frame_is_beyond_whats_loaded_so_fa
     assert view.samples_before(20, 10) == list(range(11, 21))
 
 
+def test_samples_before_clamps_rather_than_returns_none_once_loading_is_complete(qapp):
+    # regression test for a real, reported bug: a header claiming one more
+    # frame than the actual SDS dump delivered leaves loop_end sitting one
+    # past the real last frame - set_waveform's own self._frame_count =
+    # len(samples) means loading is unambiguously COMPLETE by the time
+    # this runs (unlike the mid-live-capture case above, where
+    # self._frame_count is still the bigger, not-yet-reached total), so an
+    # out-of-range frame here must clamp instead of returning None - a
+    # blank Loop Preview card for an otherwise fully-loaded sample, not a
+    # "still waiting for more" state
+    view = WaveformView()
+    samples = list(range(1000))
+    view.set_waveform(samples, start=0, loop_start=300, loop_end=999, end=999)
+    window = view.samples_before(1000, 100)  # one past the real last frame (999)
+    assert window == samples[900:1000]
+
+
 def test_samples_after_returns_none_without_audio(qapp):
     view = WaveformView()
     view.set_header(1000, start=0, loop_start=300, loop_end=700, end=999)
@@ -969,6 +986,15 @@ def test_samples_after_returns_none_when_the_frame_is_beyond_whats_loaded_so_far
     view.append_live_samples(list(range(50)))
     assert view.samples_after(1500, 100) is None
     assert view.samples_after(20, 10) == list(range(20, 30))
+
+
+def test_samples_after_clamps_rather_than_returns_none_once_loading_is_complete(qapp):
+    # same regression/reasoning as samples_before's own version above
+    view = WaveformView()
+    samples = list(range(1000))
+    view.set_waveform(samples, start=0, loop_start=300, loop_end=999, end=999)
+    window = view.samples_after(1000, 100)  # one past the real last frame (999)
+    assert window == [999]
 
 
 # --- WaveformView.set_header: editable markers without audio -----------------

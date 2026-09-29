@@ -349,29 +349,46 @@ class WaveformView(QWidget):
         """Up to *count* samples ending at (and including) *frame* - the
         audio leading INTO a loop point, for LoopJoinPreview (see
         program_editor_window.py's Loop Preview card) - its own "loop out"
-        half. None if no audio has loaded yet, or if *frame* itself is
-        beyond what's loaded so far (reachable mid-progressive-load - see
-        begin_live_capture/append_live_samples - nothing meaningful to show
-        until more of the transfer arrives).
+        half. None if no audio has loaded yet at all, or if *frame* is
+        beyond what's loaded SO FAR while a progressive live capture is
+        still filling self._samples in (self._frame_count, set up front by
+        set_header, is the eventual total - still bigger than
+        len(self._samples) until the transfer actually finishes; see
+        begin_live_capture/append_live_samples) - nothing meaningful to
+        show until more of it arrives.
+
+        Once loading is actually complete (len(self._samples) ==
+        self._frame_count - set_waveform's own doing), an out-of-range
+        *frame* is clamped into [0, length - 1] instead of also returning
+        None. This is what actually fixes a real, reported bug: a sample
+        whose header claims one more frame than the SDS dump actually
+        delivered has its own loop_end land exactly one past the real
+        last frame - the Loop Preview card showed "No audio loaded" for
+        an otherwise fully-loaded sample until the user nudged a loop
+        point back into range and it "sprang to life". samples_after
+        below has the same fix for the same reason.
         """
         if not self._samples:
             return None
         length = len(self._samples)
-        if frame < 0 or frame > length - 1:
+        if frame > length - 1 and length < self._frame_count:
             return None
+        frame = max(0, min(length - 1, frame))
         lo = max(0, frame - count + 1)
         return self._samples[lo : frame + 1]
 
     def samples_after(self, frame, count):
         """Up to *count* samples starting at (and including) *frame* - the
         audio leading OUT of a loop point, for LoopJoinPreview's own "loop
-        in" half. Same None cases as samples_before.
+        in" half. Same None-only-while-still-loading/clamp-once-complete
+        behaviour as samples_before above - see its own comment.
         """
         if not self._samples:
             return None
         length = len(self._samples)
-        if frame < 0 or frame > length - 1:
+        if frame > length - 1 and length < self._frame_count:
             return None
+        frame = max(0, min(length - 1, frame))
         hi = min(length - 1, frame + count - 1)
         return self._samples[frame : hi + 1]
 
