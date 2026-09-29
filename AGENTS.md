@@ -274,23 +274,22 @@ to be their only trace - invisible in a packaged GUI app with no attached
 console. If you add a new unhandled-exception backstop anywhere in this
 app, log it here too rather than reaching for `print()`.
 
-## MIDI transport consolidation (`core/midi_transport.py`) - opt-in, not yet hardware-validated
+## MIDI transport consolidation (`core/midi_transport.py`) - default as of real-hardware validation
 
 The Transfer Dashboard (`SamplerController`, via `MidiManager`, via `mido`)
 and the Program Editor (`BridgeWorker`, via `S3kBridge`, via `python-rtmidi`
-directly) normally open **two independent connections** to the same
-physical MIDI port whenever the editor is open - see "Samples tab: loop
-points..." above for the already-confirmed real-hardware race this causes
+directly) used to normally open **two independent connections** to the same
+physical MIDI port whenever the editor was open - see "Samples tab: loop
+points..." above for the already-confirmed real-hardware race this caused
 (`SampleList: expected command 0x05, got 0x16`). It's also why the Program
-Editor has no Settings menu of its own yet: `ui/settings_dialog.py`'s own
-diagnostics already have to release/restore `MidiManager`'s ports before
+Editor had no Settings menu of its own for a while: `ui/settings_dialog.py`'s
+own diagnostics already have to release/restore `MidiManager`'s ports before
 running a hardware test, precisely because two open connections to one port
-is already known to be unsafe - opening that same dialog from the editor
-today would reproduce exactly the hazard that release/restore dance exists
-to avoid.
+is unsafe - opening that same dialog from the editor would have reproduced
+exactly the hazard that release/restore dance exists to avoid.
 
 `core/midi_transport.py` adds a **consolidated** transport so both windows
-can share ONE real connection instead - `SharedMidiOutput` (one real
+share ONE real connection instead - `SharedMidiOutput` (one real
 `rtmidi.MidiOut`, with a hard lock around every write, since two logical
 senders on one wire can otherwise interleave a SysEx frame mid-transmission
 and corrupt it) and `SharedMidiInput` (one real `rtmidi.MidiIn`, fanned out
@@ -302,20 +301,110 @@ port instance). `core/midi_manager.py` branches to this transport, and
 `S3kBridge` from the Dashboard's already-open shared ports when available,
 instead of opening its own second connection.
 
-**Gated behind `AKAISDS_SHARED_MIDI_TRANSPORT` (unset by default)** - with
-the flag unset, every line of this is dead code and the app behaves exactly
-as it always has. This is new, not-yet-hardware-validated code: the
-automated suite (`tests/test_midi_transport.py`, `tests/test_midi_manager.py`,
-`tests/test_program_editor_bridge.py`'s `connect()` tests) covers the pure
-logic, but nothing timing-sensitive - a real dual-connection race, real
-sustained SDS transfer integrity, real output-write interleaving - can be
-proven without actual hardware. **`test_scripts/midi_transport_
-consolidation_test_plan.md`** (gitignored) is the real-hardware test plan
-for this - 8 numbered tests covering exactly those things, plus editor
-open/close cycles and the macOS `QThread`-crash class this app has already
-been bitten by once (see `BridgeWorker` above). Don't flip the default to
-on, and don't build an actual Settings-menu-in-the-editor UI on top of this,
-until that document's tests are all a clean pass.
+**On by default** as of real-hardware validation against
+`tests/midi_transport_consolidation_test_plan.md`'s numbered tests. Decided
+by `core.midi_manager.shared_transport_enabled()`: `AKAISDS_SHARED_MIDI_
+TRANSPORT`, if explicitly set in the environment (a developer/tester
+override - recognizes `0`/`false`/`no`/`off`, case-insensitive, as an
+explicit OFF, not just falsy-string gotchas), wins; otherwise
+`app_config.get_shared_midi_transport_enabled()` reads config.json's
+`"shared_midi_transport"` key (default `true`). That key is
+**manual-edit-only by design** - there's deliberately no Settings UI for
+it, so an end user who hits a problem with it edits config.json by hand and
+sets it to `false`. `app_config.ensure_shared_midi_transport_key_saved()`
+writes the key (fresh install or upgrading from a version before it
+existed) at `ApplicationWindow.__init__` startup, before anything reads it,
+so a hand-editing user can actually find it there.
+
+The Program Editor's own `&Hardware > Settings...` menu item only exists
+(built conditionally in `ProgramEditorWindow.__init__`) when
+`shared_transport_enabled()` is true - safe now because both windows share
+one real connection, and this window can actually notice and recover when
+Settings reopens it. Two things have to both be true, not just one:
+
+1. `ProgramEditorWindow._open_settings_dialog` freezes this window
+   (`_set_hardware_busy_ui(True)`) and confirms `BridgeWorker` is actually
+   idle (non-blocking `is_idle()`, then an event-pumping wait for
+   `busy_changed(False)` if not - never `wait_until_idle()` from the GUI
+   thread, see that method's own docstring) **before the dialog ever
+   opens**, and keeps it frozen for as long as the dialog is up.
+2. `_reconnect_shared_bridge` runs exactly once, unconditionally, right
+   after `MidiSettingsDialog.exec()` returns - rebuilds this window's
+   bridge in place (`BridgeWorker.set_bridge()`, after the same idle
+   check/wait, swaps which bridge the SAME worker/QThread dispatches to,
+   rather than tearing down and reconnecting every one of its Signals),
+   unfreezes the window, and falls back to closing the editor back to the
+   Dashboard if rebuilding fails (e.g. the ports got cleared entirely).
+
+A port reopen (`MidiManager.open_input`/`open_output` - Apply, or either
+diagnostic's own release-then-restore dance, all in
+`ui/settings_dialog.py`) replaces `midi_manager.raw_input`/`raw_output`
+with new objects rather than mutating the old ones in place, so without
+(2), the editor's own `S3kBridge` would silently keep talking to
+now-closed ports the instant Settings changed anything. (1) exists
+because (2) alone isn't enough - see below.
+
+**This used to be wired directly to `MidiManager.connection_changed`
+instead - a real, confirmed SIGSEGV and UI freeze on real hardware, not a
+hypothetical.** `connection_changed` fires separately for EACH
+`open_input`/`open_output` call, synchronously, and both of
+`MidiSettingsDialog`'s diagnostics call open_input/open_output up to 4
+times each (release, then restore) WHILE still executing - reacting to
+every individual emission rebuilt the bridge from a transient, PARTIAL
+port state mid-diagnostic, which fell through to `program_editor_bridge.
+connect()`'s "standard connection" branch and briefly opened a THIRD
+independent connection to the same physical port, repeatedly, while
+BridgeWorker's background thread could still be mid-`send_message()` on
+the port the GUI thread was concurrently closing - see `core/midi_
+transport.py`'s `SharedMidiOutput.close_port()`/`SharedMidiInput.
+close_port()` for the write-lock fix that closes that specific race (a
+genuine crash signature: `RtMidiOut::sendMessage` SIGSEGV on the
+`BridgeWorker` thread). Reacting once, after the dialog fully closes, only
+ever sees the final settled state, and using the busy-signal wait instead
+of the raw blocking one keeps the UI responsive while it happens. This
+also means `tests/midi_transport_consolidation_test_plan.md`'s Test 7
+(the Dashboard's own Settings reopening the ports while the editor merely
+exists in the background) is NOT covered by this mechanism, deliberately:
+Dashboard and Program Editor are mutually exclusive (only one visible at a
+time - see main_window.py's own "&Window" menu comment), so the
+Dashboard's Settings action is never actually reachable while this window
+is the active one.
+
+**A SECOND, separate real SIGSEGV (same signature, different trigger) was
+found even after the fix above**, from testing a completely unremarkable
+path: open Settings, change nothing, click OK. `main_tabs` wasn't frozen
+while Settings was merely open (only `_reconnect_shared_bridge`, running
+AFTER the dialog closed, froze anything) - closing the dialog let a
+deferred sample-list selection event through, which submitted a brand new
+`BridgeWorker` job that got dispatched against the OLD (already-deleted)
+bridge in the gap between the dialog closing and `_reconnect_shared_
+bridge` actually swapping it in. The write lock from the first fix
+doesn't help here - it only prevents a *concurrent* close-during-send, not
+a *new* send after close but before the bridge is rebuilt. Freezing (1)
+above, before the dialog even opens rather than only after it closes, is
+what actually closes this window: nothing can submit a new job for the
+entire time Settings is up, and the pre-open idle check/wait drains
+anything already queued from before it opened. If you touch
+`_open_settings_dialog`/`_reconnect_shared_bridge` again, preserve the
+"freeze before open, unfreeze only after the bridge is actually swapped"
+ordering - every early return in `_reconnect_shared_bridge` must also
+unfreeze (`_set_hardware_busy_ui(False)`) before returning, since the
+freeze now happens in the caller, not itself.
+
+The automated suite (`tests/test_midi_transport.py`, `tests/
+test_midi_manager.py`, `tests/test_program_editor_bridge.py`'s `connect()`
+and `set_bridge()` tests, `tests/test_app_config.py`'s shared-transport-key
+tests) covers the pure logic, but nothing timing-sensitive - a real
+dual-connection race, real sustained SDS transfer integrity, real
+output-write interleaving - can be proven without actual hardware.
+**`tests/midi_transport_consolidation_test_plan.md`** is the real-hardware
+test plan this default flip was validated against - 8 numbered tests
+covering exactly those things, plus editor open/close cycles and the macOS
+`QThread`-crash class this app has already been bitten by once (see
+`BridgeWorker` above). Re-run it (or at least the relevant tests) after any
+change that touches `core/midi_transport.py`, `core/midi_manager.py`'s
+`shared_transport_enabled()`/port-opening, or `program_editor_bridge.py`'s
+`connect()`/`BridgeWorker`.
 
 **A real segfault was found and fixed while writing the automated tests for
 this**, worth knowing before adding similar tests anywhere in this repo:
