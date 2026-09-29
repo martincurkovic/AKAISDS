@@ -2019,6 +2019,59 @@ class ProgramEditorWindow(QMainWindow):
         hardware_menu = self.menuBar().addMenu("&Hardware")
         hardware_menu.addAction(refresh_action)
 
+        # zoom for the Samples tab's waveform view. "Ctrl+=" is the primary
+        # zoom-in binding (auto-translates to "Cmd+=" on macOS via Qt's own
+        # Ctrl->Cmd substitution, same as every other shortcut string in
+        # this file) rather than QKeySequence.StandardKey.ZoomIn's own
+        # platform-default primary binding, "Ctrl++" - on a US keyboard "+"
+        # needs Shift, so that default would actually require
+        # Ctrl+Shift+=. QKeySequence.keyBindings(...) is still appended
+        # after it (as secondary bindings) so a keyboard/platform that DOES
+        # have a dedicated "+" key, or a real "Zoom In" media key, keeps
+        # working too - just not shown in the tooltip, which only reflects
+        # the primary (first) binding. Zoom out keeps StandardKey.ZoomOut's
+        # own default ("Ctrl+-") unmodified since "-" needs no Shift on a US
+        # keyboard already. There's no standard key for "zoom to fit" so
+        # that one is a plain "Ctrl+0", matching the common browser/editor
+        # convention for "reset zoom". These act on self.waveform_view
+        # regardless of which tab is currently showing - harmless no-ops
+        # off the Samples tab, same as Ctrl+1/2/3 below being global rather
+        # than tab-scoped.
+        self.zoom_in_action = QAction("Zoom In", self)
+        self.zoom_in_action.setShortcuts(
+            [QKeySequence("Ctrl+=")]
+            + QKeySequence.keyBindings(QKeySequence.StandardKey.ZoomIn)
+        )
+        self.zoom_in_action.triggered.connect(self.waveform_view.zoom_in)
+        self.zoom_out_action = QAction("Zoom Out", self)
+        self.zoom_out_action.setShortcuts(
+            QKeySequence.keyBindings(QKeySequence.StandardKey.ZoomOut)
+        )
+        self.zoom_out_action.triggered.connect(self.waveform_view.zoom_out)
+        self.zoom_fit_action = QAction("Zoom to Fit", self)
+        self.zoom_fit_action.setShortcut("Ctrl+0")
+        self.zoom_fit_action.triggered.connect(self.waveform_view.reset_zoom)
+
+        view_menu = self.menuBar().addMenu("&View")
+        view_menu.addAction(self.zoom_in_action)
+        view_menu.addAction(self.zoom_out_action)
+        view_menu.addAction(self.zoom_fit_action)
+
+        # append each action's own resolved (platform-native) shortcut text
+        # to the zoom buttons' existing tooltips, rather than hardcoding
+        # "Ctrl+"/"Cmd+" - action.shortcut() (not shortcuts()[1:]) already
+        # renders the platform's own first-choice binding via NativeText
+        for button, action in (
+            (self.zoom_out_button, self.zoom_out_action),
+            (self.zoom_in_button, self.zoom_in_action),
+            (self.zoom_fit_button, self.zoom_fit_action),
+        ):
+            shortcut_text = action.shortcut().toString(
+                QKeySequence.SequenceFormat.NativeText
+            )
+            if shortcut_text:
+                button.setToolTip(f"{button.toolTip()} ({shortcut_text})")
+
         # only one of {dashboard, program editor} is ever open at a time -
         # two simultaneous MIDI connections to the hardware is untested and
         # may not be safe - mirrors the dashboard's own "&Window" menu
@@ -4100,17 +4153,21 @@ class ProgramEditorWindow(QMainWindow):
         # total) plus a 1px border - 28px left only ~2px for the glyph
         # itself, which is why "+"/"-" rendered as barely-visible
         # fragments rather than a font/glyph problem
-        zoom_out_button = QPushButton("-")
-        zoom_out_button.setFixedWidth(36)
-        zoom_out_button.setToolTip("Zoom out (Ctrl+scroll on the waveform also works)")
-        zoom_out_button.clicked.connect(self.waveform_view.zoom_out)
-        zoom_in_button = QPushButton("+")
-        zoom_in_button.setFixedWidth(36)
-        zoom_in_button.setToolTip("Zoom in (Ctrl+scroll on the waveform also works)")
-        zoom_in_button.clicked.connect(self.waveform_view.zoom_in)
-        zoom_fit_button = QPushButton("Fit")
-        zoom_fit_button.setToolTip("Reset zoom to show the whole sample")
-        zoom_fit_button.clicked.connect(self.waveform_view.reset_zoom)
+        # tooltips are finished off with their resolved keyboard shortcut
+        # once self.zoom_in_action/zoom_out_action/zoom_fit_action exist
+        # (built later in __init__, alongside the &View menu) - see
+        # _update_zoom_button_tooltips.
+        self.zoom_out_button = QPushButton("-")
+        self.zoom_out_button.setFixedWidth(36)
+        self.zoom_out_button.setToolTip("Zoom out (Ctrl+scroll on the waveform also works)")
+        self.zoom_out_button.clicked.connect(self.waveform_view.zoom_out)
+        self.zoom_in_button = QPushButton("+")
+        self.zoom_in_button.setFixedWidth(36)
+        self.zoom_in_button.setToolTip("Zoom in (Ctrl+scroll on the waveform also works)")
+        self.zoom_in_button.clicked.connect(self.waveform_view.zoom_in)
+        self.zoom_fit_button = QPushButton("Fit")
+        self.zoom_fit_button.setToolTip("Reset zoom to show the whole sample")
+        self.zoom_fit_button.clicked.connect(self.waveform_view.reset_zoom)
         # small, unobtrusive progress indicator for Trim/Reverse/Fade
         # specifically (see _perform_sample_edit/_on_sample_edit_progress) -
         # NOT shown for ordinary sample-audio loading, which already has
@@ -4131,9 +4188,9 @@ class ProgramEditorWindow(QMainWindow):
         zoom_row = QHBoxLayout()
         zoom_row.setSpacing(6)
         zoom_row.addWidget(QLabel("Zoom"))
-        zoom_row.addWidget(zoom_out_button)
-        zoom_row.addWidget(zoom_in_button)
-        zoom_row.addWidget(zoom_fit_button)
+        zoom_row.addWidget(self.zoom_out_button)
+        zoom_row.addWidget(self.zoom_in_button)
+        zoom_row.addWidget(self.zoom_fit_button)
         zoom_row.addSpacing(12)
         zoom_row.addWidget(self.sample_edit_progress)
         zoom_row.addStretch()

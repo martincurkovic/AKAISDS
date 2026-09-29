@@ -1,5 +1,5 @@
 from PySide6.QtCore import QRegularExpression, Qt
-from PySide6.QtGui import QRegularExpressionValidator
+from PySide6.QtGui import QKeySequence, QRegularExpressionValidator, QShortcut
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
@@ -195,15 +195,59 @@ class SliceEditorWindow(QDialog):
         # windows' zoom controls pixel-identical rather than each picking
         # its own width
         self.zoom_out_button.setFixedWidth(36)
-        self.zoom_out_button.setToolTip("Zoom out")
         self.zoom_out_button.clicked.connect(lambda: self.waveform.zoom_out())
         self.zoom_in_button = QPushButton("+")
         self.zoom_in_button.setFixedWidth(36)
-        self.zoom_in_button.setToolTip("Zoom in")
         self.zoom_in_button.clicked.connect(lambda: self.waveform.zoom_in())
         self.zoom_fit_button = QPushButton("Fit")
-        self.zoom_fit_button.setToolTip("Zoom to fit the whole sample")
         self.zoom_fit_button.clicked.connect(self.waveform.reset_zoom)
+
+        # this dialog is a QDialog with no menu bar (see AGENTS.md/research
+        # for why a QMenuBar was deliberately not added here) - so unlike
+        # program_editor_window.py's View menu, these are plain QShortcuts,
+        # the same pattern quickstart_dialog.py already uses for its own
+        # dialog-scoped shortcuts. There's no standard key for "zoom to fit"
+        # so that one is a plain "Ctrl+0", matching the common browser/
+        # editor "reset zoom" convention (same choice
+        # program_editor_window.py's own Zoom to Fit action makes).
+        def _bind_all(key_bindings, slot):
+            # QShortcut only takes one QKeySequence each - a platform can map
+            # a StandardKey to more than one binding (e.g. both Ctrl+= and
+            # Ctrl++), so one QShortcut per binding, all triggering the same
+            # slot. Returns the first (primary) binding, for the tooltip.
+            for key_binding in key_bindings:
+                shortcut = QShortcut(key_binding, self)
+                shortcut.activated.connect(slot)
+            return key_bindings[0] if key_bindings else QKeySequence()
+
+        # "Ctrl+=" (auto-translates to "Cmd+=" on macOS) is the primary
+        # zoom-in binding, put first so it's the one shown in the tooltip -
+        # QKeySequence.StandardKey.ZoomIn's own platform-default primary
+        # binding is "Ctrl++", which on a US keyboard needs Shift too
+        # (effectively Ctrl+Shift+=). The standard key's own bindings are
+        # still appended as secondary shortcuts, matching
+        # program_editor_window.py's own View menu action.
+        zoom_in_key = _bind_all(
+            [QKeySequence("Ctrl+=")]
+            + QKeySequence.keyBindings(QKeySequence.StandardKey.ZoomIn),
+            self.waveform.zoom_in,
+        )
+        # "-" needs no Shift on a US keyboard, so StandardKey.ZoomOut's own
+        # default ("Ctrl+-") is used unmodified.
+        zoom_out_key = _bind_all(
+            QKeySequence.keyBindings(QKeySequence.StandardKey.ZoomOut),
+            self.waveform.zoom_out,
+        )
+        zoom_fit_key = _bind_all([QKeySequence("Ctrl+0")], self.waveform.reset_zoom)
+
+        for button, key, tooltip in (
+            (self.zoom_out_button, zoom_out_key, "Zoom out"),
+            (self.zoom_in_button, zoom_in_key, "Zoom in"),
+            (self.zoom_fit_button, zoom_fit_key, "Zoom to fit the whole sample"),
+        ):
+            shortcut_text = key.toString(QKeySequence.SequenceFormat.NativeText)
+            button.setToolTip(f"{tooltip} ({shortcut_text})" if shortcut_text else tooltip)
+
         zoom_row.addWidget(hint_label)
         zoom_row.addStretch()
         zoom_row.addWidget(self.zoom_out_button)
