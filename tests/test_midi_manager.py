@@ -103,6 +103,11 @@ def midi_manager_module(monkeypatch):
     monkeypatch.setitem(sys.modules, "mido", fake_mido)
     monkeypatch.setitem(sys.modules, "PySide6.QtCore", fake_qtcore)
     monkeypatch.delitem(sys.modules, "core.midi_manager", raising=False)
+    # these tests exercise the mido-backed path and assume shared-transport
+    # is off; _shared_transport_enabled() reads the env var live, so an
+    # ambient AKAISDS_SHARED_MIDI_TRANSPORT=1 in the caller's shell would
+    # otherwise leak in and send these through the real rtmidi path instead
+    monkeypatch.delenv("AKAISDS_SHARED_MIDI_TRANSPORT", raising=False)
 
     module = importlib.import_module("core.midi_manager")
     yield module, fake_mido
