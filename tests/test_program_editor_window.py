@@ -2856,12 +2856,17 @@ def test_preview_requested_looping_sptype_with_a_finite_dwell_plays_loop(
     _select_sample_with_full_audio(editor, qapp, 0, samples, markers)
     editor.sample_loop_type_combo.setCurrentIndex(1)  # "Loop til release"
     editor.sample_loop_hold_knob.setValue(500)  # 500ms dwell
+    editor.sample_loop_tune_knob.setValue(0)  # not what this test covers
     calls.clear()  # discard the stop() from selecting the sample above
 
     editor._on_waveform_preview_requested()
 
     assert calls == [
-        ("play_loop", (samples, 0, 2500, 7500, 9999, 44100), {"dwell_ms": 500})
+        (
+            "play_loop",
+            (samples, 0, 2500, 7500, 9999, 44100),
+            {"dwell_ms": 500, "loop_tune_cents": 0},
+        )
     ]
 
 
@@ -2876,12 +2881,17 @@ def test_preview_requested_looping_sptype_with_hold_loops_forever(
     _select_sample_with_full_audio(editor, qapp, 0, samples, markers)
     editor.sample_loop_type_combo.setCurrentIndex(0)  # "Loop in release"
     editor.sample_loop_hold_knob.setValue(_LOOP_HOLD_HOLD_VALUE)  # "Hold"
+    editor.sample_loop_tune_knob.setValue(0)  # not what this test covers
     calls.clear()  # discard the stop() from selecting the sample above
 
     editor._on_waveform_preview_requested()
 
     assert calls == [
-        ("play_loop", (samples, 0, 2500, 7500, 9999, 44100), {"dwell_ms": None})
+        (
+            "play_loop",
+            (samples, 0, 2500, 7500, 9999, 44100),
+            {"dwell_ms": None, "loop_tune_cents": 0},
+        )
     ]
 
 

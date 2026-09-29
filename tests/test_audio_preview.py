@@ -261,6 +261,77 @@ def test_update_loop_points_before_any_play_loop_call_does_not_raise(qapp):
     player.update_loop_points(100, 200)  # must not raise
 
 
+# --- SHLTO (Loop Tune) live pitch offset ------------------------------------
+
+
+def test_resample_region_for_cents_with_zero_cents_is_unchanged():
+    region = list(range(10))
+    assert audio_preview._resample_region_for_cents(region, 0, 9, 0) == region
+
+
+def test_resample_region_for_cents_positive_shortens_the_region():
+    # positive cents -> higher pitch -> a faster effective playback rate ->
+    # the SAME audio now takes fewer output frames to play through
+    region = list(range(1000))
+    out = audio_preview._resample_region_for_cents(region, 0, 999, 50)
+    assert len(out) < len(region)
+
+
+def test_resample_region_for_cents_negative_lengthens_the_region():
+    region = list(range(1000))
+    out = audio_preview._resample_region_for_cents(region, 0, 999, -50)
+    assert len(out) > len(region)
+
+
+def test_update_loop_tune_cents_before_any_play_loop_call_does_not_raise(qapp):
+    player = audio_preview.SlicePreviewPlayer()
+    player.update_loop_tune_cents(25)  # must not raise
+
+
+def test_play_loop_with_loop_tune_cents_never_yields_a_short_chunk(qapp, monkeypatch):
+    # same exact-buffer-size regression the short-chunk tests above cover,
+    # but with a nonzero SHLTO baked in from the start - the loop region's
+    # own resampled length won't generally divide evenly by required_frames
+    # either, so this is the same historical bug in a new disguise if the
+    # concatenation logic doesn't account for it
+    player = audio_preview.SlicePreviewPlayer()
+    fake_device = _FakeDevice()
+    monkeypatch.setattr(player, "_open_device", lambda framerate: fake_device)
+
+    samples = _tone(20000)
+    player.play_loop(
+        samples, 0, 1000, 1777, len(samples) - 1, 44100,
+        dwell_ms=None, loop_tune_cents=-37,
+    )
+
+    required_frames = 256
+    expected_bytes = required_frames * audio_preview._BYTES_PER_FRAME
+    chunks = [fake_device.gen.send(required_frames) for _ in range(60)]
+
+    assert all(len(chunk) == expected_bytes for chunk in chunks)
+
+
+def test_update_loop_tune_cents_live_update_never_yields_a_short_chunk(qapp, monkeypatch):
+    # a live update mid-playback (e.g. turning the Loop Tune knob while a
+    # preview is looping) must be just as safe as one supplied up front
+    player = audio_preview.SlicePreviewPlayer()
+    fake_device = _FakeDevice()
+    monkeypatch.setattr(player, "_open_device", lambda framerate: fake_device)
+
+    samples = _tone(20000)
+    player.play_loop(samples, 0, 1000, 1777, len(samples) - 1, 44100, dwell_ms=None)
+
+    required_frames = 256
+    expected_bytes = required_frames * audio_preview._BYTES_PER_FRAME
+    for _ in range(10):
+        assert len(fake_device.gen.send(required_frames)) == expected_bytes
+
+    player.update_loop_tune_cents(41)
+
+    chunks = [fake_device.gen.send(required_frames) for _ in range(60)]
+    assert all(len(chunk) == expected_bytes for chunk in chunks)
+
+
 # --- play()/play_loop() generator: every buffer-fill request must be met
 # EXACTLY, never short - regression tests for a real, confirmed audio bug.
 # miniaudio.PlaybackDevice._data_callback does

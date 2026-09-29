@@ -5989,6 +5989,15 @@ class ProgramEditorWindow(QMainWindow):
         # value_label already kept in sync by the knob's own separate
         # valueChanged connection (see its construction) - nothing extra
         # needed here
+        # valueChanged fires continuously while the knob is being turned
+        # (not just on release), same as WaveformView's own markers_changed
+        # - forwarding every tick here, unthrottled by _schedule_write's own
+        # debounce below, is what lets a preview already looping pick up
+        # the new SHLTO cents live instead of only after the knob is
+        # released (per direct user request - the audio preview didn't
+        # respond to Loop Tune at all before this)
+        if self._sample_preview_player.is_playing():
+            self._sample_preview_player.update_loop_tune_cents(value)
         self._schedule_write(
             "SHLTO", "sample", value, index=sample_index, debounce_key="SHLTO"
         )
@@ -7435,6 +7444,7 @@ class ProgramEditorWindow(QMainWindow):
             markers["end"],
             framerate,
             dwell_ms=dwell_ms,
+            loop_tune_cents=self.sample_loop_tune_knob.value(),
         )
 
     def _on_waveform_markers_changed_live_preview(self, start, loop_start, loop_end, end):

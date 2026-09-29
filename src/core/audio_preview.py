@@ -35,6 +35,36 @@ _SAMPLE_FORMAT = miniaudio.SampleFormat.SIGNED16
 _BYTES_PER_FRAME = 2  # SIGNED16, mono (1 channel) - struct.pack("<h", ...)
 
 
+def _resample_region_for_cents(samples, lo, hi, cents):
+    """The [lo, hi] (inclusive) region of samples, resampled to sound
+    `cents` cents higher (positive) or lower (negative) - plain linear-
+    interpolation resampling, same technique a hardware sampler's own tune
+    control uses: shifting the effective playback rate shifts pitch AND
+    duration together (a real pitch-preserving time-stretch is a lot more
+    machinery than a quick, live-updating loop preview needs). Matches
+    SHLTO's own +/-50 cent range (see tooltips.SAMPLE_LOOP_TUNE_KNOB) - at
+    most a ~3% rate change, so the duration shift is barely audible.
+    """
+    region = samples[lo : hi + 1]
+    if cents == 0 or len(region) < 2:
+        return region
+    ratio = 2.0 ** (cents / 1200.0)
+    out_len = max(1, round(len(region) / ratio))
+    last_index = len(region) - 1
+    out = [0] * out_len
+    for i in range(out_len):
+        src_pos = i * ratio
+        idx = int(src_pos)
+        if idx >= last_index:
+            out[i] = region[last_index]
+            continue
+        frac = src_pos - idx
+        a = region[idx]
+        b = region[idx + 1]
+        out[i] = int(round(a + (b - a) * frac))
+    return out
+
+
 def list_output_devices():
     return miniaudio.Devices().get_playbacks()
 
@@ -131,6 +161,11 @@ class SlicePreviewPlayer(QObject):
         # before the first play_loop() ever happens, not a real value.
         self._live_loop_start = 0
         self._live_loop_end = 0
+        # live loop-tune (SHLTO) cents offset for an in-progress play_loop()
+        # - see update_loop_tune_cents() below. Same "meaningless outside an
+        # active play_loop() call" reasoning as _live_loop_start/_live_loop_
+        # end above.
+        self._live_loop_tune_cents = 0
         self._timer = QTimer(self)
         self._timer.setInterval(_PLAYHEAD_TICK_MS)
         self._timer.timeout.connect(self._on_tick)
@@ -261,6 +296,7 @@ class SlicePreviewPlayer(QObject):
         end_frame,
         framerate,
         dwell_ms=None,
+        loop_tune_cents=0,
     ):
         """Simulates a sample's own loop settings for a single click preview
         (the Program Editor's Samples tab waveform - see
@@ -294,6 +330,12 @@ class SlicePreviewPlayer(QObject):
         before moving to the tail (see above) - jumping to an arbitrary
         new position mid-buffer is an audible click, not just a design
         nicety.
+
+        loop_tune_cents (SHLTO): a fine pitch offset applied ONLY to the
+        loop region, same as real hardware (see tooltips.
+        SAMPLE_LOOP_TUNE_KNOB) - the attack and tail always play at the
+        sample's own recorded pitch. update_loop_tune_cents() live-updates
+        this the same deferred-to-next-pass way update_loop_points() does.
         """
         self.stop()
 
@@ -313,18 +355,20 @@ class SlicePreviewPlayer(QObject):
             None if dwell_ms is None else max(0, round(dwell_ms / 1000 * framerate))
         )
 
-        # live, mutable loop bounds - update_loop_points() below writes
-        # these; the generator reads them fresh at the top of every pass.
-        # Starts at the bounds play_loop() was actually called with.
+        # live, mutable loop bounds/tune - update_loop_points()/
+        # update_loop_tune_cents() below write these; the generator reads
+        # them fresh at the top of every pass. Starts at whatever
+        # play_loop() was actually called with.
         self._live_loop_start = loop_start_frame
         self._live_loop_end = loop_end_frame
+        self._live_loop_tune_cents = loop_tune_cents
 
         device = self._open_device(framerate)
         if device is None:
             return
 
-        def _loop_region_bytes(lo, hi):
-            region = samples[lo : hi + 1]
+        def _loop_region_bytes(lo, hi, cents):
+            region = _resample_region_for_cents(samples, lo, hi, cents)
             return struct.pack("<" + "h" * len(region), *region)
 
         def _segments():
@@ -350,16 +394,25 @@ class SlicePreviewPlayer(QObject):
             looped_frames = 0
             cur_loop_start = loop_start_frame
             cur_loop_end = loop_end_frame
-            loop_bytes = _loop_region_bytes(cur_loop_start, cur_loop_end)
+            cur_loop_cents = self._live_loop_tune_cents
+            loop_bytes = _loop_region_bytes(cur_loop_start, cur_loop_end, cur_loop_cents)
             while loop_frame_budget is None or looped_frames < loop_frame_budget:
                 live_start = self._live_loop_start
                 live_end = self._live_loop_end
-                if live_end > live_start and (live_start, live_end) != (
+                live_cents = self._live_loop_tune_cents
+                if live_end > live_start and (live_start, live_end, live_cents) != (
                     cur_loop_start,
                     cur_loop_end,
+                    cur_loop_cents,
                 ):
-                    cur_loop_start, cur_loop_end = live_start, live_end
-                    loop_bytes = _loop_region_bytes(cur_loop_start, cur_loop_end)
+                    cur_loop_start, cur_loop_end, cur_loop_cents = (
+                        live_start,
+                        live_end,
+                        live_cents,
+                    )
+                    loop_bytes = _loop_region_bytes(
+                        cur_loop_start, cur_loop_end, cur_loop_cents
+                    )
                 looped_frames += len(loop_bytes) // _BYTES_PER_FRAME
                 yield cur_loop_start, loop_bytes
 
@@ -477,6 +530,15 @@ class SlicePreviewPlayer(QObject):
             return
         self._live_loop_start = loop_start_frame
         self._live_loop_end = loop_end_frame
+
+    def update_loop_tune_cents(self, cents):
+        """Live-updates the loop-tune (SHLTO) pitch offset of an
+        in-progress play_loop() - see that method's own docstring. Same
+        deferred-to-next-pass timing as update_loop_points(), and a safe
+        no-op if nothing is currently looping (the generator simply keeps
+        whatever cents it last had).
+        """
+        self._live_loop_tune_cents = cents
 
     def stop(self):
         was_playing = self._device is not None
