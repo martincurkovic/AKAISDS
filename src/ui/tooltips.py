@@ -34,6 +34,15 @@ OPEN_EDITOR_NEEDS_MIDI_PORTS = (
 OPEN_EDITOR_NEEDS_AKAI_DEVICE_TYPE = (
     'Set Sampler Type to "Akai Sampler" in Settings first'
 )
+# shown on both btn_open_editor and btn_settings (and mirrored onto their
+# menu actions - see TransferDashboard._sync_menu_actions) while a transfer
+# is in flight - opening either window mid-transfer risks a second MIDI
+# consumer racing the in-flight one on the same shared connection (Settings
+# can also reopen the ports outright), see AGENTS.md's "Follow-up, first
+# real-hardware session: a confirmed dual-connection MIDI race" for why
+BUSY_BLOCKS_OTHER_WINDOWS = (
+    "Can't do this while a MIDI transfer is in progress"
+)
 
 # =============================================================================
 # ui/settings_dialog.py
@@ -215,6 +224,12 @@ REFRESH_BUTTON = (
     "Reload the current program/keygroup from the hardware - "
     "use this if you've changed something on the sampler's own front panel"
 )
+
+# base text only - same "resolved shortcut appended at the call site"
+# convention as REFRESH_BUTTON above, not hardcoded to one platform's symbol.
+# Only ever visible while a real MIDI transfer this window started is in
+# progress - see ProgramEditorWindow._set_hardware_busy_ui
+CANCEL_TRANSFER_BUTTON = "Cancel the in-progress transfer"
 
 # --- Samples tab: waveform zoom buttons -------------------------------------
 

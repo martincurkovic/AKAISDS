@@ -1979,6 +1979,19 @@ class ProgramEditorWindow(QMainWindow):
         self.refresh_button.setToolTip(tt.REFRESH_BUTTON)
         self.refresh_button.clicked.connect(self._refresh_from_hardware)
 
+        # only shown while a blocking hardware operation on this window is
+        # actually running (see _set_hardware_busy_ui) - a discoverable,
+        # on-screen equivalent of the Hardware menu's own Cancel Transfer
+        # action/Ctrl+. shortcut, for a user who wouldn't otherwise know
+        # cancelling is even possible. Stays enabled the whole time it's
+        # visible (never touched by _set_hardware_busy_ui's own disabling)
+        # for the same reason cancel_action does - it has to stay
+        # reachable while everything else is frozen, that's the point of it
+        self.cancel_transfer_button = QPushButton("Cancel Transfer")
+        self.cancel_transfer_button.setToolTip(tt.CANCEL_TRANSFER_BUTTON)
+        self.cancel_transfer_button.clicked.connect(self._cancel_hardware_transfer)
+        self.cancel_transfer_button.setVisible(False)
+
         content_layout = QHBoxLayout()
         content_layout.addWidget(programs_container)
         content_layout.addWidget(keygroups_container)
@@ -2003,6 +2016,7 @@ class ProgramEditorWindow(QMainWindow):
 
         bottom_row = QHBoxLayout()
         bottom_row.addWidget(self.refresh_button)
+        bottom_row.addWidget(self.cancel_transfer_button)
         # ties the loading indicator to the action that most often triggers
         # a hardware sync, rather than tucking it into the status bar
         bottom_row.addWidget(self._loading_progress)
@@ -2017,20 +2031,45 @@ class ProgramEditorWindow(QMainWindow):
         container.setLayout(main_layout)
         self.setCentralWidget(container)
 
-        refresh_action = QAction("Refresh from Hardware", self)
-        refresh_action.setShortcut("Ctrl+R")  # shows as ⌘R on macOS
-        refresh_action.triggered.connect(self._refresh_from_hardware)
+        # self._refresh_action (not a local) - _set_hardware_busy_ui toggles
+        # it (and refresh_button) off for the duration of any blocking
+        # hardware operation on this window, see that method's own comment
+        self._refresh_action = QAction("Refresh from Hardware", self)
+        self._refresh_action.setShortcut("Ctrl+R")  # shows as ⌘R on macOS
+        self._refresh_action.triggered.connect(self._refresh_from_hardware)
         hardware_menu = self.menuBar().addMenu("&Hardware")
-        hardware_menu.addAction(refresh_action)
+        hardware_menu.addAction(self._refresh_action)
+
+        # same shortcut as main_window.py's own Transfer > Cancel Transfer
+        # action (Ctrl+. / Cmd+.) - cancels a sample audio load on the
+        # Samples tab (_load_sample_waveform's own blocking wait already
+        # pumps events, listening for sampler_controller.receive_finished,
+        # which cancel_transfer() already emits - see that method's own
+        # "should be safe to call at any time" comment). Unlike the Slice
+        # Editor's own Ctrl+. (a QShortcut local to that modal dialog - see
+        # slice_editor_window.py), this window is a plain top-level window
+        # and keeps focus during the freeze, so an ordinary QAction on its
+        # own menu bar reaches it fine.
+        cancel_action = QAction("Cancel Transfer", self)
+        cancel_action.setShortcut("Ctrl+.")
+        cancel_action.triggered.connect(self._cancel_hardware_transfer)
+        hardware_menu.addAction(cancel_action)
         # same "append the resolved, platform-native shortcut rather than
         # hardcoding one platform's symbol" fix-up the zoom buttons get
         # further down - see that block's own comment for why
-        refresh_shortcut_text = refresh_action.shortcut().toString(
+        refresh_shortcut_text = self._refresh_action.shortcut().toString(
             QKeySequence.SequenceFormat.NativeText
         )
         if refresh_shortcut_text:
             self.refresh_button.setToolTip(
                 f"{self.refresh_button.toolTip()} ({refresh_shortcut_text})"
+            )
+        cancel_shortcut_text = cancel_action.shortcut().toString(
+            QKeySequence.SequenceFormat.NativeText
+        )
+        if cancel_shortcut_text:
+            self.cancel_transfer_button.setToolTip(
+                f"{self.cancel_transfer_button.toolTip()} ({cancel_shortcut_text})"
             )
 
         # zoom for the Samples tab's waveform view. "Ctrl+=" is the primary
@@ -2117,12 +2156,27 @@ class ProgramEditorWindow(QMainWindow):
         # share one 1/2/3/4 sequence across both windows.
         window_menu = self.menuBar().addMenu("&Window")
 
-        dashboard_action = QAction("Transfer Dashboard", self)
-        dashboard_action.setShortcut("Ctrl+T")
+        self._dashboard_action = QAction("Transfer Dashboard", self)
+        self._dashboard_action.setShortcut("Ctrl+T")
         # closing (rather than hiding outright) reuses closeEvent()'s
-        # existing "show the main window again" cleanup below
-        dashboard_action.triggered.connect(self.close)
-        window_menu.addAction(dashboard_action)
+        # existing "show the main window again" cleanup below - closeEvent
+        # is also where the is_transfer_busy() guard lives (see its own
+        # comment), so this, the OS window-close button, and any future
+        # close-triggering control all go through the one check
+        self._dashboard_action.triggered.connect(self.close)
+        window_menu.addAction(self._dashboard_action)
+
+        # kept in sync with is_transfer_busy() below (see
+        # _sync_window_menu_busy_state) rather than only at the handful of
+        # spots that flip main_tabs.setEnabled() - a transfer this window
+        # itself didn't start (the Dashboard's own Send/Receive, since both
+        # windows share one sampler_controller) needs to disable this too,
+        # and there's no signal fired specifically for "busy changed"
+        self._window_menu_busy_timer = QTimer(self)
+        self._window_menu_busy_timer.timeout.connect(
+            self._sync_window_menu_busy_state
+        )
+        self._window_menu_busy_timer.start(150)
 
         editor_action = QAction("Program Editor", self)
         editor_action.setShortcut("Ctrl+E")
@@ -2131,24 +2185,36 @@ class ProgramEditorWindow(QMainWindow):
 
         window_menu.addSeparator()
 
-        multi_tab_action = QAction("Multi Tab", self)
-        multi_tab_action.setShortcut("Ctrl+1")
-        multi_tab_action.triggered.connect(lambda: self.main_tabs.setCurrentIndex(0))
-        window_menu.addAction(multi_tab_action)
+        # self._tab_switch_actions (not locals) - _set_hardware_busy_ui
+        # disables all three for the duration of any blocking hardware
+        # operation on this window (see that method's own comment): tab
+        # switching itself sends nothing to the sampler, but main_tabs
+        # being setEnabled(False) already means every widget on whichever
+        # tab you land on is inert either way, so leaving these live just
+        # lets the frozen window appear to navigate while doing nothing -
+        # not a MIDI safety issue, just contradicts the "freezes the rest
+        # of the editor for the duration, deliberately" intent these
+        # operations already state elsewhere
+        self._multi_tab_action = QAction("Multi Tab", self)
+        self._multi_tab_action.setShortcut("Ctrl+1")
+        self._multi_tab_action.triggered.connect(
+            lambda: self.main_tabs.setCurrentIndex(0)
+        )
+        window_menu.addAction(self._multi_tab_action)
 
-        programs_tab_action = QAction("Programs Tab", self)
-        programs_tab_action.setShortcut("Ctrl+2")
-        programs_tab_action.triggered.connect(
+        self._programs_tab_action = QAction("Programs Tab", self)
+        self._programs_tab_action.setShortcut("Ctrl+2")
+        self._programs_tab_action.triggered.connect(
             lambda: self.main_tabs.setCurrentIndex(1)
         )
-        window_menu.addAction(programs_tab_action)
+        window_menu.addAction(self._programs_tab_action)
 
-        samples_tab_action = QAction("Samples Tab", self)
-        samples_tab_action.setShortcut("Ctrl+3")
-        samples_tab_action.triggered.connect(
+        self._samples_tab_action = QAction("Samples Tab", self)
+        self._samples_tab_action.setShortcut("Ctrl+3")
+        self._samples_tab_action.triggered.connect(
             lambda: self.main_tabs.setCurrentIndex(self._samples_tab_index)
         )
-        window_menu.addAction(samples_tab_action)
+        window_menu.addAction(self._samples_tab_action)
 
         # Qt has no MenuRole for "check for updates" (only About/Preferences/
         # Quit get auto-relocated into the native app menu on macOS - see
@@ -2477,6 +2543,45 @@ class ProgramEditorWindow(QMainWindow):
         }
 
         self._worker.submit_keygroups(program_index)
+
+    def _set_hardware_busy_ui(self, busy):
+        # single place for every blocking hardware operation on this window
+        # (_load_sample_waveform, _perform_duplicate_sample_real's caller,
+        # _perform_sample_edit_real's caller) to freeze/unfreeze the rest
+        # of the window around it, instead of each call site only handling
+        # main_tabs.setEnabled() and leaving refresh_button/the Hardware
+        # menu's Refresh action/the Window menu's tab-switch actions still
+        # live - see refresh_action's own docstring for why Refresh in
+        # particular is a real hardware-safety gap, not just cosmetic:
+        # BridgeWorker firing a request while sampler_controller is
+        # mid-SDS-handshake is the same "two logical senders, one wire"
+        # risk is_transfer_busy() already guards against everywhere else in
+        # this file. cancel_action/cancel_transfer_button are deliberately
+        # NOT disabled here - they have to stay reachable while busy,
+        # that's the whole point of them; cancel_transfer_button is shown
+        # (rather than just left enabled, like the menu action) specifically
+        # so cancelling is discoverable without reading the docs or opening
+        # the Hardware menu.
+        self.main_tabs.setEnabled(not busy)
+        self.cancel_transfer_button.setVisible(busy)
+        self.refresh_button.setEnabled(not busy)
+        self._refresh_action.setEnabled(not busy)
+        for action in (
+            self._multi_tab_action,
+            self._programs_tab_action,
+            self._samples_tab_action,
+        ):
+            action.setEnabled(not busy)
+
+    def _cancel_hardware_transfer(self):
+        # reaches whichever real MIDI transfer is currently in flight on
+        # the shared sampler_controller - most usefully a sample audio
+        # load from the Samples tab (_load_sample_waveform), but harmless
+        # to trigger otherwise: cancel_transfer() is a no-op if nothing is
+        # actually running
+        sampler_controller = getattr(self._main_window, "sampler_controller", None)
+        if sampler_controller is not None:
+            sampler_controller.cancel_transfer()
 
     def _on_program_selected(self, current, previous):
         self.keygroup_list.clear()
@@ -3045,7 +3150,7 @@ class ProgramEditorWindow(QMainWindow):
             return
 
         self.waveform_view.set_loading(True)
-        self.main_tabs.setEnabled(False)
+        self._set_hardware_busy_ui(True)
         self.status_bar.showMessage(
             f'Duplicating "{current_name}" as "{new_name}" - this can '
             "take a while and will freeze the interface..."
@@ -3056,7 +3161,7 @@ class ProgramEditorWindow(QMainWindow):
                 entry, sampler_controller, current_name, new_name
             )
         finally:
-            self.main_tabs.setEnabled(True)
+            self._set_hardware_busy_ui(False)
             self.waveform_view.set_loading(False)
             self.sample_edit_progress.setVisible(False)
 
@@ -3274,6 +3379,7 @@ class ProgramEditorWindow(QMainWindow):
             demo_mode=bool(os.environ.get("AKAISDS_DEMO_SAMPLER")),
             program_names_provider=_existing_program_names,
             create_program_callback=self._create_program_from_slices,
+            cancel_callback=sampler_controller.cancel_transfer,
         )
         dialog.exec()
         # slice export can add several new resident samples - refresh so
@@ -3822,7 +3928,33 @@ class ProgramEditorWindow(QMainWindow):
             return
         super().keyPressEvent(event)
 
+    def _sync_window_menu_busy_state(self):
+        sampler_controller = getattr(self._main_window, "sampler_controller", None)
+        busy = sampler_controller is not None and sampler_controller.is_transfer_busy()
+        self._dashboard_action.setEnabled(not busy)
+        self._dashboard_action.setToolTip(tt.BUSY_BLOCKS_OTHER_WINDOWS if busy else "")
+
     def closeEvent(self, event):
+        # refuse to switch back to the Dashboard (whether via Ctrl+T, the
+        # "&Window" menu, or the OS window-close button - all three funnel
+        # through here) while a MIDI transfer is in flight on the shared
+        # sampler_controller. _dashboard_action being disabled already
+        # stops the menu/shortcut route (see _sync_window_menu_busy_state),
+        # but the OS close button has no such gate, and closing this window
+        # would show the Dashboard again while the transfer keeps running
+        # underneath it - a second window able to fire its own MIDI
+        # requests onto the SAME in-flight connection. See AGENTS.md's
+        # "Follow-up, first real-hardware session: a confirmed
+        # dual-connection MIDI race" for the exact bug this avoids.
+        sampler_controller = getattr(self._main_window, "sampler_controller", None)
+        if sampler_controller is not None and sampler_controller.is_transfer_busy():
+            self.status_bar.showMessage(
+                "Can't switch to the Transfer Dashboard - a MIDI transfer is "
+                "already in progress"
+            )
+            event.ignore()
+            return
+
         # a "Hold" preview loop never stops on its own (see
         # _on_waveform_preview_requested) - closing the window must not
         # leave it sounding forever in the background
@@ -6198,12 +6330,15 @@ class ProgramEditorWindow(QMainWindow):
 
         self.waveform_view.set_loading(True)
         # freezes the rest of the editor for the duration, deliberately -
-        # see WaveformView's own placeholder copy. Doesn't reach the menu
-        # bar (Cmd+R/Cmd+Delete etc still fire), which is a known gap, not
-        # a guarantee - the real backstop against overlapping transfers is
-        # the is_transfer_busy() check above and BridgeWorker's own queue,
-        # not this disable.
-        self.main_tabs.setEnabled(False)
+        # see WaveformView's own placeholder copy. Also reaches the menu
+        # bar now (Refresh and the Multi/Programs/Samples tab-switch
+        # actions - see _set_hardware_busy_ui): Cmd+R firing a BridgeWorker
+        # request while a real SDS dump is mid-handshake on the shared MIDI
+        # connection is exactly the race the is_transfer_busy() check above
+        # exists to prevent - letting Refresh alone bypass it would defeat
+        # the point. cancel_action is deliberately left reachable so
+        # there's still a way out.
+        self._set_hardware_busy_ui(True)
         self.status_bar.showMessage(
             f"Loading audio for sample {sample_index} - this can take a "
             "while and will freeze the interface..."
@@ -6331,7 +6466,7 @@ class ProgramEditorWindow(QMainWindow):
                 f"Loaded {len(samples)} sample frames for sample {sample_index}"
             )
         finally:
-            self.main_tabs.setEnabled(True)
+            self._set_hardware_busy_ui(False)
             self.waveform_view.set_loading(False)
 
     def _confirm_trim_sample(self):
@@ -6570,7 +6705,7 @@ class ProgramEditorWindow(QMainWindow):
                 return
 
         self.waveform_view.set_loading(True)
-        self.main_tabs.setEnabled(False)
+        self._set_hardware_busy_ui(True)
         self.status_bar.showMessage(
             f'{action_label} "{original_name}" - this can take a while and will '
             "freeze the interface..."
@@ -6600,7 +6735,7 @@ class ProgramEditorWindow(QMainWindow):
                     action_label,
                 )
         finally:
-            self.main_tabs.setEnabled(True)
+            self._set_hardware_busy_ui(False)
             self.waveform_view.set_loading(False)
             self.sample_edit_progress.setVisible(False)
 

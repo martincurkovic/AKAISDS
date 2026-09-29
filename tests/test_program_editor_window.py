@@ -378,6 +378,14 @@ class FakeSamplerController(QObject):
     def is_transfer_busy(self):
         return self.busy
 
+    def cancel_transfer(self):
+        # only ever exercised by SliceEditorWindow's Ctrl+. shortcut being
+        # constructible against this fake (cancel_callback=sampler_
+        # controller.cancel_transfer in _open_slice_editor) - no test here
+        # actually fires the shortcut, so nothing more than "exists" is
+        # needed
+        pass
+
     def send_file_queue(self, file_entries, channel=None, starting_sample_number=None):
         # iterates the WHOLE batch, same as the real SamplerController's
         # own _file_queue draining (see AGENTS.md/_export_slices' own

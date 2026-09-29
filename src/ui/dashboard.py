@@ -318,6 +318,17 @@ class TransferDashboard(QWidget):
         # public (no leading underscore) since main_window.py's "Program
         # Editor" menu action calls this directly, same as its other
         # menu-wired dashboard methods
+        if self.sampler_controller.is_transfer_busy():
+            # belt-and-braces alongside btn_open_editor/editor_action being
+            # disabled while busy (see _update_open_editor_enabled) - a
+            # second S3kBridge/BridgeWorker connecting to the sampler while
+            # a send/receive is still in flight on the shared MIDI
+            # connection is the exact dual-connection race AGENTS.md's
+            # "Follow-up, first real-hardware session" section documents
+            self.status_bar.showMessage(
+                "Can't open the Program Editor - a MIDI transfer is already in progress"
+            )
+            return
         main_window = self.window()
         try:
             bridge = program_editor_bridge.connect(self.midi_manager)
@@ -340,6 +351,14 @@ class TransferDashboard(QWidget):
         main_window.hide()
 
     def open_settings_dialog(self):
+        if self.sampler_controller.is_transfer_busy():
+            # same reasoning as open_program_editor's own guard - the
+            # Settings dialog can reopen midi_manager's ports outright,
+            # which would pull them out from under an in-flight transfer
+            self.status_bar.showMessage(
+                "Can't open Settings - a MIDI transfer is already in progress"
+            )
+            return
         dialog = MidiSettingsDialog(self.midi_manager, self.sampler_controller, self)
         dialog.exec()
         self._update_device_type_ui()
@@ -425,8 +444,21 @@ class TransferDashboard(QWidget):
             self.midi_manager.output_name
         )
         is_akai = self.sampler_controller.device_type == "akai"
-        self.btn_open_editor.setEnabled(has_ports and is_akai)
-        if has_ports and is_akai:
+        # a MIDI transfer in progress (started from here, or from the
+        # Program Editor sharing this same sampler_controller) locks out
+        # BOTH windows that could open a second thing on the wire - see
+        # open_program_editor/open_settings_dialog's own matching guards,
+        # which this only mirrors visually (disabling a button/action
+        # doesn't stop a direct call, hence the guards existing there too)
+        busy = self.sampler_controller.is_transfer_busy()
+        self.btn_settings.setEnabled(not busy)
+        self.btn_settings.setToolTip(
+            tooltips.BUSY_BLOCKS_OTHER_WINDOWS if busy else ""
+        )
+        self.btn_open_editor.setEnabled(has_ports and is_akai and not busy)
+        if busy:
+            self.btn_open_editor.setToolTip(tooltips.BUSY_BLOCKS_OTHER_WINDOWS)
+        elif has_ports and is_akai:
             self.btn_open_editor.setToolTip("")
         elif not has_ports:
             self.btn_open_editor.setToolTip(tooltips.OPEN_EDITOR_NEEDS_MIDI_PORTS)
@@ -1289,6 +1321,13 @@ class TransferDashboard(QWidget):
         self._sync_menu_actions()
 
     def _sync_menu_actions(self):
+        # re-derive btn_open_editor/btn_settings' own enabled state every
+        # tick rather than only at the handful of explicit call sites
+        # (construction, Settings closing, transfer start/finish) - a
+        # transfer can also start/stop from the Program Editor side (it
+        # shares this same sampler_controller), which has no reason to
+        # know this dashboard even exists, let alone poke its buttons
+        self._update_open_editor_enabled()
         for button, action in self._enabled_sync_map.items():
             action.setEnabled(button.isEnabled())
         for button, action in self._text_sync_map.items():  # type: ignore

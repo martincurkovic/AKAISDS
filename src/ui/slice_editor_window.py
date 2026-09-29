@@ -139,6 +139,7 @@ class SliceEditorWindow(QDialog):
         export_confirm_message=None,
         program_names_provider=None,
         create_program_callback=None,
+        cancel_callback=None,
     ):
         super().__init__(parent)
         self.setWindowTitle(f'Slice Editor - "{sample_name}"')
@@ -151,6 +152,12 @@ class SliceEditorWindow(QDialog):
         self._shlto = shlto
         self._existing_names_provider = existing_names_provider
         self._export_callback = export_callback
+        # None for dashboard.py's own reuse of this window (slicing a
+        # queued LOCAL file - nothing hits the wire, so there's nothing to
+        # cancel). program_editor_window.py's use passes
+        # sampler_controller.cancel_transfer - see the Ctrl+. QShortcut
+        # below, bound only while self._exporting is True
+        self._cancel_callback = cancel_callback
         # both None for dashboard.py's own reuse of this window (slicing a
         # queued local file - nothing resident on the sampler yet to clone a
         # program from), which is why the checkbox/combo below are built
@@ -249,6 +256,21 @@ class SliceEditorWindow(QDialog):
             self.waveform.zoom_out,
         )
         zoom_fit_key = _bind_all([QKeySequence("Ctrl+0")], self.waveform.reset_zoom)
+
+        # Ctrl+. (auto-translates to Cmd+. on macOS, same as main_window.py's
+        # own Transfer > Cancel Transfer action) - cancels an in-flight
+        # export. export_callback (ProgramEditorWindow._export_slices)
+        # blocks in its own nested QEventLoop the whole time an export is
+        # running (see this class's own docstring on why that's safe to
+        # nest a QShortcut activation into), so this reaches
+        # sampler_controller.cancel_transfer() - already documented safe to
+        # call at any time - and unblocks that wait the same way it already
+        # unblocks a Dashboard transfer. Only meaningful (and only wired at
+        # all - see cancel_callback's own docstring above) while an export
+        # is actually running; a stray Ctrl+. the rest of the time is a
+        # harmless no-op.
+        self._cancel_export_shortcut = QShortcut(QKeySequence("Ctrl+."), self)
+        self._cancel_export_shortcut.activated.connect(self._on_cancel_export_shortcut)
 
         for button, key, tooltip in (
             (self.zoom_out_button, zoom_out_key, tooltips.ZOOM_OUT),
@@ -628,6 +650,13 @@ class SliceEditorWindow(QDialog):
             QMessageBox.information(self, "Export Slices", message)
         else:
             QMessageBox.warning(self, "Export Slices", message)
+
+    def _on_cancel_export_shortcut(self):
+        if not self._exporting or self._cancel_callback is None:
+            return
+        self.status_label.setText("Cancelling...")
+        QApplication.processEvents()
+        self._cancel_callback()
 
     def _on_export_progress(self, current, total):
         percent = int(100 * current / total) if total else 0
