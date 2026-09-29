@@ -215,6 +215,18 @@ class SlicePreviewPlayer(QObject):
                     out = pcm_bytes[pos:end]
                     pos += len(out)
                     self._current_frame = start_frame + pos // _BYTES_PER_FRAME
+                    if len(out) < required_frames * _BYTES_PER_FRAME:
+                        # the true final chunk, shorter than what was
+                        # asked for - miniaudio.PlaybackDevice._data_
+                        # callback only memmove()s exactly len(out) bytes
+                        # into its native output buffer; zero-padding here
+                        # (silence) fills the rest deliberately rather
+                        # than leaving whatever native memory was already
+                        # there (stale audio from an earlier callback) to
+                        # play as an audible click right at the very end
+                        out = out + b"\x00" * (
+                            required_frames * _BYTES_PER_FRAME - len(out)
+                        )
                     required_frames = yield out
                 # exhausted: from here the device just keeps calling back
                 # for more (StopIteration) and gets silence, harmless -
@@ -315,70 +327,135 @@ class SlicePreviewPlayer(QObject):
             region = samples[lo : hi + 1]
             return struct.pack("<" + "h" * len(region), *region)
 
+        def _segments():
+            # yields (segment_start_frame, raw_bytes) pairs in play order:
+            # the attack once, then the loop region repeated for
+            # loop_frame_budget frames (or forever - "Hold" - if
+            # loop_frame_budget is None), then the release tail once.
+            # segment_start_frame is the absolute sample frame the FIRST
+            # byte of that segment corresponds to, for the generator
+            # below's own self._current_frame tracking as it consumes
+            # bytes across segment boundaries.
+            #
+            # Live loop-point updates (update_loop_points(), e.g. from a
+            # WaveformView.markers_changed tick during a drag) are only
+            # picked up here, between whole passes - never mid-pass, same
+            # as before this was split out of the generator itself - a
+            # dwell that doesn't divide evenly into the loop region's own
+            # length still always finishes its CURRENT pass before
+            # rechecking the budget or moving to the tail.
+            if attack_bytes:
+                yield start_frame, attack_bytes
+
+            looped_frames = 0
+            cur_loop_start = loop_start_frame
+            cur_loop_end = loop_end_frame
+            loop_bytes = _loop_region_bytes(cur_loop_start, cur_loop_end)
+            while loop_frame_budget is None or looped_frames < loop_frame_budget:
+                live_start = self._live_loop_start
+                live_end = self._live_loop_end
+                if live_end > live_start and (live_start, live_end) != (
+                    cur_loop_start,
+                    cur_loop_end,
+                ):
+                    cur_loop_start, cur_loop_end = live_start, live_end
+                    loop_bytes = _loop_region_bytes(cur_loop_start, cur_loop_end)
+                looped_frames += len(loop_bytes) // _BYTES_PER_FRAME
+                yield cur_loop_start, loop_bytes
+
+            # release tail, once - from the loop's own last-used end point
+            # (cur_loop_end), which may have moved since play_loop() was
+            # first called
+            tail_start = cur_loop_end
+            live_tail = (
+                samples[tail_start : end_frame + 1]
+                if cur_loop_end != loop_end_frame
+                else None
+            )
+            out_bytes = (
+                struct.pack("<" + "h" * len(live_tail), *live_tail)
+                if live_tail is not None
+                else tail_bytes
+            )
+            if out_bytes:
+                yield tail_start, out_bytes
+
         def generator():
             try:
                 required_frames = yield b""
-                # attack, once
-                pos = 0
-                while pos < len(attack_bytes):
-                    end = pos + required_frames * _BYTES_PER_FRAME
-                    out = attack_bytes[pos:end]
-                    pos += len(out)
-                    self._current_frame = start_frame + pos // _BYTES_PER_FRAME
-                    required_frames = yield out
-                # loop region, repeated for loop_frame_budget frames, or
-                # forever ("Hold") if loop_frame_budget is None - rechecked
-                # only between full passes, never mid-pass (see docstring).
-                # cached_bounds/cached_bytes avoid re-slicing/re-packing on
-                # every single pass (this runs on the real-time audio
-                # thread) - only when update_loop_points() actually moved
-                # something since the last pass, which for a stable loop
-                # (the common case) is never.
-                looped_frames = 0
-                cur_loop_start = loop_start_frame
-                cur_loop_end = loop_end_frame
-                loop_bytes = _loop_region_bytes(cur_loop_start, cur_loop_end)
-                while loop_frame_budget is None or looped_frames < loop_frame_budget:
-                    live_start = self._live_loop_start
-                    live_end = self._live_loop_end
-                    if (
-                        live_end > live_start
-                        and (live_start, live_end) != (cur_loop_start, cur_loop_end)
-                    ):
-                        cur_loop_start, cur_loop_end = live_start, live_end
-                        loop_bytes = _loop_region_bytes(cur_loop_start, cur_loop_end)
-                    pos = 0
-                    while pos < len(loop_bytes):
-                        end = pos + required_frames * _BYTES_PER_FRAME
-                        out = loop_bytes[pos:end]
-                        pos += len(out)
-                        looped_frames += len(out) // _BYTES_PER_FRAME
-                        self._current_frame = cur_loop_start + pos // _BYTES_PER_FRAME
-                        required_frames = yield out
-                # release tail, once - from the loop's own last-used end
-                # point (cur_loop_end), which may have moved since
-                # play_loop() was first called
-                pos = 0
-                tail_start = cur_loop_end
-                live_tail = (
-                    samples[tail_start : end_frame + 1]
-                    if cur_loop_end != loop_end_frame
-                    else None
-                )
-                out_bytes = (
-                    struct.pack("<" + "h" * len(live_tail), *live_tail)
-                    if live_tail is not None
-                    else tail_bytes
-                )
-                while pos < len(out_bytes):
-                    end = pos + required_frames * _BYTES_PER_FRAME
-                    out = out_bytes[pos:end]
-                    pos += len(out)
-                    self._current_frame = tail_start + pos // _BYTES_PER_FRAME
-                    required_frames = yield out
+                # Every yield below must be EXACTLY required_frames frames
+                # (never short) except the true final one at total
+                # exhaustion - miniaudio.PlaybackDevice._data_callback
+                # does `ffi.memmove(output, samples_bytes,
+                # len(samples_bytes))` and nothing else: a short yield
+                # only overwrites the FIRST len(samples_bytes) bytes of
+                # its native output buffer, leaving the REST as whatever
+                # was already there (stale audio from an earlier
+                # callback). The previous version yielded a short chunk at
+                # the end of EVERY loop pass whenever the loop region's
+                # own length didn't divide evenly by the buffer size -
+                # which for a short loop region even yielded the SAME
+                # short chunk on every single pass - that stale-tail
+                # garbage is exactly the "chop"/"glitch" reported at both
+                # large and small buffer sizes. Concatenating seamlessly
+                # across segment (and pass) boundaries (seg_iter/
+                # _advance_segment below) is what actually fixes it;
+                # _segments() above still owns what audio comes next, this
+                # only owns chunking it to the size miniaudio actually
+                # asked for.
+                seg_iter = _segments()
+                seg_start_frame = 0
+                seg_bytes = b""
+                seg_pos = 0
+
+                def _advance_segment():
+                    nonlocal seg_start_frame, seg_bytes, seg_pos
+                    try:
+                        seg_start_frame, seg_bytes = next(seg_iter)
+                    except StopIteration:
+                        seg_bytes = None
+                    seg_pos = 0
+
+                _advance_segment()
+                while seg_bytes is not None:
+                    need = required_frames * _BYTES_PER_FRAME
+                    out = bytearray()
+                    while len(out) < need and seg_bytes is not None:
+                        take_n = min(len(seg_bytes) - seg_pos, need - len(out))
+                        out += seg_bytes[seg_pos : seg_pos + take_n]
+                        seg_pos += take_n
+                        self._current_frame = (
+                            seg_start_frame + seg_pos // _BYTES_PER_FRAME
+                        )
+                        if seg_pos >= len(seg_bytes):
+                            _advance_segment()
+                    if not out:
+                        break
+                    if len(out) < need:
+                        # true final chunk (dwell_ms finite and every
+                        # segment now exhausted) - same zero-pad-the-
+                        # remainder reasoning as play()'s own generator,
+                        # so miniaudio's memmove never leaves stale native
+                        # buffer content to play as a click right at the
+                        # very end
+                        out += b"\x00" * (need - len(out))
+                    required_frames = yield bytes(out)
+                # exhausted (dwell_ms finite and reached, tail fully
+                # played): from here the device just keeps calling back
+                # for more (StopIteration) and gets silence, harmless -
+                # the finally below is what actually gets _on_tick to stop
+                # the device for real. Same as play()'s own generator.
             except Exception:
-                # see play()'s own generator for why this is caught/logged
-                # here rather than left to escape into the cffi boundary
+                # this runs on miniaudio's own native real-time audio
+                # thread, invoked through a cffi callback - an uncaught
+                # exception here doesn't reach this app's normal call
+                # stack at all (miniaudio.PlaybackDevice._data_callback
+                # re-raises it straight into the cffi boundary), so
+                # without this it's either silently swallowed by cffi's
+                # own default callback error handling or, worst case,
+                # takes the process down - either way invisible in a
+                # packaged build with no console. Logging (and letting the
+                # finally below end the preview cleanly) avoids that.
                 debug_log.get_logger().error(
                     "SlicePreviewPlayer: playback generator raised",
                     exc_info=True,

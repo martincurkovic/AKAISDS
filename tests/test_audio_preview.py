@@ -259,3 +259,98 @@ def test_update_loop_points_with_degenerate_bounds_is_ignored(qapp):
 def test_update_loop_points_before_any_play_loop_call_does_not_raise(qapp):
     player = audio_preview.SlicePreviewPlayer()
     player.update_loop_points(100, 200)  # must not raise
+
+
+# --- play()/play_loop() generator: every buffer-fill request must be met
+# EXACTLY, never short - regression tests for a real, confirmed audio bug.
+# miniaudio.PlaybackDevice._data_callback does
+# `ffi.memmove(output, samples_bytes, len(samples_bytes))` and nothing
+# else: a short-yielded chunk only overwrites the FIRST len(samples_bytes)
+# bytes of its native output buffer, leaving the REST as whatever was
+# already there - stale audio from an earlier callback, playing as an
+# audible artifact. play_loop()'s own generator used to yield a short
+# chunk at the end of EVERY loop pass whenever the loop region's length
+# didn't divide evenly by the buffer size (reported as a "chop" at a large
+# buffer size, and a "glitch" every loop repetition at a small one - both
+# are this). No real audio device needed for these - a fake one captures
+# the generator so the test can drive it directly with .send().
+
+
+class _FakeDevice:
+    def __init__(self):
+        self.gen = None
+        self.stopped = False
+        self.closed = False
+
+    def start(self, gen):
+        self.gen = gen
+
+    def stop(self):
+        self.stopped = True
+
+    def close(self):
+        self.closed = True
+
+
+def test_play_loop_never_yields_a_short_chunk_mid_stream(qapp, monkeypatch):
+    player = audio_preview.SlicePreviewPlayer()
+    fake_device = _FakeDevice()
+    monkeypatch.setattr(player, "_open_device", lambda framerate: fake_device)
+
+    samples = _tone(20000)
+    # loop region is 778 frames - deliberately NOT a multiple of
+    # required_frames below, so every pass used to end with a short chunk
+    player.play_loop(samples, 0, 1000, 1777, len(samples) - 1, 44100, dwell_ms=None)
+
+    required_frames = 512  # a real "high buffer size" setting, in frames
+    expected_bytes = required_frames * audio_preview._BYTES_PER_FRAME
+    # several buffer-fills' worth of the attack PLUS several full loop
+    # passes, so this crosses multiple loop-wrap boundaries
+    chunk_lengths = [len(fake_device.gen.send(required_frames)) for _ in range(40)]
+
+    assert all(length == expected_bytes for length in chunk_lengths)
+
+
+def test_play_loop_never_yields_a_short_chunk_with_a_small_buffer(qapp, monkeypatch):
+    # same regression, at the OTHER end of the reported symptom - a small
+    # buffer size, which still needs to divide the loop region unevenly
+    # to reproduce the historical bug
+    player = audio_preview.SlicePreviewPlayer()
+    fake_device = _FakeDevice()
+    monkeypatch.setattr(player, "_open_device", lambda framerate: fake_device)
+
+    samples = _tone(20000)
+    player.play_loop(samples, 0, 1000, 1777, len(samples) - 1, 44100, dwell_ms=None)
+
+    required_frames = 64  # a real "low buffer size" setting, in frames
+    expected_bytes = required_frames * audio_preview._BYTES_PER_FRAME
+    chunk_lengths = [len(fake_device.gen.send(required_frames)) for _ in range(200)]
+
+    assert all(length == expected_bytes for length in chunk_lengths)
+
+
+def test_play_loop_with_finite_dwell_pads_only_the_true_final_chunk(qapp, monkeypatch):
+    # the one legitimate short-chunk case (matching play()'s own existing
+    # "exhausted" behaviour) is zero-padded rather than left short, so
+    # every chunk fed to miniaudio - including the very last one - is
+    # always full-size
+    player = audio_preview.SlicePreviewPlayer()
+    fake_device = _FakeDevice()
+    monkeypatch.setattr(player, "_open_device", lambda framerate: fake_device)
+
+    samples = _tone(3000)
+    player.play_loop(samples, 0, 1000, 1200, len(samples) - 1, 44100, dwell_ms=5)
+
+    required_frames = 100
+    expected_bytes = required_frames * audio_preview._BYTES_PER_FRAME
+    chunk_lengths = []
+    for _ in range(60):
+        try:
+            chunk_lengths.append(len(fake_device.gen.send(required_frames)))
+        except StopIteration:
+            # the generator function returned - every chunk up to and
+            # including the padded final one has already been collected
+            break
+
+    assert chunk_lengths  # the tail was actually reached within 60 fills
+    assert all(length == expected_bytes for length in chunk_lengths)
