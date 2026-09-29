@@ -37,6 +37,46 @@ _BUFFER_SIZE_OPTIONS = [32, 64, 128, 256, 512, 1024, 2048]
 # seconds to wait for each message to return. also used for hardware test
 _LOOPBACK_RECEIVE_TIMEOUT = 1.5
 
+_MINIMUM_DIALOG_WIDTH = 560  # floor for the degenerate case - see
+# _minimum_width_for_pages's own docstring
+
+# how much extra horizontal room to reserve beyond the widest page's own
+# exact sizeHint() - a QScrollArea (build_scroll_area wraps each page in
+# one) can show a vertical scrollbar once its content's HEIGHT exceeds the
+# viewport, which is likely here (see build_scroll_area's own "scrolls
+# instead of growing" reasoning) - that scrollbar itself eats into the
+# horizontal space left for the content, which would otherwise silently
+# re-trigger the exact horizontal-scrollbar problem this whole calculation
+# exists to avoid
+_SCROLLBAR_WIDTH_ALLOWANCE = 32
+
+
+def _minimum_width_for_pages(pages, minimum=_MINIMUM_DIALOG_WIDTH):
+    """The dialog width needed to show the widest of *pages* (each a
+    QWidget, or anything duck-typing its own sizeHint()) without a
+    horizontal scrollbar, never narrower than *minimum*.
+
+    Pulled out of MidiSettingsDialog.__init__ as a free function - same
+    "logic that doesn't need the widget itself gets tested without one"
+    reasoning TESTING.md documents for this app's other widgets - so it's
+    testable against fake pages (a plain object with a .sizeHint()
+    returning a QSize) without needing a real MidiSettingsDialog/
+    QComboBox/QApplication at all.
+
+    *minimum* is a floor, not the everyday width: real MIDI/audio device
+    names vary a lot (a short "IAC Driver" vs. a long USB interface's own
+    self-reported name), so the actual width normally comes from what's
+    ACTUALLY loaded into the comboboxes right now (recomputed fresh every
+    time this dialog is constructed - see dashboard.py's own
+    open_settings_dialog). The floor only matters in the degenerate case:
+    no MIDI ports/audio devices found at all, so the comboboxes are empty
+    and report a near-zero sizeHint of their own, which would otherwise
+    make the dialog uncomfortably (or unusably) narrow instead of falling
+    back to a sane width.
+    """
+    widest = max((page.sizeHint().width() for page in pages), default=0)
+    return max(minimum, widest + _SCROLLBAR_WIDTH_ALLOWANCE)
+
 
 class MidiSettingsDialog(QDialog):
     # Two tabs, each a couple of section cards (same look/sizing rules as
@@ -61,18 +101,24 @@ class MidiSettingsDialog(QDialog):
 
         outer_layout = QVBoxLayout(self)
         self.setMinimumHeight(560)
-        self.setMinimumWidth(560)
 
         tabs = QTabWidget()
         tabs.setTabBar(FullWidthTabBar(tabs))
         outer_layout.addWidget(tabs)
 
-        tabs.addTab(
-            build_scroll_area(self._build_audio_midi_page()), "Audio/MIDI"
-        )
-        tabs.addTab(
-            build_scroll_area(self._build_troubleshooting_page()), "Troubleshooting"
-        )
+        # kept as local variables (not wrapped in build_scroll_area() until
+        # after _minimum_width_for_pages reads their own sizeHint() below) -
+        # a QScrollArea's own sizeHint has nothing to do with what it
+        # wraps, so measuring AFTER wrapping would just report the scroll
+        # area's own arbitrary default instead of what the actual content
+        # (in particular, MIDI Input/Output/Audio Output's own AdjustToContents
+        # comboboxes, which can end up considerably wider than a flat
+        # constant once real, possibly long, device/port names are loaded)
+        # needs to avoid a horizontal scrollbar
+        audio_midi_page = self._build_audio_midi_page()
+        troubleshooting_page = self._build_troubleshooting_page()
+        tabs.addTab(build_scroll_area(audio_midi_page), "Audio/MIDI")
+        tabs.addTab(build_scroll_area(troubleshooting_page), "Troubleshooting")
 
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
@@ -80,6 +126,20 @@ class MidiSettingsDialog(QDialog):
         buttons.accepted.connect(self._apply_and_close)
         buttons.rejected.connect(self.reject)
         outer_layout.addWidget(buttons)
+
+        # 560 is a floor, not the everyday width - real MIDI/audio device
+        # names vary a lot (a short "IAC Driver" vs. a long USB interface's
+        # own self-reported name), so the actual width this dialog needs
+        # is recomputed from what's ACTUALLY loaded into the comboboxes
+        # right now, every time this dialog is constructed (see
+        # dashboard.py's open_settings_dialog - a fresh instance each
+        # time), rather than picked by hand once and left to hope it's
+        # still wide enough. 560 stays as the floor for the degenerate
+        # case (see _minimum_width_for_pages's own comment) - e.g. no
+        # ports/devices found at all, nothing to size against.
+        self.setMinimumWidth(
+            _minimum_width_for_pages([audio_midi_page, troubleshooting_page])
+        )
 
     # --- Audio/MIDI tab ------------------------------------------------------
 
