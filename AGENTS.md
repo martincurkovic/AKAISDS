@@ -274,6 +274,69 @@ to be their only trace - invisible in a packaged GUI app with no attached
 console. If you add a new unhandled-exception backstop anywhere in this
 app, log it here too rather than reaching for `print()`.
 
+## MIDI transport consolidation (`core/midi_transport.py`) - opt-in, not yet hardware-validated
+
+The Transfer Dashboard (`SamplerController`, via `MidiManager`, via `mido`)
+and the Program Editor (`BridgeWorker`, via `S3kBridge`, via `python-rtmidi`
+directly) normally open **two independent connections** to the same
+physical MIDI port whenever the editor is open - see "Samples tab: loop
+points..." above for the already-confirmed real-hardware race this causes
+(`SampleList: expected command 0x05, got 0x16`). It's also why the Program
+Editor has no Settings menu of its own yet: `ui/settings_dialog.py`'s own
+diagnostics already have to release/restore `MidiManager`'s ports before
+running a hardware test, precisely because two open connections to one port
+is already known to be unsafe - opening that same dialog from the editor
+today would reproduce exactly the hazard that release/restore dance exists
+to avoid.
+
+`core/midi_transport.py` adds a **consolidated** transport so both windows
+can share ONE real connection instead - `SharedMidiOutput` (one real
+`rtmidi.MidiOut`, with a hard lock around every write, since two logical
+senders on one wire can otherwise interleave a SysEx frame mid-transmission
+and corrupt it) and `SharedMidiInput` (one real `rtmidi.MidiIn`, fanned out
+via `_MessageFanout` to both a poll-style consumer - `S3kBridge`'s own
+`get_message()` model - and a callback-style consumer - `MidiManager`'s own
+mido-callback model - since rtmidi only supports one delivery mode per real
+port instance). `core/midi_manager.py` branches to this transport, and
+`core/program_editor_bridge.py`'s `connect()` builds the Program Editor's
+`S3kBridge` from the Dashboard's already-open shared ports when available,
+instead of opening its own second connection.
+
+**Gated behind `AKAISDS_SHARED_MIDI_TRANSPORT` (unset by default)** - with
+the flag unset, every line of this is dead code and the app behaves exactly
+as it always has. This is new, not-yet-hardware-validated code: the
+automated suite (`tests/test_midi_transport.py`, `tests/test_midi_manager.py`,
+`tests/test_program_editor_bridge.py`'s `connect()` tests) covers the pure
+logic, but nothing timing-sensitive - a real dual-connection race, real
+sustained SDS transfer integrity, real output-write interleaving - can be
+proven without actual hardware. **`test_scripts/midi_transport_
+consolidation_test_plan.md`** (gitignored) is the real-hardware test plan
+for this - 8 numbered tests covering exactly those things, plus editor
+open/close cycles and the macOS `QThread`-crash class this app has already
+been bitten by once (see `BridgeWorker` above). Don't flip the default to
+on, and don't build an actual Settings-menu-in-the-editor UI on top of this,
+until that document's tests are all a clean pass.
+
+**A real segfault was found and fixed while writing the automated tests for
+this**, worth knowing before adding similar tests anywhere in this repo:
+a test that held a real `threading.Lock` across a `time.sleep()` from two
+real `threading.Thread`s, run in-process alongside this suite's own
+Qt/`QThread`-heavy tests (`test_program_editor_window.py` in particular),
+reproducibly crashed the interpreter with a segfault **elsewhere** in the
+suite, not in the offending test itself - a genuine, bisection-confirmed
+instability from mixing raw OS threads with Qt's own threading in this
+environment, not a bug in the code under test. Fixed by replacing the
+real-thread stress test with a mock-based lock-usage check (`tests/
+test_midi_transport.py`'s `test_shared_midi_output_send_message_acquires_
+the_write_lock`) and a sequential (not multi-threaded) version of the
+fan-out queue test - real concurrent correctness for this code needs
+proving on real hardware anyway (see the test plan above), so the
+automated suite doesn't need to re-fight that battle with real OS threads.
+If a test genuinely needs multiple real threads running concurrently in
+this repo's suite again, check this note first and be prepared to isolate
+it (run just that file, then progressively more of the suite alongside it)
+before trusting a single clean run.
+
 ## Program Editor UI: section cards, scroll areas, and the busy indicator
 
 Program/Keygroup tabs are built from `_build_section_card(title,
