@@ -178,6 +178,22 @@ def test_changing_cutoff_while_idle_does_not_start_playback(qapp, monkeypatch):
     calls = []
     monkeypatch.setattr(dialog, "_preview", lambda: calls.append(True))
     dialog.lp_knob.setValue(2000)
+    dialog.lp_knob.sliderReleased.emit()
+    assert calls == []
+
+
+def test_changing_cutoff_mid_drag_does_not_retrigger_preview(qapp, monkeypatch):
+    # regression test for a real, reported bug: valueChanged (which fires
+    # on every mouse-move tick of a drag) used to drive this instead of
+    # sliderReleased (which fires once, on release/commit) - re-filtering
+    # the whole buffer and restarting playback on every single tick made
+    # the knob itself visibly lag while turning, on top of the preview
+    # stuttering through a fresh restart many times over during one drag
+    dialog = _build_dialog()
+    monkeypatch.setattr(dialog._preview_player, "is_playing", lambda: True)
+    calls = []
+    monkeypatch.setattr(dialog, "_preview", lambda: calls.append(True))
+    dialog.lp_knob.setValue(2000)  # valueChanged alone - mid-drag, not a commit
     assert calls == []
 
 
@@ -187,6 +203,7 @@ def test_changing_cutoff_while_playing_retriggers_preview(qapp, monkeypatch):
     calls = []
     monkeypatch.setattr(dialog, "_preview", lambda: calls.append(True))
     dialog.lp_knob.setValue(2000)
+    dialog.lp_knob.sliderReleased.emit()  # the actual commit, e.g. releasing the drag
     assert calls == [True]
 
 

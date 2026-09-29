@@ -93,7 +93,16 @@ class FilterSampleDialog(QDialog):
     single-filter version of this dialog) this always reprocesses the
     whole buffer from the top rather than truly live mid-stream, since a
     filter has no cheap way to swap coefficients mid-buffer the way
-    swapping loop bounds is.
+    swapping loop bounds is - there's no getting around a restart
+    somewhere. The knobs wire this to sliderReleased, not valueChanged
+    (see the knob-wiring loop below) - valueChanged fires on every single
+    mouse-move tick of a drag, and re-filtering the whole buffer on every
+    one of those (a real, reported bug) made the knob itself visibly lag
+    while turning AND fired off a new restarted preview many times over
+    during one drag, not just once. sliderReleased fires only once, right
+    when the user actually settles on a value - the knob stays perfectly
+    responsive while turning, and the preview restarts exactly once
+    instead of stuttering through a restart per tick.
 
     Owns its own SlicePreviewPlayer (same pattern SliceEditorWindow
     already established) rather than reusing the Samples tab's own
@@ -188,10 +197,10 @@ class FilterSampleDialog(QDialog):
 
         for signal in (
             self.hp_group.toggled,
-            self.hp_knob.valueChanged,
+            self.hp_knob.sliderReleased,
             self.hp_slope_combo.currentIndexChanged,
             self.lp_group.toggled,
-            self.lp_knob.valueChanged,
+            self.lp_knob.sliderReleased,
             self.lp_slope_combo.currentIndexChanged,
         ):
             signal.connect(self._maybe_retrigger_preview)
