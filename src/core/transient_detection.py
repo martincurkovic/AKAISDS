@@ -33,7 +33,7 @@
 # once per slider tick.
 
 _WINDOW_MS = 10
-_MIN_GAP_MS = 30  # minimum spacing enforced between two detected onsets
+_MIN_GAP_MS = 60  # minimum spacing enforced between two detected onsets
 
 
 def _rms_windows(samples, window_frames):
@@ -76,7 +76,9 @@ def compute_flux(samples, framerate):
     return flux, window_frames
 
 
-def markers_from_flux(flux, window_frames, sensitivity, frame_count, min_gap_ms=_MIN_GAP_MS):
+def markers_from_flux(
+    flux, window_frames, sensitivity, frame_count, min_gap_ms=_MIN_GAP_MS
+):
     """Interior frame indices - same shape core.sample_slicing.
     equal_slice_markers returns - picked from an already-computed
     (flux, window_frames) pair (see compute_flux). Cheap enough to call on
@@ -134,6 +136,4 @@ def detect_transients(samples, sensitivity, framerate, min_gap_ms=_MIN_GAP_MS):
     flux, window_frames = compute_flux(samples, framerate)
     if flux is None:
         return []
-    return markers_from_flux(
-        flux, window_frames, sensitivity, len(samples), min_gap_ms
-    )
+    return markers_from_flux(flux, window_frames, sensitivity, len(samples), min_gap_ms)
