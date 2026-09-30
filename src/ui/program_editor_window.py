@@ -6781,7 +6781,7 @@ class ProgramEditorWindow(QMainWindow):
             "This overwrites the sample's audio on the sampler and cannot "
             "be undone.",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes,
         )
         if answer != QMessageBox.StandardButton.Yes:
             return
@@ -6804,7 +6804,7 @@ class ProgramEditorWindow(QMainWindow):
             "This overwrites the sample's audio on the sampler and cannot "
             "be undone.",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes,
         )
         if answer != QMessageBox.StandardButton.Yes:
             return
@@ -6838,7 +6838,7 @@ class ProgramEditorWindow(QMainWindow):
             "This overwrites the sample's audio on the sampler and cannot "
             "be undone.",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes,
         )
         if answer != QMessageBox.StandardButton.Yes:
             return
@@ -6875,7 +6875,7 @@ class ProgramEditorWindow(QMainWindow):
             "This overwrites the sample's audio on the sampler and cannot "
             "be undone.",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes,
         )
         if answer != QMessageBox.StandardButton.Yes:
             return
@@ -6887,10 +6887,16 @@ class ProgramEditorWindow(QMainWindow):
         # unlike Trim/Reverse/Fade/Normalise (a plain QMessageBox.question,
         # no parameters), this needs an actual filter type + cutoff
         # frequency from the user first - FilterSampleDialog owns that UI
-        # (plus its own Preview button/player) and IS the confirmation
-        # step (its warning label + OK button), so there's no second
-        # QMessageBox.question after it closes accepted - that would just
-        # be a redundant extra click after an already-deliberate dialog.
+        # (plus its own Preview button/player). Its OK button used to BE
+        # the confirmation step outright (no second QMessageBox.question
+        # after it closes accepted) - reversed after real use: OK also
+        # doubles as "audition with Preview, then commit," and a user who
+        # clicks it out of habit/muscle-memory right after previewing has
+        # no way to back out before the sample is already gone out over
+        # SysEx. A second, plain QMessageBox.question here (matching the
+        # other four transforms' own confirm dialog) costs one extra click
+        # for a deliberate filter, but gives that same "wait, not yet"
+        # escape hatch this dialog didn't otherwise have.
         sample_index = self.sample_list_widget.currentRow()
         if sample_index < 0 or not self.waveform_view.has_waveform():
             return
@@ -6904,6 +6910,19 @@ class ProgramEditorWindow(QMainWindow):
             self, sample_name, entry["samples"], entry["framerate"]
         )
         if not dialog.exec():
+            return
+
+        answer = QMessageBox.question(
+            self,
+            "Filter Sample",
+            f'Send the filtered audio for "{sample_name}" to the sampler '
+            "now?\n\n"
+            "This overwrites the sample's audio on the sampler and cannot "
+            "be undone.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
             return
 
         # filter_samples needs framerate + both filters' own

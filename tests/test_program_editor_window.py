@@ -3607,12 +3607,46 @@ def test_confirm_filter_sample_declined_does_not_call_perform_sample_edit(
     assert calls == []
 
 
-def test_confirm_filter_sample_accepted_calls_perform_sample_edit_with_a_working_transform(
+def test_confirm_filter_sample_declined_at_the_second_confirmation_does_not_send(
     editor, qapp, monkeypatch
 ):
+    # the dialog itself was accepted (OK clicked), but the extra
+    # QMessageBox.question added after real use (see _confirm_filter_
+    # sample's own comment - an accidental OK click right after Preview
+    # had no way to back out) is answered No - must not perform the edit
+    import ui.program_editor_window as pew
+
     monkeypatch.setattr(
         "ui.program_editor_window.FilterSampleDialog",
         lambda *a, **k: _FakeFilterSampleDialog(*a, **k, accept=True),
+    )
+    monkeypatch.setattr(
+        pew.QMessageBox, "question", lambda *a, **k: pew.QMessageBox.StandardButton.No
+    )
+    calls = []
+    monkeypatch.setattr(
+        editor, "_perform_sample_edit", lambda *a, **k: calls.append((a, k))
+    )
+    samples = list(range(-500, 500))
+    markers = {"start": 0, "loop_start": 100, "loop_end": 900, "end": 999}
+    _select_sample_with_full_audio(editor, qapp, 0, samples, markers)
+
+    editor._confirm_filter_sample()
+
+    assert calls == []
+
+
+def test_confirm_filter_sample_accepted_calls_perform_sample_edit_with_a_working_transform(
+    editor, qapp, monkeypatch
+):
+    import ui.program_editor_window as pew
+
+    monkeypatch.setattr(
+        "ui.program_editor_window.FilterSampleDialog",
+        lambda *a, **k: _FakeFilterSampleDialog(*a, **k, accept=True),
+    )
+    monkeypatch.setattr(
+        pew.QMessageBox, "question", lambda *a, **k: pew.QMessageBox.StandardButton.Yes
     )
     calls = []
     monkeypatch.setattr(
