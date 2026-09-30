@@ -2950,6 +2950,28 @@ def test_preview_requested_applies_stuno_as_a_pitch_shift(editor, qapp, monkeypa
     ]
 
 
+def test_preview_requested_transposes_from_root_key_to_c3(editor, qapp, monkeypatch):
+    # the hardware's own front-panel PLAY button previews at a fixed note
+    # (C3 - raw MIDI 60, this app's own convention) regardless of the
+    # sample's own root key - see _PREVIEW_ROOT_NOTE's own comment. A
+    # sample rooted at A1 (raw 21, s3k.params' own lowest SPITCH value)
+    # should play back transposed UP by 39 semitones (60 - 21) to land on
+    # C3, on top of (not instead of) STUNO's own correction.
+    calls = _fake_preview_player(editor, monkeypatch)
+    samples = [0] * 10000
+    markers = {"start": 0, "loop_start": 2500, "loop_end": 7500, "end": 9999}
+    _select_sample_with_full_audio(editor, qapp, 0, samples, markers)
+    editor._sample_waveform_cache[0]["spitch"] = 21
+    editor.sample_loop_type_combo.setCurrentIndex(3)  # "One-shot"
+    calls.clear()  # discard the stop() from selecting the sample above
+
+    editor._on_waveform_preview_requested()
+
+    assert calls == [
+        ("play", (samples, 0, 9999, 44100), {"pitch_shift_semitones": 39.0})
+    ]
+
+
 def test_preview_requested_while_playing_stops_instead_of_restarting(
     editor, qapp, monkeypatch
 ):

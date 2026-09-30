@@ -137,6 +137,18 @@ _SPTYPE_VALUES_WITHOUT_LOOP = frozenset({2, 3})
 _LOOP_HOLD_OFF_VALUE = 0
 _LOOP_HOLD_HOLD_VALUE = 9999
 
+# raw MIDI note 60 - this app's own "C3" (see core/midi_notes.py's
+# S3000XL-style octave-naming convention, NOT general MIDI's C4). The
+# hardware's own front-panel PLAY button previews a sample at a fixed
+# note (C3 by default) regardless of that sample's own SPITCH (root key) -
+# confirmed with the user directly, not measured against real hardware
+# (there is no known SysEx field for whatever note the sampler is
+# currently set to preview at - see _on_waveform_preview_requested's own
+# comment). Matching that fixed-note behaviour here is a deliberate
+# approximation of the hardware's FACTORY DEFAULT, not a live read of
+# whatever a given unit is actually configured to right now.
+_PREVIEW_ROOT_NOTE = 60
+
 
 def _format_loop_hold(value):
     # LDWELL1's own display convention (confirmed on a real S2000, matching
@@ -7785,7 +7797,17 @@ class ProgramEditorWindow(QMainWindow):
         # dialled in - is a real audible difference from hardware.
         _, baseline_semitones = compute_bandwidth_and_tuning(framerate)
         stuno_semitones = self._sample_tune_offset_to_semitones(entry["stuno"])
-        pitch_shift_semitones = stuno_semitones - baseline_semitones
+        # transposes from the sample's own root key (SPITCH) up/down to
+        # _PREVIEW_ROOT_NOTE, on top of (not instead of) the STUNO
+        # correction above - see _PREVIEW_ROOT_NOTE's own comment for why
+        # this app's preview defaults to a fixed note rather than SPITCH's
+        # own natural pitch, matching the hardware's front-panel PLAY
+        # button rather than "what does this sample sound like as
+        # recorded"
+        root_shift_semitones = _PREVIEW_ROOT_NOTE - entry["spitch"]
+        pitch_shift_semitones = (
+            stuno_semitones - baseline_semitones + root_shift_semitones
+        )
 
         # SPTYPE (sample_loop_type_combo) and LDWELL1 (sample_loop_hold_
         # knob) aren't gated on each other anywhere in this UI (see
