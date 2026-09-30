@@ -8,6 +8,7 @@ from PySide6.QtWidgets import (
 )
 
 from core.midi_notes import midi_note_to_name
+from core.sample_duration import sample_duration_seconds
 
 
 def _format_size(sample_length):
@@ -36,8 +37,7 @@ class SampleInfoDialog(QDialog):
         layout.addRow(QLabel("Bit depth:"), QLabel(f"{info['bit_depth']}-bit"))
         layout.addRow(QLabel("Sample rate:"), QLabel(f"{info['sample_rate']} Hz"))
 
-        sample_rate = info["sample_rate"] or 1  # guard against a zero rate
-        duration_s = info["sample_length"] / sample_rate
+        duration_s = sample_duration_seconds(info["sample_length"], info["sample_rate"])
         size_str = _format_size(info["sample_length"])
         layout.addRow(
             QLabel("Length:"),

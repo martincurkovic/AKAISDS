@@ -132,14 +132,24 @@ QListWidget::item:selected {
     background-color: ${bg_selected};
 }
 
-/* Program editor's Programs and Samples lists (plain text rows, no
-   per-row buttons) - scoped by objectName rather than widening
-   QListWidget::item generally, since the dashboard's queue/hardware rows
-   (and the keygroup list's own swatch+label rows) already get their own
-   comfortable height from the custom row widget's own margins and don't
-   need extra item padding stacked on top. */
-QListWidget#programList::item,
-QListWidget#sampleList::item {
+/* Program editor's Programs list (plain text rows, no per-row buttons) -
+   scoped by objectName rather than widening QListWidget::item generally,
+   since the dashboard's queue/hardware rows (and the keygroup list's own
+   swatch+label rows) already get their own comfortable height from the
+   custom row widget's own margins and don't need extra item padding
+   stacked on top.
+
+   Samples list (#sampleList) is deliberately NOT included here even
+   though its rows used to be identical plain text - it now uses a custom
+   per-row widget too (name + duration, see program_editor_window.py's
+   _build_sample_list_row_widget), and giving a QListWidget item BOTH a
+   `::item` CSS rule AND setItemWidget() is a confirmed real Qt/PySide6
+   rendering bug, not a hypothetical: the row widget's own text doubles up
+   into a garbled/illegible overlap the instant this selector matches it,
+   even with the item's own text left empty. The row widget's own margins
+   (matched to this same 6px/8px so the row height doesn't change) are the
+   padding for that list now - see AGENTS.md's Samples tab section. */
+QListWidget#programList::item {
     padding: 6px 8px;
 }
 

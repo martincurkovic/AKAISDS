@@ -2173,7 +2173,7 @@ def test_confirm_rename_sample_updates_list_zone_combos_and_writes_shname(
     editor._worker.wait_until_idle()
     _pump_until(qapp, lambda: bridge.set_parameter_calls)
 
-    assert editor.sample_list_widget.item(0).text() == "RENAMED"
+    assert editor._sample_name_at_row(0) == "RENAMED"
     assert ("SHNAME", 0, "RENAMED", 0) in bridge.set_parameter_calls
     # index 0 is the blank "-" placeholder (see _on_samples_loaded) - sample
     # 0's own entry is index 1, same offset _update_multi_program_combo_names
@@ -2194,7 +2194,7 @@ def test_confirm_rename_sample_does_nothing_when_dialog_cancelled(
     editor._confirm_rename_sample()
 
     assert bridge.set_parameter_calls == []
-    assert editor.sample_list_widget.item(0).text() == "SQUARE"
+    assert editor._sample_name_at_row(0) == "SQUARE"
 
 
 def test_confirm_delete_sample_submits_delete_on_confirm(editor, qapp, monkeypatch):
@@ -2215,10 +2215,7 @@ def test_confirm_delete_sample_submits_delete_on_confirm(editor, qapp, monkeypat
     assert bridge.sample_list() == ["SAWTOOTH", "PULSE", "SINE"]
     # a full reload, not a targeted removal (see _on_sample_deleted) -
     # the list widget itself should reflect the same shrunk roster
-    assert [
-        editor.sample_list_widget.item(i).text()
-        for i in range(editor.sample_list_widget.count())
-    ] == ["SAWTOOTH", "PULSE", "SINE"]
+    assert editor._sample_list == ["SAWTOOTH", "PULSE", "SINE"]
 
 
 def test_confirm_delete_sample_does_nothing_when_declined(editor, qapp, monkeypatch):
@@ -3255,8 +3252,8 @@ def test_reverse_sample_real_mode_happy_path_sends_deletes_and_renames(
 
     assert "complete" in editor.status_bar.currentMessage().lower()
     # landed on a clean final selection - the renamed sample, not nothing
-    assert editor.sample_list_widget.currentItem() is not None
-    assert editor.sample_list_widget.currentItem().text() == "SQUARE"
+    assert editor.sample_list_widget.currentRow() >= 0
+    assert editor._sample_name_at_row(editor.sample_list_widget.currentRow()) == "SQUARE"
 
 
 def test_reverse_sample_real_mode_send_failure_leaves_original_untouched(
@@ -3356,8 +3353,11 @@ def test_duplicate_sample_real_mode_happy_path_sends_and_copies_metadata(
     assert header_calls["LLNGTH1"] == 30 * 65536
 
     assert "complete" in editor.status_bar.currentMessage().lower()
-    assert editor.sample_list_widget.currentItem() is not None
-    assert editor.sample_list_widget.currentItem().text() == "SQUARE COPY"
+    assert editor.sample_list_widget.currentRow() >= 0
+    assert (
+        editor._sample_name_at_row(editor.sample_list_widget.currentRow())
+        == "SQUARE COPY"
+    )
 
 
 def test_duplicate_sample_refuses_a_name_already_in_use(editor, qapp, monkeypatch):

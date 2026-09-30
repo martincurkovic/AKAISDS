@@ -411,6 +411,16 @@ class BridgeWorker(QThread):
     sample_detail_loaded = Signal(int, dict)
     sample_detail_load_failed = Signal(int, str)
 
+    # sample_index, sample_length (frames), sample_rate (Hz) - a
+    # deliberately narrower two-field fetch than sample_detail_loaded above
+    # (which reads all of _SAMPLE_DETAIL_FIELDS, 11 round-trips). Used to
+    # populate every row of the Samples tab's list with a duration once the
+    # list itself loads (names only) - fetching the full 11-field detail for
+    # every sample just to show a duration would be 5x more round-trips
+    # than needed for something shown at a glance, not on selection.
+    sample_length_loaded = Signal(int, int, int)
+    sample_length_load_failed = Signal(int, str)
+
     parts_loaded = Signal(list)  # [(program_name, channel, level, pan), ...] per part
     parts_load_failed = Signal(str)
 
@@ -536,6 +546,12 @@ class BridgeWorker(QThread):
 
     def submit_sample_detail(self, sample_index):
         self._submit(("sample_detail", sample_index))
+
+    def submit_sample_length(self, sample_index):
+        # not in _COALESCE_KINDS - unlike "sample_detail" (only the current
+        # selection matters), the caller queues one of these per sample in
+        # the list and wants every one of them delivered, not just the last
+        self._submit(("sample_length", sample_index))
 
     def submit_program_change(self, part_index, program_index, program_name, channel):
         self._submit(("program_change", part_index, program_index, program_name, channel))
@@ -766,6 +782,19 @@ class BridgeWorker(QThread):
             self.sample_detail_load_failed.emit(sample_index, str(e))
             return
         self.sample_detail_loaded.emit(sample_index, values)
+
+    def _handle_sample_length(self, sample_index):
+        try:
+            sample_length = self._bridge.get_parameter(
+                p.lookup("SLNGTH", "sample"), sample_index
+            )
+            sample_rate = self._bridge.get_parameter(
+                p.lookup("SSRATE", "sample"), sample_index
+            )
+        except Exception as e:
+            self.sample_length_load_failed.emit(sample_index, str(e))
+            return
+        self.sample_length_loaded.emit(sample_index, sample_length, sample_rate)
 
     def _handle_multi_parts(self):
         parts = []

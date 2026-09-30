@@ -74,6 +74,7 @@ from core import sample_editing
 from core import sds_encoder
 from core.midi_notes import midi_note_to_name
 from core.program_editor_bridge import BridgeWorker, MULTI_PART_COUNT
+from core.sample_duration import sample_duration_seconds
 from ui.settings_dialog import MidiSettingsDialog
 
 # shared by every list's "Delete ..." QAction (program/keygroup/sample) -
@@ -409,6 +410,18 @@ class ProgramEditorWindow(QMainWindow):
         # (_on_samples_loaded) - a resident sample's own index can start
         # meaning something else after that.
         self._sample_waveform_cache = {}
+        # name/duration labels per row (index -> (generation, name_label,
+        # duration_label)), rebuilt every _on_samples_loaded, plus a
+        # generation counter bumped there too - sample_length_loaded
+        # results for a since-replaced list generation are discarded rather
+        # than applied (see _on_sample_length_loaded), same "index can mean
+        # something else after a reload" reasoning as _sample_waveform_cache
+        # above. name_label is kept in step with a rename via
+        # _confirm_rename_sample, which only calls item.setText() (no full
+        # list reload) - the item's own text is invisible once a custom row
+        # widget covers it, so the label needs its own update too.
+        self._sample_row_labels = {}
+        self._sample_list_generation = 0
         # whether the current sample's SPTYPE has a loop at all - see
         # _set_loop_markers_enabled/_SPTYPE_VALUES_WITHOUT_LOOP. Read by
         # _set_marker_spinbox_range to grey loop_start/loop_end specifically;
@@ -546,6 +559,12 @@ class ProgramEditorWindow(QMainWindow):
         self._worker.sample_detail_loaded.connect(self._on_sample_detail_loaded)
         self._worker.sample_detail_load_failed.connect(
             self._on_sample_detail_load_failed
+        )
+        # populates each Samples-tab list row's duration label as results
+        # trickle in - see _on_samples_loaded/_on_sample_length_loaded
+        self._worker.sample_length_loaded.connect(self._on_sample_length_loaded)
+        self._worker.sample_length_load_failed.connect(
+            self._on_sample_length_load_failed
         )
         self._worker.start()
 
@@ -3340,15 +3359,18 @@ class ProgramEditorWindow(QMainWindow):
         self._worker.submit_keygroups(program_index)
 
     def _confirm_rename_sample(self):
-        item = self.sample_list_widget.currentItem()
-        if item is None:
-            return
         sample_index = self.sample_list_widget.currentRow()
-        current_name = item.text()
+        if sample_index < 0:
+            return
+        current_name = self._sample_name_at_row(sample_index)
         new_name = self._prompt_sample_name(current_name)
         if new_name is None or new_name == current_name:
             return
-        item.setText(new_name)
+        self._sample_list[sample_index] = new_name
+        entry = self._sample_row_labels.get(sample_index)
+        if entry is not None:
+            _generation, name_label, _duration_label = entry
+            name_label.setText(new_name)
         self._update_zone_sample_combo_names(sample_index, new_name)
         self._write_knob_value(
             "SHNAME", "sample", new_name, keygroup_index=0, index=sample_index
@@ -3368,11 +3390,10 @@ class ProgramEditorWindow(QMainWindow):
             combo.setItemText(sample_index + 1, name)
 
     def _confirm_delete_sample(self):
-        item = self.sample_list_widget.currentItem()
-        if item is None:
-            return
         sample_index = self.sample_list_widget.currentRow()
-        sample_name = item.text()
+        if sample_index < 0:
+            return
+        sample_name = self._sample_name_at_row(sample_index)
         answer = QMessageBox.question(
             self,
             "Delete Sample",
@@ -3406,18 +3427,14 @@ class ProgramEditorWindow(QMainWindow):
         entry = self._sample_waveform_cache.get(sample_index)
         if entry is None or entry["samples"] is None:
             return
-        item = self.sample_list_widget.currentItem()
-        current_name = item.text() if item is not None else ""
+        current_name = self._sample_name_at_row(sample_index)
         default_name = _duplicate_default_name(current_name)
         new_name = self._prompt_akai_name(
             "Duplicate Sample", "New sample name:", default_name
         )
         if new_name is None:
             return
-        existing_names = [
-            self.sample_list_widget.item(i).text()
-            for i in range(self.sample_list_widget.count())
-        ]
+        existing_names = list(self._sample_list)
         if new_name in existing_names:
             # same measured hardware behaviour _confirm_duplicate_program
             # guards PRNAME against, but for a different reason here: DELS
@@ -3637,8 +3654,7 @@ class ProgramEditorWindow(QMainWindow):
         entry = self._sample_waveform_cache.get(sample_index)
         if entry is None or entry["samples"] is None:
             return
-        item = self.sample_list_widget.currentItem()
-        sample_name = item.text() if item is not None else ""
+        sample_name = self._sample_name_at_row(sample_index)
 
         sampler_controller = getattr(self._main_window, "sampler_controller", None)
         if sampler_controller is None:
@@ -3654,10 +3670,7 @@ class ProgramEditorWindow(QMainWindow):
             return
 
         def _existing_names():
-            return [
-                self.sample_list_widget.item(i).text()
-                for i in range(self.sample_list_widget.count())
-            ]
+            return list(self._sample_list)
 
         def _existing_program_names():
             return [
@@ -5419,6 +5432,44 @@ class ProgramEditorWindow(QMainWindow):
             part_index, program_index, program_name, channel
         )
 
+    def _build_sample_list_row_widget(self, name):
+        # name on the left, duration on the right in the theme's muted
+        # "secondary info" grey (same token/pattern as
+        # _build_mod_fixed_source_label) so it reads as supplementary to
+        # the name rather than part of it. Duration starts blank - it's
+        # filled in asynchronously as sample_length_loaded results arrive,
+        # see _on_samples_loaded/_on_sample_length_loaded.
+        row_widget = QWidget()
+        row_widget.setObjectName("transparentContainer")
+        row_layout = QHBoxLayout(row_widget)
+        # matches QListWidget#sampleList::item's own "padding: 6px 8px"
+        # (style.qss.template) - a custom item widget's sizeHint() is used
+        # as-is for the row's height/width, it does NOT also pick up that
+        # padding the way a plain text item would, so skipping this margin
+        # here shrank every row and made the font look cramped/squashed
+        # against the row's own top/bottom edges
+        row_layout.setContentsMargins(8, 6, 8, 6)
+        row_layout.setSpacing(6)
+
+        name_label = QLabel(name)
+        row_layout.addWidget(name_label, stretch=1)
+
+        duration_label = QLabel("")
+        duration_label.setStyleSheet(
+            f"color: {theme.current_palette()['text_disabled']};"
+        )
+        row_layout.addWidget(duration_label)
+
+        return row_widget, name_label, duration_label
+
+    def _sample_name_at_row(self, row):
+        # the sample list's own QListWidgetItems carry no text of their own
+        # (see _on_samples_loaded) - self._sample_list is the real source
+        # of truth for a row's name everywhere in this file
+        if 0 <= row < len(self._sample_list):
+            return self._sample_list[row]
+        return ""
+
     def _add_keygroup_row(self, index, lo, hi):
         # colored swatch + range text, same row-widget approach as the
         # dashboard's queue/hardware panels - keeps each row's identity tied
@@ -5754,6 +5805,10 @@ class ProgramEditorWindow(QMainWindow):
         self.multi_name_edit.blockSignals(False)
 
     def _on_samples_loaded(self, samples):
+        # captured against the OLD self._sample_list, before it's
+        # overwritten below - see _sample_name_at_row
+        previous_row = self.sample_list_widget.currentRow()
+        previous_sample = self._sample_name_at_row(previous_row)
         self._sample_list = samples
 
         # a sample's INDEX is what addresses its header/audio (see
@@ -5763,20 +5818,50 @@ class ProgramEditorWindow(QMainWindow):
         # silently wrong rather than just stale, so drop it rather than try
         # to carry it forward by name
         self._sample_waveform_cache = {}
-        previous_sample = (
-            self.sample_list_widget.currentItem().text()
-            if self.sample_list_widget.currentItem()
-            else None
-        )
+        self._sample_list_generation += 1
+        generation = self._sample_list_generation
+        self._sample_row_labels = {}
         self.sample_list_widget.blockSignals(True)
         self.sample_list_widget.clear()
-        self.sample_list_widget.addItems(samples)
-        self.sample_list_widget.blockSignals(False)
-        if previous_sample is not None:
-            match = self.sample_list_widget.findItems(
-                previous_sample, Qt.MatchFlag.MatchExactly
+        for name in samples:
+            # no text of its own - the row's custom widget (below) is the
+            # ENTIRE visual for this item. Qt still paints an item's own
+            # text underneath its item widget if one is set (confirmed:
+            # a real double-image render, not just a theoretical risk -
+            # see AGENTS.md's Samples tab section) - _sample_name_at_row is
+            # the actual source of truth for a row's name everywhere else
+            # in this file, not item.text().
+            item = QListWidgetItem()
+            self.sample_list_widget.addItem(item)
+            row_widget, name_label, duration_label = (
+                self._build_sample_list_row_widget(name)
             )
-            self.sample_list_widget.setCurrentItem(match[0] if match else None)
+            item.setSizeHint(row_widget.sizeHint())
+            self.sample_list_widget.setItemWidget(item, row_widget)
+            self._sample_row_labels[self.sample_list_widget.row(item)] = (
+                generation,
+                name_label,
+                duration_label,
+            )
+        self.sample_list_widget.blockSignals(False)
+        # duration isn't in the name/list payload itself - fetch it
+        # separately per sample (lightweight, 2 fields, not the full
+        # 11-field sample_detail - see submit_sample_length's own comment)
+        # so every row fills in progressively without blocking the list
+        # from showing names immediately. BridgeWorker processes its queue
+        # strictly one job at a time regardless of how many are queued here
+        # (see its own class docstring) - MIDI SysEx has no concept of
+        # overlapping requests, so queuing all of them up front is safe,
+        # just not instant for a large sample count.
+        for sample_index in range(len(samples)):
+            self._worker.submit_sample_length(sample_index)
+        if previous_sample is not None:
+            # by name, not by the old row index - a rename/delete/reorder
+            # on the hardware can shift what index means what, same
+            # reasoning as dropping _sample_waveform_cache above
+            self.sample_list_widget.setCurrentRow(
+                samples.index(previous_sample) if previous_sample in samples else -1
+            )
         else:
             self._clear_waveform_view()
 
@@ -5927,6 +6012,24 @@ class ProgramEditorWindow(QMainWindow):
         if sample_index != self.sample_list_widget.currentRow():
             return
         self.status_bar.showMessage(f"Couldn't read sample header: {error}")
+
+    def _on_sample_length_loaded(self, sample_index, sample_length, sample_rate):
+        entry = self._sample_row_labels.get(sample_index)
+        if entry is None:
+            return
+        generation, _name_label, duration_label = entry
+        if generation != self._sample_list_generation:
+            return  # stale - the list has reloaded since this was queued
+        duration_s = sample_duration_seconds(sample_length, sample_rate)
+        duration_label.setText(f"{duration_s:.2f}s")
+
+    def _on_sample_length_load_failed(self, sample_index, error):
+        # no status bar message - this is a background, best-effort fetch
+        # for every row in the list, not a user-triggered action; a failed
+        # read just leaves that one row's duration blank
+        debug_log.get_logger().debug(
+            f"_on_sample_length_load_failed: sample_index={sample_index}: {error}"
+        )
 
     def _clear_waveform_view(self):
         self.waveform_view.clear()
@@ -6973,8 +7076,7 @@ class ProgramEditorWindow(QMainWindow):
                 "Nothing to trim - Start/End already cover the whole sample"
             )
             return
-        item = self.sample_list_widget.currentItem()
-        sample_name = item.text() if item is not None else ""
+        sample_name = self._sample_name_at_row(sample_index)
         answer = QMessageBox.question(
             self,
             "Trim Sample",
@@ -6997,8 +7099,7 @@ class ProgramEditorWindow(QMainWindow):
         if entry is None or len(entry["samples"]) <= 1:
             self.status_bar.showMessage("Nothing to reverse - sample is too short")
             return
-        item = self.sample_list_widget.currentItem()
-        sample_name = item.text() if item is not None else ""
+        sample_name = self._sample_name_at_row(sample_index)
         answer = QMessageBox.question(
             self,
             "Reverse Sample",
@@ -7030,8 +7131,7 @@ class ProgramEditorWindow(QMainWindow):
                 "Nothing to fade - Start/End already cover the whole sample"
             )
             return
-        item = self.sample_list_widget.currentItem()
-        sample_name = item.text() if item is not None else ""
+        sample_name = self._sample_name_at_row(sample_index)
         answer = QMessageBox.question(
             self,
             "Fade Sample",
@@ -7067,8 +7167,7 @@ class ProgramEditorWindow(QMainWindow):
         if peak >= sample_editing._MAX_AMPLITUDE:
             self.status_bar.showMessage("Sample is already normalised")
             return
-        item = self.sample_list_widget.currentItem()
-        sample_name = item.text() if item is not None else ""
+        sample_name = self._sample_name_at_row(sample_index)
         answer = QMessageBox.question(
             self,
             "Normalise Sample",
@@ -7105,8 +7204,7 @@ class ProgramEditorWindow(QMainWindow):
         entry = self._sample_waveform_cache.get(sample_index)
         if entry is None or entry["samples"] is None:
             return
-        item = self.sample_list_widget.currentItem()
-        sample_name = item.text() if item is not None else ""
+        sample_name = self._sample_name_at_row(sample_index)
 
         dialog = FilterSampleDialog(
             self, sample_name, entry["samples"], entry["framerate"]
@@ -7156,8 +7254,7 @@ class ProgramEditorWindow(QMainWindow):
         entry = self._sample_waveform_cache.get(sample_index)
         if entry is None or entry["samples"] is None:
             return
-        item = self.sample_list_widget.currentItem()
-        original_name = item.text() if item is not None else ""
+        original_name = self._sample_name_at_row(sample_index)
         # not .markers() directly - trim_samples/reverse_samples both
         # assume loop_start/loop_end already sit within [start, end] (see
         # their own docstrings in core/sample_editing.py), which can be
