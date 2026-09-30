@@ -45,6 +45,11 @@ class FakeBridge:
                 # _LOOP_LENGTH_FIXED_POINT_SCALE - so 3000 FRAMES is raw
                 # 3000 * 65536
                 "LLNGTH1": 3000 * 65536, "SLNGTH": 10000, "SSRATE": 44100,
+                # SBANDW - native engine bandwidth (0=22050Hz, 1=44100Hz,
+                # see core/akai_sysex.py's _NATIVE_RATES/
+                # baseline_semitones_for_bandwidth) - 1 here since SSRATE
+                # above is already the 44100 native rate, matching it
+                "SBANDW": 1,
                 "SPTYPE": 0, "SPITCH": 60, "SHLTO": -12,
                 # STUNO is a plain signed 1/256-semitone raw value (same
                 # scale as VTUNO) - see _sample_tune_offset_to_semitones -
@@ -414,8 +419,8 @@ class FakeSamplerController(QObject):
                 self._bridge._samples.append(entry["name"])
                 self._bridge.sample_headers[new_index] = {
                     "SSTART": 0, "SMPEND": 0, "LOOPAT1": 0, "LLNGTH1": 0,
-                    "SLNGTH": 0, "SSRATE": 44100, "SPTYPE": 0, "SPITCH": 60,
-                    "SHLTO": 0, "STUNO": 0, "LDWELL1": 0,
+                    "SLNGTH": 0, "SSRATE": 44100, "SBANDW": 1, "SPTYPE": 0,
+                    "SPITCH": 60, "SHLTO": 0, "STUNO": 0, "LDWELL1": 0,
                 }
         # deferred, not synchronous - _perform_sample_edit_real connects
         # its _wait_for_any_signal listener AFTER calling send_file_queue,
@@ -2776,7 +2781,8 @@ def _select_sample_with_full_audio(editor, qapp, sample_index, samples, markers)
     )
     editor._sample_waveform_cache[sample_index] = {
         "samples": samples, "framerate": 44100, "frame_count": len(samples),
-        "sptype": 0, "spitch": 60, "shlto": 0, "stuno": 0, **markers,
+        "sptype": 0, "spitch": 60, "shlto": 0, "stuno": 0, "sbandw": 1,
+        **markers,
     }
 
 
@@ -2969,6 +2975,45 @@ def test_preview_requested_transposes_from_root_key_to_c3(editor, qapp, monkeypa
 
     assert calls == [
         ("play", (samples, 0, 9999, 44100), {"pitch_shift_semitones": 39.0})
+    ]
+
+
+def test_preview_requested_uses_real_sbandw_not_nearest_bucket_guess(
+    editor, qapp, monkeypatch
+):
+    # regression test for a real reported bug: a sample sent at any bit
+    # depth OTHER than 16 goes through the generic/universal MIDI SDS
+    # path (sampler_controller._start_unit), which has no STUNO/SBANDW
+    # fields at all - the SAMPLER ITSELF derives its own internal
+    # SBANDW/STUNO from the incoming dump. Confirmed against real
+    # hardware this does NOT pick the nearest bandwidth bucket the way
+    # compute_bandwidth_and_tuning would: an 11025 Hz sample sent at
+    # 8-bit or 12-bit reads back STUNO -24.00 (bandwidth=1/44100Hz, NOT
+    # the nearer bandwidth=0/22050Hz that same rate gets at 16-bit,
+    # which reads back -12.00). Re-deriving "nearest bucket to
+    # framerate" at preview time (as compute_bandwidth_and_tuning does)
+    # is only correct for a sample THIS app itself sent via the 16-bit
+    # path - here it would wrongly compute baseline=-12, leaving an
+    # uncancelled -12 semitones (an audible octave) rather than 0.
+    # Reading the real entry["sbandw"] instead is what makes this
+    # cancel to 0 correctly regardless of which path actually produced
+    # the STUNO value.
+    calls = _fake_preview_player(editor, monkeypatch)
+    samples = [0] * 10000
+    markers = {"start": 0, "loop_start": 2500, "loop_end": 7500, "end": 9999}
+    _select_sample_with_full_audio(editor, qapp, 0, samples, markers)
+    editor._sample_waveform_cache[0]["framerate"] = 11025
+    editor._sample_waveform_cache[0]["sbandw"] = 1
+    editor._sample_waveform_cache[0]["stuno"] = (
+        editor._semitones_to_sample_tune_offset(-24.0)
+    )
+    editor.sample_loop_type_combo.setCurrentIndex(3)  # "One-shot"
+    calls.clear()  # discard the stop() from selecting the sample above
+
+    editor._on_waveform_preview_requested()
+
+    assert calls == [
+        ("play", (samples, 0, 9999, 11025), {"pitch_shift_semitones": 0.0})
     ]
 
 

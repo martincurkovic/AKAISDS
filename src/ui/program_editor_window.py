@@ -66,7 +66,7 @@ from ui.quickstart_dialog import show_quickstart_dialog
 from ui.update_helper import UpdateCheckRunner
 from ui import tooltips as tt
 from core import debug_log
-from core.akai_sysex import compute_bandwidth_and_tuning
+from core.akai_sysex import baseline_semitones_for_bandwidth, compute_bandwidth_and_tuning
 from core import midi_manager as midi_manager_module
 from core import program_editor_bridge
 from core import root_note_detection
@@ -6006,6 +6006,7 @@ class ProgramEditorWindow(QMainWindow):
             "shlto": values["SHLTO"],
             "stuno": values["STUNO"],
             "ldwell1": values["LDWELL1"],
+            "sbandw": values["SBANDW"],
         }
         self._sample_waveform_cache[sample_index] = entry
         if sample_index == self.sample_list_widget.currentRow():
@@ -6979,6 +6980,7 @@ class ProgramEditorWindow(QMainWindow):
                 shlto = entry["shlto"]
                 stuno = entry["stuno"]
                 ldwell1 = entry["ldwell1"]
+                sbandw = entry["sbandw"]
             else:
                 # rare: the automatic on-selection fetch hasn't resolved
                 # yet (the user double-clicked before it landed) - fall
@@ -7001,6 +7003,7 @@ class ProgramEditorWindow(QMainWindow):
                 shlto = header["SHLTO"]
                 stuno = header["STUNO"]
                 ldwell1 = header["LDWELL1"]
+                sbandw = header["SBANDW"]
                 if sample_index == self.sample_list_widget.currentRow():
                     # normally already shown by _on_sample_detail_loaded's
                     # automatic fetch - this branch only runs when that
@@ -7052,6 +7055,7 @@ class ProgramEditorWindow(QMainWindow):
                 "shlto": shlto,
                 "stuno": stuno,
                 "ldwell1": ldwell1,
+                "sbandw": sbandw,
             }
             self._sample_waveform_cache[sample_index] = entry
             if sample_index == self.sample_list_widget.currentRow():
@@ -7786,16 +7790,34 @@ class ProgramEditorWindow(QMainWindow):
 
         # STUNO ("Tune") has to shift the WHOLE preview to match the
         # sampler, not just the loop region SHLTO already handles below -
-        # but STUNO also bakes in compute_bandwidth_and_tuning's own
-        # baseline compensation for a non-native recorded rate (see
-        # AGENTS.md's "Writing the result does NOT overwrite Tune outright"
-        # and _confirm_detect_root_note's own comment above), which this
-        # PC preview already reproduces exactly by playing raw samples at
-        # their own recorded framerate - applying STUNO's RAW total here
-        # would double that compensation. Only the portion of STUNO beyond
-        # that baseline - whatever the user (or Detect Root Note) actually
-        # dialled in - is a real audible difference from hardware.
-        _, baseline_semitones = compute_bandwidth_and_tuning(framerate)
+        # but STUNO also bakes in a baseline compensation for a non-native
+        # recorded rate (see AGENTS.md's "Writing the result does NOT
+        # overwrite Tune outright" and _confirm_detect_root_note's own
+        # comment above), which this PC preview already reproduces exactly
+        # by playing raw samples at their own recorded framerate - applying
+        # STUNO's RAW total here would double that compensation. Only the
+        # portion of STUNO beyond that baseline - whatever the user (or
+        # Detect Root Note) actually dialled in - is a real audible
+        # difference from hardware.
+        #
+        # baseline_semitones_for_bandwidth (not compute_bandwidth_and_
+        # tuning's own "nearest bucket to framerate" guess) - SBANDW is
+        # read directly off the sample's own header rather than re-derived,
+        # because "nearest bucket" is only the rule THIS app's own 16-bit
+        # Akai SDATA send path uses (see sampler_controller._start_unit).
+        # A sample sent via the generic/universal MIDI SDS path (any OTHER
+        # bit depth) never goes through that at all - the hardware derives
+        # its own SBANDW/STUNO from the incoming generic dump using an
+        # undocumented rule that, confirmed against real hardware, does
+        # NOT pick the nearest bucket (an 11025 Hz sample sent at 8-bit or
+        # 12-bit reads back STUNO -24.00, not the -12.00 a 16-bit send of
+        # the same rate produces - exactly what "always bandwidth=1/44100"
+        # gives, not "nearest"). Re-deriving it here produced a real,
+        # reported bug: such a sample previewed an octave low despite
+        # playing back correctly on actual hardware.
+        baseline_semitones = baseline_semitones_for_bandwidth(
+            framerate, entry["sbandw"]
+        )
         stuno_semitones = self._sample_tune_offset_to_semitones(entry["stuno"])
         # transposes from the sample's own root key (SPITCH) up/down to
         # _PREVIEW_ROOT_NOTE, on top of (not instead of) the STUNO

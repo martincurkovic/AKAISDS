@@ -260,6 +260,40 @@ def compute_bandwidth_and_tuning(sample_rate):
     return bandwidth, semitone_offset
 
 
+def baseline_semitones_for_bandwidth(sample_rate, bandwidth):
+    """Same formula as compute_bandwidth_and_tuning's own offset, but for
+    when *bandwidth* is already KNOWN (read from a resident sample's own
+    SBANDW header field) rather than being CHOSEN by us via "nearest
+    bucket to sample_rate".
+
+    Needed because compute_bandwidth_and_tuning's own nearest-bucket rule
+    is only what THIS app's own Akai-SDATA send path (bit_depth == 16 -
+    see sampler_controller._start_unit) actually uses when it bakes a
+    baseline into STUNO at send time. A sample sent via the generic/
+    universal MIDI SDS path instead (any OTHER bit depth) never goes
+    through compute_bandwidth_and_tuning at all - the hardware itself
+    derives its own SBANDW/STUNO from the incoming generic dump, using a
+    rule this app doesn't control and isn't documented in any Akai SysEx
+    spec available. Confirmed empirically against real hardware (an 11025
+    Hz sample): sent at 16-bit, STUNO comes back -12.00 (nearest bucket,
+    22050 Hz - compute_bandwidth_and_tuning's own answer); sent at EITHER
+    8-bit or 12-bit, STUNO comes back -24.00 both times - not double the
+    16-bit case by coincidence, but exactly what you get by assuming
+    bandwidth=1 (44100 Hz) regardless of which bucket is actually nearest.
+    A 44100 Hz sample shows STUNO=0 at every bit depth too, consistent
+    with 44100 already BEING that assumed bucket either way.
+
+    So re-deriving "nearest bucket" at read time (as
+    compute_bandwidth_and_tuning would) is only valid for a sample this
+    app itself sent via the 16-bit path - wrong for anything sent via the
+    generic path, and unknowable which applies for a resident sample from
+    its rate alone. Reading the real SBANDW instead sidesteps needing to
+    know a sample's send-time provenance at all.
+    """
+    native_rate = _NATIVE_RATES[bandwidth]
+    return 12 * math.log2(sample_rate / native_rate)
+
+
 def encode_tuning_offset(semitone_offset):
     # encode possibly fractional semitone offset as 2 byte signed 8.8 fixed point value
     # that the akai tuning offset fields use

@@ -284,6 +284,14 @@ _SAMPLE_DETAIL_FIELDS = [
     "LLNGTH1",
     "SLNGTH",
     "SSRATE",
+    "SBANDW",  # native engine bandwidth this sample actually plays through
+    # on hardware - 0=22050Hz, 1=44100Hz (s3k.params: "0 represents 10kHz,
+    # 1 represents 20kHz" - Akai's own spec labels these by audio
+    # bandwidth/Nyquist, not literally by sample rate). Read directly
+    # rather than re-derived from SSRATE ("nearest bucket") for pitch
+    # math - see core/akai_sysex.py's baseline_semitones_for_bandwidth for
+    # why re-deriving it is wrong for a sample sent via the generic/
+    # universal MIDI SDS path (any bit depth other than 16).
     "SPTYPE",  # playback/loop type - 0..3, see program_editor_window.py's
     # _SAMPLE_PLAYBACK_TYPE_OPTIONS for the raw-byte-order label/tooltip list
     "SPITCH",  # original pitch (root note) - 21..127, narrower than the
