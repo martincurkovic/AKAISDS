@@ -491,11 +491,50 @@ def test_scheduled_preview_uses_half_the_platform_double_click_interval(qapp):
     assert view._preview_timer.interval() == QApplication.doubleClickInterval() // 2
 
 
-def test_click_on_a_handle_does_not_schedule_a_preview(qapp):
+def test_click_on_a_handle_also_schedules_a_pending_preview(qapp):
+    # added per direct user request: closely-packed slice markers can make
+    # it genuinely impossible to click any EMPTY space without zooming in
+    # first, so clicking a handle/marker schedules the same debounced
+    # preview a plain empty-space click does - cancelled if it turns into
+    # a real drag (see test_a_real_drag_cancels_a_pending_preview below)
     view = _view(4000)
     start_x = view._x_for(0)
     view.mousePressEvent(_FakeEvent(start_x))
-    assert not view._preview_timer.isActive()
+    assert view._preview_timer.isActive()
+    assert view._dragging is not None  # still begins a normal drag too
+
+
+def test_click_on_a_marker_previews_the_slice_it_starts(qapp):
+    # a marker sits exactly on the boundary between two slices -
+    # core.sample_slicing.slice_bounds's own convention is that the
+    # marker's frame belongs to the slice it STARTS (the one to its
+    # right), not the one that ends just before it
+    view = _view(4000, markers=[2000])
+    marker_x = view._x_for(2000)
+    view.mousePressEvent(_FakeEvent(marker_x))
+    received = []
+    view.slice_preview_requested.connect(lambda s, e: received.append((s, e)))
+    view._fire_preview()
+    assert received == [(2000, 3999)]
+
+
+def test_clicking_a_pixel_either_side_of_a_marker_still_previews_its_own_slice(qapp):
+    # real, reported bug: within the marker's own hit radius, the raw
+    # cursor pixel can sit a frame or two either side of the marker's
+    # exact frame while the hover highlight already says "you're
+    # targeting THIS marker" - using the raw pixel (self._frame_for(x))
+    # instead of the target's own frame made an imperceptible left/right
+    # click difference flip which slice got previewed
+    view = _view(4000, markers=[2000])
+    marker_x = view._x_for(2000)
+
+    for offset in (-2, -1, 0, 1, 2):
+        view.mousePressEvent(_FakeEvent(marker_x + offset))
+        received = []
+        view.slice_preview_requested.connect(lambda s, e: received.append((s, e)))
+        view._fire_preview()
+        assert received == [(2000, 3999)], f"offset={offset}"
+        view.slice_preview_requested.disconnect()
 
 
 def test_click_outside_start_end_does_not_schedule_a_preview(qapp):
@@ -548,13 +587,30 @@ def test_paint_with_an_active_playhead_does_not_crash(qapp):
     view.grab()  # must not raise, whichever slice band 2500 falls in
 
 
-def test_starting_a_drag_cancels_a_pending_preview(qapp):
+def test_pressing_a_second_handle_replaces_a_still_pending_preview(qapp):
     # a click on empty space followed quickly by grabbing a handle
-    # shouldn't leave a stray preview scheduled to fire later
+    # shouldn't leave the FIRST click's stray preview scheduled to fire
+    # later - the second press's own schedule call implicitly replaces it
+    # (QTimer.start() restarts rather than stacking), not just cancels
     view = _view(4000, markers=[2000])
     empty_x = view._x_for(500)
     view.mousePressEvent(_FakeEvent(empty_x))
-    assert view._preview_timer.isActive()
+    assert view._pending_preview_frame != 0
     start_x = view._x_for(0)
     view.mousePressEvent(_FakeEvent(start_x))
+    assert view._preview_timer.isActive()  # still scheduled - now for the handle
+    assert view._pending_preview_frame == 0
+
+
+def test_a_real_drag_cancels_a_pending_preview(qapp):
+    # grabbing a handle schedules a preview same as any other click (see
+    # test_click_on_a_handle_also_schedules_a_pending_preview), but actually
+    # MOVING it (a real drag, not just a click) must cancel that preview -
+    # otherwise dragging a marker into place would also play a stray blip
+    # of whatever slice it happened to pass through
+    view = _view(4000, markers=[2000])
+    start_x = view._x_for(0)
+    view.mousePressEvent(_FakeEvent(start_x))
+    assert view._preview_timer.isActive()
+    view.mouseMoveEvent(_FakeEvent(start_x + 20))
     assert not view._preview_timer.isActive()

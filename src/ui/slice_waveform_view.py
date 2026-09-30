@@ -581,7 +581,36 @@ class SliceWaveformView(QWidget):
                         key, event.globalPosition().toPoint()
                     )
                 return
-            self._cancel_pending_preview()
+            if event.button() == Qt.MouseButton.LeftButton:
+                # same debounced click-to-preview as clicking empty
+                # waveform space (_schedule_preview_click/_fire_preview) -
+                # added because closely-packed slice markers can make it
+                # genuinely impossible to click any EMPTY space between
+                # them without zooming in first. Uses the TARGET's own
+                # frame (key, or self._start/self._end), NOT self._frame_
+                # for(x) - a real, reported bug: the raw cursor pixel can
+                # sit a frame or two to either side of the marker itself
+                # while still within its hit radius (the hover highlight
+                # already says "you're targeting THIS marker" regardless
+                # of which side), so using the raw pixel made an
+                # imperceptible left/right difference in click position
+                # flip which slice got previewed - the marker's own exact
+                # frame always resolves to the slice that STARTS there
+                # (see core.sample_slicing.slice_bounds' own boundary
+                # convention), consistently. QTimer.start() below
+                # implicitly replaces/cancels whatever was already
+                # pending, same as the old bare _cancel_pending_preview()
+                # call here used to just cancel outright with nothing new
+                # scheduled in its place. Cancelled the moment an actual
+                # drag moves this handle (see mouseMoveEvent's own cancel
+                # call) so a deliberate drag never also plays a stray
+                # preview blip.
+                preview_frame = (
+                    self._start if kind == "start"
+                    else self._end if kind == "end"
+                    else key
+                )
+                self._schedule_preview_click(preview_frame)
             self._dragging = target
             self._drag_anchor_x = x
             self._drag_value = float(self._start if kind == "start" else
@@ -662,6 +691,11 @@ class SliceWaveformView(QWidget):
                 self.update()
             return
         try:
+            # a real drag is now in progress - cancel whatever preview
+            # mousePressEvent scheduled for this same press (see its own
+            # comment) so a deliberate drag never also plays a stray
+            # preview blip once the mouse actually moves
+            self._cancel_pending_preview()
             fine = bool(event.modifiers() & Qt.KeyboardModifier.ShiftModifier)
             if fine and not self._fine_active:
                 self._enter_fine_drag()

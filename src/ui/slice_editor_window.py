@@ -13,7 +13,6 @@ from PySide6.QtWidgets import (
     QPushButton,
     QScrollBar,
     QSizePolicy,
-    QSlider,
     QSpinBox,
     QVBoxLayout,
     QWidget,
@@ -23,6 +22,7 @@ from core import sample_slicing
 from core import transient_detection
 from core.audio_preview import SlicePreviewPlayer
 from s3k.messages import AKAI_CHARSET, NAME_LENGTH
+from ui.fine_slider import FineSlider
 from ui.qt_helpers import widen_popup_to_fit_items
 from ui.sample_settings_dialog import _BIT_DEPTH_OPTIONS, _RATE_OPTIONS
 from ui.slice_waveform_view import SliceWaveformView
@@ -217,9 +217,9 @@ class SliceEditorWindow(QDialog):
 
         zoom_row = QHBoxLayout()
         hint_label = QLabel(
-            "Click: preview slice   •   Double-click empty space: add slice   •   "
-            "Double-click or right-click a marker: delete   •   "
-            "Drag edges/markers: adjust"
+            "Click: preview slice   •   Double-click: add slice   •   "
+            "Double-click a marker: delete   •   "
+            "Drag markers: adjust"
         )
         self.zoom_out_button = QPushButton("−")
         # same 36px as the Samples tab's own zoom_out_button/zoom_in_button
@@ -293,7 +293,9 @@ class SliceEditorWindow(QDialog):
             (self.zoom_fit_button, zoom_fit_key, tooltips.ZOOM_FIT),
         ):
             shortcut_text = key.toString(QKeySequence.SequenceFormat.NativeText)
-            button.setToolTip(f"{tooltip} ({shortcut_text})" if shortcut_text else tooltip)
+            button.setToolTip(
+                f"{tooltip} ({shortcut_text})" if shortcut_text else tooltip
+            )
 
         zoom_row.addWidget(hint_label)
         zoom_row.addStretch()
@@ -362,10 +364,21 @@ class SliceEditorWindow(QDialog):
         # are currently there, hand-placed or not, with no confirmation
         # prompt - a confirm-per-tick while dragging would be unusable.
         # Drag back to 0 (or undo via manual editing) to recover.
+        #
+        # FineSlider (ui/fine_slider.py), not a plain QSlider - the same
+        # double-click-to-reset/Shift-fine-drag/click-then-type niceties
+        # every Knob elsewhere in this app already has, translated to a
+        # horizontal slider - requested directly so this control feels
+        # consistent with the rest of the app's draggable inputs, not just
+        # visually (via style.qss.template's own QSlider rules) but by feel
+        # too.
         transient_row = QHBoxLayout()
-        self.transient_sensitivity_slider = QSlider(Qt.Orientation.Horizontal)
+        self.transient_sensitivity_slider = FineSlider(Qt.Orientation.Horizontal)
         self.transient_sensitivity_slider.setRange(0, 100)
         self.transient_sensitivity_slider.setValue(_TRANSIENT_SENSITIVITY_DEFAULT)
+        self.transient_sensitivity_slider.setDefaultValue(
+            _TRANSIENT_SENSITIVITY_DEFAULT
+        )
         self.transient_sensitivity_slider.setFixedWidth(160)
         self.transient_sensitivity_slider.setToolTip(
             tooltips.TRANSIENT_SENSITIVITY_SLIDER
@@ -425,9 +438,7 @@ class SliceEditorWindow(QDialog):
                 f"{tooltips.CANCEL_TRANSFER_BUTTON} "
                 f"({self._cancel_export_shortcut.key().toString(QKeySequence.SequenceFormat.NativeText)})"
             )
-            self.cancel_export_button.clicked.connect(
-                self._on_cancel_export_shortcut
-            )
+            self.cancel_export_button.clicked.connect(self._on_cancel_export_shortcut)
             self.cancel_export_button.setVisible(False)
             export_row.addWidget(self.cancel_export_button)
 
@@ -483,7 +494,9 @@ class SliceEditorWindow(QDialog):
                 # above - DemoBridge has no add-program primitive either
                 self._create_program_checkbox_allowed = False
                 self.create_program_checkbox.setEnabled(False)
-                self.create_program_checkbox.setToolTip(tooltips.CREATE_PROGRAM_DEMO_MODE)
+                self.create_program_checkbox.setToolTip(
+                    tooltips.CREATE_PROGRAM_DEMO_MODE
+                )
             elif not program_names:
                 self._create_program_checkbox_allowed = False
                 self.create_program_checkbox.setEnabled(False)
@@ -613,8 +626,7 @@ class SliceEditorWindow(QDialog):
             self.waveform.start(), self.waveform.end(), count
         )
         snapped = [
-            sample_slicing.find_nearest_zero_crossing(self._samples, m)
-            for m in markers
+            sample_slicing.find_nearest_zero_crossing(self._samples, m) for m in markers
         ]
         self.waveform.set_markers(snapped)
 
@@ -646,8 +658,7 @@ class SliceEditorWindow(QDialog):
         start, end = self.waveform.start(), self.waveform.end()
         markers = [m for m in candidates if start < m < end]
         snapped = [
-            sample_slicing.find_nearest_zero_crossing(self._samples, m)
-            for m in markers
+            sample_slicing.find_nearest_zero_crossing(self._samples, m) for m in markers
         ]
         self.waveform.set_markers(snapped)
 
@@ -664,7 +675,7 @@ class SliceEditorWindow(QDialog):
                 "can take a while and will freeze the interface."
             )
         return (
-            f'Send {slice_count} slices to the sampler as new samples '
+            f"Send {slice_count} slices to the sampler as new samples "
             f'("{names[0]}".."{names[-1]}")? This can take a while and will '
             "freeze the interface."
         )
@@ -784,7 +795,8 @@ class SliceEditorWindow(QDialog):
         self.export_progress.setVisible(True)
         self.export_progress.setValue(0)
         self.status_label.setText(
-            f'Sending "{names[0]}"...' if slice_count == 1
+            f'Sending "{names[0]}"...'
+            if slice_count == 1
             else f"Exporting {slice_count} slices..."
         )
         QApplication.processEvents()
