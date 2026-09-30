@@ -534,6 +534,13 @@ class SliceEditorWindow(QDialog):
         # window.py's own scrollbar_container (see AGENTS.md), just scoped
         # to height here instead of visibility.
         self._export_row_container = QWidget()
+        # transparentContainer (style.qss.template) - otherwise this bare
+        # QWidget picks up the base QWidget rule's own ${bg} instead of
+        # blending into the QDialog's own ${bg_dialog}, which differs -
+        # same fix this window's own _scrollbar_container above already
+        # uses, and the same visible mismatch it fixes there (a rectangle
+        # of the wrong background colour behind the row's own widgets).
+        self._export_row_container.setObjectName("transparentContainer")
         # zero margins - export_row used to be a NESTED layout (added via
         # layout.addLayout(export_row), which Qt gives 0 contents margins
         # by default); making it a QWidget's own top-level layout instead
