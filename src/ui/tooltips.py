@@ -165,6 +165,13 @@ EQUAL_SLICES_BUTTON = (
     "Replace any existing slice markers with N evenly-spaced ones."
 )
 
+TRANSIENT_SENSITIVITY_SLIDER = (
+    "Live transient detection - replaces the current slice markers as you "
+    "drag. 0% is off; higher sensitivity detects more, quieter transients. "
+    "A starting point, not a final result - hand-edit (drag/double-click/"
+    "right-click) afterward as needed."
+)
+
 # =============================================================================
 # ui/program_editor_window.py
 # =============================================================================

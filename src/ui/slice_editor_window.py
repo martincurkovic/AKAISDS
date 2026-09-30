@@ -12,12 +12,14 @@ from PySide6.QtWidgets import (
     QProgressBar,
     QPushButton,
     QScrollBar,
+    QSlider,
     QSpinBox,
     QVBoxLayout,
     QWidget,
 )
 
 from core import sample_slicing
+from core import transient_detection
 from core.audio_preview import SlicePreviewPlayer
 from s3k.messages import AKAI_CHARSET, NAME_LENGTH
 from ui.qt_helpers import widen_popup_to_fit_items
@@ -38,6 +40,12 @@ _NAME_INPUT_PATTERN = (
 _EQUAL_SLICE_MIN = 2
 _EQUAL_SLICE_MAX = 64
 _EQUAL_SLICE_DEFAULT = 8
+
+# ReCycle's own "Sensitivity" convention: 0-100%, 0 (its own rest
+# position) meaning fully off - see transient_detection.markers_from_flux's
+# own docstring on why 0 is special-cased rather than just "a very high
+# threshold"
+_TRANSIENT_SENSITIVITY_DEFAULT = 0
 
 
 def slice_export_names(base_name, count):
@@ -148,6 +156,11 @@ class SliceEditorWindow(QDialog):
 
         self._samples = samples
         self._framerate = framerate
+        # computed ONCE here, reused on every Sensitivity slider tick - see
+        # transient_detection.compute_flux's own docstring on why
+        self._transient_flux, self._transient_window_frames = (
+            transient_detection.compute_flux(samples, framerate)
+        )
         self._spitch = spitch
         self._stuno = stuno
         self._shlto = shlto
@@ -313,6 +326,37 @@ class SliceEditorWindow(QDialog):
         equal_row.addWidget(self.equal_slices_button)
         equal_row.addStretch()
 
+        # Hand-rolled energy-flux onset detection (core/transient_
+        # detection.py) - deliberately simple, see that module's own
+        # docstring for why. No separate "Detect" button - the slider IS
+        # the live control: 0 (its own rest position/default) means fully
+        # off, dragging it up live-regenerates the slice markers from
+        # scratch on every tick (see _on_transient_sensitivity_changed),
+        # same as turning a real ReCycle-style sensitivity knob. This
+        # means moving the slider away from 0 REPLACES whatever markers
+        # are currently there, hand-placed or not, with no confirmation
+        # prompt - a confirm-per-tick while dragging would be unusable.
+        # Drag back to 0 (or undo via manual editing) to recover.
+        transient_row = QHBoxLayout()
+        self.transient_sensitivity_slider = QSlider(Qt.Orientation.Horizontal)
+        self.transient_sensitivity_slider.setRange(0, 100)
+        self.transient_sensitivity_slider.setValue(_TRANSIENT_SENSITIVITY_DEFAULT)
+        self.transient_sensitivity_slider.setFixedWidth(160)
+        self.transient_sensitivity_slider.setToolTip(
+            tooltips.TRANSIENT_SENSITIVITY_SLIDER
+        )
+        self.transient_sensitivity_value_label = QLabel(
+            f"{_TRANSIENT_SENSITIVITY_DEFAULT}%"
+        )
+        self.transient_sensitivity_value_label.setFixedWidth(36)
+        self.transient_sensitivity_slider.valueChanged.connect(
+            self._on_transient_sensitivity_changed
+        )
+        transient_row.addWidget(QLabel("Sensitivity:"))
+        transient_row.addWidget(self.transient_sensitivity_slider)
+        transient_row.addWidget(self.transient_sensitivity_value_label)
+        transient_row.addStretch()
+
         name_row = QHBoxLayout()
         self.name_edit = _akai_name_edit(sample_name)
         name_row.addWidget(QLabel("Base name:"))
@@ -474,6 +518,7 @@ class SliceEditorWindow(QDialog):
         layout.addWidget(self.scrollbar)
         layout.addWidget(self.info_label)
         layout.addLayout(equal_row)
+        layout.addLayout(transient_row)
         layout.addLayout(name_row)
         layout.addWidget(self._export_row_container)
         self.resize(760, 420)
@@ -530,6 +575,39 @@ class SliceEditorWindow(QDialog):
         markers = sample_slicing.equal_slice_markers(
             self.waveform.start(), self.waveform.end(), count
         )
+        snapped = [
+            sample_slicing.find_nearest_zero_crossing(self._samples, m)
+            for m in markers
+        ]
+        self.waveform.set_markers(snapped)
+
+    # --- Sensitivity slider: live transient detection -------------------------
+
+    def _on_transient_sensitivity_changed(self, value):
+        # no confirmation dialog, unlike Equal Slices - this fires on every
+        # tick of a drag, so it fully OWNS the marker set whenever it's
+        # non-zero rather than asking each time (see this slider's own
+        # construction comment). value == 0 goes through markers_from_flux
+        # too (rather than short-circuiting here) so cached/None flux
+        # (silence, too-short buffer - see compute_flux) still behaves
+        # identically: no markers, full stop.
+        self.transient_sensitivity_value_label.setText(f"{value}%")
+        candidates = transient_detection.markers_from_flux(
+            self._transient_flux,
+            self._transient_window_frames,
+            value,
+            len(self._samples),
+        )
+        # markers_from_flux works over the WHOLE buffer, not [start, end] -
+        # it has no idea where the trim handles currently sit (same reason
+        # equal_slice_markers is instead called with waveform.start()/end()
+        # directly above) - filter to genuine interior candidates here so a
+        # loud lead-in before Start doesn't silently produce a marker
+        # nobody asked for outside the trimmed region. slice_bounds() would
+        # drop these anyway, but set_markers()/slice_markers() round-trips
+        # the raw list, so filtering here keeps that list honest too.
+        start, end = self.waveform.start(), self.waveform.end()
+        markers = [m for m in candidates if start < m < end]
         snapped = [
             sample_slicing.find_nearest_zero_crossing(self._samples, m)
             for m in markers
@@ -752,6 +830,7 @@ class SliceEditorWindow(QDialog):
             self.scrollbar,
             self.equal_count_spin,
             self.equal_slices_button,
+            self.transient_sensitivity_slider,
             self.name_edit,
             self.bit_depth_combo,
             self.rate_combo,

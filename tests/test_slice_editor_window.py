@@ -197,6 +197,67 @@ def test_generate_equal_slices_confirmed_replaces_existing_markers(qapp, monkeyp
     assert window.waveform.slice_count() == 4
 
 
+# --- Sensitivity slider: live transient detection ---------------------------
+# not testing the detection algorithm itself here (see tests/
+# test_transient_detection.py) - just this window's own wiring: does the
+# slider/label agree, does moving it live-regenerate markers with no
+# confirmation dialog (unlike Equal Slices), does 0 mean fully off, does it
+# still work in demo mode.
+
+
+def _bursty_samples(total=20000, burst_position=8000, width=200, amplitude=20000):
+    samples = [0] * total
+    for i in range(burst_position, min(total, burst_position + width)):
+        samples[i] = amplitude if (i - burst_position) % 2 == 0 else -amplitude
+    return samples
+
+
+def test_transient_sensitivity_slider_defaults_to_zero_and_label_agrees(qapp):
+    window = _build_window(samples=_bursty_samples())
+    assert window.transient_sensitivity_slider.value() == 0
+    assert window.transient_sensitivity_value_label.text() == "0%"
+    assert sew._TRANSIENT_SENSITIVITY_DEFAULT == 0
+    window.transient_sensitivity_slider.setValue(90)
+    assert window.transient_sensitivity_value_label.text() == "90%"
+
+
+def test_moving_slider_to_zero_is_fully_off(qapp):
+    window = _build_window(samples=_bursty_samples())
+    window.transient_sensitivity_slider.setValue(90)
+    assert window.waveform.slice_count() >= 2
+    window.transient_sensitivity_slider.setValue(0)
+    assert window.waveform.slice_markers() == []
+
+
+def test_moving_slider_above_zero_detects_with_no_confirmation_dialog(qapp, monkeypatch):
+    window = _build_window(samples=_bursty_samples())
+
+    def _fail_if_called(*a, **k):
+        raise AssertionError("must not prompt while dragging a live slider")
+
+    monkeypatch.setattr(sew.QMessageBox, "question", _fail_if_called)
+    window.transient_sensitivity_slider.setValue(90)
+    assert window.waveform.slice_count() >= 2
+
+
+def test_moving_slider_silently_replaces_hand_placed_markers(qapp):
+    # no confirmation dialog for this control (see its own construction
+    # comment) - touching it away from 0 always wins over whatever was
+    # there before, hand-placed or not
+    window = _build_window(samples=_bursty_samples())
+    window.waveform.set_markers([1000])
+    window.transient_sensitivity_slider.setValue(90)
+    assert window.waveform.slice_markers() != [1000]
+
+
+def test_transient_detection_still_works_in_demo_mode(qapp):
+    # only Export needs real hardware - marker placement (manual or
+    # detected) doesn't
+    window = _build_window(samples=_bursty_samples(), demo_mode=True)
+    window.transient_sensitivity_slider.setValue(90)
+    assert window.waveform.slice_count() >= 2
+
+
 # --- export guards -----------------------------------------------------------
 
 
