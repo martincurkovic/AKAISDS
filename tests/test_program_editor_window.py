@@ -3695,6 +3695,269 @@ def test_confirm_filter_sample_with_nothing_loaded_does_nothing(editor, qapp, mo
     assert opened == []
 
 
+# --- Detect Root Note --------------------------------------------------
+# not testing the detection algorithm itself here (see tests/
+# test_root_note_detection.py) - just this window's own wiring: analysis
+# window selection (loop region vs fallback), the low-confidence/None
+# "nothing actionable" path, and the confirm-then-write path.
+
+
+def test_confirm_detect_root_note_with_nothing_loaded_does_nothing(editor, qapp, monkeypatch):
+    import ui.program_editor_window as pew
+
+    calls = []
+    monkeypatch.setattr(
+        pew.root_note_detection,
+        "detect_root_note",
+        lambda *a, **k: calls.append(a) or None,
+    )
+    editor.sample_list_widget.setCurrentRow(-1)
+
+    editor._confirm_detect_root_note()
+
+    assert calls == []
+
+
+def test_confirm_detect_root_note_none_result_shows_information_only(
+    editor, qapp, monkeypatch
+):
+    import ui.program_editor_window as pew
+
+    monkeypatch.setattr(
+        pew.root_note_detection, "detect_root_note", lambda *a, **k: None
+    )
+    info_calls = []
+    question_calls = []
+    monkeypatch.setattr(
+        pew.QMessageBox, "information", lambda *a, **k: info_calls.append(a)
+    )
+    monkeypatch.setattr(
+        pew.QMessageBox,
+        "question",
+        lambda *a, **k: question_calls.append(a) or pew.QMessageBox.StandardButton.Yes,
+    )
+    samples = list(range(-5000, 5000))
+    markers = {"start": 0, "loop_start": 100, "loop_end": 900, "end": 999}
+    _select_sample_with_full_audio(editor, qapp, 0, samples, markers)
+
+    editor._confirm_detect_root_note()
+
+    assert len(info_calls) == 1
+    assert question_calls == []  # never offered a choice with no result at all
+
+
+def test_confirm_detect_root_note_low_confidence_shows_information_only(
+    editor, qapp, monkeypatch
+):
+    import ui.program_editor_window as pew
+
+    # below CONFIDENCE_THRESHOLD - per direct user request, no note/
+    # confidence/option shown, just an acknowledgement nothing reliable
+    # was found
+    monkeypatch.setattr(
+        pew.root_note_detection, "detect_root_note", lambda *a, **k: (60, 0.0, 0.1)
+    )
+    info_calls = []
+    question_calls = []
+    monkeypatch.setattr(
+        pew.QMessageBox, "information", lambda *a, **k: info_calls.append(a)
+    )
+    monkeypatch.setattr(
+        pew.QMessageBox,
+        "question",
+        lambda *a, **k: question_calls.append(a) or pew.QMessageBox.StandardButton.Yes,
+    )
+    samples = list(range(-5000, 5000))
+    markers = {"start": 0, "loop_start": 100, "loop_end": 900, "end": 999}
+    _select_sample_with_full_audio(editor, qapp, 0, samples, markers)
+
+    editor._confirm_detect_root_note()
+
+    assert len(info_calls) == 1
+    assert question_calls == []
+
+
+def test_confirm_detect_root_note_declined_does_not_write(editor, qapp, monkeypatch):
+    import ui.program_editor_window as pew
+
+    monkeypatch.setattr(
+        pew.root_note_detection, "detect_root_note", lambda *a, **k: (72, 15.0, 0.9)
+    )
+    monkeypatch.setattr(
+        pew.QMessageBox, "question", lambda *a, **k: pew.QMessageBox.StandardButton.No
+    )
+    samples = list(range(-5000, 5000))
+    markers = {"start": 0, "loop_start": 100, "loop_end": 900, "end": 999}
+    _select_sample_with_full_audio(editor, qapp, 0, samples, markers)
+    editor.sample_root_note_spinbox.setValue(60)
+    editor.sample_tune_spinbox.setValue(0.0)
+
+    editor._confirm_detect_root_note()
+
+    assert editor.sample_root_note_spinbox.value() == 60
+    assert editor.sample_tune_spinbox.value() == 0.0
+
+
+def test_confirm_detect_root_note_confirmed_writes_note_and_tune(
+    editor, qapp, monkeypatch
+):
+    import ui.program_editor_window as pew
+
+    monkeypatch.setattr(
+        pew.root_note_detection, "detect_root_note", lambda *a, **k: (72, 15.0, 0.9)
+    )
+    monkeypatch.setattr(
+        pew.QMessageBox, "question", lambda *a, **k: pew.QMessageBox.StandardButton.Yes
+    )
+    samples = list(range(-5000, 5000))
+    markers = {"start": 0, "loop_start": 100, "loop_end": 900, "end": 999}
+    _select_sample_with_full_audio(editor, qapp, 0, samples, markers)
+    editor.sample_root_note_spinbox.setValue(60)
+    editor.sample_tune_spinbox.setValue(0.0)
+
+    editor._confirm_detect_root_note()
+
+    assert editor.sample_root_note_spinbox.value() == 72
+    # cents (15.0) -> this field's own semitone-based display units - see
+    # _confirm_detect_root_note's own comment
+    assert editor.sample_tune_spinbox.value() == pytest.approx(0.15)
+
+
+def test_confirm_detect_root_note_adds_hardware_engine_compensation_for_non_native_rate(
+    editor, qapp, monkeypatch
+):
+    # regression test for a real gap: a sample originally sent at a
+    # non-native rate (anything but 44100/22050) carries a permanent
+    # STUNO tuning offset from core.akai_sysex.compute_bandwidth_and_tuning,
+    # compensating for the Akai hardware's playback engine only physically
+    # running at one of those two speeds - completely unrelated to this
+    # sample's own recorded pitch. A bare overwrite of Tune with just the
+    # detected residual would silently discard that compensation, causing
+    # the sample to mistune on real hardware afterward even though nothing
+    # about its audio changed. The fix recomputes that baseline fresh from
+    # the sample's own declared rate and adds the residual on top.
+    import ui.program_editor_window as pew
+    from core.akai_sysex import compute_bandwidth_and_tuning
+
+    monkeypatch.setattr(
+        pew.root_note_detection, "detect_root_note", lambda *a, **k: (72, 15.0, 0.9)
+    )
+    monkeypatch.setattr(
+        pew.QMessageBox, "question", lambda *a, **k: pew.QMessageBox.StandardButton.Yes
+    )
+    samples = list(range(-5000, 5000))
+    markers = {"start": 0, "loop_start": 100, "loop_end": 900, "end": 999}
+    _select_sample_with_full_audio(editor, qapp, 0, samples, markers)
+    editor._sample_waveform_cache[0]["framerate"] = 48000  # non-native rate
+    editor.sample_root_note_spinbox.setValue(60)
+    editor.sample_tune_spinbox.setValue(0.0)
+
+    editor._confirm_detect_root_note()
+
+    _, baseline_semitones = compute_bandwidth_and_tuning(48000)
+    assert editor.sample_root_note_spinbox.value() == 72
+    # abs=0.005 - sample_tune_spinbox is a 2-decimal-place QDoubleSpinBox,
+    # which rounds whatever's set to its own display precision
+    assert editor.sample_tune_spinbox.value() == pytest.approx(
+        baseline_semitones + 0.15, abs=0.005
+    )
+    # confirms this genuinely differs from the native-rate case above -
+    # the whole point of the fix
+    assert editor.sample_tune_spinbox.value() != pytest.approx(0.15, abs=0.005)
+
+
+def test_detect_root_note_analysis_window_prefers_a_large_enough_loop_region(
+    editor, qapp, monkeypatch
+):
+    import ui.program_editor_window as pew
+
+    captured = {}
+
+    def _fake_detect(samples, framerate, anchor):
+        captured["samples"] = samples
+        return (60, 0.0, 0.9)
+
+    monkeypatch.setattr(pew.root_note_detection, "detect_root_note", _fake_detect)
+    monkeypatch.setattr(
+        pew.QMessageBox, "question", lambda *a, **k: pew.QMessageBox.StandardButton.Yes
+    )
+    samples = list(range(20000))
+    loop_start, loop_end = 5000, 5000 + pew._MIN_LOOP_ANALYSIS_FRAMES
+    markers = {"start": 0, "loop_start": loop_start, "loop_end": loop_end, "end": 19999}
+    _select_sample_with_full_audio(editor, qapp, 0, samples, markers)
+
+    editor._confirm_detect_root_note()
+
+    assert captured["samples"] == samples[loop_start : loop_end + 1]
+
+
+def test_detect_root_note_analysis_window_caps_an_overly_long_loop_region(
+    editor, qapp, monkeypatch
+):
+    # real, measured issue found while smoke-testing this feature: an
+    # uncapped loop region's own analysis time scales with its length
+    # (~1.5 SECONDS to analyse ~1.5s of real audio) - a sustained pad with
+    # a multi-second loop would make this button noticeably slow without
+    # a cap. Takes a fixed-length chunk from the START of an overly long
+    # loop region rather than the whole thing.
+    import ui.program_editor_window as pew
+
+    captured = {}
+
+    def _fake_detect(samples, framerate, anchor):
+        captured["samples"] = samples
+        return (60, 0.0, 0.9)
+
+    monkeypatch.setattr(pew.root_note_detection, "detect_root_note", _fake_detect)
+    monkeypatch.setattr(
+        pew.QMessageBox, "question", lambda *a, **k: pew.QMessageBox.StandardButton.Yes
+    )
+    samples = list(range(200000))
+    loop_start, loop_end = 10000, 190000  # far longer than the analysis cap
+    markers = {"start": 0, "loop_start": loop_start, "loop_end": loop_end, "end": 199999}
+    _select_sample_with_full_audio(editor, qapp, 0, samples, markers)
+
+    editor._confirm_detect_root_note()
+
+    max_frames = round(44100 * pew._ROOT_NOTE_FALLBACK_WINDOW_SECONDS)
+    assert captured["samples"] == samples[loop_start : loop_start + max_frames]
+    assert len(captured["samples"]) < (loop_end - loop_start + 1)
+
+
+def test_detect_root_note_analysis_window_falls_back_when_loop_too_small(
+    editor, qapp, monkeypatch
+):
+    import ui.program_editor_window as pew
+
+    captured = {}
+
+    def _fake_detect(samples, framerate, anchor):
+        captured["samples"] = samples
+        return (60, 0.0, 0.9)
+
+    monkeypatch.setattr(pew.root_note_detection, "detect_root_note", _fake_detect)
+    monkeypatch.setattr(
+        pew.QMessageBox, "question", lambda *a, **k: pew.QMessageBox.StandardButton.Yes
+    )
+    samples = list(range(20000))
+    # degenerate loop (same value, per the user's own wording) - too small
+    # a span to analyse, must fall back
+    markers = {"start": 0, "loop_start": 5000, "loop_end": 5000, "end": 19999}
+    _select_sample_with_full_audio(editor, qapp, 0, samples, markers)
+
+    editor._confirm_detect_root_note()
+
+    framerate = 44100
+    skip = min(
+        round(framerate * pew._ROOT_NOTE_ATTACK_SKIP_SECONDS), (19999 - 0 + 1) // 4
+    )
+    window_start = skip
+    window_end = min(
+        19999, window_start + round(framerate * pew._ROOT_NOTE_FALLBACK_WINDOW_SECONDS) - 1
+    )
+    assert captured["samples"] == samples[window_start : window_end + 1]
+
+
 def test_export_slices_real_mode_happy_path_sends_batch_and_writes_headers(
     editor, qapp, monkeypatch
 ):

@@ -287,6 +287,13 @@ SLICE_EDITOR_BUTTON = (
     "Manually chop this sample's already-loaded audio into slices "
     "and export them back to the sampler as new one-shot samples."
 )
+DETECT_ROOT_NOTE_BUTTON = (
+    "Estimate this sample's fundamental pitch from its already-loaded "
+    "audio (the loop region if one is set, otherwise a short chunk of "
+    "the sample), and offer to set Root Note and Tune to match. "
+    "Monophonic melodic material only - not meaningful for drums, "
+    "chords, or noise."
+)
 
 # --- Filter section (Program/Keygroup tabs) - new ---------------------------
 

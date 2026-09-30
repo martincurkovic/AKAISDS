@@ -66,8 +66,10 @@ from ui.quickstart_dialog import show_quickstart_dialog
 from ui.update_helper import UpdateCheckRunner
 from ui import tooltips as tt
 from core import debug_log
+from core.akai_sysex import compute_bandwidth_and_tuning
 from core import midi_manager as midi_manager_module
 from core import program_editor_bridge
+from core import root_note_detection
 from core import sample_editing
 from core import sds_encoder
 from core.midi_notes import midi_note_to_name
@@ -213,6 +215,30 @@ _NAME_INPUT_PATTERN = (
 # dragging the loop start marker wrote a loop length the hardware read back
 # as a few milliseconds, not the intended few hundred frames).
 _LOOP_LENGTH_FIXED_POINT_SCALE = 65536
+
+# Detect Root Note (core/root_note_detection.py) - window selection: the
+# loop region (already-identified stable, repeating audio) is strongly
+# preferred over blindly analysing the whole sample, which would both be
+# slower and biased by the attack transient right at the start. Falls
+# back to a short, attack-skipped chunk of [start, end] only when the
+# loop region itself is too small a span to say anything meaningful about
+# (loop off, or loop_start/loop_end sitting at/near the same value) - see
+# _confirm_detect_root_note.
+#
+# _MIN_LOOP_ANALYSIS_FRAMES: enough for at least 2 full periods of the
+# LOWEST note root_note_detection supports (MIDI 21 ~= 29Hz, period
+# ~1513 frames @44100) with real margin, comfortably before any
+# decimation that function does internally.
+_MIN_LOOP_ANALYSIS_FRAMES = 4096
+# skip this much of the fallback window's own start to dodge the attack
+# transient (pick noise, breath, drum-like click) - not applied to the
+# loop-region case, which is already past the attack by construction
+_ROOT_NOTE_ATTACK_SKIP_SECONDS = 0.05
+# capped short deliberately - measured ~200ms of real analysis time for a
+# window this size (pure Python, no numpy) against ~900ms for a full
+# second's worth; this is a one-click button, not a live-dragged control,
+# but should still feel closer to instant than "this can take a while"
+_ROOT_NOTE_FALLBACK_WINDOW_SECONDS = 0.3
 
 # real audio for AKAISDS_DEMO_SAMPLER's fake sample-audio path (see
 # _fetch_demo_sample_audio) - the same fixture the test suite uses, not
@@ -5068,6 +5094,18 @@ class ProgramEditorWindow(QMainWindow):
         tune_meta_row.addSpacing(12)
         tune_meta_row.addWidget(sample_tune_label)
         tune_meta_row.addWidget(self.sample_tune_spinbox)
+        tune_meta_row.addSpacing(12)
+        # needs real audio in memory to analyse, same has_waveform() gate
+        # as Trim/Reverse/etc - see _set_sample_edit_buttons_enabled. Works
+        # fine in demo mode - unlike Duplicate Sample/Export, this never
+        # writes a NEW resident sample, only the same SPITCH/STUNO writes
+        # sample_root_note_spinbox/sample_tune_spinbox already make via
+        # their own existing paths (_commit_sample_root_note/
+        # _commit_sample_tune), which already work in demo mode fine.
+        self.detect_root_note_button = QPushButton("Detect Root Note")
+        self.detect_root_note_button.setToolTip(tt.DETECT_ROOT_NOTE_BUTTON)
+        self.detect_root_note_button.clicked.connect(self._confirm_detect_root_note)
+        tune_meta_row.addWidget(self.detect_root_note_button)
         tune_meta_row.addStretch()
 
         # Trim/Reverse/Fade/Normalise - destructive, hardware-write
@@ -5883,6 +5921,10 @@ class ProgramEditorWindow(QMainWindow):
         # button itself stays enabled here, and SliceEditorWindow disables
         # just its own Export button when demo_mode (see _open_slice_editor).
         self.slice_editor_button.setEnabled(enabled)
+        # same has_waveform() gate as everything above - Detect Root Note
+        # needs real audio to analyse, but (unlike Duplicate/Export) never
+        # needs actual hardware, so no demo_mode restriction here
+        self.detect_root_note_button.setEnabled(enabled)
 
     def _update_sample_meta_controls(
         self, sptype, spitch, shlto=None, stuno=None, ldwell1=None
@@ -6031,6 +6073,127 @@ class ProgramEditorWindow(QMainWindow):
 
     def _commit_sample_tune(self):
         self._flush_write("STUNO")
+
+    def _detect_root_note_analysis_window(self, entry):
+        # loop region first preference - already-identified stable,
+        # repeating audio, ideal for pitch analysis and immune to the
+        # attack-transient bias the fallback below has to dodge by hand.
+        # Falls back to a short, attack-skipped chunk of [start, end] only
+        # when the loop region's own span is too small to say anything
+        # meaningful about (loop off, or loop_start/loop_end sitting
+        # at/near the same value) - see _MIN_LOOP_ANALYSIS_FRAMES's own
+        # comment for why that particular floor.
+        markers = self.waveform_view.markers_with_loop_in_range()
+        loop_start, loop_end = markers["loop_start"], markers["loop_end"]
+        if loop_end - loop_start + 1 >= _MIN_LOOP_ANALYSIS_FRAMES:
+            # capped to the SAME length budget as the fallback below - a
+            # real, measured issue: an uncapped loop region's own analysis
+            # time scales with its length (confirmed ~1.5s of real
+            # decaying-tone audio took ~1.5 SECONDS to analyse, entirely
+            # because nothing here capped it), which would make this
+            # button noticeably slow on a sustained pad with a
+            # multi-second loop. Loop content is stable/repeating by
+            # definition, so any representative chunk of it works equally
+            # well - no need to analyse the WHOLE region, just take it
+            # from the start (already past any attack, unlike the
+            # fallback, which has to skip it by hand below).
+            max_frames = round(
+                entry["framerate"] * _ROOT_NOTE_FALLBACK_WINDOW_SECONDS
+            )
+            window_end = min(loop_end, loop_start + max_frames - 1)
+            return entry["samples"][loop_start : window_end + 1]
+
+        start, end = markers["start"], markers["end"]
+        span = end - start + 1
+        skip = min(
+            round(entry["framerate"] * _ROOT_NOTE_ATTACK_SKIP_SECONDS), span // 4
+        )
+        window_start = start + skip
+        window_end = min(
+            end,
+            window_start
+            + round(entry["framerate"] * _ROOT_NOTE_FALLBACK_WINDOW_SECONDS)
+            - 1,
+        )
+        return entry["samples"][window_start : window_end + 1]
+
+    def _confirm_detect_root_note(self):
+        sample_index = self.sample_list_widget.currentRow()
+        if sample_index < 0 or not self.waveform_view.has_waveform():
+            return
+        entry = self._sample_waveform_cache.get(sample_index)
+        if entry is None or entry["samples"] is None:
+            return
+
+        analysis_samples = self._detect_root_note_analysis_window(entry)
+        anchor = self.sample_root_note_spinbox.value()
+        result = root_note_detection.detect_root_note(
+            analysis_samples, entry["framerate"], anchor
+        )
+
+        if result is None or result[2] < root_note_detection.CONFIDENCE_THRESHOLD:
+            # per direct user request: nothing actionable here - no note,
+            # no confidence number, no Yes/No choice to make. Only an
+            # acknowledgement that detection was attempted and came up
+            # empty, not silence (which would read as the button doing
+            # nothing at all).
+            QMessageBox.information(
+                self,
+                "Detect Root Note",
+                "Couldn't reliably detect a pitch for this sample.",
+            )
+            return
+
+        midi_note, cents, confidence = result
+        note_name = midi_note_to_name(midi_note)
+        answer = QMessageBox.question(
+            self,
+            "Detect Root Note",
+            f'Detected root note: {note_name} ({confidence * 100:.0f}% '
+            f"confidence, {cents:+.0f} cents).\n\n"
+            "Set this sample's root note and tune to match?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+
+        # through the SAME existing spinbox write paths ordinary user
+        # editing already uses (_on_sample_root_note_changed/_commit_
+        # sample_root_note, _on_sample_tune_changed/_commit_sample_tune) -
+        # not a raw hardware write of our own - so the in-memory cache
+        # stays consistent with whatever a live edit would have left it as
+        # (see _on_sample_tune_changed's own comment on the stale-cache bug
+        # a raw write bypassing that path caused once already)
+        self.sample_root_note_spinbox.setValue(midi_note)
+        self._commit_sample_root_note()
+        # cents -> this field's own semitone-based display units (see
+        # sample_tune_spinbox's own construction comment: +/-50.00
+        # SEMITONES, not literally MIDI cents, despite the dialog above
+        # calling it "cents" - the friendlier, standard term for this
+        # small a residual).
+        #
+        # NOT a bare overwrite with just the residual, though - Tune
+        # (STUNO) is also where core/akai_sysex.py's own
+        # compute_bandwidth_and_tuning bakes in a SEPARATE compensation
+        # whenever a sample was originally sent at a non-native rate (the
+        # Akai hardware's playback engine only physically runs at 22050 or
+        # 44100 Hz - anything else needs a permanent tuning offset just to
+        # play back at the right pitch at all, regardless of what its
+        # recorded content actually is). That offset is a deterministic
+        # function of this sample's own declared rate alone, not of
+        # whatever happens to already be sitting in STUNO - recomputing it
+        # fresh from entry["framerate"] and adding our own measured
+        # residual on top gives the mathematically correct total either
+        # way, rather than risking a blind overwrite silently discarding
+        # hardware-engine compensation a sample at an odd rate actually
+        # needs (comes out to 0 for the overwhelmingly common native-rate
+        # case, so this is a no-op there).
+        _, baseline_semitones = compute_bandwidth_and_tuning(entry["framerate"])
+        total_semitones = baseline_semitones + cents / 100.0
+        total_semitones = max(-50.0, min(50.0, total_semitones))
+        self.sample_tune_spinbox.setValue(total_semitones)
+        self._commit_sample_tune()
 
     def _set_marker_spinbox_range(self, frame_count):
         # each spinbox can address any frame in the WHOLE sample (typing an
