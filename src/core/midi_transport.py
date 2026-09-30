@@ -43,7 +43,32 @@ def _delete_quiet(port):
 
 
 def list_input_names():
-    port = rtmidi.MidiIn()
+    # constructing rtmidi.MidiIn() at all (below AND inside
+    # _default_input_port_factory) is where a real macOS CoreMIDI client
+    # gets created - MidiManager.open_input/open_output already wrap THEIR
+    # own construction in try/except (an actually-open port failing is
+    # worth surfacing to the caller), but nothing previously guarded a
+    # bare port-listing call - main_window.py's _restore_saved_ports (every
+    # launch) and settings_dialog.py's _populate_ports (every Settings
+    # open) both call this with no try/except of their own. A rare but
+    # confirmed real crash (macOS coremidid transiently refusing a new
+    # client - OSStatus -304 - right after quitting and immediately
+    # relaunching, before its own teardown of the previous client finishes)
+    # can raise here; logging and returning an empty list lets startup/
+    # Settings continue with "no ports found" rather than an unhandled
+    # traceback. NOTE: this only helps the ordinary, catchable failure
+    # case - the specific real crash above escapes as a raw C++
+    # std::terminate/abort (a python-rtmidi/RtMidi exception-specification
+    # bug in its CoreMIDI backend, not this app's own code - see AGENTS.md
+    # on pinned deps), which no Python try/except can intercept at all.
+    try:
+        port = rtmidi.MidiIn()
+    except Exception:
+        debug_log.get_logger().error(
+            "midi_transport.list_input_names: couldn't create a MidiIn "
+            "to list ports", exc_info=True
+        )
+        return []
     try:
         return port.get_ports()
     finally:
@@ -51,7 +76,14 @@ def list_input_names():
 
 
 def list_output_names():
-    port = rtmidi.MidiOut()
+    try:
+        port = rtmidi.MidiOut()
+    except Exception:
+        debug_log.get_logger().error(
+            "midi_transport.list_output_names: couldn't create a MidiOut "
+            "to list ports", exc_info=True
+        )
+        return []
     try:
         return port.get_ports()
     finally:
