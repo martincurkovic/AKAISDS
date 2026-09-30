@@ -3737,6 +3737,7 @@ class ProgramEditorWindow(QMainWindow):
         shlto,
         progress_callback,
         status_callback,
+        busy_callback=None,
     ):
         # the actual hardware-talking half of the Slice Editor (see
         # ui/slice_editor_window.py's own class docstring for the split) -
@@ -3759,6 +3760,15 @@ class ProgramEditorWindow(QMainWindow):
                 "Export failed - a transfer is already in progress on the "
                 "Transfer Dashboard"
             )
+
+        def _set_busy(busy):
+            # busy_callback is optional (dashboard.py's own reuse of this
+            # window's export_callback contract has nothing indeterminate
+            # to report, so it doesn't accept one) - see this method's own
+            # docstring-adjacent comment at each call site below for what
+            # "busy" actually covers here
+            if busy_callback is not None:
+                busy_callback(busy)
 
         logger = debug_log.get_logger()
         temp_paths = []
@@ -3816,7 +3826,13 @@ class ProgramEditorWindow(QMainWindow):
                 )
                 return False, "Export failed - sending the slices did not complete"
 
-            which, args = self._reload_sample_list_with_retries()
+            # nothing numeric to report while this reloads/retries - see
+            # _set_busy's own comment above
+            _set_busy(True)
+            try:
+                which, args = self._reload_sample_list_with_retries()
+            finally:
+                _set_busy(False)
             if which != 0:
                 sent = f'"{names[0]}"' if len(names) == 1 else f"{len(names)} slices"
                 return False, (
@@ -3858,7 +3874,11 @@ class ProgramEditorWindow(QMainWindow):
             # one more reload so the sample list/zone combos reflect every
             # new arrival - same closing step _perform_duplicate_sample_real
             # ends on
-            self._reload_sample_list_with_retries()
+            _set_busy(True)
+            try:
+                self._reload_sample_list_with_retries()
+            finally:
+                _set_busy(False)
 
             if missing:
                 return False, (
@@ -3895,6 +3915,7 @@ class ProgramEditorWindow(QMainWindow):
         program_name,
         progress_callback,
         status_callback,
+        busy_callback=None,
     ):
         # the "ReCycle-style export" half of the Slice Editor's
         # create-program checkbox (see ui/slice_editor_window.py) - called
@@ -3952,6 +3973,7 @@ class ProgramEditorWindow(QMainWindow):
             return self._create_program_from_slices_locked(
                 names, template_program_index, program_name,
                 progress_callback, status_callback, slice_count,
+                busy_callback=busy_callback,
             )
         finally:
             self._worker.program_created.connect(self._on_program_created)
@@ -3965,7 +3987,12 @@ class ProgramEditorWindow(QMainWindow):
         progress_callback,
         status_callback,
         slice_count,
+        busy_callback=None,
     ):
+        def _set_busy(busy):
+            if busy_callback is not None:
+                busy_callback(busy)
+
         logger = debug_log.get_logger()
         status_callback(f'Creating program "{program_name}"...')
         which, args = self._wait_for_any_signal(
@@ -4050,12 +4077,24 @@ class ProgramEditorWindow(QMainWindow):
                 )
             progress_callback(slice_index, slice_count)
 
-        which, args = self._wait_for_any_signal(
-            [self._worker.keygroups_loaded, self._worker.keygroups_load_failed],
-            start=lambda: self._worker.submit_keygroups(new_index),
-            timeout_ms=20000,
-        )
-        self._worker.submit_program_list()
+        # the per-keygroup progress_callback calls above stop the instant
+        # the last keygroup is CREATED - this final verify (re-reading the
+        # keygroup count back, then refreshing the Programs tab's own list)
+        # is real, separate hardware round-trip time with nothing numeric
+        # left to report, so it's marquee/indeterminate rather than sitting
+        # frozen at its last percentage - see _on_export_busy's own comment
+        # in ui/slice_editor_window.py.
+        status_callback("Verifying keygroups...")
+        _set_busy(True)
+        try:
+            which, args = self._wait_for_any_signal(
+                [self._worker.keygroups_loaded, self._worker.keygroups_load_failed],
+                start=lambda: self._worker.submit_keygroups(new_index),
+                timeout_ms=20000,
+            )
+            self._worker.submit_program_list()
+        finally:
+            _set_busy(False)
         if which != 0 or len(args[1]) != slice_count:
             actual = len(args[1]) if which == 0 else "unknown"
             return False, (

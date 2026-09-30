@@ -90,12 +90,12 @@ def _build_window(
 ):
     samples = samples if samples is not None else list(range(-5000, 5000))
 
-    def export_callback(*args):
+    def export_callback(*args, **kwargs):
         if export_calls is not None:
             export_calls.append(args)
         return export_result
 
-    def create_program_callback(*args):
+    def create_program_callback(*args, **kwargs):
         if create_program_calls is not None:
             create_program_calls.append(args)
         return create_program_result
@@ -531,6 +531,94 @@ def test_export_happy_path_calls_export_callback_with_slices_and_metadata(
     assert callable(progress_cb) and callable(status_cb)
 
 
+def test_export_row_reserves_width_for_every_widget_it_can_ever_show(qapp):
+    # real bug this guards: Cancel Transfer/Create Program+Template/the
+    # progress bar all becoming visible at once during a real export (with
+    # Create Program checked) needed more width than the row - and so the
+    # WINDOW - had at rest, so the window visibly grew wider the moment the
+    # progress bar appeared (confirmed from a screenshot). export_row_
+    # container's own minimum width is reserved up front from every widget
+    # it could ever show at once, not just the ones visible right now - the
+    # same "reserve the space so nothing has to reflow" principle its own
+    # height fix already uses, just applied to width.
+    window = _build_window(
+        program_names=["Bass stab"], create_program_calls=[],
+    )
+    reserved_width = window._export_row_container.minimumWidth()
+
+    for widget in (
+        window.cancel_export_button,
+        window._template_program_separator,
+        window._template_program_label,
+        window.template_program_combo,
+        window.export_progress,
+    ):
+        if widget is not None:
+            widget.setVisible(True)
+
+    assert window._export_row_container.layout().sizeHint().width() <= reserved_width
+
+
+def test_export_passes_a_busy_callback_that_toggles_the_progress_bar(
+    qapp, monkeypatch
+):
+    # export_callback's own busy_callback kwarg (see ProgramEditorWindow.
+    # _export_slices' real use - toggling indeterminate/marquee mode during
+    # its own post-send verify, which has no real percentage to report) -
+    # this test only checks the plumbing: window._on_export_busy is what's
+    # actually passed, and it really does flip export_progress's own range
+    received = {}
+
+    def export_callback(*args, busy_callback=None, **kwargs):
+        received["busy_callback"] = busy_callback
+        return True, "ok"
+
+    window = SliceEditorWindow(
+        None, "SQUARE", list(range(-5000, 5000)), 44100, 60, 0, 0,
+        lambda: [], export_callback,
+    )
+    monkeypatch.setattr(
+        sew.QMessageBox, "question", lambda *a, **k: sew.QMessageBox.StandardButton.Yes
+    )
+    monkeypatch.setattr(sew.QMessageBox, "information", lambda *a, **k: None)
+
+    window._confirm_export()
+
+    busy_callback = received["busy_callback"]
+    assert busy_callback == window._on_export_busy
+    busy_callback(True)
+    assert window.export_progress.minimum() == 0
+    assert window.export_progress.maximum() == 0
+    busy_callback(False)
+    assert window.export_progress.maximum() == 100
+
+
+def test_status_bar_is_hidden_until_an_export_has_something_to_report(
+    qapp, monkeypatch
+):
+    # a real QStatusBar (style.qss.template's QStatusBar rule), matching
+    # the Dashboard/Program Editor's own status bars - the progress bar
+    # that used to also live here (and came out invisible against it in
+    # real use) has moved to export_row instead (see its own construction
+    # comment), so this only ever shows plain text via showMessage(), same
+    # as every other status bar in this app. Hidden until there's actually
+    # something to show (per direct user request - an always-reserved-but-
+    # empty bar read as dead space). Hiding/showing it lets the waveform's
+    # own Expanding stretch factor absorb the vertical change instead of
+    # resizing the window either way.
+    window = _build_window()
+    assert window.status_bar.isHidden()
+
+    monkeypatch.setattr(
+        sew.QMessageBox, "question", lambda *a, **k: sew.QMessageBox.StandardButton.Yes
+    )
+    monkeypatch.setattr(sew.QMessageBox, "information", lambda *a, **k: None)
+    window._confirm_export()
+
+    assert not window.status_bar.isHidden()
+    assert window.status_bar.currentMessage() != ""
+
+
 def test_export_failure_shows_a_warning_not_an_information_dialog(qapp, monkeypatch):
     shown = {}
     window = _build_window(export_result=(False, "it broke"))
@@ -543,7 +631,7 @@ def test_export_failure_shows_a_warning_not_an_information_dialog(qapp, monkeypa
     )
     window._confirm_export()
     assert shown.get("warning") is True
-    assert window.status_label.text() == "it broke"
+    assert window.status_bar.currentMessage() == "it broke"
 
 
 # --- modality guard: ignore Close while an export is in flight --------------

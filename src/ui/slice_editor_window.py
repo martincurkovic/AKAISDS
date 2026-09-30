@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (
     QScrollBar,
     QSizePolicy,
     QSpinBox,
+    QStatusBar,
     QVBoxLayout,
     QWidget,
 )
@@ -508,15 +509,40 @@ class SliceEditorWindow(QDialog):
             export_row.addWidget(self._template_program_label)
             export_row.addWidget(self.template_program_combo)
 
+        # lives here - right after Export/Cancel/Create Program/Template,
+        # before the stretch below - rather than in the status bar
+        # underneath: a real QStatusBar placed inside a modal QDialog stood
+        # out against the rest of this (and every other) dialog in this
+        # app, which never uses one, and a QProgressBar added to it came
+        # out invisible against its own dark background in real use
+        # (confirmed from a screenshot, not just reasoned about) - not
+        # worth chasing further when this row already has a natural home
+        # for it. Hidden until an export actually starts, same as before;
+        # the addStretch() below is what stops it (or Create Program/
+        # Template appearing) from growing the window when it does -  it
+        # eats the row's own slack instead of pushing Close outward,
+        # PROVIDED the row has enough already (true in practice - see the
+        # same addStretch()'s own comment below for the button-width bug
+        # this also fixes).
         self.export_progress = QProgressBar()
         self.export_progress.setRange(0, 100)
         self.export_progress.setFixedWidth(160)
         self.export_progress.setVisible(False)
-        self.status_label = QLabel("")
+        export_row.addWidget(self.export_progress)
+
+        # without this, Close (the last widget with no stretch factor of
+        # its own) silently absorbed whatever horizontal slack this row
+        # had - previously invisible because a status label sat right
+        # before it with its OWN stretch=1 - once that stretch moved out
+        # to its own row below, Close would otherwise visibly change width
+        # every time Create Program's own checkbox/Template combo (or now
+        # the progress bar above) appeared or disappeared (confirmed from
+        # a screenshot, not just reasoned about). This pins every button
+        # in this row to its own natural width regardless.
+        export_row.addStretch()
+
         self.close_button = QPushButton("Close")
         self.close_button.clicked.connect(self.reject)
-        export_row.addWidget(self.export_progress)
-        export_row.addWidget(self.status_label, stretch=1)
         export_row.addWidget(self.close_button)
 
         # export_row's own container gets a FIXED height, computed from
@@ -554,25 +580,111 @@ class SliceEditorWindow(QDialog):
         export_row_height = max(
             export_row.itemAt(i).widget().sizeHint().height()
             for i in range(export_row.count())
+            # addStretch() above is a spacer item, not a widget - .widget()
+            # returns None for it, so it has to be skipped rather than
+            # sizeHint()'d
+            if export_row.itemAt(i).widget() is not None
         )
         self._export_row_container.setFixedHeight(export_row_height)
 
-        layout = QVBoxLayout(self)
-        layout.addLayout(zoom_row)
-        layout.addWidget(self.waveform)
-        layout.addWidget(self._scrollbar_container)
-        layout.addWidget(self.info_label)
-        layout.addLayout(equal_row)
-        layout.addLayout(transient_row)
-        layout.addLayout(name_row)
-        layout.addWidget(self._export_row_container)
+        # same problem as the height fix just above, but for WIDTH, and a
+        # real one this time (not just a few pixels) - the addStretch()
+        # above only stops Close from visibly changing width when
+        # something appears; it does nothing to stop the WINDOW growing
+        # when the row's total content needs more width than the window
+        # currently has, which is exactly what happened once Cancel
+        # Transfer/Create Program+Template/the progress bar all became
+        # visible at once during a real export with Create Program checked
+        # (confirmed from a screenshot: the window visibly widened when the
+        # progress bar appeared). A hidden widget contributes NOTHING to a
+        # QLayout's sizeHint, so summing individual sizeHint()s here would
+        # still miss QHBoxLayout's own inter-widget spacing - showing
+        # everything that starts hidden just long enough to ask the LAYOUT
+        # ITSELF for its real sizeHint, then hiding it all again, measures
+        # the true worst-case width exactly, the same "reserve the space
+        # up front" principle as export_row_height above, just applied to
+        # every widget that can ever appear in this row at once rather
+        # than only the currently-visible ones.
+        normally_hidden = [
+            widget
+            for widget in (
+                self.cancel_export_button,
+                self._template_program_separator,
+                self._template_program_label,
+                self.template_program_combo,
+                self.export_progress,
+            )
+            if widget is not None and widget.isHidden()
+        ]
+        for widget in normally_hidden:
+            widget.setVisible(True)
+        export_row_min_width = export_row.sizeHint().width()
+        for widget in normally_hidden:
+            widget.setVisible(False)
+        self._export_row_container.setMinimumWidth(export_row_min_width)
+
+        # A real QStatusBar, matching the Dashboard/Program Editor's own
+        # status bars exactly (style.qss.template's QStatusBar rule) - a
+        # plain QLabel was tried in between, but read as inconsistent in
+        # the OTHER direction (no visual weight at all where every other
+        # window in this app has a real status bar). The visible dark box
+        # a first attempt at this had wasn't actually the wrong color
+        # (${bg_statusbar} is close to this dialog's own ${bg_dialog}) - it
+        # was Fusion's own default QStatusBar::item sunken-panel border
+        # around the progress bar this used to also host, fixed at the QSS
+        # level above rather than by abandoning QStatusBar. The progress
+        # bar itself now lives in export_row instead (see its own
+        # construction comment above) - this bar only ever shows plain
+        # text via showMessage(), the same as every other status bar in
+        # this app. Hidden until an export actually has something to
+        # report, per direct user request - an always-reserved-but-empty
+        # bar read as dead space; hiding/showing it lets the waveform's own
+        # Expanding stretch factor absorb the vertical change instead of
+        # resizing the window either way.
+        self.status_bar = QStatusBar()
+        self.status_bar.setSizeGripEnabled(False)
+        self.status_bar.setVisible(False)
+
+        # main content lives in ITS OWN widget (content_widget), not
+        # straight in this QDialog's own top-level layout - so it keeps the
+        # normal default margins around it (a QWidget's own top-level
+        # layout picks these up automatically from the Fusion style; a
+        # plain addLayout() into a parent layout does not - same reasoning
+        # export_row's own container comment above already documents) while
+        # status_bar, added to the OUTER (zero-margin) layout instead, can
+        # actually reach every edge of the window. A QMainWindow's real
+        # setStatusBar() docks flush to the window's own edges outside its
+        # central widget's margins the same way; this is the QDialog
+        # equivalent of that, needed because QDialog has no such docking
+        # mechanism of its own. Without this split, status_bar sat inset
+        # from the window's left/right/bottom edges by the dialog's own
+        # default margins - visibly NOT flush the way every other status
+        # bar in this app is against its own QMainWindow (confirmed from a
+        # screenshot, not just reasoned about).
+        content_widget = QWidget()
+        content_layout = QVBoxLayout(content_widget)
+        content_layout.addLayout(zoom_row)
+        content_layout.addWidget(self.waveform)
+        content_layout.addWidget(self._scrollbar_container)
+        content_layout.addWidget(self.info_label)
+        content_layout.addLayout(equal_row)
+        content_layout.addLayout(transient_row)
+        content_layout.addLayout(name_row)
+        content_layout.addWidget(self._export_row_container)
         # explicit belt-and-suspenders alongside the waveform's own
         # Expanding policy/info_label's own Fixed policy above - makes it
         # unambiguous that ALL surplus vertical space from resizing this
         # dialog goes to the waveform and nowhere else, resizing the
         # window otherwise leaves every other row pinned exactly where it
         # is
-        layout.setStretchFactor(self.waveform, 1)
+        content_layout.setStretchFactor(self.waveform, 1)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        layout.addWidget(content_widget)
+        layout.addWidget(self.status_bar)
+        layout.setStretchFactor(content_widget, 1)
         self.resize(760, 420)
 
         self._update_info_label()
@@ -799,9 +911,10 @@ class SliceEditorWindow(QDialog):
         self._exporting = True
         if self.cancel_export_button is not None:
             self.cancel_export_button.setVisible(True)
+        self.status_bar.setVisible(True)
         self.export_progress.setVisible(True)
         self.export_progress.setValue(0)
-        self.status_label.setText(
+        self.status_bar.showMessage(
             f'Sending "{names[0]}"...'
             if slice_count == 1
             else f"Exporting {slice_count} slices..."
@@ -819,6 +932,7 @@ class SliceEditorWindow(QDialog):
                 self._shlto,
                 self._on_export_progress,
                 self._on_export_status,
+                busy_callback=self._on_export_busy,
             )
             if success and create_program:
                 # runs AFTER every slice has actually landed as a resident
@@ -831,17 +945,27 @@ class SliceEditorWindow(QDialog):
                     program_name,
                     self._on_export_progress,
                     self._on_export_status,
+                    busy_callback=self._on_export_busy,
                 )
                 success = success and prog_success
-                message = f"{message}\n{prog_message}"
+                # joined onto ONE line, not stacked with "\n" - a real
+                # QStatusBar renders showMessage() as a single line, same
+                # as every other status bar in this app (also sidesteps a
+                # real clipping bug an earlier plain-QLabel version of this
+                # had, where a two-line message's own descenders got cut
+                # off); " - " matches how this window's own multi-part
+                # hint_label text is separated elsewhere
+                # ("Click: preview slice   •   ...")
+                message = f"{message} - {prog_message}"
         finally:
             self._exporting = False
             if self.cancel_export_button is not None:
                 self.cancel_export_button.setVisible(False)
             self._set_controls_enabled(True)
+            self._on_export_busy(False)
             self.export_progress.setVisible(False)
 
-        self.status_label.setText(message)
+        self.status_bar.showMessage(message)
         if success:
             self._dirty = False  # this exact marker layout is now on the sampler
             self.export_succeeded = True
@@ -852,7 +976,7 @@ class SliceEditorWindow(QDialog):
     def _on_cancel_export_shortcut(self):
         if not self._exporting or self._cancel_callback is None:
             return
-        self.status_label.setText("Cancelling...")
+        self.status_bar.showMessage("Cancelling...")
         QApplication.processEvents()
         self._cancel_callback()
 
@@ -862,7 +986,23 @@ class SliceEditorWindow(QDialog):
         QApplication.processEvents()
 
     def _on_export_status(self, text):
-        self.status_label.setText(text)
+        self.status_bar.showMessage(text)
+        QApplication.processEvents()
+
+    def _on_export_busy(self, busy):
+        # indeterminate ("marquee") mode for stretches export_callback/
+        # create_program_callback have no real fraction to report -
+        # ProgramEditorWindow._export_slices' own post-send sample-list
+        # reload/verify, and _create_program_from_slices' own final
+        # keygroup-count verification, both genuinely take a few real
+        # seconds against hardware with nothing numeric to show. Leaving
+        # the bar sitting at its last real percentage (usually ~100%) read
+        # as frozen/hung rather than still working. QProgressBar with
+        # range (0, 0) is Qt's own documented way to ask for the marquee
+        # style; switching back to (0, 100) resumes showing whatever value
+        # was last set (Qt doesn't reset it), so this needs no separate
+        # bookkeeping of "the value before busy mode started".
+        self.export_progress.setRange(0, 0 if busy else 100)
         QApplication.processEvents()
 
     def _mark_dirty(self):

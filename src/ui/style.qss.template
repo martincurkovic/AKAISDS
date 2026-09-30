@@ -284,6 +284,17 @@ QStatusBar {
     color: ${text_statusbar};
 }
 
+/* Fusion's default QStatusBar::item is a sunken PANEL frame around each
+   permanently-added widget (addWidget()/addPermanentWidget()) - its own
+   border/background isn't covered by the plain QStatusBar rule above
+   (a distinct sub-control, styled separately in Qt Style Sheets), and
+   rendered as a visibly darker box that read as "doesn't match the rest
+   of the app" against this app's own flat, borderless look everywhere
+   else (confirmed from a screenshot, not just reasoned about). */
+QStatusBar::item {
+    border: none;
+}
+
 /* ---------- Dialogs (Edit sample, Global settings, MIDI settings) ---------- */
 QDialog {
     background-color: ${bg_dialog};

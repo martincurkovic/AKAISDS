@@ -676,12 +676,17 @@ class TransferDashboard(QWidget):
             shlto,
             progress_callback,
             status_callback,
+            busy_callback=None,
         ):
             # spitch/stuno/shlto are Akai program-header concepts
             # (SliceEditorWindow's shared export_callback contract always
             # forwards them) with no equivalent for a queued file that
             # hasn't been sent to any sampler yet - accepted positionally,
-            # unused
+            # unused. busy_callback (ProgramEditorWindow._export_slices' own
+            # indeterminate-progress marker for its post-send hardware
+            # verify) is accepted for the same "shared contract" reason but
+            # never called - this export never leaves the local queue, so
+            # there's no hardware round-trip to mark indeterminate.
             right_slices = None
             if right_channel is not None:
                 # the exact same start/end/markers that produced `slices`

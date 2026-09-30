@@ -4045,6 +4045,35 @@ def test_export_slices_real_mode_happy_path_sends_batch_and_writes_headers(
         assert header_calls["SMPEND"] == len(slice_samples) - 1
 
 
+def test_export_slices_toggles_busy_callback_around_the_post_send_reload(
+    editor, qapp, monkeypatch
+):
+    # _export_slices' own post-send _reload_sample_list_with_retries() call
+    # has nothing numeric to report - busy_callback(True)/(False) around it
+    # is what lets SliceEditorWindow switch its progress bar to
+    # indeterminate for that stretch instead of sitting frozen at whatever
+    # percentage the batch send itself last reported (see ui/slice_editor_
+    # window.py's own _on_export_busy)
+    monkeypatch.delenv("AKAISDS_DEMO_SAMPLER", raising=False)
+    bridge = editor._bridge
+    fake_sampler = FakeSamplerController(bridge)
+    editor._main_window.sampler_controller = fake_sampler
+
+    busy_calls = []
+    success, message = editor._export_slices(
+        ["BREAK-1"], [list(range(10))], 44100, 16, None, 60, 0, 0,
+        lambda *a: None, lambda *a: None,
+        busy_callback=lambda busy: busy_calls.append(busy),
+    )
+
+    assert success is True
+    # at least one True/False pair for the post-send reload, and another
+    # for the closing reload right before returning - not asserting an
+    # exact count since both reloads use the same helper
+    assert True in busy_calls
+    assert busy_calls[-1] is False
+
+
 def test_export_slices_reports_failure_when_the_batch_send_fails(
     editor, qapp, monkeypatch
 ):
@@ -4140,6 +4169,24 @@ def test_create_program_from_slices_happy_path_maps_from_c1(editor, qapp):
     assert keygroup_writes[(0, "SNAME4")] == ""
     assert (1, "CP1") not in keygroup_writes
     assert (2, "CP1") not in keygroup_writes
+
+
+def test_create_program_from_slices_toggles_busy_callback_around_final_verify(
+    editor, qapp
+):
+    # the per-keygroup progress_callback calls stop once the last keygroup
+    # is CREATED - the final keygroup-count verify (re-reading keygroups
+    # back, then refreshing the program list) is separate real wait time
+    # with nothing numeric left to report, so it's wrapped in busy_callback
+    # the same way _export_slices' own post-send reload is
+    busy_calls = []
+    success, message = editor._create_program_from_slices(
+        ["BREAK-01", "BREAK-02", "BREAK-03"], 0, "BREAK",
+        lambda *a: None, lambda *a: None,
+        busy_callback=lambda busy: busy_calls.append(busy),
+    )
+    assert success is True
+    assert busy_calls == [True, False]
 
 
 def test_create_program_from_slices_single_slice_maps_only_c1(editor, qapp):
