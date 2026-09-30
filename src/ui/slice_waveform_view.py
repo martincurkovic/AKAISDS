@@ -69,8 +69,22 @@ class SliceWaveformView(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setFixedHeight(220)
-        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        # 220px is a floor, not a ceiling - this used to be setFixedHeight,
+        # which meant resizing the Slice Editor dialog taller couldn't
+        # actually show any more waveform at all; the surplus vertical
+        # space instead silently landed on info_label (the only OTHER
+        # widget in that layout without a Fixed vertical policy - see
+        # SliceEditorWindow's own construction comment), growing that
+        # instead of this and pushing every row below it down the window.
+        # Expanding + a minimum (rather than no minimum at all) means a
+        # freshly-opened dialog still starts at a sensible size, but
+        # enlarging the window now actually grows the one thing a user
+        # resizing this dialog is trying to see more of. Every paintEvent
+        # measurement already reads self.height() dynamically (never a
+        # hardcoded 220), so nothing else needed to change for this to be
+        # safe.
+        self.setMinimumHeight(220)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.setMouseTracking(True)
         self._samples = []
         self._envelope = []

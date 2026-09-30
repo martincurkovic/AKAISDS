@@ -12,6 +12,7 @@ from PySide6.QtWidgets import (
     QProgressBar,
     QPushButton,
     QScrollBar,
+    QSizePolicy,
     QSlider,
     QSpinBox,
     QVBoxLayout,
@@ -300,19 +301,43 @@ class SliceEditorWindow(QDialog):
         zoom_row.addWidget(self.zoom_in_button)
         zoom_row.addWidget(self.zoom_fit_button)
 
-        # unlike program_editor_window.py's own scrollbar_container (which
-        # deliberately reserves its height even while hidden, so the
-        # Samples tab's permanently-visible marker row never jumps as zoom
-        # crosses the scrolling threshold), this dialog is short-lived and
-        # its own layout below the waveform has nothing that minds
-        # reflowing - added directly (no fixed-height wrapper) so it
-        # actually collapses to zero height at "Fit" instead of leaving a
-        # visible empty strip
+        # this used to be added directly (no fixed-height wrapper), on the
+        # reasoning that a short-lived modal dialog's own layout below the
+        # waveform had nothing that would mind reflowing - reversed after
+        # real use: every row below the scrollbar (marker spinboxes, Equal
+        # Slices, Sensitivity, name/quality, Export) visibly jumped up and
+        # back down every time zooming crossed the scrolling threshold,
+        # which is exactly as jarring here as it would be anywhere else.
+        # Same fixed-height container program_editor_window.py's own
+        # scrollbar_container already uses for the Samples tab's
+        # WaveformView, for the same reason - see that one's own comment.
         self.scrollbar = QScrollBar(Qt.Orientation.Horizontal)
         self.scrollbar.valueChanged.connect(self._on_scrollbar_moved)
+        self._scrollbar_container = QWidget()
+        # transparentContainer (style.qss.template) - otherwise this bare
+        # QWidget picks up the base QWidget rule's own ${bg} rather than
+        # blending into the QDialog's own ${bg_dialog}, which differs -
+        # same fix program_editor_window.py's own scrollbar_container uses
+        self._scrollbar_container.setObjectName("transparentContainer")
+        self._scrollbar_container.setFixedHeight(self.scrollbar.sizeHint().height())
+        scrollbar_container_layout = QVBoxLayout(self._scrollbar_container)
+        scrollbar_container_layout.setContentsMargins(0, 0, 0, 0)
+        scrollbar_container_layout.addWidget(self.scrollbar)
 
         self.info_label = QLabel()
         self.info_label.setWordWrap(True)
+        # a plain QLabel defaults to a Preferred vertical size policy - the
+        # only widget directly in the main layout below that isn't already
+        # Fixed (every QHBoxLayout row's own buttons/spinboxes/combos are).
+        # Without pinning this down too, it was the one thing that silently
+        # grew to soak up the waveform's own newly-freed surplus space (see
+        # SliceWaveformView's own construction comment) rather than the
+        # waveform growing at all - same failure mode program_editor_
+        # window.py's own _build_section_card already had to fix once for
+        # its section cards (see AGENTS.md).
+        self.info_label.setSizePolicy(
+            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed
+        )
 
         equal_row = QHBoxLayout()
         self.equal_count_spin = QSpinBox()
@@ -515,12 +540,19 @@ class SliceEditorWindow(QDialog):
         layout = QVBoxLayout(self)
         layout.addLayout(zoom_row)
         layout.addWidget(self.waveform)
-        layout.addWidget(self.scrollbar)
+        layout.addWidget(self._scrollbar_container)
         layout.addWidget(self.info_label)
         layout.addLayout(equal_row)
         layout.addLayout(transient_row)
         layout.addLayout(name_row)
         layout.addWidget(self._export_row_container)
+        # explicit belt-and-suspenders alongside the waveform's own
+        # Expanding policy/info_label's own Fixed policy above - makes it
+        # unambiguous that ALL surplus vertical space from resizing this
+        # dialog goes to the waveform and nowhere else, resizing the
+        # window otherwise leaves every other row pinned exactly where it
+        # is
+        layout.setStretchFactor(self.waveform, 1)
         self.resize(760, 420)
 
         self._update_info_label()
@@ -543,12 +575,17 @@ class SliceEditorWindow(QDialog):
     # --- info label ------------------------------------------------------
 
     def _update_info_label(self):
-        bounds = self.waveform.slice_bounds()
-        lengths = ", ".join(str(b - a + 1) for a, b in bounds)
-        self.info_label.setText(
-            f"{len(bounds)} slice{'s' if len(bounds) != 1 else ''} - "
-            f"lengths (frames): {lengths}"
-        )
+        # used to also append "- lengths (frames): 441, 2203, ..." (one
+        # number per slice) - harmless at a handful of slices, but with
+        # enough of them (Detect Transients at high sensitivity easily
+        # produces 30+) the label's own wrapped text grew tall enough to
+        # visibly push every row below it down the window - the opposite
+        # of "fixed positioning," and confirmed as a real usability
+        # problem, not just a cosmetic one. Slice count alone is what a
+        # user actually needs at a glance; per-slice lengths are already
+        # visible on the waveform itself (each region's own width).
+        count = len(self.waveform.slice_bounds())
+        self.info_label.setText(f"{count} slice{'s' if count != 1 else ''}")
 
     # --- click-to-preview --------------------------------------------------
 
