@@ -66,7 +66,7 @@ from ui.quickstart_dialog import show_quickstart_dialog
 from ui.update_helper import UpdateCheckRunner
 from ui import tooltips as tt
 from core import debug_log
-from core.akai_sysex import baseline_semitones_for_bandwidth, compute_bandwidth_and_tuning
+from core.akai_sysex import baseline_semitones_for_bandwidth
 from core import midi_manager as midi_manager_module
 from core import program_editor_bridge
 from core import root_note_detection
@@ -6329,22 +6329,34 @@ class ProgramEditorWindow(QMainWindow):
         # small a residual).
         #
         # NOT a bare overwrite with just the residual, though - Tune
-        # (STUNO) is also where core/akai_sysex.py's own
-        # compute_bandwidth_and_tuning bakes in a SEPARATE compensation
+        # (STUNO) is also where a SEPARATE compensation gets baked in
         # whenever a sample was originally sent at a non-native rate (the
         # Akai hardware's playback engine only physically runs at 22050 or
         # 44100 Hz - anything else needs a permanent tuning offset just to
         # play back at the right pitch at all, regardless of what its
-        # recorded content actually is). That offset is a deterministic
-        # function of this sample's own declared rate alone, not of
-        # whatever happens to already be sitting in STUNO - recomputing it
-        # fresh from entry["framerate"] and adding our own measured
-        # residual on top gives the mathematically correct total either
-        # way, rather than risking a blind overwrite silently discarding
-        # hardware-engine compensation a sample at an odd rate actually
-        # needs (comes out to 0 for the overwhelmingly common native-rate
-        # case, so this is a no-op there).
-        _, baseline_semitones = compute_bandwidth_and_tuning(entry["framerate"])
+        # recorded content actually is). Recomputing that baseline fresh
+        # and adding our own measured residual on top gives the
+        # mathematically correct total either way, rather than risking a
+        # blind overwrite silently discarding hardware-engine compensation
+        # a sample at an odd rate actually needs (comes out to 0 for the
+        # overwhelmingly common native-rate case, so this is a no-op
+        # there).
+        #
+        # baseline_semitones_for_bandwidth (entry["sbandw"], the sample's
+        # OWN real bandwidth field), not compute_bandwidth_and_tuning's own
+        # "nearest bucket to framerate" guess - see that guess's removal
+        # from _on_waveform_preview_requested for the real bug this caused:
+        # "nearest bucket" is only the rule THIS app's own 16-bit Akai
+        # SDATA send path uses (sampler_controller._start_unit); a sample
+        # sent via the generic/universal MIDI SDS path (any OTHER bit
+        # depth) gets its SBANDW/STUNO derived by the hardware itself,
+        # confirmed to NOT pick the nearest bucket. The same wrong-guess
+        # bug applies here identically - re-deriving "nearest bucket" would
+        # write a Tune value baked against the WRONG baseline for any
+        # sample that didn't arrive via our own 16-bit path.
+        baseline_semitones = baseline_semitones_for_bandwidth(
+            entry["framerate"], entry["sbandw"]
+        )
         total_semitones = baseline_semitones + cents / 100.0
         total_semitones = max(-50.0, min(50.0, total_semitones))
         self.sample_tune_spinbox.setValue(total_semitones)

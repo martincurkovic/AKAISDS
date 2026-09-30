@@ -3970,6 +3970,44 @@ def test_confirm_detect_root_note_adds_hardware_engine_compensation_for_non_nati
     assert editor.sample_tune_spinbox.value() != pytest.approx(0.15, abs=0.005)
 
 
+def test_confirm_detect_root_note_uses_real_sbandw_not_nearest_bucket_guess(
+    editor, qapp, monkeypatch
+):
+    # same real bug/fix as _on_waveform_preview_requested's own
+    # test_preview_requested_uses_real_sbandw_not_nearest_bucket_guess -
+    # an 11025 Hz sample sent at any bit depth other than 16 gets its
+    # SBANDW/STUNO derived by the hardware itself (the generic/universal
+    # MIDI SDS path has no such fields), confirmed to land on
+    # bandwidth=1/44100 rather than the nearer bandwidth=0/22050 that
+    # rate would get at 16-bit. Deliberately uses a rate/sbandw
+    # combination where "nearest bucket to framerate" (bandwidth=0, since
+    # 11025 is nearer 22050) and the sample's REAL sbandw (1) disagree -
+    # unlike the sibling test above (48000 Hz), whose nearest bucket and
+    # fixture sbandw happen to already match, so it wouldn't catch a
+    # reversion back to the wrong "nearest bucket" guess.
+    import ui.program_editor_window as pew
+
+    monkeypatch.setattr(
+        pew.root_note_detection, "detect_root_note", lambda *a, **k: (72, 0.0, 0.9)
+    )
+    monkeypatch.setattr(
+        pew.QMessageBox, "question", lambda *a, **k: pew.QMessageBox.StandardButton.Yes
+    )
+    samples = list(range(-5000, 5000))
+    markers = {"start": 0, "loop_start": 100, "loop_end": 900, "end": 999}
+    _select_sample_with_full_audio(editor, qapp, 0, samples, markers)
+    editor._sample_waveform_cache[0]["framerate"] = 11025
+    editor._sample_waveform_cache[0]["sbandw"] = 1
+    editor.sample_root_note_spinbox.setValue(60)
+    editor.sample_tune_spinbox.setValue(0.0)
+
+    editor._confirm_detect_root_note()
+
+    # -24.00 (the real bandwidth=1 baseline), NOT -12.00 (what a
+    # nearest-bucket-to-11025 guess would wrongly produce)
+    assert editor.sample_tune_spinbox.value() == pytest.approx(-24.0, abs=0.005)
+
+
 def test_detect_root_note_analysis_window_prefers_a_large_enough_loop_region(
     editor, qapp, monkeypatch
 ):
