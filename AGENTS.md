@@ -461,6 +461,38 @@ sample's own declared rate and ADDS the detected residual on top, rather
 than blindly discarding it (comes out to 0 - a no-op - for the
 overwhelmingly common native-rate case).
 
+**That baseline must come from the sample's own `SBANDW`, never
+re-derived from its rate - a real bug, found and fixed.** Both
+`_confirm_detect_root_note` and `_on_waveform_preview_requested` used to
+recompute the baseline via `compute_bandwidth_and_tuning(framerate)`,
+which picks whichever native bucket (22050/44100) is numerically NEAREST
+the sample's rate. That's only the rule THIS app's own 16-bit Akai SDATA
+send path actually follows (`sampler_controller._start_unit`,
+`bit_depth == 16`) - a sample sent at any OTHER bit depth goes through
+the generic/universal MIDI SDS path instead (no `STUNO`/`SBANDW` fields
+in that protocol at all), and the SAMPLER ITSELF derives its own
+`SBANDW`/`STUNO` from the incoming dump using an undocumented rule that
+does NOT pick the nearest bucket. Confirmed on real hardware: an 11025 Hz
+sample sent at 16-bit reads back `STUNO` -12.00 (bandwidth=0/22050, the
+nearest bucket); the SAME sample sent at either 8-bit or 12-bit reads
+back -24.00 both times - not "double" by some bit-depth-dependent
+scaling, but exactly what you get from always assuming bandwidth=1/44100
+regardless of which bucket is actually nearest. Re-deriving "nearest
+bucket" for a sample that arrived via the generic path silently computes
+against the WRONG baseline - the real, reported symptom was the Samples
+tab's own click-to-preview playing such a sample back a full octave low
+despite it playing correctly on actual hardware (and round-tripping
+correctly through the Transfer Dashboard's own SDS receive → WAV save).
+Fixed: `SBANDW` is now read directly (`_SAMPLE_DETAIL_FIELDS`, hardware's
+own real value for THIS sample) and passed to
+`baseline_semitones_for_bandwidth(rate, bandwidth)` instead of guessed -
+correct regardless of which path actually produced the sample's `STUNO`.
+`test_preview_requested_uses_real_sbandw_not_nearest_bucket_guess`/
+`test_confirm_detect_root_note_uses_real_sbandw_not_nearest_bucket_guess`
+both deliberately use a rate/bandwidth combination where the two
+computations disagree, so a reversion to "nearest bucket" would actually
+be caught.
+
 ## Slice Editor (Samples tab): manual ReCycle-style breakbeat chopping
 
 "Slice Editor…" opens a modal `SliceEditorWindow` over a sample's
