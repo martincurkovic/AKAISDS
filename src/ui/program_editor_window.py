@@ -7021,8 +7021,13 @@ class ProgramEditorWindow(QMainWindow):
                     sample_index,
                     sampler_controller,
                     original_name,
+                    entry,
                     new_samples,
                     framerate,
+                    new_start,
+                    new_loop_start,
+                    new_loop_end,
+                    new_end,
                     action_label,
                 )
         finally:
@@ -7080,8 +7085,13 @@ class ProgramEditorWindow(QMainWindow):
         sample_index,
         sampler_controller,
         original_name,
+        entry,
         new_samples,
         framerate,
+        new_start,
+        new_loop_start,
+        new_loop_end,
+        new_end,
         action_label,
     ):
         # The only audio-replace mechanism anywhere in this stack (s3k has
@@ -7237,6 +7247,33 @@ class ProgramEditorWindow(QMainWindow):
             self._write_knob_value(
                 "SHNAME", "sample", original_name, keygroup_index=0, index=new_index
             )
+
+            # a freshly-sent SDS dump lands with the sampler's own default
+            # header, not the original sample's - without this, Trim/
+            # Reverse's genuinely new (rebased/mirrored) loop points and
+            # Fade/Normalise/Filter's unchanged-but-known ones would both
+            # be silently discarded. Same eight-field pattern
+            # _perform_duplicate_sample_real already uses, just sourced
+            # from the transform's own new_* markers instead of the live
+            # waveform_view (this sample's audio just changed shape, so
+            # the view's current markers don't necessarily apply).
+            loop_length_frames = new_loop_end - new_loop_start
+            for param_name, value in (
+                ("SPTYPE", entry["sptype"]),
+                ("SPITCH", entry["spitch"]),
+                ("SHLTO", entry["shlto"]),
+                ("STUNO", entry["stuno"]),
+                ("SSTART", new_start),
+                ("SMPEND", new_end),
+                ("LOOPAT1", new_loop_end),
+                (
+                    "LLNGTH1",
+                    loop_length_frames * _LOOP_LENGTH_FIXED_POINT_SCALE,
+                ),
+            ):
+                self._write_knob_value(
+                    param_name, "sample", value, keygroup_index=0, index=new_index
+                )
 
             # one more reload so the sample list reflects the rename - and
             # to land on a clean final selection: nothing stayed selected

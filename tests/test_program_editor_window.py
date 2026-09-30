@@ -2779,7 +2779,7 @@ def _select_sample_with_full_audio(editor, qapp, sample_index, samples, markers)
     )
     editor._sample_waveform_cache[sample_index] = {
         "samples": samples, "framerate": 44100, "frame_count": len(samples),
-        "sptype": 0, "spitch": 60, **markers,
+        "sptype": 0, "spitch": 60, "shlto": 0, "stuno": 0, **markers,
     }
 
 
