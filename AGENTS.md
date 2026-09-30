@@ -213,6 +213,24 @@ Widget visibility assertions use `.isHidden()`, not `.isVisible()` - the
 `editor` test fixture never calls `.show()`, and `.isVisible()` is
 unconditionally `False` for a never-shown top-level window.
 
+**`QListWidgetItem` + `setItemWidget` double-paints the item's own text if
+you also give the item text** - confirmed with a minimal repro, not just
+theory: an item constructed `QListWidgetItem(name)` then handed a custom
+row widget via `setItemWidget` renders BOTH the item's own default text
+AND the widget's own label, overlapping/offset, looking like stray
+strikethrough garbage rather than two legible copies. The fix is to
+construct the item with no text at all (`QListWidgetItem()`) - same
+convention `_add_keygroup_row` already used, for this exact reason - and
+keep whatever the row actually needs to display in the widget alone. The
+Samples tab's list (`_on_samples_loaded`/`_build_sample_list_row_widget`,
+added to show each sample's duration) hit this: `_sample_name_at_row`
+(backed by `self._sample_list`) is the real source of truth for a row's
+name everywhere in the file now, not `item.text()`, which is always
+empty. Also: a custom item widget's own `sizeHint()` is used as the row's
+size AS-IS - it does NOT also inherit `QListWidget::item`'s own QSS
+`padding`, so a row widget needs its own matching margins or every row
+comes out shorter/more cramped than a plain-text row would.
+
 ## Envelope graphs (`ui/envelope_graph.py`)
 
 Each ADSR/ENV2 stage gets a FIXED width budget, scaled only by its own
