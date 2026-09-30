@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (
     QScrollBar,
     QSpinBox,
     QVBoxLayout,
+    QWidget,
 )
 
 from core import sample_slicing
@@ -379,16 +380,23 @@ class SliceEditorWindow(QDialog):
         self.create_program_checkbox = None
         self.template_program_combo = None
         self._template_program_label = None
+        self._template_program_separator = None
         if program_names_provider is not None and create_program_callback is not None:
             program_names = program_names_provider()
             self.create_program_checkbox = QCheckBox("Create new program with slices")
             self.create_program_checkbox.setToolTip(tooltips.CREATE_PROGRAM_CHECKBOX)
+            # same bullet-separator style as the zoom row's own hint_label
+            # above ("Click: preview slice   •   ...") - a plain "Template:"
+            # butted right up against the checkbox's own text read as one
+            # run-on phrase rather than two distinct controls
+            self._template_program_separator = QLabel("•")
             self._template_program_label = QLabel("Template:")
             self.template_program_combo = QComboBox()
             self.template_program_combo.addItems(program_names)
-            # the combo (and its label) only ever APPEAR once the checkbox
+            # the separator/label/combo only ever APPEAR once the checkbox
             # is checked - per direct user request, rather than sitting
             # there always-visible-but-greyed-out
+            self._template_program_separator.setVisible(False)
             self._template_program_label.setVisible(False)
             self.template_program_combo.setVisible(False)
             self.template_program_combo.setEnabled(False)
@@ -414,6 +422,7 @@ class SliceEditorWindow(QDialog):
                     tooltips.CREATE_PROGRAM_NO_TEMPLATE
                 )
             export_row.addWidget(self.create_program_checkbox)
+            export_row.addWidget(self._template_program_separator)
             export_row.addWidget(self._template_program_label)
             export_row.addWidget(self.template_program_combo)
 
@@ -428,6 +437,37 @@ class SliceEditorWindow(QDialog):
         export_row.addWidget(self.status_label, stretch=1)
         export_row.addWidget(self.close_button)
 
+        # export_row's own container gets a FIXED height, computed from
+        # every widget in it up front - including the Template separator/
+        # label/combo, which start out hidden (see above). A QLayout
+        # excludes a hidden widget from its row's height calculation
+        # entirely, but QWidget.sizeHint() itself is unaffected by
+        # visibility - so without this, the row (and via minimumSizeHint,
+        # the whole dialog) grew a few pixels taller the instant Template
+        # first appeared, since the Template combo's own sizeHint is
+        # slightly taller than the checkbox/buttons alongside it. Fixing
+        # the row's height from the tallest candidate up front, whether
+        # currently visible or not, closes that gap - same "reserve the
+        # space so nothing else has to reflow" reasoning as program_editor_
+        # window.py's own scrollbar_container (see AGENTS.md), just scoped
+        # to height here instead of visibility.
+        self._export_row_container = QWidget()
+        # zero margins - export_row used to be a NESTED layout (added via
+        # layout.addLayout(export_row), which Qt gives 0 contents margins
+        # by default); making it a QWidget's own top-level layout instead
+        # would otherwise pick up that widget's default top-level margins
+        # (~9-11px a side under Fusion) on top of the fixed height below,
+        # silently eating into the row's usable height and clipping
+        # Export/Cancel/Close at the bottom - confirmed from a screenshot,
+        # not just reasoned about.
+        export_row.setContentsMargins(0, 0, 0, 0)
+        self._export_row_container.setLayout(export_row)
+        export_row_height = max(
+            export_row.itemAt(i).widget().sizeHint().height()
+            for i in range(export_row.count())
+        )
+        self._export_row_container.setFixedHeight(export_row_height)
+
         layout = QVBoxLayout(self)
         layout.addLayout(zoom_row)
         layout.addWidget(self.waveform)
@@ -435,7 +475,7 @@ class SliceEditorWindow(QDialog):
         layout.addWidget(self.info_label)
         layout.addLayout(equal_row)
         layout.addLayout(name_row)
-        layout.addLayout(export_row)
+        layout.addWidget(self._export_row_container)
         self.resize(760, 420)
 
         self._update_info_label()
@@ -695,8 +735,10 @@ class SliceEditorWindow(QDialog):
         self._dirty = True
 
     def _on_create_program_toggled(self, checked):
-        # the Template combo (and its label) only exist visually once the
-        # checkbox is checked - see this window's own construction comment
+        # the Template combo (and its separator/label) only exist visually
+        # once the checkbox is checked - see this window's own construction
+        # comment
+        self._template_program_separator.setVisible(checked)
         self._template_program_label.setVisible(checked)
         self.template_program_combo.setVisible(checked)
         self.template_program_combo.setEnabled(checked)

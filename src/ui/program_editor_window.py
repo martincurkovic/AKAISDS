@@ -7637,14 +7637,19 @@ if __name__ == "__main__":
     from ui import theme
 
     class _StandaloneSamplerController:
-        # the only thing _open_slice_editor/_export_slices actually need
+        # the only things _open_slice_editor/_export_slices actually need
         # from a real SamplerController when there's no Transfer Dashboard
         # around at all - just enough for the Slice Editor's own busy-check
-        # to pass. Export itself still isn't reachable this way (its button
-        # is disabled in demo mode - see SliceEditorWindow's demo_mode
-        # param), so send_file_queue is deliberately not stubbed here.
+        # to pass and for its cancel_callback wiring to have something
+        # (never actually called - Export is disabled in demo mode, so
+        # SliceEditorWindow's own Cancel Transfer path is unreachable here)
+        # to bind to. send_file_queue is deliberately not stubbed - that
+        # one genuinely can't be reached this way.
         def is_transfer_busy(self):
             return False
+
+        def cancel_transfer(self):
+            pass
 
     class _StandaloneHost:
         # ProgramEditorWindow.closeEvent() calls main_window.show() to bring

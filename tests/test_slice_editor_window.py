@@ -290,16 +290,35 @@ def test_create_program_combo_only_enabled_while_checkbox_checked(qapp):
 
 def test_create_program_combo_only_visible_while_checkbox_checked(qapp):
     # per direct user request: the Template combo doesn't just sit there
-    # greyed out - it doesn't appear at all until the checkbox is checked
+    # greyed out - it doesn't appear at all until the checkbox is checked.
+    # The bullet separator between the checkbox's own text and "Template:"
+    # follows the same show/hide as the label/combo it separates.
     window = _build_window(program_names=["Bass stab"])
     assert window.template_program_combo.isHidden() is True
     assert window._template_program_label.isHidden() is True
+    assert window._template_program_separator.isHidden() is True
     window.create_program_checkbox.setChecked(True)
     assert window.template_program_combo.isHidden() is False
     assert window._template_program_label.isHidden() is False
+    assert window._template_program_separator.isHidden() is False
     window.create_program_checkbox.setChecked(False)
     assert window.template_program_combo.isHidden() is True
     assert window._template_program_label.isHidden() is True
+    assert window._template_program_separator.isHidden() is True
+
+
+def test_export_row_height_does_not_change_when_template_controls_appear(qapp):
+    # regression test: toggling Create New Program used to make the whole
+    # export row (and via minimumSizeHint, the whole dialog) grow a few
+    # pixels taller the instant the Template combo/label first appeared -
+    # see the export_row_container construction comment for why. The
+    # container's height must be identical before and after.
+    window = _build_window(program_names=["Bass stab"])
+    height_before = window._export_row_container.height()
+    window.create_program_checkbox.setChecked(True)
+    assert window._export_row_container.height() == height_before
+    window.create_program_checkbox.setChecked(False)
+    assert window._export_row_container.height() == height_before
 
 
 def test_export_with_create_program_unchecked_does_not_call_the_callback(
