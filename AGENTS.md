@@ -1,1558 +1,576 @@
 # Agent notes for AKAISDS
 
-This file is for AI agents picking up work in this repo cold. It exists to
-save you from re-deriving context that isn't obvious from the code alone,
-and especially to stop you from "fixing" things that look like bugs but are
-actually deliberate, hard-won corrections. For human-facing docs see
-`README.md`, `BUILDING.md`, `TESTING.md`, `CONTRIBUTING.md` - not repeated
-here.
+Cold-start context for AI agents picking up this repo. Purpose: stop you
+from "fixing" things that look like bugs but are actually deliberate,
+hard-won corrections. Human-facing docs: `README.md`, `BUILDING.md`,
+`TESTING.md`, `CONTRIBUTING.md` - not repeated here.
 
-## What this app actually is
+## What this app is
 
-Two largely independent windows, both PySide6/Qt, both driven by `src/main.py`:
+Two independent PySide6/Qt windows, both launched from `src/main.py`,
+swapped via a `&Window` menu action (only one ever shown at a time):
 
-- **Transfer Dashboard** (`src/ui/dashboard.py`, `src/ui/main_window.py`,
-  `src/controller/sampler_controller.py`) - sends/receives audio samples to
-  Akai S1000/S2000/S3000 samplers (or generic MIDI SDS devices) over SysEx.
-  This is what the README documents.
-- **Program Editor** (`src/ui/program_editor_window.py`,
-  `src/core/program_editor_bridge.py`) - edits a program/keygroup/multi's
-  *parameters* (filter, envelopes, pan, LFO, keygroup ranges, multi part
-  assignments) on an S3000-series sampler over SysEx. Opened via the
-  dashboard's Window menu. Most of this file is about this window.
+- **Transfer Dashboard** (`ui/dashboard.py`, `ui/main_window.py`,
+  `controller/sampler_controller.py`) - sends/receives samples to Akai
+  S1000/S2000/S3000 or generic MIDI SDS devices over SysEx. What the
+  README documents.
+- **Program Editor** (`ui/program_editor_window.py`,
+  `core/program_editor_bridge.py`) - edits a program/keygroup/multi's
+  *parameters* on an S3000-series sampler over SysEx. Opened via the
+  Dashboard's Window menu. Most of this file is about this window.
 
-Both windows swap via a `&Window` menu action; only one is ever shown at a
-time (`closeEvent`/`open_program_editor` in `main_window.py` /
-`program_editor_window.py`).
+## Third-party deps - read the notes, don't edit in place
 
-## Third-party dependencies you should actually go read
-
-`s3k` and `s3ked` are **not part of this repo** - pulled in via
-`pyproject.toml` (`s3ked` pinned to a git rev; `s3k` comes with it), living
-in `.venv/lib/python3.12/site-packages/s3k(ed)/`:
+`s3k`/`s3ked` are pinned external deps (`pyproject.toml`, `s3ked` on a git
+rev; `s3k` comes with it), living in `.venv/lib/python3.12/site-packages/`,
+not part of this repo:
 
 - `s3k.bridge.S3kBridge` - the real MIDI/SysEx bridge to hardware.
-- `s3k.params` - the parameter registry (`p.lookup(name, region)`). Its
-  `Parameter.notes` fields record hardware measurements and dated research
-  notes - **read these before assuming a field's range/meaning**; several
-  past bugs here came from trusting the Akai manual's prose over what was
-  actually measured.
-- `s3ked.demo.DemoBridge` - a duck-typed fake sampler for dev without
-  hardware; deliberately reproduces real hardware quirks, not just canned
-  values.
+- `s3k.params` - the parameter registry (`p.lookup(name, region)`).
+  `Parameter.notes` has dated hardware-measurement notes - **read these
+  before trusting a field's declared range/meaning**; several past bugs
+  came from trusting the Akai manual's prose instead of what was measured.
+- `s3ked.demo.DemoBridge` - duck-typed fake sampler, deliberately
+  reproduces real hardware quirks, not just canned values.
 
-Don't "fix" anything in these packages - pinned external dependency; raise
-upstream if something looks wrong, don't edit in place.
+If something here looks wrong, raise it upstream - don't edit the
+dependency.
 
-### Three fields where this project's own hardware beats s3k.params' notes
+**Three fields where this project's own hardware measurement overrides
+`s3k.params`' own notes** (confirmed in front of the user - don't "fix"
+these back without re-measuring):
 
-`s3k.params`' notes are usually the most trustworthy source in the stack -
-but on these three, this project's own hardware measurement (confirmed
-in front of the user) overrides it:
-
-- **`K_FREQ`** (keygroup filter key-tracking): `s3k.params` says `-30..99`.
-  Re-measured: real range is `-24..+24`. `key_filter_track_knob` uses
-  `-24..24` - narrower, so it already passes `encode_field`'s own range
-  check, no override machinery needed.
-- **`B_PTCHD`** (pitch-bend-down range): `s3k.params` says `0..12`
-  (asymmetric with bend-up's `0..24`). Re-measured: actually `0..24`,
-  symmetric. Unlike `K_FREQ` this is WIDER than the declared range, so a
-  raw write above 12 fails `encode_field`'s check against the pinned
-  `s3ked` rev - `core/program_editor_bridge.py`'s
-  `_HARDWARE_RANGE_OVERRIDES`/`_lookup_for_write` patches a corrected
-  `dataclasses.replace` copy of the `Parameter` in front of every write.
-  See `tests/test_program_editor_window_demo_bridge.py`'s bend-down tests.
-- **`LFO2TRIG`** (LFO2 retrigger mode): `s3k.params` declares raw `0..255`
-  with no enum/notes at all. Measured: it's a plain boolean.
-  `lfo2_trig_combo` offers only Off/On - UI-only narrowing, same shape as
-  `K_FREQ`, no override needed (0/1 always fits 0..255).
-
-If you're auditing widget ranges against `s3k.params` and find one of these
-three "wrong," it isn't - re-read the comment at the call site before
-"fixing" it back. If you get hardware access and can re-verify any of
-these (or find another), update the comment with date + finding.
+- `K_FREQ` (keygroup filter key-tracking): declared `-30..99`, measured
+  `-24..+24`. The widget already uses the narrower range.
+- `B_PTCHD` (pitch-bend-down): declared `0..12` (asymmetric with
+  bend-up's `0..24`), measured `0..24` symmetric - WIDER than declared, so
+  a raw write above 12 fails the pinned dependency's own range check.
+  `core/program_editor_bridge.py`'s `_HARDWARE_RANGE_OVERRIDES`/
+  `_lookup_for_write` patches a corrected `Parameter` copy in front of
+  every write.
+- `LFO2TRIG`: declared raw `0..255`, no enum. Measured: a plain boolean.
+  `lfo2_trig_combo` just narrows to Off/On - no override machinery needed.
 
 ## Developing without hardware
 
-Set `AKAISDS_DEMO_SAMPLER=1` before launching; `program_editor_bridge.connect()`
-returns a `DemoBridge` instead of a real MIDI port. Good for UI work, but
-can't exercise real timing/latency or `S3kBridge`'s thread-safety
-constraints (see BridgeWorker below).
+`AKAISDS_DEMO_SAMPLER=1` → `program_editor_bridge.connect()` returns a
+`DemoBridge`. `SamplerController` has no demo mode of its own, so
+`ProgramEditorWindow._fetch_demo_sample_audio` substitutes real audio from
+`tests/test_audio.wav` (a ~0.7s mono chord-stab fixture) instead of a real
+receive, paced with real `time.sleep()` so the progress bar/timing feel
+genuine. Falls back to a synthesized tone if that fixture's missing.
+`AKAISDS_DEMO_INSTANT=1` skips the pacing entirely (fast UI iteration).
 
-`SamplerController` has no demo mode of its own (always wants a real MIDI
-connection), so `ProgramEditorWindow._fetch_demo_sample_audio` loads real
-audio from `tests/test_audio.wav` instead of calling
-`sampler_controller.receive_samples()` when the env var is set - paced with
-real `time.sleep()` + genuine `receive_progress`-shaped updates so the
-progress bar is exercised too. Falls back to `_synthesize_demo_sample_audio`
-(a deterministic fake tone) if that fixture is ever missing, rather than
-failing outright. `WaveformRenderer/` is unrelated copied-in reference
-material, not a fixture path.
+## `BridgeWorker` - read before touching `core/program_editor_bridge.py`
 
-## `BridgeWorker` - read this before touching `core/program_editor_bridge.py`
+`S3kBridge` is unsafe for concurrent calls on one connection. A
+pre-`BridgeWorker` version spun up a fresh `QThread` per UI action -
+crashed real hardware (`QThread::~QThread()` calling `qFatal()` when a
+stale thread was still mid-call during GC) and interleaved SysEx frames on
+the wire. Confirmed from an actual macOS crash report.
 
-`S3kBridge` is unsafe for concurrent calls on one connection. An earlier
-version spun up a fresh `QThread` per UI action, with nothing stopping two
-from being in flight at once - invisible against `DemoBridge` (serialised
-by the GIL), but against real hardware it interleaved SysEx frames on the
-wire **and** crashed the app (`QThread::~QThread()` calling `qFatal()`
-when a stale thread was still mid-call during GC). Diagnosed from an
-actual macOS crash report + the debug log described below.
+Fix: `BridgeWorker` is ONE persistent `QThread` per editor lifetime,
+processing a queue strictly one at a time. "Current state" requests
+(keygroups, sample/multi detail) coalesce - a queued-but-not-yet-started
+duplicate gets dropped. Writes/Program Changes never coalesce. **Don't go
+back to thread-per-action** - add a `submit_*()`/`_handle_*()` pair to
+`BridgeWorker` instead.
 
-The fix: **`BridgeWorker`** is a single persistent `QThread` that owns the
-bridge for the editor's whole lifetime, processing requests off a queue
-strictly one at a time. `ProgramEditorWindow` creates exactly one in
-`__init__`; every UI action calls a `submit_*()` method. "Current state of
-X" requests (keygroups, keygroup detail, multi parts) coalesce - a new one
-drops any not-yet-started one of the same kind. Writes and Program Changes
-are never coalesced.
+Tests: `process_pending()` drains the queue synchronously (no real
+thread) in `test_program_editor_bridge.py`; window-level tests use a real
+thread + `wait_until_idle()`. Any test constructing `ProgramEditorWindow`
+directly must call `editor._worker.stop(); editor._worker.wait()` in
+teardown or hit `QThread: Destroyed while thread is still running`.
 
-**If you're tempted to go back to thread-per-action, don't.** To add a new
-kind of hardware request, add a `submit_*()` + `_handle_*()` pair to
-`BridgeWorker`, not a new `QThread` subclass.
+## Update checker
 
-Tests exercise `BridgeWorker` synchronously via `process_pending()` (no
-real thread); window-level tests use a real thread + `wait_until_idle()`.
-Any test that constructs a `ProgramEditorWindow` directly **must** call
-`editor._worker.stop(); editor._worker.wait()` in teardown (see the
-`editor` fixture in `tests/test_program_editor_window.py`) or you'll hit
-`QThread: Destroyed while thread is still running`.
+`core/update_checker.py`/`ui/update_helper.py` polls GitHub's
+`/releases/latest`, which ignores `draft: true` releases by design (so an
+in-progress CI build stays invisible) - an unpublished tagged build just
+means the checker keeps reporting the previous release, not a bug.
+`UpdateCheckRunner` is shared by `MainWindow`/`ProgramEditorWindow`/
+`AboutDialog` - same `QThread`-GC bug class as `BridgeWorker` above if you
+don't `.wait()` it before closing.
 
-## Update checker (`core/update_checker.py`, `ui/update_helper.py`)
+## Transfer Dashboard
 
-Checks GitHub's `/repos/.../releases/latest` for a newer tag than
-`ui/_version.py`'s `APP_VERSION`, unauthenticated. Works unattended only
-because `.github/workflows/build.yml` publishes releases with
-`draft: true` - `/releases/latest` ignores drafts, so an in-progress build
-is invisible to it. If a tagged build never gets manually published, the
-checker just keeps reporting the previous release - expected, not a bug.
+**Open Editor gating**: `btn_open_editor` (+ its mirrored menu action)
+only enables with both MIDI ports selected AND `device_type == "akai"`
+(the Program Editor needs Akai-only SysEx extensions Generic SDS lacks).
+`_update_open_editor_enabled` recomputes at construction and after
+Settings closes.
 
-`UpdateCheckRunner` is shared by `MainWindow`, `ProgramEditorWindow`, and
-`AboutDialog` - each owns its own instance and calls `.wait()` on it before
-closing. Same root-cause bug class as `BridgeWorker` above (a `QThread`
-whose Python wrapper is GC'd while the OS thread still runs).
-`ProgramEditorWindow` is most likely to hit this, since
-`dashboard.py`'s `open_program_editor()` replaces `self.editor_window` on
-every click.
+**Shortcuts**: `Ctrl+T`/`Ctrl+E` switch windows (mirrored in both windows'
+own `&Window` menus so either works regardless of focus). `Ctrl+1/2/3` are
+the Program Editor's OWN tab shortcuts (Multi/Programs/Samples) - a
+separate, window-scoped numbering, not window-switching.
 
-## Transfer Dashboard: window/tab shortcuts and "Open Editor" gating
+**Layout gotcha**: a short child layout/widget sitting in a `QHBoxLayout`
+next to something much taller gets stretched to match the row's height,
+dumping unclaimed slack into whichever gap exists inside it - a bare
+`setSpacing()` doesn't fix this. Fix:
+`outer_layout.setAlignment(child, Qt.AlignmentFlag.AlignVCenter)` right
+after `addLayout`. Check for this before assuming a spacing value is
+wrong.
 
-`btn_open_editor` and the `&Window > Program Editor` menu action are only
-enabled when BOTH a MIDI input and output port are selected AND the
-sampler type is "Akai Sampler" (`device_type == "akai"` -
-`program_editor_bridge.connect()` needs Akai-specific SysEx extensions
-Generic SDS lacks). `_update_open_editor_enabled` computes this (with a
-tooltip explaining what's missing) at construction and after the MIDI
-Settings dialog closes. The menu action needs no separate wiring -
-`register_menu_actions` already polls button `isEnabled()` on a timer and
-mirrors it onto the paired menu action.
+**Dropped/opened files get a stable local copy**: dragging a cropped
+region out of a sample editor added the queue row fine, but Send later
+failed ("No such file or directory") - the editor renders the crop to a
+real temp file and deletes it shortly after drop, well before Send.
+`core/dropped_files.py` copies every dropped/opened file into
+`~/.akaisds/dropped_files/<pid>/` right where the row is first built;
+three points in `dashboard.py` delete the copy when its row goes away.
+`sweep_orphaned_sessions()` cleans up other dead PIDs' leftovers at next
+launch (self-heals, not real-time); `cleanup_session()` also runs on
+normal exit.
 
-`btn_open_editor`/`btn_settings` are stacked vertically (a `QVBoxLayout`
-inside the top bar's `QHBoxLayout`) at equal fixed width (the wider
-button's own `sizeHint()`).
+**Follow-up, 32-bit float WAVs read as silence**: `sf.read(path,
+dtype="int16")` isn't reliable for every source - a real affected file
+read as int16 peaked at 1/32767, the same file read as float64 and
+hand-scaled peaked at 22724 (its real content). `sds_encoder`'s
+`_read_float_scaled_to_int16` always reads float first (libsndfile
+normalizes reliably to `[-1,1]`) and scales to int16 by hand.
 
-**Gotcha**: a small `setSpacing()` on that column alone did NOT keep the
-buttons close - `top_bar` (the outer `QHBoxLayout`) stretches a short
-nested child layout to match the row's full height (set by the tall
-ASCII logo beside it), dumping unclaimed slack into whichever gap exists
-inside the child. Fixed with
-`top_bar.setAlignment(settings_editor_column, Qt.AlignmentFlag.AlignVCenter)`
-right after `addLayout` - makes `top_bar` use the column's natural
-sizeHint instead of stretching it. If a short child layout/widget ever
-gets added into a `QHBoxLayout` next to something much taller and its
-children look spread apart more than their spacing says, check for this
-before assuming the spacing value is wrong.
+## Debug logging
 
-`tests/test_dashboard.py` covers the enabled-state logic against a real
-`TransferDashboard`/`MidiManager`/`SamplerController`, never a full
-`ApplicationWindow` (which reads/writes the user's real
-`~/.akaisds/config.json`).
+`core/debug_log.py` → rotating log at `~/.akaisds/akaisds.log`.
+`LoggingBridge` wraps whatever bridge `connect()` returns and logs every
+call's START/END/FAILED with timing + a traceback on failure - ask for
+this log (and the macOS `.crash` report if it aborted) before guessing at
+a real-hardware bug report. App-wide despite the module being named for
+the Program Editor - `sampler_controller.py`'s own unhandled-exception
+backstops log here too. Any new unhandled-exception backstop anywhere in
+this app should log here, not `print()`.
 
-**Shortcuts**: `Ctrl+T` (⌘T) switches to the Transfer Dashboard, `Ctrl+E`
-opens/switches to the Program Editor - both live in each window's own
-`&Window` menu, mirrored so the same shortcut works regardless of which
-window has focus. `Ctrl+1/2/3` are NOT window-switch shortcuts - they're
-the Program Editor's own tab shortcuts (Multi/Programs/Samples), a
-separate numbering scheme scoped to that window only.
+## MIDI transport consolidation (`core/midi_transport.py`)
 
-## Transfer Dashboard: dropped/opened files get a stable local copy
+Default as of real-hardware validation. The Dashboard
+(`SamplerController`/`mido`) and Program Editor (`BridgeWorker`/
+`S3kBridge`/`python-rtmidi`) used to open TWO independent connections to
+the same physical port whenever the editor was open - caused a confirmed
+real race (`SampleList: expected command 0x05, got 0x16`).
+`SharedMidiOutput`/`SharedMidiInput` (one real port each, write-locked,
+fanned out to both consumer models) fix this;
+`core.midi_manager.shared_transport_enabled()` decides (env var override,
+else `config.json`'s `shared_midi_transport` key, default true,
+manual-edit-only by design - no Settings UI for it on purpose).
 
-Dragging a "cropped" region out of a sample browser into the queue added
-the row fine, but Send later failed with "No such file or directory".
-Root cause: `create_local_row` only stored the dropped file's PATH; the
-actual read happens later, at send time. Sample editors render the crop
-to a real OS temp file for the drag and delete it shortly after drop -
-well before Send is clicked, and Qt's cross-platform `QMimeData.urls()`
-has no way to tell "temporary" from "permanent" paths (that's an
-AppKit-level file-promise protocol), so the row added fine and only the
-later, lazy read lost the race.
+**Two confirmed real SIGSEGVs were found reaching this state** - both from
+reacting to MIDI-port state DURING a Settings dialog's own diagnostics
+instead of only after it fully closes:
 
-**Fix**: `core/dropped_files.py` (pure filesystem logic, no Qt) copies
-every dropped/opened file into a stable, app-owned location right where
-`create_local_row` already opens it once for its bit-depth probe - the
-queue row is built around THAT copy's path from then on. Applies
-uniformly to drag-and-drop and File > Open (both funnel through
-`on_files_dropped` → `create_local_row`).
+1. Wiring straight to `MidiManager.connection_changed` reacted to
+   transient, partial port states mid-diagnostic, briefly opening a THIRD
+   connection while `BridgeWorker` could be mid-`send_message()` on a port
+   the GUI was concurrently closing.
+2. Even reacting only once, right after the dialog closed, still crashed
+   on the totally unremarkable "open Settings, change nothing, click OK" -
+   a deferred event let a new `BridgeWorker` job dispatch against the
+   just-deleted old bridge in the gap between dialog-close and
+   bridge-swap.
 
-Copies live under `~/.akaisds/dropped_files/<pid>/`. Three points already
-in `dashboard.py` delete a copy when its row stops existing:
-`on_file_transferred`, `_remove_local_row`, `clear_local_queue`.
-`dropped_files.remove_copy` only ever deletes a path that resolves under
-its own base directory.
+**If you touch `_open_settings_dialog`/`_reconnect_shared_bridge`,
+preserve this ordering**: freeze the window (confirm `BridgeWorker` is
+actually idle) BEFORE the dialog ever opens, keep it frozen the whole time
+Settings is up, and only unfreeze after `_reconnect_shared_bridge`
+actually swaps the bridge in - every early return there must still
+unfreeze before returning.
 
-**Crash-safety**: `dropped_files.sweep_orphaned_sessions()` runs once,
-early, in `TransferDashboard.__init__`, removing every OTHER PID-named
-subdirectory whose PID isn't a running process (`os.kill(pid, 0)`; any
-ambiguous result defaults to "still running" - don't delete). Self-heals
-at the next launch, not real-time. `dropped_files.cleanup_session()` is
-also wired into `ApplicationWindow.closeEvent` for the normal-exit case.
+`tests/midi_transport_consolidation_test_plan.md` is the real-hardware
+test plan this was validated against - re-run relevant tests after
+touching `core/midi_transport.py`, `midi_manager.py`'s port-opening, or
+`program_editor_bridge.py`'s `connect()`/`BridgeWorker`. **Don't add a
+real multi-threaded stress test to this suite** - one holding a real lock
+across real `threading.Thread`s reproducibly segfaulted the interpreter
+elsewhere in the suite (a confirmed, bisection-proven instability from
+mixing raw OS threads with this suite's own Qt threading); mock-based +
+sequential tests replaced it.
 
-`tests/test_dropped_files.py` covers the module in isolation
-(monkeypatched `_BASE_DIR`/`_session_dir`, never the real
-`~/.akaisds/dropped_files`). `tests/test_dashboard.py` covers the
-regression end to end: drop a file, delete the original, confirm the
-queued copy still reads.
-
-### Follow-up: 32-bit float WAVs read as silence
-
-Once the stable-copy fix let a real sample-editor export survive long
-enough to actually send, it played as silence. Root cause:
-`sds_encoder.read_wav_samples`/`read_wav_channels` called `sf.read(path,
-dtype="int16", always_2d=True)` - `soundfile`'s direct float→int16
-coercion is not reliable for every source. Confirmed against a real
-affected file: read as `int16` it peaked at 1 (of 32767); the same file
-read as `float64` and scaled by hand (`round(x * 32768)`, clipped to
-`[-32768, 32767]`) peaked at 22724, matching its real content. Not
-source-specific - a `libsndfile` behavior that can affect any 32-bit
-float WAV.
-
-Fixed by `_read_float_scaled_to_int16` (both functions funnel through
-it) - always reads as float (reliable, since `libsndfile` normalizes any
-subtype to `[-1.0, 1.0]`) and scales to int16 by hand.
-`test_read_wav_samples_32bit_float_scales_to_real_int16_values` now
-asserts actual scaled values, not just "didn't crash" - the old test
-only checked length/rate, which is why this shipped unnoticed.
-
-### Follow-up: renaming a queued file to something long didn't scroll the field to the start
-
-`open_edit_dialog` calls `setText(new_name)` then `setCursorPosition(0)`,
-meant to show a long filename's START rather than Qt's own end-of-text
-default. Extensive reproduction (bare `QLineEdit`, one embedded via
-`setItemWidget`, a simulated dialog stealing focus, the real
-`open_edit_dialog` flow end to end) could not reproduce a failure -
-`cursorRect()` (the real visible scroll position, not just the logical
-`cursorPosition()`) consistently showed it correctly scrolled every time.
-Rather than claim an unconfirmed root cause, fixed with the standard,
-low-risk Qt workaround for this class of bug regardless: `QLineEdit`
-only recomputes its scroll offset lazily, inside its own `paintEvent`,
-based on the cursor position *at paint time* - nothing guarantees a
-repaint happens before something else in the same call stack touches the
-field again first. `QTimer.singleShot(0, lambda: edit_field.setCursorPosition(0))`
-defers the call to a fresh event-loop turn instead. If this resurfaces,
-it's a genuinely different bug - this fix was verified as a correct
-mitigation for the suspected race, not a confirmed root-cause fix.
-`test_renaming_to_a_long_name_scrolls_the_field_back_to_the_start` in
-`tests/test_dashboard.py` asserts on `cursorRect().x()`, not just
-`cursorPosition()`, since the logical index was never actually wrong.
-
-## Debug logging for real-hardware issues
-
-`core/debug_log.py` sets up a rotating log at `~/.akaisds/akaisds.log` (renamed from `editor_debug.log` when it became app-wide; users on older builds may still have the old file).
-`LoggingBridge` (in `program_editor_bridge.py`) wraps whatever bridge
-`connect()` returns and logs every call's START/END/FAILED with thread
-identity, timing, and a traceback on failure. If a user reports frequent
-errors or a crash against real hardware, ask for this log (and the macOS
-`.crash` report if it aborted) before guessing. Lines are long (full
-`repr()` of `Parameter` objects) - grep/tail rather than reading whole.
-
-Despite the module's own name/docstring being written for the Program
-Editor's bridge layer, it's app-wide infrastructure: `sampler_controller.py`'s
-two top-level unhandled-exception backstops (`on_sysex_received`,
-`_send_next_queued_file`) also log here (`debug_log.get_logger().error(msg,
-exc_info=True)`) rather than `print()`/`traceback.print_exc()`, which used
-to be their only trace - invisible in a packaged GUI app with no attached
-console. If you add a new unhandled-exception backstop anywhere in this
-app, log it here too rather than reaching for `print()`.
-
-## MIDI transport consolidation (`core/midi_transport.py`) - default as of real-hardware validation
-
-The Transfer Dashboard (`SamplerController`, via `MidiManager`, via `mido`)
-and the Program Editor (`BridgeWorker`, via `S3kBridge`, via `python-rtmidi`
-directly) used to normally open **two independent connections** to the same
-physical MIDI port whenever the editor was open - see "Samples tab: loop
-points..." above for the already-confirmed real-hardware race this caused
-(`SampleList: expected command 0x05, got 0x16`). It's also why the Program
-Editor had no Settings menu of its own for a while: `ui/settings_dialog.py`'s
-own diagnostics already have to release/restore `MidiManager`'s ports before
-running a hardware test, precisely because two open connections to one port
-is unsafe - opening that same dialog from the editor would have reproduced
-exactly the hazard that release/restore dance exists to avoid.
-
-`core/midi_transport.py` adds a **consolidated** transport so both windows
-share ONE real connection instead - `SharedMidiOutput` (one real
-`rtmidi.MidiOut`, with a hard lock around every write, since two logical
-senders on one wire can otherwise interleave a SysEx frame mid-transmission
-and corrupt it) and `SharedMidiInput` (one real `rtmidi.MidiIn`, fanned out
-via `_MessageFanout` to both a poll-style consumer - `S3kBridge`'s own
-`get_message()` model - and a callback-style consumer - `MidiManager`'s own
-mido-callback model - since rtmidi only supports one delivery mode per real
-port instance). `core/midi_manager.py` branches to this transport, and
-`core/program_editor_bridge.py`'s `connect()` builds the Program Editor's
-`S3kBridge` from the Dashboard's already-open shared ports when available,
-instead of opening its own second connection.
-
-**On by default** as of real-hardware validation against
-`tests/midi_transport_consolidation_test_plan.md`'s numbered tests. Decided
-by `core.midi_manager.shared_transport_enabled()`: `AKAISDS_SHARED_MIDI_
-TRANSPORT`, if explicitly set in the environment (a developer/tester
-override - recognizes `0`/`false`/`no`/`off`, case-insensitive, as an
-explicit OFF, not just falsy-string gotchas), wins; otherwise
-`app_config.get_shared_midi_transport_enabled()` reads config.json's
-`"shared_midi_transport"` key (default `true`). That key is
-**manual-edit-only by design** - there's deliberately no Settings UI for
-it, so an end user who hits a problem with it edits config.json by hand and
-sets it to `false`. `app_config.ensure_shared_midi_transport_key_saved()`
-writes the key (fresh install or upgrading from a version before it
-existed) at `ApplicationWindow.__init__` startup, before anything reads it,
-so a hand-editing user can actually find it there.
-
-The Program Editor's own `&Hardware > Settings...` menu item only exists
-(built conditionally in `ProgramEditorWindow.__init__`) when
-`shared_transport_enabled()` is true - safe now because both windows share
-one real connection, and this window can actually notice and recover when
-Settings reopens it. Two things have to both be true, not just one:
-
-1. `ProgramEditorWindow._open_settings_dialog` freezes this window
-   (`_set_hardware_busy_ui(True)`) and confirms `BridgeWorker` is actually
-   idle (non-blocking `is_idle()`, then an event-pumping wait for
-   `busy_changed(False)` if not - never `wait_until_idle()` from the GUI
-   thread, see that method's own docstring) **before the dialog ever
-   opens**, and keeps it frozen for as long as the dialog is up.
-2. `_reconnect_shared_bridge` runs exactly once, unconditionally, right
-   after `MidiSettingsDialog.exec()` returns - rebuilds this window's
-   bridge in place (`BridgeWorker.set_bridge()`, after the same idle
-   check/wait, swaps which bridge the SAME worker/QThread dispatches to,
-   rather than tearing down and reconnecting every one of its Signals),
-   unfreezes the window, and falls back to closing the editor back to the
-   Dashboard if rebuilding fails (e.g. the ports got cleared entirely).
-
-A port reopen (`MidiManager.open_input`/`open_output` - Apply, or either
-diagnostic's own release-then-restore dance, all in
-`ui/settings_dialog.py`) replaces `midi_manager.raw_input`/`raw_output`
-with new objects rather than mutating the old ones in place, so without
-(2), the editor's own `S3kBridge` would silently keep talking to
-now-closed ports the instant Settings changed anything. (1) exists
-because (2) alone isn't enough - see below.
-
-**This used to be wired directly to `MidiManager.connection_changed`
-instead - a real, confirmed SIGSEGV and UI freeze on real hardware, not a
-hypothetical.** `connection_changed` fires separately for EACH
-`open_input`/`open_output` call, synchronously, and both of
-`MidiSettingsDialog`'s diagnostics call open_input/open_output up to 4
-times each (release, then restore) WHILE still executing - reacting to
-every individual emission rebuilt the bridge from a transient, PARTIAL
-port state mid-diagnostic, which fell through to `program_editor_bridge.
-connect()`'s "standard connection" branch and briefly opened a THIRD
-independent connection to the same physical port, repeatedly, while
-BridgeWorker's background thread could still be mid-`send_message()` on
-the port the GUI thread was concurrently closing - see `core/midi_
-transport.py`'s `SharedMidiOutput.close_port()`/`SharedMidiInput.
-close_port()` for the write-lock fix that closes that specific race (a
-genuine crash signature: `RtMidiOut::sendMessage` SIGSEGV on the
-`BridgeWorker` thread). Reacting once, after the dialog fully closes, only
-ever sees the final settled state, and using the busy-signal wait instead
-of the raw blocking one keeps the UI responsive while it happens. This
-also means `tests/midi_transport_consolidation_test_plan.md`'s Test 7
-(the Dashboard's own Settings reopening the ports while the editor merely
-exists in the background) is NOT covered by this mechanism, deliberately:
-Dashboard and Program Editor are mutually exclusive (only one visible at a
-time - see main_window.py's own "&Window" menu comment), so the
-Dashboard's Settings action is never actually reachable while this window
-is the active one.
-
-**A SECOND, separate real SIGSEGV (same signature, different trigger) was
-found even after the fix above**, from testing a completely unremarkable
-path: open Settings, change nothing, click OK. `main_tabs` wasn't frozen
-while Settings was merely open (only `_reconnect_shared_bridge`, running
-AFTER the dialog closed, froze anything) - closing the dialog let a
-deferred sample-list selection event through, which submitted a brand new
-`BridgeWorker` job that got dispatched against the OLD (already-deleted)
-bridge in the gap between the dialog closing and `_reconnect_shared_
-bridge` actually swapping it in. The write lock from the first fix
-doesn't help here - it only prevents a *concurrent* close-during-send, not
-a *new* send after close but before the bridge is rebuilt. Freezing (1)
-above, before the dialog even opens rather than only after it closes, is
-what actually closes this window: nothing can submit a new job for the
-entire time Settings is up, and the pre-open idle check/wait drains
-anything already queued from before it opened. If you touch
-`_open_settings_dialog`/`_reconnect_shared_bridge` again, preserve the
-"freeze before open, unfreeze only after the bridge is actually swapped"
-ordering - every early return in `_reconnect_shared_bridge` must also
-unfreeze (`_set_hardware_busy_ui(False)`) before returning, since the
-freeze now happens in the caller, not itself.
-
-The automated suite (`tests/test_midi_transport.py`, `tests/
-test_midi_manager.py`, `tests/test_program_editor_bridge.py`'s `connect()`
-and `set_bridge()` tests, `tests/test_app_config.py`'s shared-transport-key
-tests) covers the pure logic, but nothing timing-sensitive - a real
-dual-connection race, real sustained SDS transfer integrity, real
-output-write interleaving - can be proven without actual hardware.
-**`tests/midi_transport_consolidation_test_plan.md`** is the real-hardware
-test plan this default flip was validated against - 8 numbered tests
-covering exactly those things, plus editor open/close cycles and the macOS
-`QThread`-crash class this app has already been bitten by once (see
-`BridgeWorker` above). Re-run it (or at least the relevant tests) after any
-change that touches `core/midi_transport.py`, `core/midi_manager.py`'s
-`shared_transport_enabled()`/port-opening, or `program_editor_bridge.py`'s
-`connect()`/`BridgeWorker`.
-
-**A real segfault was found and fixed while writing the automated tests for
-this**, worth knowing before adding similar tests anywhere in this repo:
-a test that held a real `threading.Lock` across a `time.sleep()` from two
-real `threading.Thread`s, run in-process alongside this suite's own
-Qt/`QThread`-heavy tests (`test_program_editor_window.py` in particular),
-reproducibly crashed the interpreter with a segfault **elsewhere** in the
-suite, not in the offending test itself - a genuine, bisection-confirmed
-instability from mixing raw OS threads with Qt's own threading in this
-environment, not a bug in the code under test. Fixed by replacing the
-real-thread stress test with a mock-based lock-usage check (`tests/
-test_midi_transport.py`'s `test_shared_midi_output_send_message_acquires_
-the_write_lock`) and a sequential (not multi-threaded) version of the
-fan-out queue test - real concurrent correctness for this code needs
-proving on real hardware anyway (see the test plan above), so the
-automated suite doesn't need to re-fight that battle with real OS threads.
-If a test genuinely needs multiple real threads running concurrently in
-this repo's suite again, check this note first and be prepared to isolate
-it (run just that file, then progressively more of the suite alongside it)
-before trusting a single clean run.
-
-## Program Editor UI: section cards, scroll areas, and the busy indicator
+## Program Editor UI: section cards, scroll areas, busy indicator
 
 Program/Keygroup tabs are built from `_build_section_card(title,
-*row_layouts)` and `_build_scroll_area(page)` (wraps a whole tab so the
-window needn't be tall enough to show every card unscrolled). Add new
-controls to the most relevant existing card rather than a new bare row.
-This page's `setMinimumSize(...)` was tuned by hand, not a round number:
+*row_layouts)` cards inside `_build_scroll_area(page)`. `setMinimumSize`
+was tuned by hand: height doesn't need to fit everything (a tab scrolls
+past the minimum); width is the real constraint (some cards pair side by
+side - re-measure `scroll_area.horizontalScrollBar().maximum() == 0` on
+both tabs if you widen anything, don't guess a new minimum). Stretch
+ratios between paired cards are measured via `sizeHint()`, not guessed
+(Range:Filter is 1:1, not the originally-assumed 1:2). `_build_section_
+card` pins each card `setSizePolicy(Preferred, Fixed)` vertically - a bare
+`QWidget` otherwise grows past its own `sizeHint()` into any layout
+surplus (an `addStretch()` with the default stretch factor 0 doesn't
+outrank this). `_equalize_card_heights()` pins paired cards' heights equal
+too - call it for any new paired row.
 
-- **Height** doesn't need to fit everything - past the minimum, a tab
-  scrolls rather than compressing/overlapping cards.
-- **Width** is the real constraint - some cards are paired side by side
-  (e.g. Range+Filter on Keygroup tab); below a certain width the pair
-  stops fitting and an unwanted horizontal scrollbar appears. If you
-  widen a card or add a pair, grow the window until
-  `scroll_area.horizontalScrollBar().maximum()` hits zero on both tabs
-  rather than guessing a new minimum.
-- **Stretch ratios between paired cards should be measured via
-  `sizeHint()`, not guessed** - Range+Filter briefly shipped 1:2 on the
-  assumption Filter needs more width; wrong (Filter's content is actually
-  narrower, 273px vs 299px). Every paired row is 1:1 now.
-- `_build_section_card`'s layout ends with `addStretch()` - without it, a
-  card shorter than its row partner gets slack space split before the
-  header too (reads as vertically centered instead of top-aligned).
-- **Cards used to grow taller than their content as the window grew
-  vertically.** A bare `QWidget`'s default vertical size policy
-  (`Preferred`) can grow past its own `sizeHint()` when a layout has
-  surplus space - the trailing `addStretch()`s above are supposed to
-  claim that surplus instead, but `addStretch()`'s own default stretch
-  factor (0) doesn't actually outrank a sibling widget's willingness to
-  grow (also 0), so Qt's layout could still split extra space across the
-  cards themselves. Fixed by `setSizePolicy(Preferred, Fixed)` vertically
-  in `_build_section_card` - pins each card to its `sizeHint()`, can't
-  grow OR compress below it (compressing is the earlier overlap bug
-  above), rather than relying on winning a stretch-factor tie.
-- **Paired cards' heights are pinned equal, not just their widths**, via
-  `_equalize_card_heights(*cards)` - `setFixedHeight`s every card in a
-  pair to `max(sizeHint().height() for card in pair)`, called once both
-  are fully built (needs real final content to measure correctly).
-  Applied to every paired row on both tabs (Range/Filter, Envelope 1/2,
-  Volume Pan & Velocity/Pitch, LFO1/LFO2, Voice & MIDI/Portamento) even
-  where two cards already happen to match today, so a later edit to just
-  one side can't silently throw them out of sync. Call this for any new
-  paired row too.
-
-`BridgeWorker.busy_changed` drives the indeterminate progress bar next to
-Refresh - `True` from the moment any job queues while nothing else is
-pending, `False` once the queue drains, so a burst of jobs reads as one
-span. `ProgramEditorWindow` debounces this through two one-shot
-`QTimer`s (`_busy_show_timer`/`_busy_hide_timer`) because a **fast**
-bridge (`DemoBridge`/test fakes) can drain the queue to empty *between*
-two back-to-back `submit_*()` calls, causing real flicker without the
-hide-timer's grace period. Real hardware essentially can't hit this race
-(submitting a batch takes microseconds). Don't remove either timer without
-re-reading the comment; see
+`BridgeWorker.busy_changed` drives the Refresh progress bar, debounced
+through two one-shot `QTimer`s (`_busy_show_timer`/`_busy_hide_timer`) -
+a fast bridge (`DemoBridge`/test fakes) can drain the queue to empty
+BETWEEN two back-to-back `submit_*()` calls, flickering without the hide
+timer's grace period. Don't remove either without re-reading
 `test_a_new_busy_true_during_the_hide_grace_period_cancels_the_hide`.
 
-Widget visibility assertions in tests use `.isHidden()`, not
-`.isVisible()` - the `editor` fixture never calls `.show()`, and
-`.isVisible()` is unconditionally `False` for a never-shown top-level
-window regardless of `setVisible()`.
+Widget visibility assertions use `.isHidden()`, not `.isVisible()` - the
+`editor` test fixture never calls `.show()`, and `.isVisible()` is
+unconditionally `False` for a never-shown top-level window.
 
-## Envelope graphs (`ui/envelope_graph.py`): each stage's width must be independent
+## Envelope graphs (`ui/envelope_graph.py`)
 
-`_adsr_points()`/`_env2_points()` used to give each stage a width
-*proportional to its share of the live total* - a real bug: turning ONE
-knob visibly resized the OTHER stages even though their values never
-changed. No synth's ADSR display works that way.
+Each ADSR/ENV2 stage gets a FIXED width budget, scaled only by its own
+value within that budget - **never re-normalize one stage's width against
+the others' current values**, that's the exact bug this was built to fix
+(turning ONE knob visibly resized every OTHER stage even though their
+values never changed - no synth's ADSR display works that way).
 
-Fixed with a **fixed** width budget per stage - `(1 -
-SUSTAIN_HOLD_FRACTION) / 3` per ADSR stage, `w / 4` per ENV2 stage -
-scaled only by `own_value / 99` within that budget. Trade-off: the
-envelope no longer necessarily reaches the full widget width - correct,
-not a regression. **Do not re-normalize one stage's width against the
-others' current values** to "simplify" this - that reintroduces the bug.
-See `test_adsr_stage_width_is_a_fixed_share_not_a_relative_one` /
-`test_env2_stage_width_is_a_fixed_share_not_a_relative_one`.
+## LFO2 and the modulation matrix
 
-## LFO2 and the modulation matrix (Program/Keygroup tabs)
+`LFO2` is real/independent but hardwired to modulate Pan (`PANRAT`/
+`PANDEP`/`PANDEL`/`LFO2WAVE`, stored in `program.pan`). `LFO2WAVE` only
+offers 3 shapes - no measured 4th like LFO1's "Random," don't assume one
+without measuring. `lfo1_sync_combo`'s item labels are deliberately
+inverted from `DESYNC`'s own raw meaning (clearer UX: "Sync" On/Off), but
+the raw byte written is NOT inverted - same "combo index is the raw byte"
+convention as everywhere else.
 
-`LFO2` is real and independent but hardwired to modulate **Pan**
-(auto-pan): its rate/depth/delay/shape are `PANRAT`/`PANDEP`/`PANDEL`/
-`LFO2WAVE`, stored in `program.pan` despite being LFO2's own controls.
-`LFO2WAVE` only documents 3 shapes (Triangle/Sawtooth/Square) - unlike
-`LFO1WAVE`'s measured 4th ("Random", found by reading the pitch track
-LFO1 drives); LFO2 drives pan, no equivalent measurement exists, so
-`lfo2_shape_combo` only offers 3 - don't assume a 4th without measuring.
-
-LFO1 has its own sync/desync toggle (`lfo1_sync_combo`, field `DESYNC`:
-`{0: "OFF", 1: "ON"}` - the field is phrased as its own negation).
-`lfo1_sync_combo` is deliberately labeled the positive way ("Sync":
-On/Off), so its item order is inverted from `DESYNC`'s own text, but the
-raw byte written is NOT inverted (index 0 "On" = `DESYNC=0`, index 1
-"Off" = `DESYNC=1`) - same "combo index is the raw byte" convention as
-everything else. See the construction comment before reordering items.
-LFO2 has no equivalent sync field (it does have its own `LFO2TRIG`
-retrigger boolean - a different thing, see the hardware-override section
-above).
-
-The **Modulation** cards (one per tab) expose the assignable matrix
-(`MODS*`/`MODV*`): up to 3 (source, amount) slots per destination (Pan,
-Loudness, Filter Frequency), 1 slot each for LFO1's Rate/Depth/Delay and
-for Pitch. The 14-source enum (`s3k.params.MOD_SOURCES`) is hand-mirrored
-as `_MOD_SOURCE_LABELS`, **with envelope 3 (value 14) deliberately left
-out** - env3 works on base hardware (only the *second filter* target
-needs the IB304F board), but this app has no Envelope 3 editor page yet,
-so offering it as a source would be confusing.
-`test_mod_source_labels_match_s3k_params_minus_env3` guards this.
-
-**Why the matrix splits across both tabs**: every destination's *source*
-choice lives in the `program` region (one shared choice per program), so
-every source dropdown lives on the Program tab. Most *amounts* are also
-program-level and sit next to their source there. But `MODVFILT1..3`,
-`MODVPITCH`, `MODVAMP3` (Loudness slot 3's amount only) and `L_PTCH` (a
-separate always-on LFO1→pitch depth, not part of the 3-slot matrix) are
-in the `keygroup` region - genuinely per-keygroup - so those rows show
-only source (+ footnote) on the Program tab, and only the amount knob on
-the Keygroup tab. This is what the hardware actually stores, not a UI
-choice - don't merge it into one card without re-checking each field's
-`region` in `s3k.params`.
-
-Slots are built through `_build_mod_slot`/`_build_mod_source_only_column`/
-`_build_mod_amount_only_column`, placed in a `QGridLayout` via
-`_build_mod_matrix_row`/`_build_mod_matrix_amount_row`. Each card has one
-"Slot 1/2/3" + "Source"/"Amount" header (`_build_mod_matrix_header`/
-`_build_mod_matrix_amount_header`) rather than a repeated label per
-control - the grid's column alignment carries that meaning now; don't
-reintroduce per-control labels without removing the header, or both will
-say it. The amount knobs (`_build_mod_amount_knob`) are enabled right
-where they're built rather than in `__init__`'s later "enable knobs"
-block - deliberate; don't assume every knob not listed there is unwired,
-check whether it came from one of these helpers first.
-
-This card's rows are what pushed `setMinimumSize` from `1040` to `1080`
-(re-measured the same `horizontalScrollBar().maximum()` way described
-above).
+The modulation matrix (`MODS*`/`MODV*`, a 14-source enum minus env3 - no
+Envelope 3 editor page exists yet, offering it as a source would be
+confusing) splits across both tabs because that's what the hardware
+actually stores: sources are program-region (Program tab), most amounts
+too, but `MODVFILT1..3`/`MODVPITCH`/`MODVAMP3`/`L_PTCH` are keygroup-region
+(Keygroup tab shows Amount-only + a read-only source-mirror combo for
+those). **Confirmed on real hardware** that Filter/Pitch/Amp-mod SOURCE
+really is program-wide, not per-keygroup, despite the S2000 manual's
+ambiguous prose suggesting otherwise. Mirror combos need syncing on BOTH
+live edits (wired after the Program tab's own combos exist) AND program
+loads (`blockSignals(True)` during load means the live-edit wire never
+fires then) - miss either half and the mirror silently drifts.
 
 ## PRGNUM and Program Change (Multis tab)
 
-No working SysEx write assigns a program to a multi part - `PRNAME` in
-the multipart region is read-only (documented in `s3k` itself). The only
-real mechanism is a raw MIDI **Program Change** on the part's channel,
-addressed by the target program's own `PRGNUM` (not its list position).
+No working SysEx write assigns a program to a multi part - only a raw
+MIDI Program Change, addressed by the target program's own `PRGNUM` (not
+its list position). Freshly-loaded programs commonly share `PRGNUM == 0`;
+`BridgeWorker.renumber_programs()` runs once before the first Program
+Change and again on every list reload - if "assigning always picks the
+wrong program" recurs, check for `PRGNUM` collisions first. The raw-vs-
+display (+1) offset now lives in `s3k.params` itself (`display_offset=1`,
+since the 2026-09-27 `s3ked` bump); `_handle_program_change` still needs
+the raw wire byte for the actual MIDI message, so it explicitly subtracts
+the offset back out after reading.
 
-Freshly-loaded programs commonly all have `PRGNUM == 0`, which makes
-every Program Change target whichever program the hardware associates
-with 0. `BridgeWorker` calls `renumber_programs()` (gives every resident
-program a distinct number in list order) once before the first Program
-Change, and again whenever the program list reloads. If "assigning a
-program always picks the wrong one" recurs, check `PRGNUM` collisions
-first.
+The 16 Multis-tab part combos hold their OWN copy of every program name -
+renaming a program needs an explicit `_update_multi_program_combo_names()`
+push; a full list reload alone won't catch it.
 
-There's no hardware concept of "no program assigned" for a part - the
-blank `"-"` combo entry is a UI-only no-op placeholder, not a bug.
+## Note names: S3000XL convention, not general MIDI
 
-**Raw-vs-display offset now lives in `s3ked`, not here.** Until the
-2026-09-27 `s3ked` bump, `s3k.params`' `PRGNUM` had no `display_offset`,
-so this app did its own +1 (display) / -1 (write) conversion by hand in
-`program_editor_window.py`. Upstream's §267 declared `display_offset=1`
-on `PRGNUM` itself (confirmed on hardware: the panel is 1-based, the
-register is 0-based - the same finding this app had already made
-independently), so `get_parameter`/`set_parameter` now do that conversion
-inside `s3k.params.decode_field`/`encode_field`. `program_number_spinbox`
-was updated to show/write the panel's 1..128 value straight through, with
-no converter of its own - re-adding one would double-offset it.
-`_handle_program_change` in `program_editor_bridge.py` still needs the
-raw wire-native byte for the actual MIDI Program Change message, so it
-explicitly subtracts `p.lookup("PRGNUM", "program").display_offset` back
-out after calling `get_parameter` rather than assuming the two now agree.
-If you bump `s3ked` again and `PRGNUM`'s handling changes further,
-recheck all three sites: the spinbox load, `_wire_spinbox_write`'s (lack
-of) converter, and this subtraction.
+`core.midi_notes.midi_note_to_name()` calls note 60 **"C3"** (the
+S3000XL panel's own convention), not general MIDI's C4. Already fixed
+once (the editor showed every note an octave too high) - **don't
+"correct" this back**. `ui/note_spinbox.py`'s inverse parser must stay in
+sync (`test_note_spinbox.py`'s round-trip test guards this).
 
-**The 16 part combos hold their own copy of every program's name**
-(populated in `_on_programs_loaded`, a full reload) - they don't
-automatically follow changes elsewhere. Renaming a program used to leave
-stale names in all 16 combos until the next Refresh; fixed by
-`_commit_program_name`/`_on_program_name_typed` calling
-`_update_multi_program_combo_names(program_index, name)` explicitly. Any
-new program-identity field the Multis tab mirrors needs the same explicit
-push - `_on_programs_loaded` alone only catches a full reload.
+## Samples tab: hardware quirks
 
-## Note names: S3000XL octave convention, not general MIDI
-
-`core/midi_notes.midi_note_to_name()` calls note 60 (middle C) **"C3"**,
-matching the S3000XL's own panel - **not** general MIDI's C4. Fixed once
-already (editor showed every note an octave too high).
-`ui/note_spinbox.py`'s `_note_name_to_midi()` is the exact inverse and
-must stay in sync (see `tests/test_note_spinbox.py`'s round-trip test).
-Don't "correct" this back to general-MIDI convention; C3 is right here.
-
-## Samples tab: loop points, and the one place this window deliberately blocks
-
-`s3k` has no bulk sample-audio transfer - no RSPACK/ASPACK, only header
-reads. So the Samples tab's waveform gets header fields (loop points,
-start/end, rate) through the normal `BridgeWorker` connection, but gets
-actual audio from `main_window.sampler_controller` - the Transfer
-Dashboard's own SDS receiver, reached via the `main_window` reference
-`ProgramEditorWindow` already holds. That's a **second, separate MIDI
-connection** to the same port, open concurrently with this window's own
-bridge - not new, but worth knowing if hardware actions ever seem to
-interleave strangely.
-
-**`LOOPAT1` is the loop's END, not its start.** `LLNGTH1` measures
-*backwards* from it - the loop region is `[LOOPAT1 - LLNGTH1, LOOPAT1]`.
-Confirmed in `s3ked`'s own `docs/RESOLUTION_NOTES.md` (§136 upstream, not
-in the installed wheel): the manual says so directly, an independent
-implementation (`ConvertWithMoss`) agrees, and getting it backwards is
-exactly the bug that produced silent/degraded loops in that project's own
-history. **`s3k.params`' own `notes=` for `LOOPAT1` does NOT mention
-this** - reading only that file, the natural (wrong) assumption is that
-`LOOPAT1` is where the loop starts. `loop_start` is always *derived*
-(`LOOPAT1 - LLNGTH1`) here, never read/written directly.
-
-**`LLNGTH1`'s raw value is 32.16 fixed point, not a plain frame count** -
-the real field is `frames * 65536` (confirmed against `s3000editor`'s own
-`writeFixed32_16` and independently against `RESOLUTION_NOTES.md`'s akaiutil
-cross-check). Get this wrong and loops still "work" in-app (read/write
-both naively wrong the same direction) but the hardware reads a loop
-~65536x too short. See `_LOOP_LENGTH_FIXED_POINT_SCALE`.
-
-**`STUNO`/`PRGNUM` raw-vs-display quirks, confirmed on hardware:**
-
-- `STUNO` (sample tune) is signed 1/256-semitone, same scale as `VTUNO` -
-  but `s3k.params` declares it unsigned `0..65535`, so `encode_field`
-  rejects a negative raw value. `_sample_tune_offset_to_semitones`/
-  `_semitones_to_sample_tune_offset` manually sign-extend on read and wrap
-  to unsigned two's-complement on write. Range is ±50.00st. **The
-  in-memory cache (`_sample_waveform_cache[i]["stuno"]`) must always hold
-  the RAW value, never the display semitones** - a live tune edit used to
-  store the raw spinbox value (semitones) into that key while a header
-  load stored the true raw byte, so reselecting a previously-edited
-  sample fed semitones back through the raw→semitones converter a second
-  time and redisplayed garbage (`+40.00st` came back as `+0.16st`,
-  confirmed on hardware - the actual hardware write was always correct,
-  this was display-only). `_on_sample_tune_changed` now stores
-  `_semitones_to_sample_tune_offset(value)`, matching the load path.
-  `test_sample_tune_survives_a_reselect_after_a_live_edit` guards this.
-- `PRGNUM`'s raw value is off by one from the panel's own numbering (raw
-  8 shows as program 9) - since the 2026-09-27 `s3ked` bump this
-  conversion happens inside `s3k.params` itself (`display_offset=1`), not
-  in this app's spinbox code. See "PRGNUM and Program Change" above for
-  the full detail and why the MIDI Program Change send still needs the
-  raw byte back.
+- **`LOOPAT1` is the loop's END, not its start** - `LLNGTH1` measures
+  *backwards* from it (`[LOOPAT1 - LLNGTH1, LOOPAT1]`). `s3k.params`'s own
+  notes for `LOOPAT1` don't mention this - reading only that file, the
+  natural (wrong) assumption is that it's where the loop starts.
+  `loop_start` is always *derived*, never read/written directly.
+- **`LLNGTH1` is 32.16 fixed point** (`frames * 65536`), not a plain frame
+  count - get this wrong and loops still "work" in-app (read/write both
+  naively wrong the same direction) but the hardware reads them ~65536x
+  too short. See `_LOOP_LENGTH_FIXED_POINT_SCALE`.
+- **`STUNO` (sample tune) is signed 1/256-semitone** despite `s3k.params`
+  declaring it unsigned `0..65535` - manually sign-extended on read,
+  wrapped to two's-complement on write. Range ±50.00st (semitones, despite
+  "tune" sometimes being called "cents" colloquially in this app's own UI
+  text). The in-memory cache must always hold the RAW value, never
+  display semitones - a live edit that stored semitones instead once made
+  `+40.00st` redisplay as `+0.16st` on reselect (display-only bug, the
+  actual hardware write was always correct).
+- **`PRGNUM`'s +1 display offset** now lives in `s3k.params` itself - see
+  "PRGNUM and Program Change" above.
 
 Loading a sample's audio is a real SDS dump, legitimately minutes for a
 large sample - the UI is meant to freeze while it happens, not work
-around it. The mechanism, `ProgramEditorWindow._wait_for_any_signal`, is
-the **one place in this window** that blocks the calling thread on a
-signal instead of connecting once and letting results arrive async
-(`BridgeWorker`'s whole design is the opposite). Don't reach for it
-elsewhere without a comparably good reason.
-
-### Editing: markers, spinboxes, zoom - one write path for both input methods
-
-Loop points are editable by dragging a marker on `WaveformView`'s canvas
-(Shift = fine mode, slower relative-delta drag with a float accumulator
-`_drag_value` carrying sub-frame remainder) or via the four marker
-spinboxes. **Both paths go through the same two helpers**,
-`_schedule_marker_write`/`_flush_marker_write` - which field(s) a marker
-maps to (`SSTART`/`SMPEND` 1:1; either loop edge writes `LOOPAT1`+
-`LLNGTH1` together) lives in exactly one place. Wire a third input method
-through these two rather than re-deriving the pairing.
-
-`WaveformView` also has horizontal zoom/pan - `x_for_frame`/`frame_for_x`
-take a view window, not the whole frame count. `clamp_marker` stays
-whole-sample-bounded regardless of zoom. Ctrl+wheel zooms centered on the
-cursor. A real macOS trackpad pinch arrives as its own event
-(`QEvent.Type.NativeGesture`), not Ctrl+wheel - handled via
-`WaveformView.event()` → `_handle_pinch_zoom` (no dedicated Qt virtual for
-this gesture).
-
-**Panning**: a trackpad reports pan motion through `angleDelta().x()` or
-`.y()` depending on swipe direction, and naive handling either drops an
-axis or picks the wrong one momentarily before "bouncing" onto the right
-one. What shipped, after a couple of per-event/per-gesture heuristics
-each fixed one symptom but left another: stop inferring intent from an
-ambiguous signal at all - `angle.x() != 0` always wins for pan,
-unconditionally; nothing produces nonzero `.x()` except a genuine
-horizontal swipe or a mouse's own horizontal wheel, so there's nothing to
-disambiguate. A vertical-only mouse wheel has no `.x()` at all, so
-Shift+scroll explicitly repurposes its `.y()` for pan (the usual "hold
-Shift to scroll sideways" convention) - unmodified vertical scroll does
-nothing on purpose, since repurposing it for pan was the root of every
-earlier version of this bug. Zoom (Ctrl+scroll) keeps a simple `x if
-nonzero else y`, since zoom has no left/right ambiguity.
-
-The Zoom +/-/Fit buttons and the horizontal `QScrollBar` are the
-discoverable/no-modifier equivalents, synced via `WaveformView.view_changed`
-↔ the scrollbar's `valueChanged`, both `blockSignals`-guarded against
-bouncing. The scrollbar sits in a fixed-height container even when hidden
-(`setVisible(False)` alone collapses it to zero height, which shoved the
-marker spinboxes up/down every time zoom crossed the scrolling threshold).
-
-### Editing loop points without audio - header and audio load independently
-
-Loading full waveform audio can take minutes over SDS, but loop points
-only need the sample's *header* - a handful of fast `get_parameter` reads
-over the same fast `BridgeWorker` connection every other tab uses.
-`WaveformView.set_header(...)` shows/makes the four markers draggable
-from header data alone, no envelope trace (`has_header()` true,
-`has_waveform()` false until real audio arrives). `_frame_count > 0`
-gates dragging/zoom/pan now, not `_samples is not None` (`_samples` only
-gates whether there's an envelope to paint). **Get this distinction wrong
-in a new method and editing silently blocks without audio again** - this
-happened once in `_on_marker_spinbox_changed` (gated on `has_waveform()`,
-so typing before audio loaded did nothing).
-
-`ProgramEditorWindow._on_sample_selected` fires an automatic async
-`submit_sample_detail()` on selection if nothing's cached - persistently
-connected in `__init__`, not through `_wait_for_any_signal` (reserved for
-the actual audio fetch). `_sample_waveform_cache` entries can be
-header-only (`"samples": None`) or full; both always carry
-`"frame_count"`. **If the user edits a marker with only the header loaded
-and then loads audio, `_load_sample_waveform` must reuse the cached
-markers, not re-derive fresh ones** - re-deriving silently discards the
-edit. `_markers_from_header()` is the shared helper both fetch paths use
-so they compute identically.
-
-`WaveformView.set_waveform` preserves zoom/pan when called for the
-already-showing sample (rather than resetting to fully zoomed out) - it
-still resets for a genuinely different sample (always goes through
-`clear()`/`set_header()` first).
-
-### Diagnosing a load that silently does nothing
-
-A user hit intermittent "double-click loads nothing" that no scripted
-repro could reproduce. Reading `~/.akaisds/akaisds.log` from their
-actual session showed zero `FAILED` entries and no overlapping calls -
-the bridge layer itself was never at fault, meaning the problem was
-upstream of any bridge call. `WaveformView.mouseDoubleClickEvent` and
-`_load_sample_waveform` now log at every entry/early-return/fetch-result
-point for exactly this reason.
-
-**Follow-up, same mechanism, later session**: the log showed
-`_load_sample_waveform` being entered fine, but the `sample_detail` job
-never produced even a START log line. Root cause: `BridgeWorker.run()`'s
-dispatch call sat outside any try/except - an exception escaping
-`_dispatch()` (from a bug in a handler, not the bridge calls a handler's
-own try/except already guards) silently killed the OS thread for the
-rest of the app's life. The GUI stayed fully responsive throughout
-(`submit_*()` keeps appending to the queue), and nothing ever popped from
-it again. `BridgeWorker._safe_dispatch` wraps `_dispatch()` in a
-try/except that logs and lets the loop continue instead of dying. See
-`test_worker_survives_a_job_whose_dispatch_raises_outside_its_own_handler`.
-If you see "double-click recognized, GUI responsive, zero bridge-layer
-log lines" again, check this log line first.
-
-### Progressive waveform loading during a live SDS dump
-
-The envelope fills in live, left-to-right, in step with an in-progress
-transfer, instead of appearing all at once when it finishes.
-`WaveformView.begin_live_capture()` switches from header-only to an
-empty growing list right before a fetch starts; `append_live_samples(chunk)`
-extends it and repaints each call. `_rebuild_envelope` clips to
-`min(view_start + view_length, len(self._samples))` and sizes the
-envelope's pixel width proportionally to how much of the current view is
-actually loaded, so a half-loaded prefix occupies only its own left
-fraction rather than stretching to fill the canvas.
-
-Two producers feed `append_live_samples`: real hardware via
-`SamplerController.sample_chunk_received` (decodes each accepted SDS
-packet immediately, scaled via `sds_encoder.scale_sample_to_16bit`); demo
-mode via `_fetch_demo_sample_audio` calling it with newly-revealed slices
-on the same ~200ms tick its progress bar already uses, so evaluating this
-without hardware shows the real thing.
-
-**Follow-up bug**: the envelope visibly finished loading well before the
-progress bar did, then the whole waveform snapped/rescaled when real
-audio landed. Root cause: `_markers_from_header`'s demo branch used an
-arbitrary placeholder (`values["SLNGTH"] or 20000`) for `frame_count`
-against `DemoBridge`'s all-zero header - harmless before progressive
-loading needed it as the live-capture *total*, but `tests/test_audio.wav`
-is ~31000 frames, so the envelope read "100% loaded" at ~64% of the real
-transfer, then jumped when the real 31000-frame total replaced it
-mid-view. Fixed by `_demo_sample_frame_count(sample_index)` (predicts the
-real length via a cheap `wave.open().getnframes()` header peek, or
-`_synthesized_demo_frame_count` if the fixture is missing) replacing the
-placeholder. Demo-mode-only: on real hardware both values trace back to
-the same physical sample's `SLNGTH`, so they can't disagree.
-
-### Sample loop type, root note, and rename/delete
-
-Three additions, all mirroring existing patterns:
-
-- **Loop type** (`sample_loop_type_combo`) writes `SPTYPE` (sample
-  region) - the SAMPLE's own type, distinct from `ZPLAY` (the
-  per-keygroup-zone override, on the Keygroup tab).
-  `_SAMPLE_PLAYBACK_TYPE_OPTIONS` reuses `_LOOP_TYPE_OPTIONS`'s own
-  tooltips (indices 1-4) rather than retyping them, since s3k.params'
-  SPTYPE labels line up 1:1 with ZPLAY's. `test_sample_playback_type_options_match_s3k_params_sptype`
-  guards this.
-- **Root note** (`sample_root_note_spinbox`) writes `SPITCH` via
-  `NoteSpinBox`, same C3-convention as elsewhere, but ranged `21..127`
-  (s3k.params' own declared range) - `setRange(21, 127)` must be called
-  explicitly, `NoteSpinBox()` otherwise defaults to `0..127`.
-- **Rename/delete** on `sample_list_widget` mirrors `program_list`'s
-  `ActionsContextMenu`/`QAction` shape. `_DELETE_SHORTCUTS` is now a
-  shared module-level constant. Rename writes `SHNAME` and pushes the new
-  name into every zone's sample-choice combo via
-  `_update_zone_sample_combo_names` (same stale-copy problem class
-  `_update_multi_program_combo_names` already solves for programs).
-  Delete submits `DELS` via `BridgeWorker.submit_delete_sample`, then does
-  a full `submit_sample_list()` reload (indices shift after delete).
-  **Unlike program delete**, there's no "last one is silently ignored"
-  restriction for `DELS` in `s3k`/`s3ked` - no `count() > 1` guard here.
-  If real hardware is ever found to ignore deleting the last sample too,
-  add the guard back.
-
-Both `SPTYPE`/`SPITCH` are in `_SAMPLE_DETAIL_FIELDS`, arriving in the
-normal header payload. `DemoBridge`'s all-zero header means both read back
-benign defaults (0 → "Normal looping"; 0 → clamped up to 21 by
-`NoteSpinBox`'s range) - neither needed the placeholder treatment
-`_demo_sample_frame_count` needed, since neither collapses markers the
-way `(0,0,0,0)` does.
-
-### Trim/Reverse/Duplicate, and timestretch/resample (capability audit)
-
-Checked first whether `s3k`/`s3ked` already provide sample/program/keygroup
-duplication, hardware time-stretch, or hardware resampling - **none
-exist** (grepped both packages; only structural messages are Delete*, no
-Copy/Duplicate/Clone anywhere). `SSRATE` is a plain metadata byte -
-writing it changes the declared rate, not the audio. This repo's own
-`sds_encoder.resample_to_target_rate` is the only real resampling in the
-stack, client-side; time-stretch would need new DSP work.
-
-**Trim**/**Reverse** needed a way to get modified audio back onto the
-hardware - something neither `s3k` nor `s3ked`'s own TUI app has ever
-done (it's a pure parameter editor, zero sample-audio capability). The
-only mechanism is this repo's own `SamplerController.send_file_queue`
-plus `BridgeWorker.submit_delete_sample`.
-
-The math (`core/sample_editing.py`, pure, no Qt/MIDI): `trim_samples`/
-`reverse_samples` take/return the same four markers `WaveformView.markers()`
-uses. Trim keeps `samples[start:end+1]` and re-bases loop markers into the
-shorter buffer (never clips into an active loop - `clamp_marker`
-guarantees `start <= loop_start <= loop_end <= end` on entry). Reverse
-mirrors every marker around `frame_count - 1 - i`; loop length is
-invariant under this.
-
-**Why Trim/Reverse send-then-delete under a temp name**
-(`_perform_sample_edit_real`): two failure modes to design around:
-
-- Deleting the original before confirming the replacement sent would risk
-  losing the sample if the send then failed - so replacement sends FIRST,
-  original deletes only once confirmed resident.
-- Sending under the ORIGINAL's own name risks a subtler failure: verified
-  via `s3k/analysis.py`'s own docstrings that **keygroup zones resolve a
-  sample by NAME, live**, and the hardware enforces no uniqueness on that
-  name (measured: renaming one resident sample to another's name left
-  both unresolvably ambiguous). Two samples briefly sharing a name during
-  the send/delete window would make every zone using that name ambiguous.
-  `_sample_edit_temp_name` sidesteps this by appending a fixed `"-TMP"`
-  suffix, never touching the original's name until the original is gone.
-
-Sequence: send under `<name>-TMP` → confirm resident → delete original →
-reload, find `<name>-TMP`'s new index by name (indices shift after
-delete) → `SHNAME`-only rename back → reload once more, select result.
-Demo mode (`_perform_sample_edit_demo`) bypasses all of this, mutating
-the cache/`WaveformView` directly, paced the same way
-`_fetch_demo_sample_audio` is.
-
-**Real bug found while building this**: `_wait_for_any_signal` used to
-`submit_*()` THEN connect listeners - every signal it waits on fires from
-a background thread/async callback, and nothing guaranteed the GUI thread
-reached `connect()` first. Unhittable against real hardware (real SysEx
-latency), but **reliably lost every run** against `FakeBridge` in tests
-(plain dict ops, no latency) - a test hung for a full 20s timeout despite
-the delete having already succeeded. Fixed: `_wait_for_any_signal` now
-takes a required `start` callable, invoked only after every listener is
-connected; every caller moved its `submit_*()`/`send_*()`/`receive_*()`
-call into `start=`. A `start()` returning exactly `False` (not `None`)
-makes it skip the wait outright (used by `send_file_queue` declining to
-start) rather than hanging until timeout (or forever, for the send step's
-`timeout_ms=None`). Any new blocking wait added to this page must follow
-this ordering.
-
-**Duplicate Sample** (button, right-aligned on `sample_edit_row` next to
-Trim/Reverse/Fade/Normalise) reuses this same send pipeline but is
-simpler: nothing is deleted or renamed, so no temp-name step - the new
-name is confirmed distinct from every resident sample up front (same
-name-collision hazard as above), then sent directly.
-`_perform_duplicate_sample_real` looks up the new sample's index by name
-once resident, then copies every header field `send_file_queue` doesn't
-set (`SPTYPE`/`SPITCH`/`SHLTO`/`STUNO` and the four loop/start/end
-fields) across from the source - otherwise "duplicate" would silently
-mean "audio copy with default metadata." Unlike Trim/Reverse/Fade/
-Normalise, it never touches the source's own audio, so it isn't
-"destructive" in the same sense - no "cannot be undone" warning needed,
-just the name prompt. **Demo-mode-disabled**, same reasoning as Duplicate
-Program/Duplicate Keygroup (`DemoBridge` has no add-sample primitive
-either) - gated through `_set_sample_edit_buttons_enabled` (which already
-reacts to `has_waveform()`, which this button also needs), not the list
-context-menu's own enable method.
-
-### Loop-point markers push each other, and click-to-cycle when stacked
-
-`WaveformView`'s old `clamp_marker` stopped a dragged marker dead at its
-neighbour. Now `push_marker`: moving a marker far enough pushes the
-neighbour along instead, cascading (Newton's cradle). `start <=
-loop_start <= loop_end <= end` still always holds, just enforced by
-shoving rather than refusing to cross. `clamp_marker` is gone entirely.
-
-**The write side had to change with it**: a push can move up to all four
-markers from one action, so `_schedule_marker_write` takes the FULL
-marker dict from both before and after the edit and writes exactly the
-field(s) whose value actually changed (`SSTART` if start moved, `SMPEND`
-if end moved, `LOOPAT1`+`LLNGTH1` together if either loop edge moved) -
-get this wrong and the hardware silently desyncs from what's on screen
-(e.g. a push that visibly moves `loop_end` but only writes `SMPEND`
-leaves the sampler looping at its old position). `_on_waveform_marker_committed`
-(drag release) gets "before" from the cache entry (only updated on
-commit); `_on_marker_spinbox_changed` gets it from `WaveformView.markers()`
-read immediately before `set_marker`. `_flush_marker_write` unconditionally
-flushes all four marker debounce keys now, no `which` parameter needed.
-
-**Follow-up**: once a push lands several markers on the same frame, they
-sit at the same pixel column - the first version's `_marker_near(x)`
-always broke ties the same way (effectively always "start"), so only the
-frontmost marker could ever be grabbed again. Fixed the usual way
-overlapping-selection is solved: `_markers_within_hit_radius(x)` (every
-visible marker within `_HIT_RADIUS_PX`, closest first) replaces
-`_marker_near`, and `mousePressEvent` cycles through the candidate list
-on repeated clicks at the same spot (compared by the actual sorted name
-list, not just pixel proximity) rather than always grabbing the closest.
-Marker spinboxes need none of this - each is directly clickable
-regardless of canvas position, an unambiguous fallback for separating a
-stack.
-
-### Waveform rendering details: zone tint, zero-crossing, high-zoom, gap-bridging
-
-`_waveform_zone_color(frame, palette)` picks a color per envelope column:
-`text_disabled` (greyed) outside `[start, end]` (resident but never
-plays), `keygroup_color_3` (the same teal the loop markers use) inside
-`[loop_start, loop_end]` inclusive, plain `accent` elsewhere within
-`[start, end]`. Frame comes from `frame_for_x`, the same mapping marker
-positioning uses, so boundaries line up with the markers pixel for pixel.
-
-`_draw_zero_crossing_line` is a plain horizontal guide at `mid_y`, drawn
-even in header-only mode. `_draw_connected_samples` fixes a real bug at
-high zoom: the per-column min/max bar mode degenerates once zoomed past
-1:1 (each column maps to ≤1 sample, so min == max, every bar collapses to
-a dot, reading as disconnected dashes). `paintEvent` switches to an
-actual point-to-point polyline whenever `view_length <= self.width()` -
-cheap, since that condition bounds sample count by canvas width. Below
-that threshold the bar rendering is unchanged; both paths share
-`_waveform_zone_color`. Crash-guarded by
-`test_paint_does_not_crash_at_high_zoom_in_connected_sample_mode`, since
-the progressive-loading interaction (`self._samples` still filling in,
-shorter than the zoomed-in view) is easy to get wrong here.
-
-The bar mode itself also used to leave real gaps between adjacent
-columns whose samples all sit in a narrow, low-variance range (a quiet
-passage) even though the audio is continuous - the classic min/max-bar
-artifact. `_bridge_envelope_gaps` (`build_envelope` always runs output
-through it) walks the envelope once and nudges the nearer edge of any
-two non-overlapping adjacent columns just far enough to touch - never
-shrinks a genuine peak/trough, no-op once already overlapping. Operates
-on amplitude `(lo, hi)` pairs, not pixels (the y-mapping is strictly
-monotonic linear, so amplitude-space gaps are y-space gaps).
-
-### Zoom ceiling: a flat 500x could never reach single-sample resolution
-
-Dragging a marker "as zoomed in as possible" still wasn't sample-accurate.
-Root cause: `_MAX_ZOOM = 500.0` was a flat ceiling, but `_view_length()`
-is `round(frame_count / zoom)` - for any sample bigger than roughly
-`500 * canvas_width_px` frames, max zoom still left more samples visible
-than canvas pixels, so every pixel of mouse movement skipped several
-frames permanently on larger samples (real S3000-series samples can be
-several hundred thousand to a few million frames).
-
-Fixed by `WaveformView._max_zoom()` returning `max(_MIN_ZOOM,
-float(self._frame_count))` - the exact zoom at which `_view_length()`
-bottoms out at 1 - so single-sample resolution is always reachable
-regardless of sample size; `set_zoom` clamps against this instead of the
-old flat constant. This also means zoom now naturally reaches
-`_draw_connected_samples`' rendering mode for every sample, previously
-geometrically unreachable for big samples. No change to `_ZOOM_STEP`.
-See `test_max_zoom_reaches_single_sample_resolution_for_a_huge_sample`.
-
-### Loop type gating: markers/spinboxes/tint disappear, don't just grey out
-
-When `SPTYPE` is "No looping"/"One-shot" (`_SPTYPE_VALUES_WITHOUT_LOOP =
-{2, 3}`), the loop has no meaning: `_set_loop_markers_enabled(enabled)`
-greys the loop spinboxes + legend swatches and calls
-`WaveformView.set_loop_enabled(enabled)`, which makes `loop_start`/
-`loop_end` **not draw at all** (paintEvent skips them outright) and
-excludes them from `_markers_within_hit_radius`. The loop-region teal
-tint reverts to plain accent. Getting the disabled *look* right needed
-its own fix: `style.qss.template`'s `QComboBox, QSpinBox, QDoubleSpinBox`
-rule hardcodes colors, silently defeating Fusion's automatic
-disabled-greying unless `:disabled` is spelled out too - added alongside
-the existing `QPushButton:disabled`/`QLineEdit:disabled` rules, app-wide.
-
-**Dragging Start/End while the loop is off freezes `loop_start`/
-`loop_end` instead of pushing them.** `WaveformView._push_marker` wraps
-`push_marker`: when the dragged/typed marker is `start`/`end` and
-`self._loop_enabled` is `False`, it pushes against the reduced order
-`("start", "end")` only, leaving the loop markers untouched even if the
-moved marker crosses them - deliberately breaking `push_marker`'s own
-invariant while the loop is off, since loop points shouldn't get dragged
-by an unrelated trim while invisible. Re-enabling
-(`set_loop_enabled(True)`) calls `_reconcile_loop_into_range` once
-(`min(max(x, start), end)` per edge, monotonic) and emits
-`markers_changed`; `_set_loop_markers_enabled` diffs old vs. new around
-that call and schedules the `LOOPAT1`/`LLNGTH1` write only if something
-actually moved.
-
-**This reintroduced the exact bug class Trim/Reverse assumed couldn't
-happen** (their docstrings state loop markers are always within `[start,
-end]` on entry, which the freeze above can violate while the loop is
-off). Fixed by `WaveformView.markers_with_loop_in_range()` - a
-*non-mutating* clamped view - `_perform_sample_edit` reads from this
-instead of `.markers()` directly, so Trim/Reverse/Fade always get sane
-input without permanently un-freezing the actual stored loop points.
-
-### Sample-load progress: removed, then partly brought back
-
-The full-width `sample_load_progress` bar under Trim/Reverse was removed
-for ordinary sample *loading* - redundant with the waveform's own
-progressive fill and the status bar (which already showed frame counts).
-`_on_sample_receive_progress` now takes a `label` and writes
-`"{label} - {percentage}% ({current}/{total} frames)"` to the status bar
-instead of driving a bar.
-
-**Trim/Reverse/Fade got a small bar back**: unlike loading, sending
-already-loaded audio back out has no progressively-filling waveform of
-its own - the audio sits static until send/delete/rename finishes.
-`sample_edit_progress` (140px, hidden by default) lives next to the Zoom
-controls, driven by `_on_sample_edit_progress` (which also calls
-`_on_sample_receive_progress` for the shared status-bar text) - ordinary
-loading never calls this, so the bar stays hidden for a plain
-double-click load.
-
-### Fade In/Out: fades the lead-in/lead-out AROUND [start, end], not inside it
-
-One "Fade In/Out" button (next to Trim/Reverse) applies both directions
-in one pass. `core/sample_editing.py`'s `fade_in_out_samples(samples,
-start, loop_start, loop_end, end)` - same 5-arg-in/5-tuple-out shape as
-`trim_samples`/`reverse_samples`.
-
-**First version faded the first/last 10% of `[start, end]` itself** (a
-trapezoid inside the marked region) - wrong; corrected after real use.
-Actual intent: a linear ramp from silence at frame 0 up to full volume
-exactly AT the Start marker (the lead-in, otherwise untouched by anything
-else on this page), and a mirror ramp from full volume AT the End marker
-down to silence at the buffer's last frame (the lead-out).
-**`[start, end]` itself is left completely untouched** - both ramps
-merely reach gain 1.0 at its edges. `start == 0` or `end == frame_count -
-1` skips that ramp rather than dividing by zero. Markers are always
-returned unchanged - fading only scales values in place.
-
-**If this looks backwards from what a "fade the marked region" feature
-should do, it isn't - re-read this section before "fixing" it.**
-
-### Normalise Sample: whole-buffer gain, not [start, end]-scoped
-
-`core/sample_editing.py`'s `normalize_samples(samples, start, loop_start,
-loop_end, end)` - same 5-arg shape as the other three transforms -
-applies ONE uniform gain to the ENTIRE buffer so its loudest sample hits
-`_MAX_AMPLITUDE` (32767, the conventional safe ceiling; -32768 is
-technically representable but not used). Deliberate scope choice, not an
-oversight: unlike Trim/Fade (`[start, end]`-relative), Normalise matches
-Reverse's whole-buffer scope - "loudest point of the sample" was read as
-the whole buffer, matching how normalizing conventionally works. If a
-user ever wants it scoped to `[start, end]` instead, that's a one-line
-change to what `normalize_samples` iterates over - confirm with the user
-first, the same way Fade's region got corrected above after guessing
-wrong.
-
-`_confirm_normalize_sample`'s "nothing to do" guards read the actual peak
-(unlike Trim/Fade's marker-only guards): silent (`peak == 0`, nothing to
-gain up) or already at `_MAX_AMPLITUDE`.
-
-### Keygroup tab's Modulation card: read-only source mirrors
-
-**Confirmed on real hardware**: the S2000 manual's prose ("Each keygroup
-has these modulation facilities separately available") raised the
-question of whether Filter Mod/Pitch Mod/Amp Mod 3's SOURCE is
-per-keygroup rather than program-wide as implemented. A read-only
-diagnostic script (`test_scripts/keygroup_mod_source_diagnostic.py` -
-gitignored) read a program's header and two keygroups' headers before/
-after changing Filter Mod 1's source on the front panel: only the
-PROGRAM header's byte changed, neither keygroup moved a byte. Confirmed
-program-wide, as implemented. See
-`test_scripts/MOD_SOURCE_KEYGROUP_INVESTIGATION.md` for the full
-writeup if this question resurfaces - don't re-litigate from the manual's
-prose alone without reading that first.
-
-The Keygroup tab's Modulation card is Amount-only (see "LFO2 and the
-modulation matrix" above); previously it gave no hint which source was
-assigned program-wide. `_build_mod_amount_column_with_source_mirror`
-places a disabled, read-only combo (`_build_mod_source_mirror_combo`,
-same items as the real one) to the LEFT of the amount knob, for Filter
-Freq (all 3 slots), Pitch slot 2, and Amplitude slot 3 -
-`self.mod_filt1_source_mirror` etc. Pitch slot 1 (`L_PTCH`, always LFO1,
-never assignable) gets no mirror combo - see below.
-
-Side by side (mirror, then knob), matching the Program tab's own
-(source, amount) left-to-right order - re-measured via
-`horizontalScrollBar().maximum()` staying 0 on both tabs after switching
-from an earlier stacked layout.
-
-**Keeping the mirror in sync needs two mechanisms**, because of build
-order and how program loads avoid write-back loops:
-
-- **Live edits**: the Keygroup tab is built before the Program tab's
-  source combos exist in `__init__`, so
-  `combo.currentIndexChanged.connect(mirror.setCurrentIndex)` is wired
-  later, right after the Program tab's 5 source combos are constructed.
-- **Loading a program** sets every `MODS*` combo via `blockSignals(True)`
-  (avoiding a redundant write-back), which also means the live-edit
-  connection never fires during a load - so the `program_mod_combos` load
-  loop carries a `mod_source_mirrors` dict and sets each mirror's index
-  explicitly alongside the real combo's, inside the same blockSignals
-  block.
-
-Miss either half and the mirror silently drifts - the live connection
-alone misses every load, the load-time sync alone misses live edits.
-`tests/test_program_editor_window.py` has one test per path plus
-`test_keygroup_mod_source_mirror_is_never_a_write_target` (the mirror is
-never wired through `_wire_combo_write`).
-
-**Row labels/slots** - 3 rows, not 4:
-
-- "Filter Frequency" → **"Filter Freq."**, matching the Program tab's own
-  label for the same destination.
-- **"Pitch"** is one row, two slots (was two separate rows): Slot 1 is
-  the fixed always-on LFO1 route (`L_PTCH`, no source combo - see
-  below), Slot 2 is the assignable one (`MODVPITCH`, mirrored). Matches
-  the hardware's own PITCHMOD1/PITCHMOD2 order.
-- "Loudness (slot 3)" → **"Amplitude"**, moved into **Slot 3**
-  specifically (was Slot 1) - matches exactly where `MODSAMP3`/`MODVAMP3`
-  sits on the Program tab's own "Loudness" row (slots 1/2 there are
-  program-level `MODSAMP1`/`MODSAMP2`).
-
-`_ModMatrixGrid`'s `data_row_count` for this card dropped from 4 to 3 -
-bump it again if you add a row back (nothing else catches a mismatch,
-the card just draws one shading band short or long).
-
-**Pitch Slot 1 shows a plain "LFO1" label, not a disabled combo** -
-`_build_mod_fixed_source_label` (new). A disabled combo there would still
-read as "a choice that isn't available right now," misleading for a slot
-whose source was never assignable at all. Same fixed width (130px) as
-the real mirror combos so the row lines up, same muted `text_disabled`
-color, but a bare `QLabel` with no border/background so it looks
-unmistakably unclickable. Use this helper for any future never-assignable
-mod slot rather than a disabled combo.
+around it (`_wait_for_any_signal`, the ONE place in this window that
+blocks the calling thread on a signal - don't reach for it elsewhere
+without comparably good reason). Audio for the waveform comes from
+`main_window.sampler_controller` (the Dashboard's OWN receiver - a
+*second*, separate concurrent MIDI connection to the same port); header
+fields come through the normal `BridgeWorker` connection.
+
+**Loop marker editing**: both drag (canvas) and spinbox input paths go
+through `_schedule_marker_write`/`_flush_marker_write` - one place decides
+which field(s) a marker maps to. Markers PUSH each other (Newton's-cradle
+cascade) rather than clamping dead at a neighbour; `_schedule_marker_
+write` takes the full before/after marker dict and writes only whichever
+field(s) actually changed. `_markers_within_hit_radius` + click-to-cycle
+handles multiple markers landing on the same pixel after a push.
+
+Loop editing needs only the HEADER, not full audio (`has_header()` true,
+`has_waveform()` false is a valid, editable state) - gate new
+marker-editing code on `_frame_count > 0`, not `_samples is not None`. If
+the user edits a marker with only the header loaded and audio arrives
+later, reuse the cached markers (`_markers_from_header()`); re-deriving
+silently discards the edit.
+
+**Loop type gating** (`SPTYPE` "No looping"/"One-shot"): loop
+markers/spinboxes/tint fully disappear (not just grey out) via
+`WaveformView.set_loop_enabled(False)`. Dragging Start/End while the loop
+is off freezes (doesn't push) the loop markers, which can violate the
+`start<=loop_start<=loop_end<=end` invariant Trim/Reverse/Fade/Detect Root
+Note all assume on entry - `WaveformView.markers_with_loop_in_range()` is
+a NON-mutating clamped view for exactly this; any code transforming
+sample audio should read from this, not `.markers()` directly.
+
+**Zoom**: `_max_zoom()` scales with `frame_count` (not a flat ceiling) so
+single-sample resolution is always reachable regardless of sample size.
+Trackpad pinch arrives as `QEvent.Type.NativeGesture`, not Ctrl+wheel.
+Panning: `angle.x() != 0` always means pan (nothing else produces nonzero
+`.x()` except a genuine horizontal swipe/wheel); Shift+scroll repurposes
+`.y()` for pan on a vertical-only mouse wheel; unmodified vertical scroll
+does nothing on purpose (repurposing it for pan was the root of an
+earlier version of this exact bug).
+
+## Sample edit actions (Trim/Reverse/Fade/Normalise/Filter/Duplicate)
+
+No hardware primitive exists for any of this (`s3k`/`s3ked` have zero
+sample-audio-editing capability) - the only mechanism is
+`SamplerController.send_file_queue` + `BridgeWorker.submit_delete_sample`.
+The math lives in `core/sample_editing.py` (pure, no Qt/MIDI; a consistent
+5-arg-in/5-tuple-out shape: samples, start, loop_start, loop_end, end).
+
+**Trim/Reverse/Fade/Normalise/Filter send-then-delete under a temp name**
+(`_perform_sample_edit_real`): send the replacement FIRST under
+`<name>-TMP`, confirm it's resident, delete the original, rename back -
+never delete-then-send (risks total loss if the send then fails) or send
+under the original's own name (keygroup zones resolve samples by NAME,
+live, with no uniqueness enforced on hardware - two samples briefly
+sharing a name make every zone using it ambiguous, measured).
+
+**These five transforms used to silently drop the sample's own header
+fields on every resend** - a freshly-sent SDS dump lands with the
+sampler's own defaults, not the original's, so Trim/Reverse's genuinely
+recomputed loop points (and Fade/Normalise/Filter's unchanged-but-still-
+known ones) were discarded outright. Fixed: `_perform_sample_edit_real`
+now writes back `SPTYPE`/`SPITCH`/`SHLTO`/`STUNO` (from the source cache
+entry) and `SSTART`/`SMPEND`/`LOOPAT1`/`LLNGTH1` (from the transform's own
+new markers) after the rename - the same 8-field pattern
+`_perform_duplicate_sample_real` already used (that one never had this
+bug, since duplicating doesn't change the audio's own shape).
+
+Fade fades the lead-in/lead-out AROUND `[start, end]` (linear ramps
+reaching gain 1.0 exactly at the markers), NOT a trapezoid inside the
+region - **re-read `fade_in_out_samples`'s own docstring before "fixing"
+this back**, it looks backwards but isn't. Normalise is whole-buffer scope
+(matches Reverse), not `[start, end]`-scoped like Fade - a deliberate
+choice; confirm with the user before changing it.
+
+Filter Sample's own dialog (cutoff/slope knobs + Preview) used to BE the
+only confirmation - reversed after real use: OK also doubles as "audition,
+then commit," so a habitual/muscle-memory OK click right after Preview had
+no way to back out. Now has the same second `QMessageBox.question`
+confirm every other transform already had. **All five send-confirmation
+dialogs default to Yes** (not Qt's usual No) - Enter alone now sends, at
+the user's own request, since reaching one of these dialogs is already a
+deliberate step.
+
+`_wait_for_any_signal` requires a `start` callable, invoked only AFTER
+every listener connects (not `submit_*()` then connect) - unhittable
+against real hardware's own latency, but reliably lost every run against a
+fast fake/`DemoBridge` in tests (no latency to hide the race).
+
+## Root Note & Tune, and Detect Root Note
+
+`sample_root_note_spinbox` (`SPITCH`, `NoteSpinBox`, ranged `21..127`) and
+`sample_tune_spinbox` (`STUNO`, a `QDoubleSpinBox` in SEMITONES not
+literally cents despite the common name, ±50.00st) live in the "Root Note
+& Tune" card.
+
+**"Detect Root Note" button** (`core/root_note_detection.py` +
+`_confirm_detect_root_note`) - hand-rolled, pure-Python time-domain
+autocorrelation pitch detection, no new dependency (aubio/librosa/numpy
+were all considered and rejected - pitch tuning is a matter of taste, not
+correctness this app needs to nail perfectly; same reasoning as
+`core/transient_detection.py`'s onset detection). Monophonic only.
+
+**Octave disambiguation is via the CURRENT root note as an anchor, not
+"lowest"/"loudest"**: a periodic signal's autocorrelation is ALSO strongly
+peaked at every integer multiple of the true period (trivially, since
+periodic-with-T implies periodic-with-2T/3T/...), so real audio typically
+shows several genuine candidate peaks, not one. The anchor picks whichever
+candidate is closest in semitones - never biases the measurement itself.
+
+**Real bug found and fixed**: originally picked whichever peak was
+nearest the anchor, full stop - a badly-set (or default) anchor could
+reach past a strong peak and grab a much weaker, spurious one instead, so
+the SAME audio reported wildly different "confidence" (37%-79%, confirmed
+against `tests/test_audio.wav`, a chord stab) purely from the anchor,
+nothing about the audio changing. Fixed: the anchor now only picks among
+CREDIBLE peaks (`_CANDIDATE_CONFIDENCE_RATIO`, 0.8 of the strongest one
+found) - still disambiguates genuine octave ambiguity, can no longer
+manufacture false confidence in noise.
+`test_confidence_does_not_swing_low_based_on_anchor_alone` regression-
+guards this against the real fixture.
+
+**Analysis window**: the loop region (`markers_with_loop_in_range()`,
+already-stable/repeating, immune to attack-transient bias) is preferred if
+its span is at least `_MIN_LOOP_ANALYSIS_FRAMES` (≈2 periods of the lowest
+supported note); otherwise an attack-skipped, capped chunk of
+`[start, end]`. **Both paths are capped to the same short length budget**
+(`_ROOT_NOTE_FALLBACK_WINDOW_SECONDS`) - an uncapped loop region's own
+analysis time scales with its length (confirmed: ~1.5s of real audio took
+~1.5 SECONDS to analyse before this cap existed), which would make a
+sustained-pad sample's own loop region noticeably slow to click.
+
+**Confidence threshold** (`CONFIDENCE_THRESHOLD`, currently 0.5): below
+this, the button shows a plain acknowledgement with no note/confidence/
+choice offered - per direct user request, nothing actionable for an
+unreliable guess. Needs real-hardware/real-material validation to actually
+calibrate; the chord-stab fixture still clears 50% (it's polyphonic, not
+pure noise), so this may need raising once tested against real
+monophonic samples.
+
+**Writing the result does NOT overwrite Tune outright.**
+`core/akai_sysex.py`'s `compute_bandwidth_and_tuning` (Transfer Dashboard
+send-time code, an unrelated file) bakes a permanent hardware-engine-speed
+compensation into `STUNO` whenever a sample was originally sent at a
+non-native rate (the Akai playback engine only physically runs at
+22050/44100 Hz) - completely independent of the sample's own recorded
+pitch. `_confirm_detect_root_note` recomputes that baseline fresh from the
+sample's own declared rate and ADDS the detected residual on top, rather
+than blindly discarding it (comes out to 0 - a no-op - for the
+overwhelmingly common native-rate case).
 
 ## Slice Editor (Samples tab): manual ReCycle-style breakbeat chopping
 
-"Slice Editor…" (next to Duplicate Sample) opens a modal
-`SliceEditorWindow` (`ui/slice_editor_window.py`) over a sample's already-
-loaded audio, letting the user place slice markers by hand and export every
-resulting slice back to the sampler as a new one-shot sample. Same
-`has_waveform()`/demo-mode gate as Duplicate Sample in
-`_set_sample_edit_buttons_enabled` - DemoBridge has no add-sample primitive
-either, so the button is fully disabled in demo mode rather than offering a
-partial fake (same reasoning already established for Duplicate
-Program/Keygroup/Sample - see "Trim/Reverse..." above).
+"Slice Editor…" opens a modal `SliceEditorWindow` over a sample's
+already-loaded audio - place slice markers by hand (Equal Slices, or the
+live Sensitivity slider below), export every slice as a new one-shot
+sample, optionally also building a whole new program (one keygroup per
+slice, Const Pitch, one-shot). Same `has_waveform()` gate as other
+sample-edit actions, but NOT demo-mode-disabled outright like Duplicate
+Sample - only Export needs real hardware (`DemoBridge` has no add-sample
+primitive); marker placement/click-to-preview/detection all work fine
+without it.
 
-**No transient detection** - manual markers only, plus an "Equal Slices"
-quick-start (even spacing via `core.sample_slicing.equal_slice_markers`) and
-zero-crossing snapping (`find_nearest_zero_crossing`) on every add/drag-
-release. Automatic transient detection was discussed and deliberately cut
-as a separate, much larger undertaking - if it's ever added, it should
-produce the same plain frame-index marker list this already consumes, not
-a parallel code path.
+`SliceWaveformView` is NOT `WaveformView` reused - genuinely different
+marker model (two edges + an arbitrary-length interior list that CLAMPS
+at a neighbour on drag, vs. `WaveformView`'s fixed four markers that PUSH
+each other). Reuses `waveform_view.py`'s free helper functions, not its
+class.
 
-**`SliceWaveformView` (`ui/slice_waveform_view.py`) is NOT a reuse of the
-Samples tab's own `WaveformView`** - genuinely different marker model:
-`WaveformView` has a FIXED four named markers that PUSH each other past a
-neighbour (Newton's-cradle cascade, see `push_marker`); this widget has two
-edge handles (start/end - "shave off dead space") plus an ARBITRARY-length,
-user-managed interior marker list, and a drag just CLAMPS at whichever
-neighbour (marker or edge) is nearest - there's no meaningful "shove the
-next slice along" behaviour here, since slices are independent chunks, not
-one continuous loop region. It does reuse `waveform_view.py`'s free,
-Qt-independent helpers (`build_envelope`, `frame_for_x`, `x_for_frame`,
-`_MIN_ZOOM`) rather than re-deriving that math.
+**Export**: every slice forced to one-shot (`SPTYPE=3`) regardless of the
+source's own loop settings; `SPITCH`/`STUNO`/`SHLTO` copied from source;
+the whole batch goes in ONE `send_file_queue` call (not one per slice) -
+`SamplerController` already reports one combined `transfer_finished` for
+a whole queue. Slice names zero-pad to a width computed ONCE per batch
+(`<base>-01`..`<base>-16`, not `-1`..`-16`) so truncation stays consistent
+across it. Collision checks re-query `existing_names_provider()` live,
+never a stale snapshot. The dialog is application-modal specifically so
+the user can't tab back to the Dashboard and start a conflicting send
+mid-export - not a race this window otherwise has to poll for.
 
-**Zero-crossing snapping is snap-ON-RELEASE, not continuous during the
-drag** - the same "redraw live, commit on release" split
-`WaveformView.marker_committed` already uses for its own hardware writes.
-Snapping on every mouse-move would make a marker visibly jump around
-mid-drag instead of tracking the cursor smoothly; it also isn't free
-(`find_nearest_zero_crossing` searches outward from a target frame,
-`O(search_radius)` per call). `core.sample_slicing.find_nearest_zero_crossing`
-picks the nearest of two samples straddling a genuine sign change (or a
-sample that's exactly 0) - there's no continuous zero to land on in
-discrete audio, so "nearest to zero amplitude among the two frames the
-crossing sits between" is the practical definition used throughout.
+**Confirmed real dual-connection MIDI race** (the Samples tab's OWN second
+connection, to fetch audio via `sampler_controller` - see above): a large
+batch export's own sample-list reload can lose a reply to
+`SamplerController`'s concurrent chatter on the same wire.
+`_reload_sample_list_with_retries` retries up to 3 times - deliberately
+scoped to `_export_slices` only (the biggest/longest send this window
+ever triggers), not retrofitted onto Duplicate/Trim's own single reload
+points without evidence they need it too.
 
-**Every exported slice is forced to one-shot (`SPTYPE = 3`)** regardless of
-the source sample's own loop settings - a chopped drum break slice isn't
-meant to loop. `SPITCH`/`STUNO`/`SHLTO` are still copied from the source
-(same fields `_perform_duplicate_sample_real` copies), so at least pitch/
-tuning carry over; `SSTART`/`SMPEND` are written to cover the whole sent
-buffer (0 to the slice's own length - 1).
+**Click-to-preview** (`core/audio_preview.py`'s `SlicePreviewPlayer`, this
+app's first non-MIDI audio output - `miniaudio`, not `QAudioSink`, after
+`QAudioSink` produced measured real buffer underruns on Linux): a plain
+single click (not double, which still adds a marker) on empty space OR a
+marker/handle schedules a debounced preview
+(`QApplication.doubleClickInterval() // 2`) rather than firing
+immediately - the real Qt event sequence for a double-click is
+press→release→doubleClick→release, so an immediate-fire would make every
+marker-adding double-click also blip a stray preview. **Clicking a
+marker/handle uses the TARGET's own frame, not the raw cursor pixel** - a
+real bug: a click a pixel or two either side of a marker (still within its
+own hover/hit radius) used to resolve to the wrong neighbouring slice,
+even though the hover highlight visually said "you're on this marker." A
+real drag (movement, not just a press) cancels the pending preview.
 
-**Export sends the WHOLE batch in ONE `send_file_queue` call**, not one
-call per slice the way `_perform_duplicate_sample_real` sends its single
-file - `SamplerController._finish_unit` only emits `transfer_finished` once
-`self._file_queue` is fully drained (see its own code), so a single
-`send_file_queue(file_entries)` with all N slices already gets "send these,
-tell me once they're ALL done," including per-file progress
-(`transfer_progress`) and per-file status text (`status_changed`, "Sending
-file X/N") for free - looping `_wait_for_any_signal` N times would be
-strictly more code for a worse result. `_export_slices` in
-`program_editor_window.py` is the hardware-talking half that does this
-(temp WAVs, the batch send, then one header-field fixup pass per landed
-sample); `SliceEditorWindow` itself only owns naming/collision/confirmation
-UI and calls into it - same layering `BridgeWorker`'s own section above
-describes for the rest of this window's hardware access.
-`tests/test_program_editor_window.py`'s own `FakeSamplerController` used to
-only read `file_entries[0]` (every existing caller only ever sent one file)
-- extended to iterate the whole list for this, backward-compatible with
-every single-file caller.
+**Sensitivity slider - live transient detection, no separate button**
+(`core/transient_detection.py`): hand-rolled energy-flux onset detection
+(RMS over fixed windows, half-wave-rectified frame-to-frame flux,
+threshold+local-peak+min-gap picking) - deliberately simple, no
+FFT/numpy/aubio. 0% (the default/rest position) is fully OFF; dragging
+the slider live-regenerates ALL slice markers from scratch on every tick,
+same feel as a real ReCycle sensitivity knob - **no confirmation dialog**
+(would be unusable while dragging), so touching it away from 0 silently
+replaces whatever markers exist, hand-placed or not. `compute_flux()`/
+`markers_from_flux()` are split so the expensive O(n) analysis pass runs
+ONCE per loaded sample and only the cheap O(peaks) picking re-runs per
+slider tick.
 
-**Slice names are zero-padded to a FIXED width computed once per batch**
-(`ui.slice_editor_window.slice_export_names`) - `<base>-01`.."<base>-16"`,
-not `-1`.."-16"` - so every name in the same export truncates its base
-identically. Getting this wrong (each name computing its own suffix width)
-would silently truncate slice 1's base one character longer than slice
-10's the moment a batch crosses 10 slices, since `NAME_LENGTH` (12) always
-needs to leave room for the suffix. Collisions are checked against a live
-`existing_names_provider()` callback (re-queried right before export), not
-a snapshot taken when the dialog opened - the same "stale copy" bug class
-`_update_multi_program_combo_names`/`_update_zone_sample_combo_names`
-already exist to avoid elsewhere on this page.
+The slider itself is `ui/fine_slider.py`'s `FineSlider` (not a plain
+`QSlider`) - double-click resets to default, Shift-drag is fine control
+(same macOS no-cursor-warp tweak as `Knob`/`WaveformView`), click-then-
+type opens the same generic `_TypeEdit` popup `Knob` uses. Deliberately
+NOT a `Knob` subclass or refactored to share a base with it (zero risk to
+that already-tested, widely-used class) - some real duplication accepted
+instead. QSS styling (`style.qss.template`'s `QSlider` rules, previously
+nonexistent - it rendered as a plain unstyled Fusion slider) uses
+`#3aa88a`, the SAME hardcoded green `Knob`'s own value arc paints with,
+not `${accent}` (which differs between themes) - deliberately
+theme-independent, matching precedent.
 
-**`SliceEditorWindow` is deliberately application-modal** (`.exec()`, not
-`.show()`) - there's no `is_transfer_busy()` re-check once export is
-actually underway, so modality is what actually prevents the user tabbing
-back to the Transfer Dashboard and starting a conflicting send while the
-window is open, rather than a race this window would otherwise have to
-poll for. `_wait_for_any_signal` (in `ProgramEditorWindow`, which is what
-performs the real export) already pumps its own nested `QEventLoop` while
-blocking on a send, so nesting `QDialog.exec()` on top of that is nothing
-new for this codebase. `reject()`/`closeEvent()` both ignore Close/Esc/
-window-X while an export is actually in flight (`self._exporting`) - that
-nested event loop means a Close click COULD otherwise be delivered and
-processed mid-batch-send.
+**Layout fixes, all confirmed against the actual dialog, not just
+reasoned about**:
 
-**Deferred to a later version, deliberately out of scope for this pass**:
-click-to-preview playback through the computer's own speakers (needs an
-audio output driver this app has never opened before - a separate,
-larger piece of work); real macOS trackpad pinch-to-zoom
-(`WaveformView._handle_pinch_zoom`'s own `QEvent.Type.NativeGesture`
-handling was not duplicated onto `SliceWaveformView` - Ctrl+wheel zoom and
-the Zoom +/-/Fit buttons cover it for now). Mono only - stereo sample
-editing was out of scope for this pass too, though in practice every
-resident S3000-series sample is already a single mono buffer on this
-hardware regardless (stereo only ever exists as a pair of mono sample
-slots, `-L`/`-R` - see `sampler_controller.py`'s own
-`build_stereo_channel_name`), so this was never actually a gap to guard
-against on the input side.
+- The zoom scrollbar now reserves its height even while hidden, matching
+  the Samples tab's own `WaveformView` scrollbar - the original
+  "collapse to zero height, no wrapper" choice was reversed after real use
+  showed every row below it visibly jumping on every zoom-threshold
+  crossing.
+- The info label dropped its per-slice "lengths (frames): ..." list - at
+  30+ slices (easy via the sensitivity slider) the wrapped text grew tall
+  enough to push every row below it down the window.
+- The waveform view used to be `setFixedHeight(220)` - resizing the
+  dialog taller did nothing for it; the surplus vertical space instead
+  silently landed on the info label (the only OTHER non-Fixed-policy
+  widget in the layout - same failure class the Program Editor's own
+  section cards needed `Preferred,Fixed` to avoid, see above). Fixed:
+  `Expanding` + a 220px floor (not ceiling) on the waveform,
+  `Preferred,Fixed` explicitly on the info label,
+  `layout.setStretchFactor(waveform, 1)` as a third belt-and-suspenders
+  guarantee.
+- Wrapping `export_row` in a `QWidget` (for the height fix above) needs
+  `setContentsMargins(0,0,0,0)` explicitly - a bare top-level layout picks
+  up Qt's own default margins that a nested `addLayout()`'d one never had,
+  which silently clipped the row's own buttons at the bottom until caught
+  from a screenshot.
 
-Test split: pure math (`equal_slice_markers`/`find_nearest_zero_crossing`/
-`slice_bounds`/`slice_samples`) in `tests/test_sample_slicing.py`, the
-widget's own marker/drag/zoom behaviour in
-`tests/test_slice_waveform_view.py`, the dialog's naming/collision/
-confirmation UI (with `export_callback` entirely faked, never a real send)
-in `tests/test_slice_editor_window.py`, and the real hardware-talking half
-(`_export_slices`, plus `_open_slice_editor`'s own early guards) in
-`tests/test_program_editor_window.py` - the same split
-`core/sample_editing.py` vs. `_perform_sample_edit_real` already
-established for Trim/Reverse/Fade/Normalise. `SliceEditorWindow.exec()`
-itself is never called in a test (would hang an offscreen test with
-nothing to close a real modal loop) - `test_slice_editor_window.py`
-constructs the dialog directly and drives its methods without showing it.
+`AKAISDS_DEMO_INSTANT` skips `_fetch_demo_sample_audio`'s realistic
+pacing entirely - for iterating on this window without waiting out a
+simulated transfer per sample selected. The standalone launcher (bottom of
+`program_editor_window.py`) needs this AND `AKAISDS_DEMO_SAMPLER=1` both
+set - its `_StandaloneSamplerController` stub needs `cancel_transfer()`
+too, not just `is_transfer_busy()`, or `_open_slice_editor` raises
+`AttributeError` (a real bug, found and fixed).
 
-### Follow-up, first real-hardware session: a confirmed dual-connection MIDI race
-
-A user's real `akaisds.log` showed an export report "N slices were sent,
-but the sample list couldn't be refreshed to set their header fields" -
-not a timeout. The actual traceback: `s3k.bridge.sample_list()` raised
-`ValueError("SampleList: expected command 0x05, got 0x16")` on
-`ProgramEditorWindow`'s own BridgeWorker connection, at the exact moment
-the log showed `SamplerController` (the Transfer Dashboard's own,
-separate connection to the same physical MIDI port - see "Samples tab:
-loop points..." above) doing its own post-send RSTAT/RSLIST chatter and a
-further queued send. Two independent software listeners on the same wire
-occasionally each grab a reply meant for the other - confirmed, not
-theoretical. `_reload_sample_list_with_retries` (used by both of
-`_export_slices`'s own reload points, replacing two direct
-`_wait_for_any_signal([samples_loaded, samples_load_failed], ...)` calls)
-retries `submit_sample_list()` up to 3 times with a short pause before
-reporting real failure - a large batch export is exactly the case most
-likely to overlap with `sampler_controller`'s own chatter, since it's the
-biggest, longest-running send this window ever triggers on that shared
-connection. **Deliberately scoped to `_export_slices` only** -
-`_perform_duplicate_sample_real`/`_perform_sample_edit_real` have the
-identical latent race in their own single "one more reload" calls, but
-weren't reported failing and are more heavily-relied-on paths; don't
-retrofit the retry there without a reason to believe they're actually
-hitting it.
-
-### Follow-up: trackpad pinch-zoom, terse zoom buttons, and Fit collapsing the scrollbar
-
-`SliceWaveformView` initially shipped without `WaveformView`'s trackpad
-pinch-to-zoom (`QEvent.Type.NativeGesture` handling) - added afterward
-once asked for, same `event()`/`_handle_pinch_zoom` mechanism, mirrored
-rather than shared (this widget doesn't subclass `WaveformView` - see its
-own class docstring for why). Zoom buttons read bare "−"/"+" (with
-`setToolTip` picking up the discoverability a text label used to provide),
-not "Zoom −"/"Zoom +".
-
-**The horizontal scrollbar collapses to zero height at "Fit", unlike the
-Samples tab's own `WaveformView` scrollbar.** That one is deliberately
-wrapped in a fixed-height container even while hidden (see "Editing:
-markers, spinboxes, zoom" above) because it sits in a permanently-visible
-panel where neighbouring rows jumping on every zoom change would be
-worse. `SliceEditorWindow` is a short-lived modal dialog with nothing
-below the scrollbar that mockup/user testing found jarring about a bit of
-reflow - `self.scrollbar` is added directly to the dialog's layout with no
-such wrapper, so `setVisible(view_length < frame_count)` actually reclaims
-the space instead of just hiding the handle inside a reserved strip.
-
-**Close/Esc/window-X now asks for confirmation if there are unsaved slice
-edits.** `self._dirty` starts `False`, is set by `_mark_dirty` (wired to
-`SliceWaveformView.markers_changed`, connected only AFTER the initial
-`set_waveform` call so that call's own emit doesn't mark a freshly-opened
-window dirty), and is cleared again only after a SUCCESSFUL export (a
-failed one leaves it set - nothing actually landed on the sampler, so
-there's still something to lose). `_confirm_discard` is the single method
-both `reject()` and `closeEvent()` call through - checked in this order:
-still exporting (never allowed to close, no prompt - see the modality
-section above) → not dirty (close immediately, no prompt - nothing to
-lose) → dirty (ask). Zoom/pan changes don't count as "edits" (they use
-`SliceWaveformView`'s separate `view_changed` signal, never
-`markers_changed`), only start/end/marker changes do.
-
-### Follow-up: click-to-preview playback, and the audio output driver this app never had before
-
-The "deferred to a later version" note above (click-to-preview needing an
-audio output driver this app had never opened) is now implemented: a plain
-single click on empty waveform space (no handle nearby) previews that
-slice's audio through the computer's own speakers/interface -
-`core/audio_preview.py`'s `SlicePreviewPlayer`, the first thing in this
-codebase to open a `QAudioSink` rather than a MIDI port. The device/buffer
-size it uses are chosen in `MidiSettingsDialog`'s new "Audio Preview" tab
-(`ui/settings_dialog.py`) and persisted via `app_config.save_audio_output_device`/
-`save_audio_buffer_ms` - unrelated to MIDI, but kept in the same dialog
-since it's still "I/O hardware settings," just for the computer's own
-output instead of the sampler's.
-
-**Single click previews, double click still adds a marker** (unlike real
-ReCycle, which uses double-click to preview) - deliberate, confirmed with
-the user: this app had already committed double-click to "add a slice
-marker" before this feature existed, and re-purposing it would break the
-existing marker workflow. The two don't actually collide today (a plain
-click on empty space is currently a no-op in `SliceWaveformView`'s own
-`mousePressEvent` - only clicks on a handle do anything), **except** for
-the literal event sequence Qt delivers for every double-click: `mousePress`
-→ `mouseRelease` → `mouseDoubleClick` → `mouseRelease` - there IS a real
-single-click press before Qt recognizes the second one as a double-click.
-Firing preview playback immediately on that first press would mean every
-"add a marker" double-click also plays a brief blip of the wrong (pre-split)
-slice a moment before the marker lands.
-
-Fixed with the standard single-vs-double-click disambiguation pattern:
-`SliceWaveformView._schedule_preview_click` doesn't preview immediately -
-it starts a single-shot `QTimer` for `QApplication.doubleClickInterval()`ms
-(the platform's own double-click timing, not a made-up constant) and only
-actually emits `slice_preview_requested` when that timer fires
-(`_fire_preview`). `mouseDoubleClickEvent` and grabbing an actual handle
-(`mousePressEvent`'s drag-start branch) both call `_cancel_pending_preview()`
-first - so the ~300-400ms most users will never consciously notice buys a
-guarantee that a marker-adding double-click never also triggers a preview.
-See `tests/test_slice_waveform_view.py`'s click-to-preview tests, which
-call `_fire_preview()` directly to simulate the timer elapsing rather than
-sleeping a real test.
-
-**`SlicePreviewPlayer` retriggers, it doesn't queue** - a new `play()` call
-always `stop()`s whatever's already playing first, matching how a user
-actually scans through slices while chopping a break (click, click, click
-- each one should cut off the last and start immediately, not queue up a
-backlog). Both the `QAudioSink` and its backing `QBuffer` are kept alive on
-`self` for exactly this reason - Qt does not take ownership of the
-`QIODevice*` passed to `QAudioSink.start()`, and a local reference falling
-out of scope mid-playback is a real crash, not just a leak (same class of
-gotcha `BridgeWorker`'s section above warns about for a different Qt
-object). `SliceEditorWindow` calls `stop()` before a real export starts
-(the batch send freezes the UI for a while - nothing should still be
-playing under that) and in both `reject()`/`closeEvent()`, after
-`_confirm_discard()` says it's actually OK to close.
-
-Mono 16-bit PCM only, matching every sample this app ever handles
-(`struct.pack("<" + "h" * len(chunk), *chunk)` - same packing
-`sds_encoder.py` already uses, not `array.array`, to avoid introducing a
-second convention for the same job). `QAudioDevice.isFormatSupported()` is
-checked before construction; an unsupported combination falls back to the
-device's own `preferredFormat()` (pitch will be off, logged, rather than
-refusing to preview at all) - realistically only reachable via an unusual
-audio interface, not the default output on a Mac/Windows/Linux machine.
-
-**Buffer size is a `QComboBox` of raw sample-frame counts (32/64/128/256/
-512/1024/2048), not milliseconds** - deliberately mirrors the unit a DAW's
-own audio buffer-size setting uses (e.g. Ableton Live) rather than
-inventing a different one, at the user's own request. `app_config`'s
-`audio_buffer_samples` key stores the raw frame count; converted to actual
-bytes at playback time via `QAudioFormat.bytesForFrames()` (depends on the
-format actually in use, so this can't be precomputed once).
-
-**The playhead**: while a slice is sounding, `SlicePreviewPlayer` polls
-`QAudioSink.processedUSecs()` on a 30ms `QTimer` and emits
-`position_changed(frame)` - converted via the ORIGINAL sample's own
-framerate (not whatever `fmt` ended up being, in case
-`isFormatSupported()` above forced a fallback - see that method's own
-comment), since `processedUSecs()` measures real elapsed time regardless
-of which format is actually playing. `finished()` fires once when playback
-actually stops, for any reason (ran off the slice's own end, `IdleState`,
-or an explicit `stop()`/retrigger) - `SliceWaveformView.set_playhead`/
-`clear_playhead` are wired straight to these two signals in
-`SliceEditorWindow.__init__` and don't know anything about `QAudioSink`
-themselves. Drawn as two things, both gated on `self._playhead_frame`
-being non-`None`: `_draw_playhead_highlight` (a low-alpha `accent`-colored
-tint across the whole currently-playing slice band, drawn early so the
-waveform/markers paint on top of it) and `_draw_playhead_line` (a solid,
-undashed line at the exact current frame, drawn last so it's never
-obscured - deliberately undashed, unlike every other marker line on this
-widget, so it doesn't read as just another slice boundary).
-
-**The Slice Editor is now openable in demo mode, not fully disabled like
-Duplicate Sample/Program/Keygroup.** Marker placement and click-to-preview
-need only the audio already in memory - only the Export step is the same
-add-new-resident-sample primitive `DemoBridge` genuinely lacks. So
-`_set_sample_edit_buttons_enabled` no longer gates `slice_editor_button` on
-`demo_mode` at all; instead `SliceEditorWindow` takes its own `demo_mode`
-param (passed by `_open_slice_editor`) and disables just `export_button`
-(with a tooltip explaining why) when set. **Don't re-merge this back into
-one all-or-nothing gate** - unlike Duplicate Sample, most of this dialog's
-value has nothing to do with hardware at all, and disabling the whole
-thing again would silently regress the only way to evaluate/demo this
-feature without real hardware in front of you.
-
-**`AKAISDS_DEMO_INSTANT`** (new env var, checked live like
-`AKAISDS_DEMO_SAMPLER` itself, not cached) skips `_fetch_demo_sample_audio`'s
-own realistic-transfer-speed pacing entirely (`steps = 1`, no `time.sleep`)
-- for iterating on UI work away from hardware (the Slice Editor above all)
-without waiting out a simulated SDS transfer on every sample selected.
-Doesn't touch `_DEMO_MS_PER_WORD` at all when set, deliberately (see
-`test_akaisds_demo_instant_skips_the_pacing_loop_entirely`'s own comment on
-why that's asserted, not just assumed).
-
-**The bottom-of-file standalone launcher** (`if __name__ == "__main__":`)
-now does two more things than it used to: `_StandaloneHost` gained a
-`sampler_controller` stub (just enough for the Slice Editor's own
-busy-check - `is_transfer_busy() -> False` - Export itself still isn't
-reachable this way, its button is disabled by `demo_mode` regardless), and
-the script now `os.environ.setdefault("AKAISDS_DEMO_SAMPLER", "1")` before
-constructing anything. That second part fixes a real latent bug: this
-script always passes `bridge=DemoBridge()` two lines down regardless, but
-every `demo_mode` check elsewhere in this file re-reads the env var
-independently - so running this script without ALSO manually exporting
-`AKAISDS_DEMO_SAMPLER=1` used to leave every one of those checks disagreeing
-with the actual bridge in use (e.g. `_fetch_demo_sample_audio` never firing,
-falling through to a real-hardware code path that `_StandaloneHost` can't
-support). `setdefault` means an explicit `AKAISDS_DEMO_INSTANT=1` alongside
-it on the command line still works normally.
-
-### Follow-up: faster preview debounce, double-click deletes a marker, Settings dialog reorganized
-
-**The click-to-preview debounce is `QApplication.doubleClickInterval() // 2`**,
-not the full interval - halved at the user's own request (the full delay
-felt sluggish for quickly scrubbing through slices). Still derived from
-the platform's own interval rather than a hardcoded constant, just at half
-of it. Trade-off, worth knowing if "double-click to add a marker also
-plays a stray blip of audio" ever gets reported again: halving narrows,
-but doesn't eliminate, the window described in `_schedule_preview_click`'s
-own comment - an unusually slow double-click can still land outside it.
-
-**Double-clicking an existing slice marker now deletes it** - a faster
-alternative to the right-click context menu (`_show_marker_context_menu`),
-not a replacement for it; both stay wired. Double-clicking start/end does
-nothing, same as before this existed - they're the region's own edges,
-not slice boundaries, and were never deletable any way. Safe against the
-same first-click-before-the-double-click-fires event ordering
-`_cancel_pending_preview` already has to account for elsewhere on this
-widget: Qt's documented sequence for a double-click is press → release →
-doubleClick → release, so `self._dragging` (set by the first press,
-targeting the marker about to be deleted) is already cleared by the first
-release *before* `mouseDoubleClickEvent` ever runs - no stale reference to
-guard against in the second `mouseReleaseEvent`.
-
-**`build_section_card`/`build_scroll_area` moved from `ProgramEditorWindow`
-methods into free functions in `ui/qt_helpers.py`**, unchanged apart from
-no longer taking `self` - `ui/settings_dialog.py` needed the exact same
-card look and the exact same "past the minimum, a tab scrolls instead of
-the window growing" scroll-area behavior, and duplicating either (both
-carry real, easy-to-get-wrong subtlety - see this file's own "section
-cards, scroll areas" notes above) would have meant keeping two copies of
-the same gotchas in sync by hand. `ProgramEditorWindow._build_section_card`/
-`_build_scroll_area` are now one-line delegates kept only so every existing
-`self._build_section_card(...)` call site elsewhere in that (huge) file
-didn't need touching.
-
-**`MidiSettingsDialog` (`ui/settings_dialog.py`) collapsed from 4 flat tabs
-to 2, each built from section cards**, at the user's own request once 4
-tabs made the dialog uncomfortably narrow: "Audio/MIDI" (MIDI Input/Output
-card + Audio Output card - the Slice Editor preview device/buffer size
-added alongside that feature) and "Troubleshooting" (Hardware Test card +
-Interface Test card - what used to be "MIDI Hardware Test"/"MIDI Interface
-Test"). Window title changed from "MIDI Settings" to plain "Settings" to
-match - **grep for the literal string `"MIDI Settings"` before assuming
-it's gone everywhere**; a couple of tooltip/log strings in
-`dashboard.py`/`settings_dialog.py` that referenced the dialog by its old
-name were updated alongside it, but this is exactly the kind of string a
-future addition could reintroduce without realizing the dialog was
-renamed.
-
-**`btn_settings`/`btn_open_editor` (`ui/dashboard.py`) renamed** from
-"⚙ MIDI Settings"/"Open Editor" to "⚙ Settings..."/"Open Editor..." (the
-trailing `...` signals both open another window, matching the Settings
-menu action's own existing "Settings..." wording, which the button had
-drifted out of sync with). The fixed-width-column sizing next to the logo
-(see "Transfer Dashboard: window/tab shortcuts" above) is computed from
-each button's own live `sizeHint()`, not a hardcoded width, so this rename
-needed no follow-up fix there.
+**Other real bugs found building this window**: `_wait_for_any_signal`
+used to `submit_*()` before connecting listeners (same class as the
+sample-edit bug above); a test holding a real lock across real
+`threading.Thread`s here reproducibly segfaulted the interpreter elsewhere
+in the suite (same instability class the MIDI transport section above
+describes - don't add another).
 
 ## Testing
 
-`TESTING.md` undersells this slightly - there's also
-`tests/test_program_editor_bridge.py` (BridgeWorker + LoggingBridge, pure
-logic, no Qt event loop) and `tests/test_program_editor_window.py` (real
-offscreen `QApplication`, actual widgets). Stated philosophy (from the
-user): don't test the UI exhaustively, but cover core functionality and
-any bug you fix - see `TESTING.md`'s "why several tests exist" section.
-
-`uv run pytest tests/ -v` runs everything in well under 10 seconds.
+See `TESTING.md`. `uv run pytest tests/ -v` runs everything in well under
+10 seconds. Tests force `QT_QPA_PLATFORM=offscreen` via
+`tests/conftest.py`'s own unconditional assignment - NOT the per-file
+`os.environ.setdefault(...)` calls each test module also has, which are
+no-ops if the desktop environment already exports this var globally
+(confirmed on an Omarchy/Hyprland machine, where every "offscreen" test
+was silently running on the real Wayland platform the whole time; the one
+test that `.show()`s a real widget - `test_qt_helpers.py`'s tab-width
+tests - was flaky for exactly this reason, a real window manager tiling-
+reflowing a genuine on-screen window, not a numeric fluke).
