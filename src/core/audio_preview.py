@@ -65,6 +65,12 @@ def _resample_region_for_cents(samples, lo, hi, cents):
     return out
 
 
+def _shifted_framerate(framerate, pitch_shift_semitones):
+    if not pitch_shift_semitones:
+        return framerate
+    return max(1, round(framerate * 2.0 ** (pitch_shift_semitones / 12.0)))
+
+
 def list_output_devices():
     return miniaudio.Devices().get_playbacks()
 
@@ -223,12 +229,20 @@ class SlicePreviewPlayer(QObject):
         self._finished = False
         self._timer.start()
 
-    def play(self, samples, start_frame, end_frame, framerate):
+    def play(self, samples, start_frame, end_frame, framerate, pitch_shift_semitones=0):
         """samples: the full mono int16 sample list/array already loaded for
         this sound (same list slice_bounds()' frame indices are relative
         to); start_frame/end_frame: one slice_bounds() entry, inclusive.
         Never raises into a Qt mouse-event slot - a misconfigured or
         unplugged output device logs and no-ops instead.
+
+        pitch_shift_semitones: an overall pitch offset applied to the WHOLE
+        chunk by opening the output device at a scaled sample rate (same
+        "shift rate, shift pitch+duration together" technique
+        _resample_region_for_cents uses, just via the device's own rate
+        instead of resampling the data) - see program_editor_window.py's
+        own caller for why this exists (STUNO, the sample's own tuning
+        offset, has to shift the ENTIRE preview, not just a loop region).
         """
         self.stop()
 
@@ -237,7 +251,7 @@ class SlicePreviewPlayer(QObject):
             return
         pcm_bytes = struct.pack("<" + "h" * len(chunk), *chunk)
 
-        device = self._open_device(framerate)
+        device = self._open_device(_shifted_framerate(framerate, pitch_shift_semitones))
         if device is None:
             return
 
@@ -297,6 +311,7 @@ class SlicePreviewPlayer(QObject):
         framerate,
         dwell_ms=None,
         loop_tune_cents=0,
+        pitch_shift_semitones=0,
     ):
         """Simulates a sample's own loop settings for a single click preview
         (the Program Editor's Samples tab waveform - see
@@ -336,6 +351,11 @@ class SlicePreviewPlayer(QObject):
         SAMPLE_LOOP_TUNE_KNOB) - the attack and tail always play at the
         sample's own recorded pitch. update_loop_tune_cents() live-updates
         this the same deferred-to-next-pass way update_loop_points() does.
+
+        pitch_shift_semitones: see play()'s own docstring - applied to the
+        WHOLE playback (attack, loop, and tail alike) via the device's own
+        opened sample rate, so it stacks on top of loop_tune_cents' own
+        loop-only resampling rather than replacing it.
         """
         self.stop()
 
@@ -343,7 +363,9 @@ class SlicePreviewPlayer(QObject):
             # degenerate/zero-length loop region - nothing to repeat, falls
             # back to playing the whole range once rather than looping an
             # empty buffer forever
-            self.play(samples, start_frame, end_frame, framerate)
+            self.play(
+                samples, start_frame, end_frame, framerate, pitch_shift_semitones
+            )
             return
 
         attack = samples[start_frame : loop_end_frame + 1]
@@ -363,7 +385,7 @@ class SlicePreviewPlayer(QObject):
         self._live_loop_end = loop_end_frame
         self._live_loop_tune_cents = loop_tune_cents
 
-        device = self._open_device(framerate)
+        device = self._open_device(_shifted_framerate(framerate, pitch_shift_semitones))
         if device is None:
             return
 

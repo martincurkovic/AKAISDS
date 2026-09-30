@@ -2845,7 +2845,9 @@ def test_preview_requested_one_shot_sptype_plays_once_regardless_of_dwell(
 
     editor._on_waveform_preview_requested()
 
-    assert calls == [("play", (samples, 0, 9999, 44100), {})]
+    assert calls == [
+        ("play", (samples, 0, 9999, 44100), {"pitch_shift_semitones": 0.0})
+    ]
 
 
 def test_preview_requested_looping_sptype_with_a_finite_dwell_plays_loop(
@@ -2866,7 +2868,11 @@ def test_preview_requested_looping_sptype_with_a_finite_dwell_plays_loop(
         (
             "play_loop",
             (samples, 0, 2500, 7500, 9999, 44100),
-            {"dwell_ms": 500, "loop_tune_cents": 0},
+            {
+                "dwell_ms": 500,
+                "loop_tune_cents": 0,
+                "pitch_shift_semitones": 0.0,
+            },
         )
     ]
 
@@ -2891,7 +2897,11 @@ def test_preview_requested_looping_sptype_with_hold_loops_forever(
         (
             "play_loop",
             (samples, 0, 2500, 7500, 9999, 44100),
-            {"dwell_ms": None, "loop_tune_cents": 0},
+            {
+                "dwell_ms": None,
+                "loop_tune_cents": 0,
+                "pitch_shift_semitones": 0.0,
+            },
         )
     ]
 
@@ -2913,7 +2923,34 @@ def test_preview_requested_looping_sptype_with_dwell_off_plays_once(
 
     editor._on_waveform_preview_requested()
 
-    assert calls == [("play", (samples, 0, 9999, 44100), {})]
+    assert calls == [
+        ("play", (samples, 0, 9999, 44100), {"pitch_shift_semitones": 0.0})
+    ]
+
+
+def test_preview_requested_applies_stuno_as_a_pitch_shift(editor, qapp, monkeypatch):
+    # STUNO ("Tune") has to shift the WHOLE preview to actually match the
+    # sampler - previously ignored entirely, so a sample tuned away from
+    # its baseline played back at the wrong pitch in-app vs. on real
+    # hardware. framerate here (44100) is already a native engine rate, so
+    # compute_bandwidth_and_tuning's own baseline compensation is 0 -
+    # entry["stuno"]'s whole +2.00 semitones is a real, audible offset the
+    # user actually dialled in, not hardware-engine-speed compensation.
+    calls = _fake_preview_player(editor, monkeypatch)
+    samples = [0] * 10000
+    markers = {"start": 0, "loop_start": 2500, "loop_end": 7500, "end": 9999}
+    _select_sample_with_full_audio(editor, qapp, 0, samples, markers)
+    editor._sample_waveform_cache[0]["stuno"] = (
+        editor._semitones_to_sample_tune_offset(2.0)
+    )
+    editor.sample_loop_type_combo.setCurrentIndex(3)  # "One-shot"
+    calls.clear()  # discard the stop() from selecting the sample above
+
+    editor._on_waveform_preview_requested()
+
+    assert calls == [
+        ("play", (samples, 0, 9999, 44100), {"pitch_shift_semitones": 2.0})
+    ]
 
 
 def test_preview_requested_while_playing_stops_instead_of_restarting(

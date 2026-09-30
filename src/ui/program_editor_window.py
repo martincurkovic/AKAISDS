@@ -7636,6 +7636,21 @@ class ProgramEditorWindow(QMainWindow):
         framerate = entry["framerate"]
         markers = self.waveform_view.markers()
 
+        # STUNO ("Tune") has to shift the WHOLE preview to match the
+        # sampler, not just the loop region SHLTO already handles below -
+        # but STUNO also bakes in compute_bandwidth_and_tuning's own
+        # baseline compensation for a non-native recorded rate (see
+        # AGENTS.md's "Writing the result does NOT overwrite Tune outright"
+        # and _confirm_detect_root_note's own comment above), which this
+        # PC preview already reproduces exactly by playing raw samples at
+        # their own recorded framerate - applying STUNO's RAW total here
+        # would double that compensation. Only the portion of STUNO beyond
+        # that baseline - whatever the user (or Detect Root Note) actually
+        # dialled in - is a real audible difference from hardware.
+        _, baseline_semitones = compute_bandwidth_and_tuning(framerate)
+        stuno_semitones = self._sample_tune_offset_to_semitones(entry["stuno"])
+        pitch_shift_semitones = stuno_semitones - baseline_semitones
+
         # SPTYPE (sample_loop_type_combo) and LDWELL1 (sample_loop_hold_
         # knob) aren't gated on each other anywhere in this UI (see
         # _update_sample_meta_controls) - a "No looping"/"One-shot" SPTYPE
@@ -7650,7 +7665,11 @@ class ProgramEditorWindow(QMainWindow):
         dwell = self.sample_loop_hold_knob.value()
         if sptype in _SPTYPE_VALUES_WITHOUT_LOOP or dwell == _LOOP_HOLD_OFF_VALUE:
             self._sample_preview_player.play(
-                samples, markers["start"], markers["end"], framerate
+                samples,
+                markers["start"],
+                markers["end"],
+                framerate,
+                pitch_shift_semitones=pitch_shift_semitones,
             )
             return
 
@@ -7664,6 +7683,7 @@ class ProgramEditorWindow(QMainWindow):
             framerate,
             dwell_ms=dwell_ms,
             loop_tune_cents=self.sample_loop_tune_knob.value(),
+            pitch_shift_semitones=pitch_shift_semitones,
         )
 
     def _on_waveform_markers_changed_live_preview(self, start, loop_start, loop_end, end):
