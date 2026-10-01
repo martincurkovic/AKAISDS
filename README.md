@@ -11,8 +11,13 @@ A simple way to send and receive audio samples (WAV, AIFF, FLAC) to an Akai S100
 
 - Akai-native sample browsing & management (list, rename, delete) as well as universal generic SDS support for non-Akai hardware
 - Program, Keygroup and Sample editor for Akai S2000/S3000 series samplers
+- ReCycle style sample slicing
+  - Transient detection
+  - Audio preview
+  - Generate new Program with slices
 - WAV/AIFF/FLAC support
 - Drag-and-drop support for adding samples
+- Audio preview for samples
 - Batch transmission queue for sending and receiving samples
 - Sampler memory status bar to display how much RAM is free (Akai sampler specific only)
 - Open-loop fallback for one-way MIDI cable setups, including timeout detection if a cable is unplugged mid-transfer
