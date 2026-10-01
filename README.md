@@ -38,6 +38,8 @@ See [Quick Start Guide](src/ui/help/quickstart.md) for a walkthrough of connecti
 
 ![Sample Editor](src/ui/help/screenshots/editor-sample-page.png)
 
+![Slice Editor](src/ui/help/screenshots/slice-editor-auto.png)
+
 ## Download & Installation
 
 Download the latest release from the Releases tab on GitHub.
