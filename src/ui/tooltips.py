@@ -340,10 +340,12 @@ LFO1_DELAY_KNOB = (
 # LFO2 is hardwired to auto-pan (see AGENTS.md's "LFO2 and the modulation
 # matrix" section) - its rate/depth/delay are PANRAT/PANDEP/PANDEL, stored
 # in the program's own pan fields despite being LFO2's controls
-LFO2_RATE_KNOB = "LFO2's speed. LFO2 is hardwired to auto-pan (see the Pan modulation matrix), not freely assignable like LFO1."
-LFO2_DEPTH_KNOB = "LFO2's modulation depth, i.e. how wide the auto-pan sweep is."
+LFO2_RATE_KNOB = "LFO2's speed."
+LFO2_DEPTH_KNOB = (
+    "LFO2's modulation depth (how strongly it affects whatever it's routed to)."
+)
 LFO2_DELAY_KNOB = (
-    "How long LFO2 waits after a key is pressed before the auto-pan starts."
+    "How long LFO2 waits after a key is pressed before it starts modulating."
 )
 
 # --- Portamento - new --------------------------------------------------------
