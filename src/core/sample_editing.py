@@ -1,9 +1,12 @@
+import math
+
 # Pure, Qt/MIDI-independent sample-buffer transforms for the Samples tab's
-# Trim/Reverse/Fade/Normalise actions (see program_editor_window.py's
+# Trim/Reverse/Fade/Normalise/Filter actions (see program_editor_window.py's
 # _confirm_trim_sample/_confirm_reverse_sample/_confirm_fade_sample/
-# _confirm_normalize_sample). No hardware or bridge code here at all - just
-# the sample-list + marker-field math, kept separate so it's trivially
-# unit-testable without a QApplication, a bridge, or real audio.
+# _confirm_normalize_sample/_confirm_filter_sample). No hardware or bridge
+# code here at all - just the sample-list + marker-field math, kept
+# separate so it's trivially unit-testable without a QApplication, a
+# bridge, or real audio.
 #
 # All four functions take/return the same four markers WaveformView.markers()
 # already uses (start, loop_start, loop_end, end) - the caller is
@@ -129,4 +132,156 @@ def normalize_samples(samples, start, loop_start, loop_end, end):
         max(-_MAX_AMPLITUDE - 1, min(_MAX_AMPLITUDE, int(round(v * gain))))
         for v in samples
     ]
+    return new_samples, start, loop_start, loop_end, end
+
+
+# --- Filter (highpass/lowpass, adjustable slope) -----------------------------
+# Hand-rolled rather than a scipy/numpy dependency - a standard 2nd-order
+# Butterworth biquad (the "RBJ Audio EQ Cookbook" formulas, the same
+# derivation almost every hand-written audio EQ traces back to) is
+# well-understood, exactly-reproducible math and maybe 40 lines, matching
+# this module's own established style (see trim/reverse/fade/normalize
+# above) and sds_encoder.py's own precedent (_lowpass_filter, used there
+# for anti-aliasing before downsampling) - not worth a heavy, Nuitka-
+# unfriendly dependency for something this contained.
+#
+# "Slope" (steepness) is not a separate algorithm - a single biquad stage
+# is always a fixed 12dB/octave rolloff; cascading N identical stages in
+# series (each filtering the PREVIOUS stage's own output) gives 12*N
+# dB/octave, the standard way any analog or digital filter gets a steeper
+# slope. _SLOPE_DB_PER_OCTAVE_OPTIONS/_stages_for_slope just turn a
+# dB/octave choice into "how many times to run the same filter."
+
+FILTER_TYPES = ("lowpass", "highpass")
+SLOPE_DB_PER_OCTAVE_OPTIONS = (12, 24, 36, 48)
+
+
+def _stages_for_slope(slope_db_per_octave):
+    stages, remainder = divmod(slope_db_per_octave, 12)
+    if remainder != 0 or stages < 1:
+        raise ValueError(
+            "slope_db_per_octave must be a positive multiple of 12 "
+            f"(got {slope_db_per_octave!r})"
+        )
+    return stages
+
+
+def _biquad_coefficients(filter_type, cutoff_hz, framerate):
+    # Q = 1/sqrt(2) (~0.7071) - the maximally-flat Butterworth response
+    # (no resonant peak at the cutoff), not exposed as its own control:
+    # this is meant as a practical "tame the highs/lows" tool, not a
+    # resonant-filter sound-design one - if that's ever wanted, it's a
+    # one-line change to accept Q as a parameter instead of a fixed
+    # constant, not a rewrite of the math itself.
+    q = 1 / math.sqrt(2)
+    nyquist = framerate / 2
+    # clamped strictly inside (0, nyquist) - w0 must stay inside (0, pi)
+    # for sin/cos below to produce a stable, meaningful filter; the
+    # dialog's own spinbox range should already guarantee this, but a
+    # cutoff placed exactly ON or past Nyquist has no valid biquad
+    # response at all, so this guards it defensively rather than trust
+    # every caller
+    cutoff_hz = max(1.0, min(nyquist - 1.0, cutoff_hz))
+    w0 = 2 * math.pi * cutoff_hz / framerate
+    cos_w0 = math.cos(w0)
+    sin_w0 = math.sin(w0)
+    alpha = sin_w0 / (2 * q)
+
+    if filter_type == "lowpass":
+        b0 = (1 - cos_w0) / 2
+        b1 = 1 - cos_w0
+        b2 = (1 - cos_w0) / 2
+    elif filter_type == "highpass":
+        b0 = (1 + cos_w0) / 2
+        b1 = -(1 + cos_w0)
+        b2 = (1 + cos_w0) / 2
+    else:
+        raise ValueError(f"Unknown filter_type {filter_type!r} - expected one of {FILTER_TYPES}")
+
+    a0 = 1 + alpha
+    a1 = -2 * cos_w0
+    a2 = 1 - alpha
+
+    # normalized so a0 == 1 - the difference equation below assumes this
+    return b0 / a0, b1 / a0, b2 / a0, a1 / a0, a2 / a0
+
+
+def _apply_biquad_float(samples, coefficients):
+    # keeps output as plain floats, no rounding/clipping - used internally
+    # so a multi-stage/dual-filter cascade (see filter_samples) doesn't
+    # accumulate quantization noise at every intermediate stage, only
+    # once, at the very end of the whole chain (_quantize_to_int16)
+    b0, b1, b2, a1, a2 = coefficients
+    x1 = x2 = 0.0  # previous two INPUT samples
+    y1 = y2 = 0.0  # previous two OUTPUT samples
+    new_samples = [0.0] * len(samples)
+    for i, x0 in enumerate(samples):
+        y0 = b0 * x0 + b1 * x1 + b2 * x2 - a1 * y1 - a2 * y2
+        new_samples[i] = y0
+        x2, x1 = x1, x0
+        y2, y1 = y1, y0
+    return new_samples
+
+
+def _quantize_to_int16(samples):
+    return [max(-_MAX_AMPLITUDE - 1, min(_MAX_AMPLITUDE, int(round(v)))) for v in samples]
+
+
+def filter_samples(
+    samples,
+    start,
+    loop_start,
+    loop_end,
+    end,
+    framerate,
+    highpass_enabled=False,
+    highpass_cutoff_hz=None,
+    highpass_slope_db_per_octave=12,
+    lowpass_enabled=False,
+    lowpass_cutoff_hz=None,
+    lowpass_slope_db_per_octave=12,
+):
+    """Runs the WHOLE buffer through an optional highpass and/or an
+    optional lowpass Butterworth filter, each independently enabled/
+    bypassed with its own cutoff and slope - same whole-buffer scope as
+    reverse_samples/normalize_samples, not [start, end]-relative like
+    trim/fade: frequency content isn't a concept scoped to the marked
+    playback region the way trim/fade's timing-based edits are, and
+    filtering only part of a sample while leaving the rest untouched would
+    introduce an audible discontinuity right at the [start, end] boundary.
+    Markers are always returned unchanged - filtering only changes sample
+    VALUES, never timing, same as fade_in_out_samples/normalize_samples.
+
+    When both are enabled, highpass is applied FIRST, then lowpass -
+    cascaded IIR stages interact nonlinearly with each other regardless of
+    order, so there's no "correct" order in an absolute sense, just this
+    one, picked for being the conventional "clean up the bottom, then the
+    top" signal chain. Quantization to int16 happens exactly ONCE, after
+    every stage of both filters has run (see _apply_biquad_float/
+    _quantize_to_int16) - not after each individual stage - so a steep
+    (multi-stage) slope doesn't accumulate extra rounding noise beyond
+    what the filter math itself already introduces.
+
+    Unlike the other three transforms, this needs parameters beyond the
+    standard 5 (samples, start, loop_start, loop_end, end) -
+    program_editor_window.py's _confirm_filter_sample binds the rest via
+    functools.partial before handing this to _perform_sample_edit, which
+    only ever calls transform(samples, start, loop_start, loop_end, end) -
+    so this function's own extra parameters are never visible to that
+    dispatcher.
+    """
+    result = [float(v) for v in samples]
+    if highpass_enabled:
+        if highpass_cutoff_hz is None:
+            raise ValueError("highpass_cutoff_hz is required when highpass_enabled is True")
+        coefficients = _biquad_coefficients("highpass", highpass_cutoff_hz, framerate)
+        for _ in range(_stages_for_slope(highpass_slope_db_per_octave)):
+            result = _apply_biquad_float(result, coefficients)
+    if lowpass_enabled:
+        if lowpass_cutoff_hz is None:
+            raise ValueError("lowpass_cutoff_hz is required when lowpass_enabled is True")
+        coefficients = _biquad_coefficients("lowpass", lowpass_cutoff_hz, framerate)
+        for _ in range(_stages_for_slope(lowpass_slope_db_per_octave)):
+            result = _apply_biquad_float(result, coefficients)
+    new_samples = _quantize_to_int16(result)
     return new_samples, start, loop_start, loop_end, end

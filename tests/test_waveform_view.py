@@ -6,6 +6,13 @@
 # real WaveformView + a live QApplication - see the section comment there.
 
 import math
+import os
+
+# must be set BEFORE the first QApplication() call below - see
+# test_slice_editor_window.py's own comment on this exact guard for why a
+# file lacking it only runs offscreen by accident (whichever OTHER test
+# module happens to get collected first)
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
 from PySide6.QtCore import Qt
@@ -17,11 +24,46 @@ from ui.waveform_view import (
     _MARKER_ORDER,
     WaveformView,
     _bridge_envelope_gaps,
+    brighten_for_hover,
     build_envelope,
     frame_for_x,
     push_marker,
     x_for_frame,
 )
+
+
+# --- brighten_for_hover -------------------------------------------------------
+# used by both WaveformView and SliceWaveformView (imported there) for
+# marker hover/drag feedback - pure QColor-in/QColor-out, no widget needed.
+
+
+def test_brighten_for_hover_lightens_in_dark_mode():
+    dark_bg_palette = {"bg_input": "#2a2a35"}  # theme.DARK_PALETTE's own value
+    base = QColor("#199e70")  # keygroup_color_3, dark theme
+    brighter = brighten_for_hover(base, dark_bg_palette)
+    assert brighter.lightness() > base.lightness()
+
+
+def test_brighten_for_hover_darkens_in_light_mode():
+    # the mirror image is correct here, not a bug - lightening further
+    # against an already-light background would wash the colour out
+    # instead of making it pop (see the function's own docstring)
+    light_bg_palette = {"bg_input": "#ffffff"}  # theme.LIGHT_PALETTE's own value
+    base = QColor("#1baf7a")  # keygroup_color_3, light theme
+    darker = brighten_for_hover(base, light_bg_palette)
+    assert darker.lightness() < base.lightness()
+
+
+def test_brighten_for_hover_never_clips_a_light_colour_to_solid_white():
+    # a flat lightness multiplier used to blow an already-fairly-light
+    # colour straight to #ffffff, losing its own hue entirely - blending
+    # only ever approaches white asymptotically, so it never fully gets
+    # there
+    dark_bg_palette = {"bg_input": "#2a2a35"}
+    base = QColor("#9085e9")  # keygroup_color_7, dark theme - already fairly light
+    brighter = brighten_for_hover(base, dark_bg_palette)
+    assert brighter != QColor("#ffffff")
+    assert brighter.hue() == base.hue()  # hue survives - same colour, just brighter
 
 
 # --- build_envelope ------------------------------------------------------------
@@ -380,6 +422,9 @@ class _FakePressEvent:
     def position(self):
         return _FakeXPos(self._x)
 
+    def button(self):
+        return Qt.MouseButton.LeftButton
+
 
 class _FakeMoveEvent(_FakePressEvent):
     # mouseMoveEvent also reads .modifiers() (for Shift-held fine dragging)
@@ -446,6 +491,75 @@ def test_cycling_only_covers_markers_actually_in_the_stack(qapp):
 
     assert {first, second} == {"loop_start", "loop_end"}
     assert first != second
+
+
+# --- WaveformView: hover feedback -------------------------------------------
+# "if you click now, this is what you'll grab" - a marker near enough to the
+# cursor to be draggable should look different (brighter, solid line, bigger
+# handle - see paintEvent) before the user ever actually clicks.
+
+
+def test_hovering_near_a_marker_sets_hover_marker(qapp):
+    view = WaveformView()
+    view.resize(400, 180)
+    view.set_header(10000, start=0, loop_start=3000, loop_end=7000, end=9999)
+    view.mouseMoveEvent(_FakeMoveEvent(view._x_for("start")))
+    assert view._hover_marker == "start"
+
+
+def test_hovering_empty_space_clears_hover_marker(qapp):
+    view = WaveformView()
+    view.resize(400, 180)
+    view.set_header(10000, start=0, loop_start=3000, loop_end=7000, end=9999)
+    view.mouseMoveEvent(_FakeMoveEvent(view._x_for("start")))
+    assert view._hover_marker == "start"
+    view.mouseMoveEvent(_FakeMoveEvent(200))  # nowhere near a marker
+    assert view._hover_marker is None
+
+
+def test_hover_does_not_fire_while_dragging_a_different_marker(qapp):
+    # mouseMoveEvent's hover branch only runs when NOT dragging - moving the
+    # mouse mid-drag must keep updating the DRAGGED marker, never silently
+    # swap in a hover read instead
+    view = WaveformView()
+    view.resize(400, 180)
+    view.set_header(10000, start=0, loop_start=3000, loop_end=7000, end=9999)
+    view.mousePressEvent(_FakePressEvent(view._x_for("start")))
+    assert view._dragging == "start"
+    view.mouseMoveEvent(_FakeMoveEvent(view._x_for("end")))
+    assert view._hover_marker is None  # untouched - the move fed the drag instead
+    assert view._dragging == "start"
+
+
+def test_leave_event_clears_hover_marker(qapp):
+    view = WaveformView()
+    view.resize(400, 180)
+    view.set_header(10000, start=0, loop_start=3000, loop_end=7000, end=9999)
+    view.mouseMoveEvent(_FakeMoveEvent(view._x_for("start")))
+    assert view._hover_marker == "start"
+    view.leaveEvent(None)
+    assert view._hover_marker is None
+
+
+def test_release_sets_hover_marker_to_the_just_released_one(qapp):
+    # so it doesn't flash back to the dim/dashed look for one repaint before
+    # the next real mouseMoveEvent notices the cursor is still right there
+    view = WaveformView()
+    view.resize(400, 180)
+    view.set_header(10000, start=0, loop_start=3000, loop_end=7000, end=9999)
+    x = view._x_for("loop_start")
+    view.mousePressEvent(_FakePressEvent(x))
+    view.mouseReleaseEvent(_FakePressEvent(x))
+    assert view._hover_marker == "loop_start"
+
+
+def test_paint_does_not_crash_with_a_marker_hovered(qapp):
+    view = WaveformView()
+    view.resize(400, 180)
+    view.set_header(10000, start=0, loop_start=3000, loop_end=7000, end=9999)
+    view.mouseMoveEvent(_FakeMoveEvent(view._x_for("loop_end")))
+    assert view._hover_marker == "loop_end"
+    view.grab()
 
 
 def test_dragging_a_marker_away_and_pressing_the_stack_again_finds_the_rest(qapp):
@@ -769,6 +883,120 @@ def test_paint_does_not_crash_at_high_zoom_with_only_one_sample_loaded(qapp):
     view.grab()
 
 
+def test_paint_does_not_crash_with_all_markers_stacked_on_the_default_header(qapp):
+    # real hardware's own default header - start=0, end=last frame, and
+    # BOTH loop markers on top of end too - used to be genuinely invisible
+    # (all four markers drew an identical full-height line + top handle at
+    # the same x, so three of the four were completely hidden behind
+    # whichever _MARKER_ORDER happened to paint last). See paintEvent's own
+    # comment on why loop markers now get a bottom-anchored handle/line
+    # segment instead, painted after start/end so it stays visible even
+    # fully stacked - this is a crash-guard for that new code path,
+    # exercising the exact reported scenario.
+    view = WaveformView()
+    view.resize(400, 180)
+    view.set_header(1000, start=0, loop_start=999, loop_end=999, end=999)
+    view.grab()
+
+
+# --- WaveformView.samples_before / samples_after -----------------------------
+# for LoopJoinPreview (ui/loop_preview_view.py's "Loop Preview" card) - the
+# audio leading into/out of a loop point, clamped to the buffer's own bounds
+# rather than the whole envelope this widget itself renders.
+
+
+def test_samples_before_returns_none_without_audio(qapp):
+    view = WaveformView()
+    view.set_header(1000, start=0, loop_start=300, loop_end=700, end=999)
+    assert view.samples_before(500, 100) is None
+
+
+def test_samples_before_ends_at_and_includes_the_given_frame(qapp):
+    view = WaveformView()
+    samples = list(range(1000))
+    view.set_waveform(samples, start=0, loop_start=300, loop_end=700, end=999)
+    window = view.samples_before(500, 100)
+    assert window == samples[401:501]
+
+
+def test_samples_before_clamps_at_the_low_edge(qapp):
+    view = WaveformView()
+    samples = list(range(1000))
+    view.set_waveform(samples, start=0, loop_start=300, loop_end=700, end=999)
+    window = view.samples_before(20, 100)
+    assert window == samples[0:21]
+
+
+def test_samples_before_returns_none_when_the_frame_is_beyond_whats_loaded_so_far(qapp):
+    # reachable mid-progressive-load (begin_live_capture/append_live_samples)
+    # if the loop point sits further into the sample than the transfer has
+    # reached yet - nothing to show until more arrives, not a crash
+    view = WaveformView()
+    view.set_header(2000, start=0, loop_start=500, loop_end=1500, end=1999)
+    view.begin_live_capture()
+    view.append_live_samples(list(range(50)))  # far short of frame 1500
+    assert view.samples_before(1500, 100) is None
+    # still works fine for a point ALREADY within what's loaded
+    assert view.samples_before(20, 10) == list(range(11, 21))
+
+
+def test_samples_before_clamps_rather_than_returns_none_once_loading_is_complete(qapp):
+    # regression test for a real, reported bug: a header claiming one more
+    # frame than the actual SDS dump delivered leaves loop_end sitting one
+    # past the real last frame - set_waveform's own self._frame_count =
+    # len(samples) means loading is unambiguously COMPLETE by the time
+    # this runs (unlike the mid-live-capture case above, where
+    # self._frame_count is still the bigger, not-yet-reached total), so an
+    # out-of-range frame here must clamp instead of returning None - a
+    # blank Loop Preview card for an otherwise fully-loaded sample, not a
+    # "still waiting for more" state
+    view = WaveformView()
+    samples = list(range(1000))
+    view.set_waveform(samples, start=0, loop_start=300, loop_end=999, end=999)
+    window = view.samples_before(1000, 100)  # one past the real last frame (999)
+    assert window == samples[900:1000]
+
+
+def test_samples_after_returns_none_without_audio(qapp):
+    view = WaveformView()
+    view.set_header(1000, start=0, loop_start=300, loop_end=700, end=999)
+    assert view.samples_after(500, 100) is None
+
+
+def test_samples_after_starts_at_and_includes_the_given_frame(qapp):
+    view = WaveformView()
+    samples = list(range(1000))
+    view.set_waveform(samples, start=0, loop_start=300, loop_end=700, end=999)
+    window = view.samples_after(500, 100)
+    assert window == samples[500:600]
+
+
+def test_samples_after_clamps_at_the_high_edge(qapp):
+    view = WaveformView()
+    samples = list(range(1000))
+    view.set_waveform(samples, start=0, loop_start=300, loop_end=700, end=999)
+    window = view.samples_after(980, 100)
+    assert window == samples[980:1000]
+
+
+def test_samples_after_returns_none_when_the_frame_is_beyond_whats_loaded_so_far(qapp):
+    view = WaveformView()
+    view.set_header(2000, start=0, loop_start=500, loop_end=1500, end=1999)
+    view.begin_live_capture()
+    view.append_live_samples(list(range(50)))
+    assert view.samples_after(1500, 100) is None
+    assert view.samples_after(20, 10) == list(range(20, 30))
+
+
+def test_samples_after_clamps_rather_than_returns_none_once_loading_is_complete(qapp):
+    # same regression/reasoning as samples_before's own version above
+    view = WaveformView()
+    samples = list(range(1000))
+    view.set_waveform(samples, start=0, loop_start=300, loop_end=999, end=999)
+    window = view.samples_after(1000, 100)  # one past the real last frame (999)
+    assert window == [999]
+
+
 # --- WaveformView.set_header: editable markers without audio -----------------
 # A real SDS sample dump can take minutes; the header alone (a handful of
 # fast get_parameter reads) is comparatively instant. set_header lets a
@@ -997,3 +1225,99 @@ def test_progressive_fill_scales_to_any_sample_length(qapp, frame_count, chunk_s
     assert all(w <= view.width() for w in widths)
     assert all(a <= b for a, b in zip(widths, widths[1:]))  # monotonically grows
     assert widths[-1] == view.width()
+
+
+# --- click-to-preview (WaveformView.preview_requested) ----------------------
+# same single-vs-double-click disambiguation SliceWaveformView's own
+# _schedule_preview_click uses - a click on empty waveform space starts a
+# deferred timer rather than firing immediately, cancelled by a genuine
+# double-click. _preview_timer.timeout.emit() is called directly rather than
+# waiting out the real interval, same reasoning
+# tests/test_slice_waveform_view.py's own click-to-preview tests give for
+# calling _fire_preview() directly.
+
+
+def _preview_ready_waveform_view(frame_count=10000):
+    view = WaveformView()
+    view.resize(400, 180)
+    view.set_waveform([0] * frame_count, 0, 2500, 7500, frame_count - 1)
+    return view
+
+
+def test_click_on_empty_space_without_a_waveform_does_not_schedule_a_preview(qapp):
+    # header-only (set_header, not set_waveform) - has_waveform() is False,
+    # nothing real to play
+    view = _stacked_waveform_view()
+    view.mousePressEvent(_FakePressEvent(view._x_for("start") + 200))
+    assert view._preview_timer.isActive() is False
+
+
+def test_click_on_empty_space_with_a_waveform_schedules_a_preview(qapp):
+    view = _preview_ready_waveform_view()
+    view.mousePressEvent(_FakePressEvent(200))  # nowhere near a marker
+    assert view._preview_timer.isActive() is True
+
+
+def test_clicking_a_marker_does_not_schedule_a_preview(qapp):
+    view = _preview_ready_waveform_view()
+    view.mousePressEvent(_FakePressEvent(view._x_for("start")))
+    assert view._preview_timer.isActive() is False
+
+
+def test_preview_timer_firing_emits_preview_requested(qapp):
+    view = _preview_ready_waveform_view()
+    received = []
+    view.preview_requested.connect(lambda: received.append(True))
+    view.mousePressEvent(_FakePressEvent(200))
+    view._preview_timer.timeout.emit()
+    assert received == [True]
+
+
+def test_double_click_cancels_a_pending_preview(qapp):
+    # a real QMouseEvent, not _FakePressEvent - unlike SliceWaveformView's
+    # own mouseDoubleClickEvent, WaveformView's still calls
+    # super().mouseDoubleClickEvent(event) at the end (see its own
+    # comment), which requires an actual QMouseEvent
+    from PySide6.QtCore import QEvent, QPointF
+    from PySide6.QtGui import QMouseEvent
+
+    view = _preview_ready_waveform_view()
+    view.mousePressEvent(_FakePressEvent(200))
+    assert view._preview_timer.isActive() is True
+
+    point = QPointF(200, 10)
+    event = QMouseEvent(
+        QEvent.Type.MouseButtonDblClick,
+        point,
+        point,
+        Qt.MouseButton.LeftButton,
+        Qt.MouseButton.LeftButton,
+        Qt.KeyboardModifier.NoModifier,
+    )
+    view.mouseDoubleClickEvent(event)
+    assert view._preview_timer.isActive() is False
+
+
+def test_empty_space_click_still_resets_the_marker_click_cycle(qapp):
+    # regression guard: click-to-preview's early return must not skip the
+    # existing overlapping-marker click-cycle reset (see
+    # test_pressing_elsewhere_then_back_on_the_stack_restarts_the_cycle,
+    # which already covers the full user-facing behaviour this pins down
+    # at the state level instead)
+    view = _stacked_waveform_view()
+    view._press_cycle_candidates = ["start", "loop_start", "loop_end", "end"]
+    view._press_cycle_index = 2
+    view.mousePressEvent(_FakePressEvent(view._x_for("start") + 200))
+    assert view._press_cycle_candidates == []
+    assert view._press_cycle_index == 0
+
+
+# --- playhead (click-to-preview visual feedback) ----------------------------
+
+
+def test_set_playhead_and_clear_playhead(qapp):
+    view = _preview_ready_waveform_view()
+    view.set_playhead(1234)
+    assert view._playhead_frame == 1234
+    view.clear_playhead()
+    assert view._playhead_frame is None

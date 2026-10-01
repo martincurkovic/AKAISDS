@@ -1,3 +1,4 @@
+import functools
 import math
 import os
 import random
@@ -23,6 +24,7 @@ from PySide6.QtGui import (
 )
 from PySide6.QtCore import QEventLoop, QTimer, QRegularExpression
 from PySide6.QtWidgets import (
+    QAbstractSpinBox,
     QApplication,
     QGridLayout,
     QHBoxLayout,
@@ -45,25 +47,35 @@ from PySide6.QtWidgets import (
     QSpinBox,
     QStatusBar,
     QTabWidget,
-    QScrollArea,
     QProgressBar,
 )
 from s3k.messages import AKAI_CHARSET, NAME_LENGTH
 from ui.knob import Knob
 from ui.note_spinbox import NoteSpinBox
-from ui.qt_helpers import FullWidthTabBar
+from ui.qt_helpers import FullWidthTabBar, build_scroll_area, build_section_card
 from ui.envelope_graph import ADSREnvelopeGraph, Envelope2Graph
 from ui.keygroup_range_bar import KeygroupRangeBar, keygroup_color
 from ui.waveform_view import WaveformView
+from ui.loop_preview_view import LoopJoinPreview, HALF_WINDOW_FRAMES
+from ui.slice_editor_window import SliceEditorWindow
+from ui.filter_sample_dialog import FilterSampleDialog
+from core.audio_preview import SlicePreviewPlayer
 from ui import theme
 from ui.about_dialog import AboutDialog
 from ui.quickstart_dialog import show_quickstart_dialog
 from ui.update_helper import UpdateCheckRunner
+from ui import tooltips as tt
 from core import debug_log
+from core.akai_sysex import baseline_semitones_for_bandwidth
+from core import midi_manager as midi_manager_module
+from core import program_editor_bridge
+from core import root_note_detection
 from core import sample_editing
 from core import sds_encoder
 from core.midi_notes import midi_note_to_name
 from core.program_editor_bridge import BridgeWorker, MULTI_PART_COUNT
+from core.sample_duration import sample_duration_seconds
+from ui.settings_dialog import MidiSettingsDialog
 
 # shared by every list's "Delete ..." QAction (program/keygroup/sample) -
 # see the construction comment where the program/keygroup ones are built
@@ -75,37 +87,22 @@ _DELETE_SHORTCUTS = [
     QKeySequence("Ctrl+Backspace"),
 ]
 
+# the Slice Editor's ReCycle-style "export + create program" feature (see
+# _create_program_from_slices) maps its first slice's keygroup to this MIDI
+# note - raw note 36, which is "C1" under THIS app's own C3-at-60 octave
+# convention (core/midi_notes.py), not general MIDI's C1 (24)
+_FIRST_SLICE_NOTE = 36
+
 # (label, tooltip) per ZPLAY value, in raw-byte order (0-4) - labels are the
 # abbreviated forms the front panel itself uses; tooltips spell out what
 # each actually does on playback. Module-level (not just __init__-local)
 # since both the zone-building loop and _update_zone_panels need it.
 _LOOP_TYPE_OPTIONS = [
-    (
-        "As sample",
-        "Uses whichever loop points and loop type are already stored "
-        "on the sample itself, rather than overriding them for this zone.",
-    ),
-    (
-        "Loop in release",
-        "Loops continuously while the note is held, then finishes the "
-        "current loop pass before moving into the amp envelope's "
-        "release stage - avoids cutting off mid-loop on note-off.",
-    ),
-    (
-        "Loop til release",
-        "Loops continuously until note-off, then jumps straight into "
-        "the release stage from wherever the loop currently is.",
-    ),
-    (
-        "No loops",
-        "Ignores the sample's loop points and plays straight through "
-        "once, gated by the amp envelope as usual.",
-    ),
-    (
-        "One-shot",
-        "Ignores note-off and always plays through to the physical "
-        "end of the sample, regardless of when the key is released.",
-    ),
+    ("As sample", tt.LOOP_TYPE_AS_SAMPLE),
+    ("Loop in release", tt.LOOP_TYPE_LOOP_IN_RELEASE),
+    ("Loop til release", tt.LOOP_TYPE_LOOP_TIL_RELEASE),
+    ("No loops", tt.LOOP_TYPE_NO_LOOPS),
+    ("One-shot", tt.LOOP_TYPE_ONE_SHOT),
 ]
 
 # (label, tooltip) per SPTYPE value, in raw-byte order (0-3) - SPTYPE is the
@@ -137,6 +134,31 @@ _SAMPLE_PLAYBACK_TYPE_OPTIONS = [
 # a loop region the hardware won't use is misleading rather than useful.
 _SPTYPE_VALUES_WITHOUT_LOOP = frozenset({2, 3})
 
+_LOOP_HOLD_OFF_VALUE = 0
+_LOOP_HOLD_HOLD_VALUE = 9999
+
+# raw MIDI note 60 - this app's own "C3" (see core/midi_notes.py's
+# S3000XL-style octave-naming convention, NOT general MIDI's C4). The
+# hardware's own front-panel PLAY button previews a sample at a fixed
+# note (C3 by default) regardless of that sample's own SPITCH (root key) -
+# confirmed with the user directly, not measured against real hardware
+# (there is no known SysEx field for whatever note the sampler is
+# currently set to preview at - see _on_waveform_preview_requested's own
+# comment). Matching that fixed-note behaviour here is a deliberate
+# approximation of the hardware's FACTORY DEFAULT, not a live read of
+# whatever a given unit is actually configured to right now.
+_PREVIEW_ROOT_NOTE = 60
+
+
+def _format_loop_hold(value):
+    # LDWELL1's own display convention (confirmed on a real S2000, matching
+    # s3k.params' notes) - see sample_loop_hold_knob's construction comment
+    if value == _LOOP_HOLD_OFF_VALUE:
+        return "Off"
+    if value == _LOOP_HOLD_HOLD_VALUE:
+        return "Hold"
+    return f"{value} ms"
+
 # (label, tooltip) per PORTYPE value - s3k.params transcribes this field as
 # "PORTAMENTO TYPE" with no decoded values={} map (unlike most other
 # program enum fields), so 0="Rate"/1="Time" is inferred from this whole
@@ -144,18 +166,8 @@ _SPTYPE_VALUES_WITHOUT_LOOP = frozenset({2, 3})
 # or documented mapping. Module-level for the same reason as
 # _LOOP_TYPE_OPTIONS above - both __init__ and the load path need it.
 _PORTAMENTO_TYPE_OPTIONS = [
-    (
-        "Rate",
-        "The pitch glide always moves at a fixed speed, so a wider "
-        "interval between notes takes proportionally longer to glide "
-        "through.",
-    ),
-    (
-        "Time",
-        "The pitch glide always takes the same amount of time to "
-        "complete, so a wider interval between notes glides faster to "
-        "still finish in that time.",
-    ),
+    ("Rate", tt.PORTAMENTO_TYPE_RATE),
+    ("Time", tt.PORTAMENTO_TYPE_TIME),
 ]
 
 # Raw values 0-13 of s3k.params.MOD_SOURCES, in combo-index order - shared
@@ -216,6 +228,41 @@ _NAME_INPUT_PATTERN = (
 # dragging the loop start marker wrote a loop length the hardware read back
 # as a few milliseconds, not the intended few hundred frames).
 _LOOP_LENGTH_FIXED_POINT_SCALE = 65536
+
+# tooltips for the four marker knobs built in the loop below (start/
+# loop_start/loop_end/end) - keyed by the same marker name used
+# everywhere else on this page (WaveformView.markers(), self.
+# _marker_spinboxes, _schedule_marker_write), not the display label
+_MARKER_KNOB_TOOLTIPS = {
+    "start": tt.SAMPLE_START_KNOB,
+    "loop_start": tt.LOOP_START_KNOB,
+    "loop_end": tt.LOOP_END_KNOB,
+    "end": tt.SAMPLE_END_KNOB,
+}
+
+# Detect Root Note (core/root_note_detection.py) - window selection: the
+# loop region (already-identified stable, repeating audio) is strongly
+# preferred over blindly analysing the whole sample, which would both be
+# slower and biased by the attack transient right at the start. Falls
+# back to a short, attack-skipped chunk of [start, end] only when the
+# loop region itself is too small a span to say anything meaningful about
+# (loop off, or loop_start/loop_end sitting at/near the same value) - see
+# _confirm_detect_root_note.
+#
+# _MIN_LOOP_ANALYSIS_FRAMES: enough for at least 2 full periods of the
+# LOWEST note root_note_detection supports (MIDI 21 ~= 29Hz, period
+# ~1513 frames @44100) with real margin, comfortably before any
+# decimation that function does internally.
+_MIN_LOOP_ANALYSIS_FRAMES = 4096
+# skip this much of the fallback window's own start to dodge the attack
+# transient (pick noise, breath, drum-like click) - not applied to the
+# loop-region case, which is already past the attack by construction
+_ROOT_NOTE_ATTACK_SKIP_SECONDS = 0.05
+# capped short deliberately - measured ~200ms of real analysis time for a
+# window this size (pure Python, no numpy) against ~900ms for a full
+# second's worth; this is a one-click button, not a live-dragged control,
+# but should still feel closer to instant than "this can take a while"
+_ROOT_NOTE_FALLBACK_WINDOW_SECONDS = 0.3
 
 # real audio for AKAISDS_DEMO_SAMPLER's fake sample-audio path (see
 # _fetch_demo_sample_audio) - the same fixture the test suite uses, not
@@ -386,6 +433,18 @@ class ProgramEditorWindow(QMainWindow):
         # (_on_samples_loaded) - a resident sample's own index can start
         # meaning something else after that.
         self._sample_waveform_cache = {}
+        # name/duration labels per row (index -> (generation, name_label,
+        # duration_label)), rebuilt every _on_samples_loaded, plus a
+        # generation counter bumped there too - sample_length_loaded
+        # results for a since-replaced list generation are discarded rather
+        # than applied (see _on_sample_length_loaded), same "index can mean
+        # something else after a reload" reasoning as _sample_waveform_cache
+        # above. name_label is kept in step with a rename via
+        # _confirm_rename_sample, which only calls item.setText() (no full
+        # list reload) - the item's own text is invisible once a custom row
+        # widget covers it, so the label needs its own update too.
+        self._sample_row_labels = {}
+        self._sample_list_generation = 0
         # whether the current sample's SPTYPE has a loop at all - see
         # _set_loop_markers_enabled/_SPTYPE_VALUES_WITHOUT_LOOP. Read by
         # _set_marker_spinbox_range to grey loop_start/loop_end specifically;
@@ -442,6 +501,13 @@ class ProgramEditorWindow(QMainWindow):
         self._busy_hide_timer.setSingleShot(True)
         self._busy_hide_timer.setInterval(150)
         self._busy_hide_timer.timeout.connect(self._confirm_worker_idle)
+
+        # Samples tab's own single-click-to-preview (see WaveformView's
+        # preview_requested and _on_waveform_preview_requested below) -
+        # separate instance from SliceEditorWindow's own SlicePreviewPlayer
+        # (that one's scoped to the Slice Editor dialog's own lifetime);
+        # this one lives as long as the editor window itself does.
+        self._sample_preview_player = SlicePreviewPlayer(self)
 
         self._worker = BridgeWorker(self._bridge)
         self._worker.busy_changed.connect(self._on_worker_busy_changed)
@@ -517,6 +583,12 @@ class ProgramEditorWindow(QMainWindow):
         self._worker.sample_detail_load_failed.connect(
             self._on_sample_detail_load_failed
         )
+        # populates each Samples-tab list row's duration label as results
+        # trickle in - see _on_samples_loaded/_on_sample_length_loaded
+        self._worker.sample_length_loaded.connect(self._on_sample_length_loaded)
+        self._worker.sample_length_load_failed.connect(
+            self._on_sample_length_load_failed
+        )
         self._worker.start()
 
         # placeholder - real program, keygroup panels come later
@@ -570,10 +642,7 @@ class ProgramEditorWindow(QMainWindow):
         self._duplicate_program_action = QAction(
             "Duplicate Program...", self.program_list
         )
-        self._duplicate_program_action.setToolTip(
-            "Not available in demo mode - the fake sampler has no way to "
-            "create new programs"
-        )
+        self._duplicate_program_action.setToolTip(tt.DUPLICATE_PROGRAM_DEMO_MODE)
         self._duplicate_program_action.triggered.connect(
             self._confirm_duplicate_program
         )
@@ -598,10 +667,7 @@ class ProgramEditorWindow(QMainWindow):
         self._duplicate_keygroup_action = QAction(
             "Duplicate Keygroup...", self.keygroup_list
         )
-        self._duplicate_keygroup_action.setToolTip(
-            "Not available in demo mode - the fake sampler has no way to "
-            "create new keygroups"
-        )
+        self._duplicate_keygroup_action.setToolTip(tt.DUPLICATE_KEYGROUP_DEMO_MODE)
         self._duplicate_keygroup_action.triggered.connect(
             self._confirm_duplicate_keygroup
         )
@@ -656,10 +722,12 @@ class ProgramEditorWindow(QMainWindow):
         self.cutoff_knob.setRange(0, 99)
         self.cutoff_knob.setDefaultValue(99)  # fully open - no filtering
         self.cutoff_knob.setFixedSize(56, 56)
+        self.cutoff_knob.setToolTip(tt.FILTER_CUTOFF_KNOB)
         self.resonance_knob = Knob()
         self.resonance_knob.setRange(0, 15)
         self.resonance_knob.setDefaultValue(0)  # no resonance
         self.resonance_knob.setFixedSize(56, 56)
+        self.resonance_knob.setToolTip(tt.FILTER_RESONANCE_KNOB)
         self.key_filter_track_knob = Knob()
         # s3k.params declares K_FREQ's range as -30..99 (its own notes cite
         # a 2026-08-24 hardware sweep finding no clamp at 12 or 24 either),
@@ -671,6 +739,7 @@ class ProgramEditorWindow(QMainWindow):
         self.key_filter_track_knob.setRange(-24, 24)
         self.key_filter_track_knob.setDefaultValue(0)  # no key tracking
         self.key_filter_track_knob.setFixedSize(56, 56)
+        self.key_filter_track_knob.setToolTip(tt.FILTER_KEY_TRACK_KNOB)
 
         self.env1_graph = ADSREnvelopeGraph()
         self.env1_graph.setFixedSize(200, 90)
@@ -685,18 +754,22 @@ class ProgramEditorWindow(QMainWindow):
         self.attack1_knob.setRange(0, 99)
         self.attack1_knob.setDefaultValue(25)
         self.attack1_knob.setFixedSize(40, 40)
+        self.attack1_knob.setToolTip(tt.ENV1_ATTACK_KNOB)
         self.decay1_knob = Knob()
         self.decay1_knob.setRange(0, 99)
         self.decay1_knob.setDefaultValue(50)
         self.decay1_knob.setFixedSize(40, 40)
+        self.decay1_knob.setToolTip(tt.ENV1_DECAY_KNOB)
         self.sustain1_knob = Knob()
         self.sustain1_knob.setRange(0, 99)
         self.sustain1_knob.setDefaultValue(99)
         self.sustain1_knob.setFixedSize(40, 40)
+        self.sustain1_knob.setToolTip(tt.ENV1_SUSTAIN_KNOB)
         self.release1_knob = Knob()
         self.release1_knob.setRange(0, 99)
         self.release1_knob.setDefaultValue(45)
         self.release1_knob.setFixedSize(40, 40)
+        self.release1_knob.setToolTip(tt.ENV1_RELEASE_KNOB)
 
         attack1_col, self.attack1_value_label = self._build_knob_column(
             "Attack", self.attack1_knob
@@ -765,9 +838,11 @@ class ProgramEditorWindow(QMainWindow):
             rate_knob.setRange(0, 99)
             rate_knob.setDefaultValue(_ENV2_RATE_DEFAULTS[i - 1])
             rate_knob.setFixedSize(32, 32)
+            rate_knob.setToolTip(tt.ENV2_RATE_KNOB.format(stage=i))
             level_knob.setRange(0, 99)
             level_knob.setDefaultValue(_ENV2_LEVEL_DEFAULTS[i - 1])
             level_knob.setFixedSize(32, 32)
+            level_knob.setToolTip(tt.ENV2_LEVEL_KNOB.format(stage=i))
 
             rate_layout, rate_value_label = self._build_knob_value_row(rate_knob)
             level_layout, level_value_label = self._build_knob_value_row(level_knob)
@@ -900,7 +975,7 @@ class ProgramEditorWindow(QMainWindow):
         self._zone_button_group.setExclusive(True)
 
         self._zone_stack = QStackedWidget()
-        self._zone_stack.setStyleSheet("background: transparent;")
+        self._zone_stack.setObjectName("transparentContainer")
 
         self._zone_loudness_labels = []
         self._zone_pan_labels = []
@@ -915,13 +990,14 @@ class ProgramEditorWindow(QMainWindow):
             cp,
         ) in enumerate(_ZONE_FIELDS):
             btn = QPushButton(f"Zone {zone_idx + 1}")
+            btn.setToolTip(tt.ZONE_TAB.format(zone_number=zone_idx + 1))
             btn.setCheckable(True)
             btn.setChecked(zone_idx == 0)
             self._zone_button_group.addButton(btn, zone_idx)
             zone_selector_row.addWidget(btn)
 
             page = QWidget()
-            page.setStyleSheet("background: transparent;")
+            page.setObjectName("transparentContainer")
             page_layout = QVBoxLayout()
             page_layout.setSpacing(6)
 
@@ -947,10 +1023,12 @@ class ProgramEditorWindow(QMainWindow):
             loud_knob.setRange(-50, 50)
             loud_knob.setFixedSize(28, 28)
             loud_knob.setEnabled(True)
+            loud_knob.setToolTip(tt.ZONE_LOUDNESS_KNOB)
             pan_knob = Knob()
             pan_knob.setRange(-50, 50)
             pan_knob.setFixedSize(28, 28)
             pan_knob.setEnabled(True)
+            pan_knob.setToolTip(tt.ZONE_PAN_KNOB)
 
             loud_col, loud_val_label = self._build_labeled_knob_value_column(
                 "<b>Loud</b>", loud_knob, center=False
@@ -1337,12 +1415,14 @@ class ProgramEditorWindow(QMainWindow):
         self.pan_knob = Knob()
         self.pan_knob.setRange(-50, 50)
         self.pan_knob.setFixedSize(56, 56)
+        self.pan_knob.setToolTip(tt.PROGRAM_PAN_KNOB)
         pan_column, self.pan_value_label = self._build_knob_column("Pan", self.pan_knob)
 
         self.loud_knob = Knob()
         self.loud_knob.setRange(0, 99)
         self.loud_knob.setDefaultValue(80)
         self.loud_knob.setFixedSize(56, 56)
+        self.loud_knob.setToolTip(tt.PROGRAM_LOUDNESS_KNOB)
         loud_column, self.loud_value_label = self._build_knob_column(
             "Loud", self.loud_knob
         )
@@ -1351,6 +1431,7 @@ class ProgramEditorWindow(QMainWindow):
         self.velocity_knob.setRange(-50, 50)
         self.velocity_knob.setDefaultValue(20)
         self.velocity_knob.setFixedSize(56, 56)
+        self.velocity_knob.setToolTip(tt.PROGRAM_VELOCITY_KNOB)
         velocity_column, self.velocity_value_label = self._build_knob_column(
             "Velocity", self.velocity_knob
         )
@@ -1359,18 +1440,22 @@ class ProgramEditorWindow(QMainWindow):
         self.lfo_rate_knob.setRange(0, 99)
         self.lfo_rate_knob.setDefaultValue(0)  # no modulation without depth anyway
         self.lfo_rate_knob.setFixedSize(56, 56)
+        self.lfo_rate_knob.setToolTip(tt.LFO1_RATE_KNOB)
         self.lfo_depth_knob = Knob()
         self.lfo_depth_knob.setRange(0, 99)
         self.lfo_depth_knob.setDefaultValue(0)  # no modulation
         self.lfo_depth_knob.setFixedSize(56, 56)
+        self.lfo_depth_knob.setToolTip(tt.LFO1_DEPTH_KNOB)
         self.lfo_delay_knob = Knob()
         self.lfo_delay_knob.setRange(0, 99)
         self.lfo_delay_knob.setDefaultValue(0)  # no delay before the LFO starts
         self.lfo_delay_knob.setFixedSize(56, 56)
+        self.lfo_delay_knob.setToolTip(tt.LFO1_DELAY_KNOB)
 
         self.lfo_shape_combo = QComboBox()
         self.lfo_shape_combo.addItems(["Triangle", "Sawtooth", "Square", "Random"])
         self.lfo_shape_combo.setEnabled(True)
+        self.lfo_shape_combo.setToolTip(tt.LFO1_SHAPE_COMBO)
         self.lfo_shape_combo.currentIndexChanged.connect(
             lambda i: self._schedule_write("LFO1WAVE", "program", i)
         )
@@ -1398,6 +1483,7 @@ class ProgramEditorWindow(QMainWindow):
         # without also checking this still lines up.
         self.lfo1_sync_combo = QComboBox()
         self.lfo1_sync_combo.addItems(["On", "Off"])
+        self.lfo1_sync_combo.setToolTip(tt.LFO1_SYNC_COMBO)
         lfo1_sync_column = self._build_labeled_combo_column(
             "LFO1 sync", self.lfo1_sync_combo
         )
@@ -1422,14 +1508,17 @@ class ProgramEditorWindow(QMainWindow):
         self.lfo2_rate_knob.setRange(0, 99)
         self.lfo2_rate_knob.setDefaultValue(0)
         self.lfo2_rate_knob.setFixedSize(56, 56)
+        self.lfo2_rate_knob.setToolTip(tt.LFO2_RATE_KNOB)
         self.lfo2_depth_knob = Knob()
         self.lfo2_depth_knob.setRange(0, 99)
         self.lfo2_depth_knob.setDefaultValue(0)
         self.lfo2_depth_knob.setFixedSize(56, 56)
+        self.lfo2_depth_knob.setToolTip(tt.LFO2_DEPTH_KNOB)
         self.lfo2_delay_knob = Knob()
         self.lfo2_delay_knob.setRange(0, 99)
         self.lfo2_delay_knob.setDefaultValue(0)
         self.lfo2_delay_knob.setFixedSize(56, 56)
+        self.lfo2_delay_knob.setToolTip(tt.LFO2_DELAY_KNOB)
 
         self.lfo2_shape_combo = QComboBox()
         # only 3 shapes, not LFO1's 4 - LFO1WAVE's 4th ("Random") value was
@@ -1438,6 +1527,7 @@ class ProgramEditorWindow(QMainWindow):
         # the same way, so this offers only what s3k.params' LFO2WAVE desc
         # actually documents rather than assuming the same hidden 4th shape
         self.lfo2_shape_combo.addItems(["Triangle", "Sawtooth", "Square"])
+        self.lfo2_shape_combo.setToolTip(tt.LFO2_SHAPE_COMBO)
         self.lfo2_shape_combo.currentIndexChanged.connect(
             lambda i: self._schedule_write("LFO2WAVE", "program", i)
         )
@@ -1460,6 +1550,7 @@ class ProgramEditorWindow(QMainWindow):
         # K_FREQ/B_PTCHD (AGENTS.md) - a third field in that list now.
         self.lfo2_trig_combo = QComboBox()
         self.lfo2_trig_combo.addItems(["Off", "On"])
+        self.lfo2_trig_combo.setToolTip(tt.LFO2_TRIG_COMBO)
         lfo2_trig_column = self._build_labeled_combo_column(
             "LFO2 retrig", self.lfo2_trig_combo
         )
@@ -1478,6 +1569,7 @@ class ProgramEditorWindow(QMainWindow):
         for voices in range(1, 33):  # 1-32 voices - the sampler's full range
             self.polyph_combo.addItem(str(voices), voices)
         self.polyph_combo.setEnabled(True)
+        self.polyph_combo.setToolTip(tt.POLYPHONY_COMBO)
         self.polyph_combo.currentIndexChanged.connect(
             lambda i: self._schedule_write(
                 "POLYPH", "program", self.polyph_combo.itemData(i)
@@ -1497,6 +1589,7 @@ class ProgramEditorWindow(QMainWindow):
         # lfo_shape_combo/LFO1WAVE above, no itemData needed
         self.note_priority_combo.addItems(["Low", "Normal", "High", "Hold"])
         self.note_priority_combo.setEnabled(True)
+        self.note_priority_combo.setToolTip(tt.NOTE_PRIORITY_COMBO)
         self.note_priority_combo.currentIndexChanged.connect(
             lambda i: self._schedule_write("PRIORT", "program", i)
         )
@@ -1520,6 +1613,7 @@ class ProgramEditorWindow(QMainWindow):
         # 255 as a real OMNI sentinel for this region, so it's offered here
         self.midi_channel_combo.addItem("Omni", 255)
         self.midi_channel_combo.setEnabled(True)
+        self.midi_channel_combo.setToolTip(tt.MIDI_CHANNEL_COMBO)
         self.midi_channel_combo.currentIndexChanged.connect(
             lambda i: self._schedule_write(
                 "PMCHAN", "program", self.midi_channel_combo.itemData(i)
@@ -1564,6 +1658,7 @@ class ProgramEditorWindow(QMainWindow):
         self.bend_up_combo = QComboBox()
         self.bend_up_combo.addItems([f"{i} st" for i in range(25)])
         self.bend_up_combo.setMaximumWidth(70)
+        self.bend_up_combo.setToolTip(tt.BEND_UP_COMBO)
         bend_up_column = self._build_labeled_combo_column("Bend up", self.bend_up_combo)
 
         self.bend_down_combo = QComboBox()
@@ -1575,6 +1670,7 @@ class ProgramEditorWindow(QMainWindow):
         # edit the dependency (AGENTS.md)
         self.bend_down_combo.addItems([f"{i} st" for i in range(25)])
         self.bend_down_combo.setMaximumWidth(70)
+        self.bend_down_combo.setToolTip(tt.BEND_DOWN_COMBO)
         bend_down_column = self._build_labeled_combo_column(
             "Bend down", self.bend_down_combo
         )
@@ -1603,6 +1699,7 @@ class ProgramEditorWindow(QMainWindow):
         self.portamento_rate_knob.setRange(0, 99)
         self.portamento_rate_knob.setDefaultValue(0)  # no known factory default
         self.portamento_rate_knob.setFixedSize(28, 28)
+        self.portamento_rate_knob.setToolTip(tt.PORTAMENTO_RATE_KNOB)
         portamento_rate_column, self.portamento_rate_value_label = (
             self._build_labeled_knob_value_column("Rate", self.portamento_rate_knob)
         )
@@ -1944,12 +2041,27 @@ class ProgramEditorWindow(QMainWindow):
         close_button = QPushButton("Close")
         close_button.clicked.connect(self.close)
 
-        refresh_button = QPushButton("⟳ Refresh")
-        refresh_button.setToolTip(
-            "Reload the current program/keygroup from the hardware (⌘R) - "
-            "use this if you've changed something on the sampler's own front panel"
-        )
-        refresh_button.clicked.connect(self._refresh_from_hardware)
+        # tooltip is finished off with its resolved keyboard shortcut once
+        # refresh_action exists (built later in __init__, alongside the
+        # zoom buttons' own equivalent finishing step) - see the comment
+        # there for why this can't just be hardcoded to one platform's
+        # symbol
+        self.refresh_button = QPushButton("⟳ Refresh")
+        self.refresh_button.setToolTip(tt.REFRESH_BUTTON)
+        self.refresh_button.clicked.connect(self._refresh_from_hardware)
+
+        # only shown while a blocking hardware operation on this window is
+        # actually running (see _set_hardware_busy_ui) - a discoverable,
+        # on-screen equivalent of the Hardware menu's own Cancel Transfer
+        # action/Ctrl+. shortcut, for a user who wouldn't otherwise know
+        # cancelling is even possible. Stays enabled the whole time it's
+        # visible (never touched by _set_hardware_busy_ui's own disabling)
+        # for the same reason cancel_action does - it has to stay
+        # reachable while everything else is frozen, that's the point of it
+        self.cancel_transfer_button = QPushButton("Cancel Transfer")
+        self.cancel_transfer_button.setToolTip(tt.CANCEL_TRANSFER_BUTTON)
+        self.cancel_transfer_button.clicked.connect(self._cancel_hardware_transfer)
+        self.cancel_transfer_button.setVisible(False)
 
         content_layout = QHBoxLayout()
         content_layout.addWidget(programs_container)
@@ -1974,7 +2086,8 @@ class ProgramEditorWindow(QMainWindow):
         self.main_tabs.currentChanged.connect(self._on_main_tab_changed)
 
         bottom_row = QHBoxLayout()
-        bottom_row.addWidget(refresh_button)
+        bottom_row.addWidget(self.refresh_button)
+        bottom_row.addWidget(self.cancel_transfer_button)
         # ties the loading indicator to the action that most often triggers
         # a hardware sync, rather than tucking it into the status bar
         bottom_row.addWidget(self._loading_progress)
@@ -1989,11 +2102,144 @@ class ProgramEditorWindow(QMainWindow):
         container.setLayout(main_layout)
         self.setCentralWidget(container)
 
-        refresh_action = QAction("Refresh from Hardware", self)
-        refresh_action.setShortcut("Ctrl+R")  # shows as ⌘R on macOS
-        refresh_action.triggered.connect(self._refresh_from_hardware)
+        # self._refresh_action (not a local) - _set_hardware_busy_ui toggles
+        # it (and refresh_button) off for the duration of any blocking
+        # hardware operation on this window, see that method's own comment
+        self._refresh_action = QAction("Refresh from Hardware", self)
+        self._refresh_action.setShortcut("Ctrl+R")  # shows as ⌘R on macOS
+        self._refresh_action.triggered.connect(self._refresh_from_hardware)
         hardware_menu = self.menuBar().addMenu("&Hardware")
-        hardware_menu.addAction(refresh_action)
+        hardware_menu.addAction(self._refresh_action)
+
+        # same shortcut as main_window.py's own Transfer > Cancel Transfer
+        # action (Ctrl+. / Cmd+.) - cancels a sample audio load on the
+        # Samples tab (_load_sample_waveform's own blocking wait already
+        # pumps events, listening for sampler_controller.receive_finished,
+        # which cancel_transfer() already emits - see that method's own
+        # "should be safe to call at any time" comment). Unlike the Slice
+        # Editor's own Ctrl+. (a QShortcut local to that modal dialog - see
+        # slice_editor_window.py), this window is a plain top-level window
+        # and keeps focus during the freeze, so an ordinary QAction on its
+        # own menu bar reaches it fine.
+        cancel_action = QAction("Cancel Transfer", self)
+        cancel_action.setShortcut("Ctrl+.")
+        cancel_action.triggered.connect(self._cancel_hardware_transfer)
+        hardware_menu.addAction(cancel_action)
+        # same "append the resolved, platform-native shortcut rather than
+        # hardcoding one platform's symbol" fix-up the zoom buttons get
+        # further down - see that block's own comment for why
+        refresh_shortcut_text = self._refresh_action.shortcut().toString(
+            QKeySequence.SequenceFormat.NativeText
+        )
+        if refresh_shortcut_text:
+            self.refresh_button.setToolTip(
+                f"{self.refresh_button.toolTip()} ({refresh_shortcut_text})"
+            )
+        cancel_shortcut_text = cancel_action.shortcut().toString(
+            QKeySequence.SequenceFormat.NativeText
+        )
+        if cancel_shortcut_text:
+            self.cancel_transfer_button.setToolTip(
+                f"{self.cancel_transfer_button.toolTip()} ({cancel_shortcut_text})"
+            )
+
+        # only offered here at all when the shared MIDI transport is
+        # active (config.json's "shared_midi_transport", or
+        # AKAISDS_SHARED_MIDI_TRANSPORT - see midi_manager.shared_transport_
+        # enabled()'s own docstring) - opening Settings used to mean a
+        # SECOND independent connection to the sampler while this window's
+        # own connection is also open, which is exactly the confirmed
+        # dual-connection race AGENTS.md's "MIDI transport consolidation"
+        # section describes; safe now only because both windows share ONE
+        # real connection, and Settings reopening it is something this
+        # window can actually notice and recover from - see
+        # _open_settings_dialog/_reconnect_shared_bridge, which is what
+        # actually rebuilds this window's own bridge afterward.
+        self._settings_action = None
+        if midi_manager_module.shared_transport_enabled():
+            self._settings_action = QAction("Settings...", self)
+            self._settings_action.setMenuRole(QAction.MenuRole.PreferencesRole)
+            self._settings_action.setShortcut(
+                QKeySequence.StandardKey.Preferences
+                if sys.platform == "darwin"
+                else "Ctrl+,"
+            )
+            self._settings_action.triggered.connect(self._open_settings_dialog)
+            hardware_menu.addAction(self._settings_action)
+
+        # zoom for the Samples tab's waveform view. "Ctrl+=" is the primary
+        # zoom-in binding (auto-translates to "Cmd+=" on macOS via Qt's own
+        # Ctrl->Cmd substitution, same as every other shortcut string in
+        # this file) rather than QKeySequence.StandardKey.ZoomIn's own
+        # platform-default primary binding, "Ctrl++" - on a US keyboard "+"
+        # needs Shift, so that default would actually require
+        # Ctrl+Shift+=. QKeySequence.keyBindings(...) is still appended
+        # after it (as secondary bindings) so a keyboard/platform that DOES
+        # have a dedicated "+" key, or a real "Zoom In" media key, keeps
+        # working too - just not shown in the tooltip, which only reflects
+        # the primary (first) binding. Zoom out keeps StandardKey.ZoomOut's
+        # own default ("Ctrl+-") unmodified since "-" needs no Shift on a US
+        # keyboard already. There's no standard key for "zoom to fit" so
+        # that one is a plain "Ctrl+0", matching the common browser/editor
+        # convention for "reset zoom". These act on self.waveform_view
+        # regardless of which tab is currently showing - harmless no-ops
+        # off the Samples tab, same as Ctrl+1/2/3 below being global rather
+        # than tab-scoped.
+        self.zoom_in_action = QAction("Zoom In", self)
+        self.zoom_in_action.setShortcuts(
+            [QKeySequence("Ctrl+=")]
+            + QKeySequence.keyBindings(QKeySequence.StandardKey.ZoomIn)
+        )
+        self.zoom_in_action.triggered.connect(self.waveform_view.zoom_in)
+        self.zoom_out_action = QAction("Zoom Out", self)
+        self.zoom_out_action.setShortcuts(
+            QKeySequence.keyBindings(QKeySequence.StandardKey.ZoomOut)
+        )
+        self.zoom_out_action.triggered.connect(self.waveform_view.zoom_out)
+        self.zoom_fit_action = QAction("Zoom to Fit", self)
+        self.zoom_fit_action.setShortcut("Ctrl+0")
+        self.zoom_fit_action.triggered.connect(self.waveform_view.reset_zoom)
+
+        view_menu = self.menuBar().addMenu("&View")
+        view_menu.addAction(self.zoom_in_action)
+        view_menu.addAction(self.zoom_out_action)
+        view_menu.addAction(self.zoom_fit_action)
+
+        # append each action's own resolved (platform-native) shortcut text
+        # to the zoom buttons' existing tooltips, rather than hardcoding
+        # "Ctrl+"/"Cmd+" - action.shortcut() (not shortcuts()[1:]) already
+        # renders the platform's own first-choice binding via NativeText
+        for button, action in (
+            (self.zoom_out_button, self.zoom_out_action),
+            (self.zoom_in_button, self.zoom_in_action),
+            (self.zoom_fit_button, self.zoom_fit_action),
+        ):
+            shortcut_text = action.shortcut().toString(
+                QKeySequence.SequenceFormat.NativeText
+            )
+            if shortcut_text:
+                button.setToolTip(f"{button.toolTip()} ({shortcut_text})")
+
+        # these act on self.waveform_view (the Samples tab's own waveform),
+        # so they're meaningless - and, worse, silently confusing - while
+        # some OTHER tab is showing: without this, Ctrl+=/Ctrl+-/Ctrl+0
+        # would zoom a waveform the user can't currently see, and they'd
+        # only discover it was already zoomed the next time they switched
+        # back to Samples. Disabling a QAction disables its shortcut too
+        # (Qt's own behaviour, not something this app has to enforce by
+        # hand), so this greys out the &View menu items AND stops the
+        # keyboard shortcuts from firing, in one call each - see
+        # _update_zoom_actions_enabled/_on_main_tab_changed for the other
+        # half (keeping this in sync as the user actually switches tabs).
+        # Deliberately separate from ui/slice_editor_window.py's OWN
+        # Ctrl+=/Ctrl+-/Ctrl+0 zoom shortcuts (see that file - plain
+        # QShortcuts on the Slice Editor dialog itself, not QActions on
+        # this window's menu bar) - those are already naturally scoped to
+        # whichever window has focus (the modal Slice Editor, opened either
+        # from this window's own Samples tab or from the Transfer
+        # Dashboard's own file queue - see dashboard.py), so they're
+        # unaffected by this window's own tab-based gating either way.
+        self._update_zoom_actions_enabled()
 
         # only one of {dashboard, program editor} is ever open at a time -
         # two simultaneous MIDI connections to the hardware is untested and
@@ -2005,12 +2251,27 @@ class ProgramEditorWindow(QMainWindow):
         # share one 1/2/3/4 sequence across both windows.
         window_menu = self.menuBar().addMenu("&Window")
 
-        dashboard_action = QAction("Transfer Dashboard", self)
-        dashboard_action.setShortcut("Ctrl+T")
+        self._dashboard_action = QAction("Transfer Dashboard", self)
+        self._dashboard_action.setShortcut("Ctrl+T")
         # closing (rather than hiding outright) reuses closeEvent()'s
-        # existing "show the main window again" cleanup below
-        dashboard_action.triggered.connect(self.close)
-        window_menu.addAction(dashboard_action)
+        # existing "show the main window again" cleanup below - closeEvent
+        # is also where the is_transfer_busy() guard lives (see its own
+        # comment), so this, the OS window-close button, and any future
+        # close-triggering control all go through the one check
+        self._dashboard_action.triggered.connect(self.close)
+        window_menu.addAction(self._dashboard_action)
+
+        # kept in sync with is_transfer_busy() below (see
+        # _sync_window_menu_busy_state) rather than only at the handful of
+        # spots that flip main_tabs.setEnabled() - a transfer this window
+        # itself didn't start (the Dashboard's own Send/Receive, since both
+        # windows share one sampler_controller) needs to disable this too,
+        # and there's no signal fired specifically for "busy changed"
+        self._window_menu_busy_timer = QTimer(self)
+        self._window_menu_busy_timer.timeout.connect(
+            self._sync_window_menu_busy_state
+        )
+        self._window_menu_busy_timer.start(150)
 
         editor_action = QAction("Program Editor", self)
         editor_action.setShortcut("Ctrl+E")
@@ -2019,24 +2280,36 @@ class ProgramEditorWindow(QMainWindow):
 
         window_menu.addSeparator()
 
-        multi_tab_action = QAction("Multi Tab", self)
-        multi_tab_action.setShortcut("Ctrl+1")
-        multi_tab_action.triggered.connect(lambda: self.main_tabs.setCurrentIndex(0))
-        window_menu.addAction(multi_tab_action)
+        # self._tab_switch_actions (not locals) - _set_hardware_busy_ui
+        # disables all three for the duration of any blocking hardware
+        # operation on this window (see that method's own comment): tab
+        # switching itself sends nothing to the sampler, but main_tabs
+        # being setEnabled(False) already means every widget on whichever
+        # tab you land on is inert either way, so leaving these live just
+        # lets the frozen window appear to navigate while doing nothing -
+        # not a MIDI safety issue, just contradicts the "freezes the rest
+        # of the editor for the duration, deliberately" intent these
+        # operations already state elsewhere
+        self._multi_tab_action = QAction("Multi Tab", self)
+        self._multi_tab_action.setShortcut("Ctrl+1")
+        self._multi_tab_action.triggered.connect(
+            lambda: self.main_tabs.setCurrentIndex(0)
+        )
+        window_menu.addAction(self._multi_tab_action)
 
-        programs_tab_action = QAction("Programs Tab", self)
-        programs_tab_action.setShortcut("Ctrl+2")
-        programs_tab_action.triggered.connect(
+        self._programs_tab_action = QAction("Programs Tab", self)
+        self._programs_tab_action.setShortcut("Ctrl+2")
+        self._programs_tab_action.triggered.connect(
             lambda: self.main_tabs.setCurrentIndex(1)
         )
-        window_menu.addAction(programs_tab_action)
+        window_menu.addAction(self._programs_tab_action)
 
-        samples_tab_action = QAction("Samples Tab", self)
-        samples_tab_action.setShortcut("Ctrl+3")
-        samples_tab_action.triggered.connect(
+        self._samples_tab_action = QAction("Samples Tab", self)
+        self._samples_tab_action.setShortcut("Ctrl+3")
+        self._samples_tab_action.triggered.connect(
             lambda: self.main_tabs.setCurrentIndex(self._samples_tab_index)
         )
-        window_menu.addAction(samples_tab_action)
+        window_menu.addAction(self._samples_tab_action)
 
         # Qt has no MenuRole for "check for updates" (only About/Preferences/
         # Quit get auto-relocated into the native app menu on macOS - see
@@ -2095,7 +2368,23 @@ class ProgramEditorWindow(QMainWindow):
         self.waveform_view.load_requested.connect(self._load_sample_waveform)
         self.waveform_view.marker_committed.connect(self._on_waveform_marker_committed)
         self.waveform_view.markers_changed.connect(self._update_marker_spinboxes)
+        self.waveform_view.markers_changed.connect(
+            self._on_waveform_markers_changed_live_preview
+        )
+        self.waveform_view.markers_changed.connect(
+            self._on_waveform_markers_changed_loop_preview
+        )
+        self.loop_preview.marker_drag_delta.connect(
+            self._on_loop_preview_marker_dragged
+        )
         self.waveform_view.view_changed.connect(self._on_waveform_view_changed)
+        self.waveform_view.preview_requested.connect(
+            self._on_waveform_preview_requested
+        )
+        self._sample_preview_player.position_changed.connect(
+            self.waveform_view.set_playhead
+        )
+        self._sample_preview_player.finished.connect(self.waveform_view.clear_playhead)
         self.waveform_scrollbar.valueChanged.connect(self._on_waveform_scrollbar_moved)
         self._worker.submit_program_list()
 
@@ -2271,6 +2560,32 @@ class ProgramEditorWindow(QMainWindow):
             ):
                 self._busy_show_timer.start()
         else:
+            # a STALE False, already overtaken by real work - ignore it
+            # rather than start the hide countdown at all. This is
+            # reachable, not hypothetical: the very first load
+            # (__init__'s submit_program_list()) chains straight into
+            # _on_programs_loaded submitting sample_list AND multi_parts
+            # from within its own handler. programs_loaded and this job's
+            # own busy_changed(False) are both emitted from the WORKER
+            # thread and queued in that order for GUI-thread delivery -
+            # but _on_programs_loaded's submit_sample_list() call happens
+            # ON the GUI thread, so ITS busy_changed(True) fires
+            # SYNCHRONOUSLY (a same-thread direct connection, no queuing)
+            # and is handled immediately, jumping ahead of the
+            # already-queued-but-not-yet-delivered busy_changed(False)
+            # from program_list's own completion. That stale False then
+            # arrives here, after the worker is legitimately busy again,
+            # and would start the hide countdown anyway - _busy_hide_timer
+            # (150ms) reliably beats _busy_show_timer (200ms, already
+            # running) to the finish line and cancels it outright, so the
+            # bar never gets a chance to show at all for the very
+            # sequence a user most wants to see it for (the editor's own
+            # first load). is_idle() is checked live here rather than
+            # trusted from the event's own stale payload, same reasoning
+            # ProgramEditorWindow._reconnect_shared_bridge already uses it
+            # for.
+            if not self._worker.is_idle():
+                return
             # not hidden immediately - _confirm_worker_idle only actually
             # hides once this fires without a new busy_changed(True)
             # cancelling it first (see the comment on these two timers above)
@@ -2349,6 +2664,265 @@ class ProgramEditorWindow(QMainWindow):
         }
 
         self._worker.submit_keygroups(program_index)
+
+    def _set_hardware_busy_ui(self, busy):
+        # single place for every blocking hardware operation on this window
+        # (_load_sample_waveform, _perform_duplicate_sample_real's caller,
+        # _perform_sample_edit_real's caller) to freeze/unfreeze the rest
+        # of the window around it, instead of each call site only handling
+        # main_tabs.setEnabled() and leaving refresh_button/the Hardware
+        # menu's Refresh action/the Window menu's tab-switch actions still
+        # live - see refresh_action's own docstring for why Refresh in
+        # particular is a real hardware-safety gap, not just cosmetic:
+        # BridgeWorker firing a request while sampler_controller is
+        # mid-SDS-handshake is the same "two logical senders, one wire"
+        # risk is_transfer_busy() already guards against everywhere else in
+        # this file. cancel_action/cancel_transfer_button are deliberately
+        # NOT disabled here - they have to stay reachable while busy,
+        # that's the whole point of them; cancel_transfer_button is shown
+        # (rather than just left enabled, like the menu action) specifically
+        # so cancelling is discoverable without reading the docs or opening
+        # the Hardware menu.
+        self.main_tabs.setEnabled(not busy)
+        self.cancel_transfer_button.setVisible(busy)
+        self.refresh_button.setEnabled(not busy)
+        self._refresh_action.setEnabled(not busy)
+        for action in (
+            self._multi_tab_action,
+            self._programs_tab_action,
+            self._samples_tab_action,
+        ):
+            action.setEnabled(not busy)
+
+    def _cancel_hardware_transfer(self):
+        # reaches whichever real MIDI transfer is currently in flight on
+        # the shared sampler_controller - most usefully a sample audio
+        # load from the Samples tab (_load_sample_waveform), but harmless
+        # to trigger otherwise: cancel_transfer() is a no-op if nothing is
+        # actually running
+        sampler_controller = getattr(self._main_window, "sampler_controller", None)
+        if sampler_controller is not None:
+            sampler_controller.cancel_transfer()
+
+    def _open_settings_dialog(self):
+        # only ever wired up (see __init__) when shared_transport_enabled()
+        # was true at construction - _sync_window_menu_busy_state already
+        # disables the action while busy, this is the same belt-and-braces
+        # re-check dashboard.py's own open_settings_dialog/open_program_
+        # editor use for their own menu actions, for a direct call that
+        # bypasses the disabled action (there isn't one today, but matching
+        # the established pattern here costs nothing)
+        logger = debug_log.get_logger()
+        logger.debug("ProgramEditorWindow._open_settings_dialog: entered")
+        # re-entrancy guard - _settings_action itself is never disabled by
+        # _set_hardware_busy_ui (unlike refresh/tab-switch), so nothing
+        # currently stops this method being entered a second time while an
+        # earlier call is still between dialog.exec() and
+        # _reconnect_shared_bridge finishing. Two real, confirmed
+        # unexplained crashes happened with no trace of why
+        # _reconnect_shared_bridge's own program_editor_bridge.connect()
+        # call never ran - this closes the one re-entrancy gap found by
+        # inspection while that investigation continues (see this method's
+        # own debug logging above/below, added at the same time, to pin
+        # down the real cause if it happens again)
+        if getattr(self, "_settings_dialog_active", False):
+            logger.error(
+                "ProgramEditorWindow._open_settings_dialog: re-entered "
+                "while already active - ignoring this call"
+            )
+            return
+        sampler_controller = getattr(self._main_window, "sampler_controller", None)
+        midi_manager = getattr(self._main_window, "midi_manager", None)
+        if sampler_controller is None or midi_manager is None:
+            self.status_bar.showMessage(
+                "Can't open Settings - no Transfer Dashboard connection available"
+            )
+            return
+        if sampler_controller.is_transfer_busy():
+            self.status_bar.showMessage(
+                "Can't open Settings - a MIDI transfer is already in progress"
+            )
+            return
+        self._settings_dialog_active = True
+        # frozen BEFORE the dialog ever opens, not just while
+        # _reconnect_shared_bridge runs afterward - a second, real,
+        # confirmed crash (same SIGSEGV signature, different trigger) came
+        # from main_tabs still being interactive the whole time Settings
+        # was open: closing the dialog let a deferred sample-list
+        # selection event through, which submitted a new BridgeWorker job
+        # that got dispatched against the OLD (already-deleted) bridge
+        # before _reconnect_shared_bridge's own dialog.exec()-then-rebuild
+        # sequence ever got a chance to run. Freezing here closes that
+        # window entirely: nothing can submit a new job for the whole time
+        # Settings is up, and is_idle()/the busy_changed wait below (not
+        # wait_until_idle() - see that method's own docstring) drains
+        # anything already queued from BEFORE Settings opened, so
+        # BridgeWorker is guaranteed genuinely idle before Apply/either
+        # diagnostic ever touches the ports.
+        self.status_bar.showMessage("Waiting for pending hardware requests to finish...")
+        self._set_hardware_busy_ui(True)
+        QApplication.processEvents()
+        if not self._worker.is_idle():
+            logger.debug(
+                "ProgramEditorWindow._open_settings_dialog: worker busy, "
+                "waiting for busy_changed(False) before opening the dialog"
+            )
+            self._wait_for_any_signal(
+                [self._worker.busy_changed], start=lambda: None, timeout_ms=30000
+            )
+            logger.debug(
+                "ProgramEditorWindow._open_settings_dialog: wait finished "
+                f"(is_idle()={self._worker.is_idle()})"
+            )
+        logger.debug("ProgramEditorWindow._open_settings_dialog: opening MidiSettingsDialog")
+        dialog = MidiSettingsDialog(midi_manager, sampler_controller, self)
+        dialog.exec()
+        logger.debug(
+            "ProgramEditorWindow._open_settings_dialog: dialog.exec() returned, "
+            "calling _reconnect_shared_bridge"
+        )
+        # unconditional, not just on Accept - Identity Request/Loopback
+        # Test both release-then-restore MidiManager's ports WHILE the
+        # dialog is still open (see ui/settings_dialog.py), so even a
+        # Cancel can leave the ports reopened. See _reconnect_shared_bridge
+        # for why this has to happen exactly ONCE, here, rather than
+        # reacting to MidiManager.connection_changed directly. Also what
+        # un-freezes what this method froze above, on every path (success
+        # or the close()-back-to-Dashboard fallback).
+        self._reconnect_shared_bridge()
+        self._settings_dialog_active = False
+        logger.debug("ProgramEditorWindow._open_settings_dialog: finished")
+
+    def _reconnect_shared_bridge(self):
+        # rebuilds this window's bridge against midi_manager's CURRENT
+        # raw ports - needed because, under shared transport, a reopen
+        # (MidiManager.open_input/open_output - Apply, or either
+        # diagnostic's own release-then-restore dance, all in
+        # ui/settings_dialog.py) REPLACES midi_manager.raw_input/
+        # raw_output with new objects rather than mutating the old ones in
+        # place. This window's own S3kBridge was built
+        # (program_editor_bridge.connect()) from whichever objects were
+        # open at THAT moment, so without this it would silently keep
+        # talking to now-closed ports.
+        #
+        # Called exactly once, after _open_settings_dialog's dialog.exec()
+        # returns - NOT wired to MidiManager.connection_changed directly.
+        # That was tried first and produced a real, confirmed bug on real
+        # hardware: connection_changed fires separately for EACH of
+        # open_input()/open_output() (and a diagnostic's release calls
+        # both, then its own restore calls both again - up to 4 emissions
+        # per diagnostic run), each one synchronously, nested inside
+        # ui/settings_dialog.py's own still-executing code. Reacting to
+        # each one individually rebuilds the bridge from a PARTIAL,
+        # transient state (e.g. raw_input already None, raw_output not
+        # closed yet) - which falls through to program_editor_bridge.
+        # connect()'s "standard connection" branch, briefly opening a
+        # THIRD independent connection to the same physical port (exactly
+        # the dual-connection hazard this whole feature exists to
+        # prevent), repeatedly, while the diagnostic is still running on
+        # its own separate temporary ports. Reacting once, after
+        # dialog.exec() returns, only ever sees the final settled state.
+        #
+        # This also means the Dashboard's own Settings dialog reopening
+        # the ports while this window merely exists in the background
+        # (tests/midi_transport_consolidation_test_plan.md's own Test 7)
+        # is NOT covered here - deliberately: this app hides the Dashboard
+        # whenever this window is open (see main_window.py's own "&Window"
+        # menu comment), so the Dashboard's Settings action is never
+        # actually reachable while this window is the active one; the only
+        # real path to a port reopen while this window is active is its
+        # own Settings action above.
+        # _open_settings_dialog already froze the UI before ever opening the
+        # dialog (see its own comment) - every exit path below must
+        # unfreeze it again, including these two early-return guards, or
+        # the window is left permanently frozen.
+        #
+        # Both guards below FAIL SAFE by closing the editor back to the
+        # Dashboard, same as the "couldn't rebuild" exception path further
+        # down - deliberately NOT "unfreeze and carry on with the OLD
+        # bridge still in place", which was this method's first version
+        # and produced a real, confirmed SIGSEGV on real hardware: leaving
+        # main_tabs interactive again with a bridge still pointed at
+        # already-closed ports means the very next BridgeWorker job (a
+        # sample selection, a refresh, anything) dispatches against a
+        # deleted native port. Logged at ERROR (not silently) specifically
+        # so a future occurrence is immediately diagnosable from
+        # ~/.akaisds/akaisds.log rather than inferred from the ABSENCE of
+        # a program_editor_bridge.connect() log line, the way this one was.
+        logger = debug_log.get_logger()
+        logger.debug("ProgramEditorWindow._reconnect_shared_bridge: entered")
+        sampler_controller = getattr(self._main_window, "sampler_controller", None)
+        midi_manager = getattr(self._main_window, "midi_manager", None)
+        if midi_manager is None:
+            logger.error(
+                "ProgramEditorWindow: _reconnect_shared_bridge found no "
+                "midi_manager on the main window - returning to the "
+                "Transfer Dashboard rather than risk using a stale bridge"
+            )
+            self._set_hardware_busy_ui(False)
+            self.close()
+            return
+        if sampler_controller is not None and sampler_controller.is_transfer_busy():
+            # shouldn't be reachable (Settings itself refuses to open while
+            # busy - see _open_settings_dialog/dashboard.py's own matching
+            # guard)
+            logger.error(
+                "ProgramEditorWindow: _reconnect_shared_bridge found "
+                "sampler_controller busy right after Settings closed (was "
+                "not expected to be reachable) - returning to the Transfer "
+                "Dashboard rather than risk using a stale bridge"
+            )
+            self._set_hardware_busy_ui(False)
+            self.close()
+            return
+        self.status_bar.showMessage("Reconnecting to the sampler...")
+        self._set_hardware_busy_ui(True)
+        QApplication.processEvents()
+        # event-pumping wait (same pattern as _wait_for_any_signal, used
+        # everywhere else in this file for this) - NOT wait_until_idle(),
+        # whose own docstring already says not to call it from the GUI
+        # thread: a raw threading.Condition wait with no event-loop
+        # pumping at all, which froze this window's UI solid for as long
+        # as BridgeWorker took to drain on the first version of this fix.
+        # is_idle() skips the wait entirely when there's nothing to wait
+        # for, since busy_changed(False) won't fire again until the worker
+        # goes busy then idle a NEXT time.
+        if not self._worker.is_idle():
+            logger.debug(
+                "ProgramEditorWindow._reconnect_shared_bridge: worker busy, "
+                "waiting for busy_changed(False) before rebuilding"
+            )
+            self._wait_for_any_signal(
+                [self._worker.busy_changed], start=lambda: None, timeout_ms=30000
+            )
+            logger.debug(
+                "ProgramEditorWindow._reconnect_shared_bridge: wait finished "
+                f"(is_idle()={self._worker.is_idle()})"
+            )
+        logger.debug(
+            "ProgramEditorWindow._reconnect_shared_bridge: calling "
+            "program_editor_bridge.connect()"
+        )
+        try:
+            new_bridge = program_editor_bridge.connect(midi_manager)
+        except Exception:
+            logger.error(
+                "ProgramEditorWindow: couldn't rebuild the bridge after "
+                "Settings changed the shared MIDI ports - returning to the "
+                "Transfer Dashboard",
+                exc_info=True,
+            )
+            self._set_hardware_busy_ui(False)
+            self.close()
+            return
+        logger.debug(
+            "ProgramEditorWindow._reconnect_shared_bridge: got new bridge, "
+            "calling set_bridge()"
+        )
+        self._worker.set_bridge(new_bridge)
+        self._set_hardware_busy_ui(False)
+        logger.debug("ProgramEditorWindow._reconnect_shared_bridge: finished")
+        self._refresh_from_hardware()
 
     def _on_program_selected(self, current, previous):
         self.keygroup_list.clear()
@@ -2808,15 +3382,18 @@ class ProgramEditorWindow(QMainWindow):
         self._worker.submit_keygroups(program_index)
 
     def _confirm_rename_sample(self):
-        item = self.sample_list_widget.currentItem()
-        if item is None:
-            return
         sample_index = self.sample_list_widget.currentRow()
-        current_name = item.text()
+        if sample_index < 0:
+            return
+        current_name = self._sample_name_at_row(sample_index)
         new_name = self._prompt_sample_name(current_name)
         if new_name is None or new_name == current_name:
             return
-        item.setText(new_name)
+        self._sample_list[sample_index] = new_name
+        entry = self._sample_row_labels.get(sample_index)
+        if entry is not None:
+            _generation, name_label, _duration_label = entry
+            name_label.setText(new_name)
         self._update_zone_sample_combo_names(sample_index, new_name)
         self._write_knob_value(
             "SHNAME", "sample", new_name, keygroup_index=0, index=sample_index
@@ -2836,11 +3413,10 @@ class ProgramEditorWindow(QMainWindow):
             combo.setItemText(sample_index + 1, name)
 
     def _confirm_delete_sample(self):
-        item = self.sample_list_widget.currentItem()
-        if item is None:
-            return
         sample_index = self.sample_list_widget.currentRow()
-        sample_name = item.text()
+        if sample_index < 0:
+            return
+        sample_name = self._sample_name_at_row(sample_index)
         answer = QMessageBox.question(
             self,
             "Delete Sample",
@@ -2874,18 +3450,14 @@ class ProgramEditorWindow(QMainWindow):
         entry = self._sample_waveform_cache.get(sample_index)
         if entry is None or entry["samples"] is None:
             return
-        item = self.sample_list_widget.currentItem()
-        current_name = item.text() if item is not None else ""
+        current_name = self._sample_name_at_row(sample_index)
         default_name = _duplicate_default_name(current_name)
         new_name = self._prompt_akai_name(
             "Duplicate Sample", "New sample name:", default_name
         )
         if new_name is None:
             return
-        existing_names = [
-            self.sample_list_widget.item(i).text()
-            for i in range(self.sample_list_widget.count())
-        ]
+        existing_names = list(self._sample_list)
         if new_name in existing_names:
             # same measured hardware behaviour _confirm_duplicate_program
             # guards PRNAME against, but for a different reason here: DELS
@@ -2917,7 +3489,7 @@ class ProgramEditorWindow(QMainWindow):
             return
 
         self.waveform_view.set_loading(True)
-        self.main_tabs.setEnabled(False)
+        self._set_hardware_busy_ui(True)
         self.status_bar.showMessage(
             f'Duplicating "{current_name}" as "{new_name}" - this can '
             "take a while and will freeze the interface..."
@@ -2928,7 +3500,7 @@ class ProgramEditorWindow(QMainWindow):
                 entry, sampler_controller, current_name, new_name
             )
         finally:
-            self.main_tabs.setEnabled(True)
+            self._set_hardware_busy_ui(False)
             self.waveform_view.set_loading(False)
             self.sample_edit_progress.setVisible(False)
 
@@ -3070,11 +3642,507 @@ class ProgramEditorWindow(QMainWindow):
                 final_samples = args[0]
                 if new_name in final_samples:
                     self.sample_list_widget.setCurrentRow(final_samples.index(new_name))
+        except Exception:
+            # this whole function was, until now, only ever guarded against
+            # the specific failures it already anticipates (a refused send,
+            # a missing name after reload, etc - each already handled and
+            # logged above) - anything else (e.g. a bug in write_wav_file,
+            # an unexpected sampler_controller exception) would otherwise
+            # propagate straight out of this Qt slot uncaught. There's no
+            # global exception hook anywhere in this app, so in a packaged
+            # build that's silent - exactly the failure class
+            # BridgeWorker._safe_dispatch exists to prevent for the worker
+            # thread (see AGENTS.md), just never extended to this call path.
+            logger.error(
+                "_perform_duplicate_sample_real: unexpected error", exc_info=True
+            )
+            self.status_bar.showMessage(
+                f'Duplicate failed - unexpected error, see {debug_log.LOG_PATH} '
+                "for details"
+            )
         finally:
             try:
                 os.remove(temp_path)
             except OSError:
                 pass
+
+    def _open_slice_editor(self):
+        # same has_waveform()/demo-mode gate as Duplicate Sample (see
+        # _set_sample_edit_buttons_enabled) - re-checked here too since a
+        # button's enabled state and the moment it's actually clicked can
+        # never be perfectly synchronized with async state
+        sample_index = self.sample_list_widget.currentRow()
+        if sample_index < 0 or not self.waveform_view.has_waveform():
+            return
+        entry = self._sample_waveform_cache.get(sample_index)
+        if entry is None or entry["samples"] is None:
+            return
+        sample_name = self._sample_name_at_row(sample_index)
+
+        sampler_controller = getattr(self._main_window, "sampler_controller", None)
+        if sampler_controller is None:
+            self.status_bar.showMessage(
+                "Can't open Slice Editor - no Transfer Dashboard connection available"
+            )
+            return
+        if sampler_controller.is_transfer_busy():
+            self.status_bar.showMessage(
+                "Can't open Slice Editor - a transfer is already in progress "
+                "on the Transfer Dashboard"
+            )
+            return
+
+        def _existing_names():
+            return list(self._sample_list)
+
+        def _existing_program_names():
+            return [
+                self.program_list.item(i).text()
+                for i in range(self.program_list.count())
+            ]
+
+        dialog = SliceEditorWindow(
+            self,
+            sample_name,
+            entry["samples"],
+            entry["framerate"],
+            entry["spitch"],
+            entry["stuno"],
+            entry["shlto"],
+            _existing_names,
+            self._export_slices,
+            demo_mode=bool(os.environ.get("AKAISDS_DEMO_SAMPLER")),
+            program_names_provider=_existing_program_names,
+            create_program_callback=self._create_program_from_slices,
+            cancel_callback=sampler_controller.cancel_transfer,
+        )
+        dialog.exec()
+        # slice export can add several new resident samples - refresh so
+        # the Samples tab's own list/zone combos pick them up. Only when
+        # something was ACTUALLY exported, though (dialog.export_succeeded) -
+        # this used to run unconditionally on every close, including a
+        # plain "look at the waveform, then close" with nothing exported,
+        # which made _on_samples_loaded wipe the whole _sample_waveform_
+        # cache (see its own comment) and forced a fresh, slow real SDS
+        # transfer just to see the waveform again - confirmed as the
+        # actual cause of "the waveform disappears after closing the Slice
+        # Editor," reported directly.
+        if dialog.export_succeeded:
+            self._worker.submit_sample_list()
+
+    def _reload_sample_list_with_retries(self, attempts=3, retry_delay_seconds=0.3):
+        # submit_sample_list() with a couple of retries on failure. Root
+        # cause, confirmed against a real akaisds.log: this window's own
+        # BridgeWorker connection and the Transfer Dashboard's
+        # sampler_controller connection share the same physical MIDI port
+        # (see AGENTS.md's "Samples tab" section - "a second, separate MIDI
+        # connection to the same port, open concurrently... worth knowing
+        # if hardware actions ever seem to interleave strangely"). A big
+        # batch export finishing right as sampler_controller does its own
+        # post-send RSTAT/RSLIST chatter can leave this connection reading
+        # a reply meant for the OTHER one, which s3k.bridge.sample_list()
+        # surfaces as a hard decode error ("SampleList: expected command
+        # 0x05, got 0x16") rather than a silent skip - BridgeWorker turns
+        # that into samples_load_failed rather than crashing, but a single
+        # attempt has no way to tell "genuinely broken" apart from "lost
+        # this one race." A short retry clears the transient case almost
+        # every time without the user ever seeing it; only exhausting
+        # every attempt is reported as a real failure.
+        which, args = None, None
+        for attempt in range(attempts):
+            which, args = self._wait_for_any_signal(
+                [self._worker.samples_loaded, self._worker.samples_load_failed],
+                start=self._worker.submit_sample_list,
+                timeout_ms=20000,
+            )
+            if which == 0:
+                return which, args
+            if attempt < attempts - 1:
+                time.sleep(retry_delay_seconds)
+        return which, args
+
+    def _export_slices(
+        self,
+        names,
+        slices,
+        framerate,
+        bit_depth,
+        sample_rate,
+        spitch,
+        stuno,
+        shlto,
+        progress_callback,
+        status_callback,
+        busy_callback=None,
+    ):
+        # the actual hardware-talking half of the Slice Editor (see
+        # ui/slice_editor_window.py's own class docstring for the split) -
+        # called synchronously from SliceEditorWindow's Export Slices
+        # button, blocking exactly the way every other real send on this
+        # page does. Writes every slice to its own temp 16-bit mono WAV,
+        # then sends the WHOLE BATCH in one send_file_queue call rather
+        # than looping _perform_duplicate_sample_real's single-file dance
+        # once per slice - SamplerController.send_file_queue already
+        # sequences a list of files on its own (one transfer_progress per
+        # file, "Sending file X/N" via status_changed) and only fires
+        # transfer_finished once every file in the batch is done, which is
+        # exactly the "start once, wait once" shape this needs. Returns
+        # (success: bool, message: str).
+        sampler_controller = getattr(self._main_window, "sampler_controller", None)
+        if sampler_controller is None:
+            return False, "Export failed - no Transfer Dashboard connection available"
+        if sampler_controller.is_transfer_busy():
+            return False, (
+                "Export failed - a transfer is already in progress on the "
+                "Transfer Dashboard"
+            )
+
+        def _set_busy(busy):
+            # busy_callback is optional (dashboard.py's own reuse of this
+            # window's export_callback contract has nothing indeterminate
+            # to report, so it doesn't accept one) - see this method's own
+            # docstring-adjacent comment at each call site below for what
+            # "busy" actually covers here
+            if busy_callback is not None:
+                busy_callback(busy)
+
+        logger = debug_log.get_logger()
+        temp_paths = []
+        try:
+            file_entries = []
+            for name, slice_samples in zip(names, slices):
+                fd, temp_path = tempfile.mkstemp(
+                    suffix=".wav", prefix="akaisds_slice_"
+                )
+                os.close(fd)
+                temp_paths.append(temp_path)
+                sds_encoder.write_wav_file(
+                    temp_path, slice_samples, framerate, bit_depth=16
+                )
+                file_entries.append(
+                    {
+                        "filepath": temp_path,
+                        "name": name,
+                        "bit_depth": bit_depth,
+                        "sample_rate": sample_rate,
+                        "mono": True,
+                    }
+                )
+
+            progress_connection = sampler_controller.transfer_progress.connect(
+                progress_callback
+            )
+            status_connection = sampler_controller.status_changed.connect(
+                status_callback
+            )
+
+            def _start_send():
+                # returning exactly False here (send_file_queue declining
+                # to start) makes _wait_for_any_signal skip its own wait -
+                # same convention _perform_duplicate_sample_real's
+                # _start_send uses
+                return sampler_controller.send_file_queue(file_entries)
+
+            try:
+                which, args = self._wait_for_any_signal(
+                    [sampler_controller.transfer_finished],
+                    start=_start_send,
+                    timeout_ms=None,
+                )
+            finally:
+                sampler_controller.transfer_progress.disconnect(progress_connection)
+                sampler_controller.status_changed.disconnect(status_connection)
+
+            if which is None or args is None:
+                logger.debug("_export_slices: send_file_queue refused to start")
+                return False, "Export failed - couldn't start sending the slices"
+            if not args[0]:
+                logger.debug(
+                    "_export_slices: batch send did not complete successfully"
+                )
+                return False, "Export failed - sending the slices did not complete"
+
+            # nothing numeric to report while this reloads/retries - see
+            # _set_busy's own comment above
+            _set_busy(True)
+            try:
+                which, args = self._reload_sample_list_with_retries()
+            finally:
+                _set_busy(False)
+            if which != 0:
+                sent = f'"{names[0]}"' if len(names) == 1 else f"{len(names)} slices"
+                return False, (
+                    f"{sent} sent, but the sample list couldn't be "
+                    "refreshed to set the header fields - refresh manually "
+                    "and check the sampler directly."
+                )
+            samples_after_send = args[0]
+            landed = [n for n in names if n in samples_after_send]
+            missing = [n for n in names if n not in samples_after_send]
+
+            for index, name in enumerate(names):
+                if name not in samples_after_send:
+                    continue
+                new_index = samples_after_send.index(name)
+                slice_frame_count = len(slices[index])
+                # SPTYPE forced to one-shot (3, matching
+                # _SAMPLE_PLAYBACK_TYPE_OPTIONS' own raw-byte-order) - a
+                # chopped slice isn't meant to loop, regardless of what
+                # the source sample's own loop was; SPITCH/STUNO/SHLTO
+                # copied from the source, same fields
+                # _perform_duplicate_sample_real copies, so each slice at
+                # least plays back at the source's own pitch/tuning;
+                # SSTART/SMPEND cover the whole sent buffer (send_file_queue
+                # only ever sends audio, never these header fields - same
+                # reasoning as Duplicate Sample's own header fixup)
+                for param_name, value in (
+                    ("SPTYPE", 3),
+                    ("SPITCH", spitch),
+                    ("SHLTO", shlto),
+                    ("STUNO", stuno),
+                    ("SSTART", 0),
+                    ("SMPEND", slice_frame_count - 1),
+                ):
+                    self._write_knob_value(
+                        param_name, "sample", value, keygroup_index=0, index=new_index
+                    )
+
+            # one more reload so the sample list/zone combos reflect every
+            # new arrival - same closing step _perform_duplicate_sample_real
+            # ends on
+            _set_busy(True)
+            try:
+                self._reload_sample_list_with_retries()
+            finally:
+                _set_busy(False)
+
+            if missing:
+                return False, (
+                    f"Sent {len(landed)}/{len(names)} slice(s); missing from the "
+                    f"reloaded list: {', '.join(missing)} - check the sampler "
+                    "directly."
+                )
+            if len(names) == 1:
+                return True, f'Export complete: "{names[0]}" sent'
+            return True, f"Export complete: {len(names)} slices sent as {names[0]}..{names[-1]}"
+        except Exception:
+            # same reasoning as _perform_duplicate_sample_real/
+            # _perform_sample_edit_real's own matching except clauses -
+            # every anticipated failure above is already handled and
+            # logged; this is the backstop for anything else (a bug in
+            # write_wav_file, an unexpected sampler_controller exception)
+            # that would otherwise propagate out of this Qt slot uncaught
+            logger.error("_export_slices: unexpected error", exc_info=True)
+            return False, (
+                f"Export failed - unexpected error, see {debug_log.LOG_PATH} "
+                "for details"
+            )
+        finally:
+            for path in temp_paths:
+                try:
+                    os.remove(path)
+                except OSError:
+                    pass
+
+    def _create_program_from_slices(
+        self,
+        names,
+        template_program_index,
+        program_name,
+        progress_callback,
+        status_callback,
+        busy_callback=None,
+    ):
+        # the "ReCycle-style export" half of the Slice Editor's
+        # create-program checkbox (see ui/slice_editor_window.py) - called
+        # AFTER _export_slices has already landed every slice as a
+        # resident one-shot sample. Only ever needs the slice sample
+        # NAMES, never their indices - a keygroup's SNAME1 addresses a
+        # sample by name string, so there's no index to re-look-up here.
+        #
+        # Creating a program means CLONING an existing resident one (there
+        # is no from-scratch "blank program" primitive - see
+        # BridgeWorker._handle_create_program's own comment), which also
+        # clones every one of ITS keygroups - so the shape here is: patch
+        # keygroup 0 into the first slice's mapping (this also makes it the
+        # correctly-configured clone SOURCE for every keygroup added
+        # below), delete whatever OTHER keygroups the template came with,
+        # then add one freshly-cloned keygroup per remaining slice.
+        #
+        # Like _export_slices' own batch send, this submits optimistically
+        # and leans on BridgeWorker's strict FIFO queue (AGENTS.md's
+        # "BridgeWorker" section) for correctness rather than waiting on
+        # every single write/create - only the program creation itself and
+        # the keygroup COUNT are actually waited on and verified, the same
+        # "submit fast, verify once via a final reload" shape
+        # _export_slices already uses for its own per-sample header fixups.
+        slice_count = len(names)
+        if slice_count > 99:
+            # same ceiling SliceEditorWindow already checks client-side
+            # before ever calling this - re-checked here since this method
+            # has no other caller today, but shouldn't silently trust one
+            return False, (
+                f"Can't create a program - {slice_count} keygroups "
+                "requested, but a program can only hold 99."
+            )
+
+        # _on_program_created/_on_keygroup_created (see __init__) are
+        # permanently wired for the INTERACTIVE "Duplicate Program/
+        # Keygroup" UI, but they react to the exact same program_created/
+        # keygroup_created signals this method also waits on below - and
+        # _on_program_created's own side effect (jumping the Programs
+        # tab's selection onto the brand new program, so a subsequent
+        # reload lands on it) can make _on_program_selected/
+        # _on_keygroup_created start reacting to THIS method's own
+        # create/keygroup calls too, firing extra, PREMATURE
+        # submit_keygroups() reloads for the very same program while this
+        # method is still mid-batch. _wait_for_any_signal has no way to
+        # tell those apart from the result this method actually asked for
+        # (confirmed as a real, reproducible race, not just a theoretical
+        # one - see the test that caught it). Disconnecting both for the
+        # duration of this method removes the race at its source, rather
+        # than trying to filter or retry around noisy results afterward;
+        # reconnected in every exit path via the try/finally below.
+        self._worker.program_created.disconnect(self._on_program_created)
+        self._worker.keygroup_created.disconnect(self._on_keygroup_created)
+        try:
+            return self._create_program_from_slices_locked(
+                names, template_program_index, program_name,
+                progress_callback, status_callback, slice_count,
+                busy_callback=busy_callback,
+            )
+        finally:
+            self._worker.program_created.connect(self._on_program_created)
+            self._worker.keygroup_created.connect(self._on_keygroup_created)
+
+    def _create_program_from_slices_locked(
+        self,
+        names,
+        template_program_index,
+        program_name,
+        progress_callback,
+        status_callback,
+        slice_count,
+        busy_callback=None,
+    ):
+        def _set_busy(busy):
+            if busy_callback is not None:
+                busy_callback(busy)
+
+        logger = debug_log.get_logger()
+        status_callback(f'Creating program "{program_name}"...')
+        which, args = self._wait_for_any_signal(
+            [self._worker.program_created, self._worker.program_create_failed],
+            start=lambda: self._worker.submit_create_program(
+                template_program_index, program_name
+            ),
+            timeout_ms=20000,
+        )
+        if which != 0:
+            message = args[1] if args else "timed out"
+            logger.error(
+                "_create_program_from_slices: program creation failed: %s", message
+            )
+            return False, f'Failed to create program "{program_name}": {message}'
+        _source_index, new_index = args
+
+        which, args = self._wait_for_any_signal(
+            [self._worker.keygroups_loaded, self._worker.keygroups_load_failed],
+            start=lambda: self._worker.submit_keygroups(new_index),
+            timeout_ms=20000,
+        )
+        if which != 0:
+            return False, (
+                f'Program "{program_name}" created, but its keygroup count '
+                "couldn't be read to finish setting it up - check the "
+                "sampler directly."
+            )
+        template_group_count = len(args[1])
+
+        # keygroup 0 first, into its final configured shape - LONOTE/HINOTE
+        # map it to the first slice at _FIRST_SLICE_NOTE ("C1"), CP1 forces
+        # Const Pitch (no key tracking - the sample always plays at its own
+        # recorded pitch), ZPLAY1 explicitly reset to "As sample" (0, cheap
+        # insurance - the sample's own SPTYPE is already forced to one-shot
+        # by _export_slices), and SNAME2..4 cleared so no OTHER sample
+        # plays from a velocity zone this feature isn't using. Every
+        # keygroup created further down clones THIS keygroup, so
+        # CP1/ZPLAY1/the cleared zones only need writing once, here.
+        for param_name, value in (
+            ("SNAME1", names[0]),
+            ("SNAME2", ""),
+            ("SNAME3", ""),
+            ("SNAME4", ""),
+            ("CP1", 1),
+            ("ZPLAY1", 0),
+            ("LONOTE", _FIRST_SLICE_NOTE),
+            ("HINOTE", _FIRST_SLICE_NOTE),
+        ):
+            self._write_knob_value(
+                param_name, "keygroup", value, keygroup_index=0, index=new_index
+            )
+
+        # drop every OTHER keygroup the template came with - this program
+        # should end up with exactly one keygroup per slice. Highest index
+        # first: deletion may shift every index above it down, so working
+        # backward never moves the next target out from under this loop
+        # (same reasoning as sample delete elsewhere in this file)
+        for keygroup_index in range(template_group_count - 1, 0, -1):
+            self._worker.submit_delete_keygroup(new_index, keygroup_index)
+
+        # one new keygroup per remaining slice, cloned from the now
+        # fully-configured keygroup 0 (inherits CP1/ZPLAY1/the cleared
+        # zones for free) - the LONOTE/HINOTE/SNAME1 overrides queued right
+        # after each create are guaranteed to land on THAT keygroup without
+        # waiting on keygroup_created in between, since BridgeWorker
+        # processes its queue strictly one job at a time in submission
+        # order (see this method's own docstring-style comment above)
+        for slice_index in range(1, slice_count):
+            self._worker.submit_create_keygroup(new_index, 0)
+            for param_name, value in (
+                ("SNAME1", names[slice_index]),
+                ("LONOTE", _FIRST_SLICE_NOTE + slice_index),
+                ("HINOTE", _FIRST_SLICE_NOTE + slice_index),
+            ):
+                self._write_knob_value(
+                    param_name,
+                    "keygroup",
+                    value,
+                    keygroup_index=slice_index,
+                    index=new_index,
+                )
+            progress_callback(slice_index, slice_count)
+
+        # the per-keygroup progress_callback calls above stop the instant
+        # the last keygroup is CREATED - this final verify (re-reading the
+        # keygroup count back, then refreshing the Programs tab's own list)
+        # is real, separate hardware round-trip time with nothing numeric
+        # left to report, so it's marquee/indeterminate rather than sitting
+        # frozen at its last percentage - see _on_export_busy's own comment
+        # in ui/slice_editor_window.py.
+        status_callback("Verifying keygroups...")
+        _set_busy(True)
+        try:
+            which, args = self._wait_for_any_signal(
+                [self._worker.keygroups_loaded, self._worker.keygroups_load_failed],
+                start=lambda: self._worker.submit_keygroups(new_index),
+                timeout_ms=20000,
+            )
+            self._worker.submit_program_list()
+        finally:
+            _set_busy(False)
+        if which != 0 or len(args[1]) != slice_count:
+            actual = len(args[1]) if which == 0 else "unknown"
+            return False, (
+                f'Program "{program_name}" created, but ended up with '
+                f"{actual}/{slice_count} keygroups - check the sampler "
+                "directly."
+            )
+        return True, (
+            f'Program "{program_name}" created with {slice_count} '
+            f"keygroup{'s' if slice_count != 1 else ''}, mapped from "
+            f"{midi_note_to_name(_FIRST_SLICE_NOTE)} upward."
+        )
 
     def _on_keygroup_selected(self, current, previous):
         if current is None:
@@ -3209,7 +4277,72 @@ class ProgramEditorWindow(QMainWindow):
         ):
             self.status_bar.showMessage(f"Couldn't load detail: {error_message}")
 
+    def keyPressEvent(self, event):
+        # Spacebar toggles the Samples tab's own click-to-preview (see
+        # _on_waveform_preview_requested) - scoped to the Samples tab only
+        # (Program tab/Keygroup tab/Multis tab have nothing analogous to
+        # preview) and backs off whenever a text-entry widget currently has
+        # focus, so this can never steal a literal space character out of
+        # the sample rename field, a marker spinbox, or a combo box's own
+        # search-by-typing. isAutoRepeat() is excluded too - holding the
+        # key down would otherwise toggle play/stop repeatedly as the OS
+        # sends repeat key events, which is not what "hold spacebar" reads
+        # as to a user (nothing else in this app treats a held key as
+        # repeated discrete presses).
+        if (
+            event.key() == Qt.Key.Key_Space
+            and not event.isAutoRepeat()
+            and self.main_tabs.currentIndex() == self._samples_tab_index
+            and not isinstance(
+                QApplication.focusWidget(), (QLineEdit, QAbstractSpinBox, QComboBox)
+            )
+        ):
+            self._on_waveform_preview_requested()
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+    def _sync_window_menu_busy_state(self):
+        sampler_controller = getattr(self._main_window, "sampler_controller", None)
+        busy = sampler_controller is not None and sampler_controller.is_transfer_busy()
+        self._dashboard_action.setEnabled(not busy)
+        self._dashboard_action.setToolTip(tt.BUSY_BLOCKS_OTHER_WINDOWS if busy else "")
+        # same reasoning as dashboard.py's own btn_settings guard - Settings
+        # can reopen the shared ports out from under an in-flight transfer.
+        # None when shared_transport_enabled() was false at construction
+        # (see this action's own build-time comment) - nothing to disable
+        if self._settings_action is not None:
+            self._settings_action.setEnabled(not busy)
+            self._settings_action.setToolTip(
+                tt.BUSY_BLOCKS_OTHER_WINDOWS if busy else ""
+            )
+
     def closeEvent(self, event):
+        # refuse to switch back to the Dashboard (whether via Ctrl+T, the
+        # "&Window" menu, or the OS window-close button - all three funnel
+        # through here) while a MIDI transfer is in flight on the shared
+        # sampler_controller. _dashboard_action being disabled already
+        # stops the menu/shortcut route (see _sync_window_menu_busy_state),
+        # but the OS close button has no such gate, and closing this window
+        # would show the Dashboard again while the transfer keeps running
+        # underneath it - a second window able to fire its own MIDI
+        # requests onto the SAME in-flight connection. See AGENTS.md's
+        # "Follow-up, first real-hardware session: a confirmed
+        # dual-connection MIDI race" for the exact bug this avoids.
+        sampler_controller = getattr(self._main_window, "sampler_controller", None)
+        if sampler_controller is not None and sampler_controller.is_transfer_busy():
+            self.status_bar.showMessage(
+                "Can't switch to the Transfer Dashboard - a MIDI transfer is "
+                "already in progress"
+            )
+            event.ignore()
+            return
+
+        # a "Hold" preview loop never stops on its own (see
+        # _on_waveform_preview_requested) - closing the window must not
+        # leave it sounding forever in the background
+        self._sample_preview_player.stop()
+
         # runs regardless of how the window closes (close button, command + w,
         # etc) - stop() lets anything already queued (in particular, pending
         # writes) drain before the worker thread actually exits, then wait()
@@ -3316,6 +4449,7 @@ class ProgramEditorWindow(QMainWindow):
         knob.setRange(-50, 50)
         knob.setDefaultValue(0)
         knob.setFixedSize(28, 28)
+        knob.setToolTip(tt.MOD_MATRIX_AMOUNT_KNOB)
         # enabled here rather than in __init__'s later "enable knobs" block
         # (see Knob.__init__ - it starts disabled) - unlike every other
         # knob on this page, these are built AND wired together by one
@@ -3639,50 +4773,11 @@ class ProgramEditorWindow(QMainWindow):
     def _build_section_card(self, title, *row_layouts):
         # groups related rows (e.g. every LFO control, or Volume/Pan/
         # Velocity together on the Program tab; Filter or Envelopes on the
-        # Keygroup tab) into one visually distinct card - same surface/
-        # border look as the keygroup zone card (see QWidget#zoneCard in
-        # style.qss.template), just under a different objectName since this
-        # isn't zone-selector content
-        header = QLabel(title)
-        header.setObjectName("sectionHeader")
-
-        section_layout = QVBoxLayout()
-        section_layout.setContentsMargins(12, 10, 12, 12)
-        section_layout.setSpacing(10)
-        section_layout.addWidget(header)
-        for row in row_layouts:
-            section_layout.addLayout(row)
-        # without this, a card whose content is shorter than the row it's
-        # paired with (Range next to Filter; Envelope 1 next to Envelope 2)
-        # gets its leftover height split BEFORE the header too, not just
-        # after the content - QBoxLayout distributes surplus space evenly
-        # across every gap when nothing claims a stretch, which reads as
-        # the whole card being vertically centered rather than top-aligned
-        # like its taller neighbor. This claims all of it at the bottom
-        # instead.
-        section_layout.addStretch()
-
-        card = QWidget()
-        card.setObjectName("sectionCard")
-        card.setLayout(section_layout)
-        # a bare QWidget defaults to Preferred vertically, which CAN grow
-        # past its own sizeHint when the surrounding layout has surplus
-        # space to hand out - normally a trailing addStretch() (see e.g.
-        # program_page_layout) is enough to claim that surplus instead,
-        # but addStretch()'s own default stretch factor (0) doesn't
-        # actually outrank a sibling Preferred-policy widget's willingness
-        # to grow (both are stretch 0), so Qt's layout can still split the
-        # extra space across the CARDS themselves rather than routing all
-        # of it into the stretch at the end - visible as every card
-        # growing taller (and its own internal addStretch() padding out
-        # further) as the window grows, on every tab. Fixed vertically
-        # pins each card to its sizeHint - can't grow OR compress below it
-        # (the latter is what caused cards to visibly overlap during
-        # development - see this file's own "section cards" notes) -
-        # regardless of how any particular tab's surrounding layout
-        # resolves its own stretch distribution.
-        card.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
-        return card
+        # Keygroup tab) into one visually distinct card - see
+        # ui.qt_helpers.build_section_card's own docstring for the actual
+        # implementation and the gotchas it exists to avoid (also used
+        # directly, not through this wrapper, by ui/settings_dialog.py).
+        return build_section_card(title, *row_layouts)
 
     def _equalize_card_heights(self, *cards):
         # pairs like Range+Filter or the two Envelope cards read oddly
@@ -3702,15 +4797,9 @@ class ProgramEditorWindow(QMainWindow):
 
     def _build_scroll_area(self, page):
         # both detail_stack pages (Program, Keygroup) are wrapped in one of
-        # these rather than added directly - lets the window's minimum
-        # height stay comfortable without needing to grow every time a
-        # section card is added, at the cost of a scrollbar on a short
-        # window instead of everything always fitting unscrolled
-        scroll_area = QScrollArea()
-        scroll_area.setWidgetResizable(True)
-        scroll_area.setFrameShape(QScrollArea.Shape.NoFrame)
-        scroll_area.setWidget(page)
-        return scroll_area
+        # these rather than added directly - see
+        # ui.qt_helpers.build_scroll_area's own docstring
+        return build_scroll_area(page)
 
     def _build_multi_part_knob(self, minimum, maximum, *, default):
         # compact knob + numeric readout for a Multis-tab row - unlike
@@ -3735,7 +4824,7 @@ class ProgramEditorWindow(QMainWindow):
         # a different shade - see _build_section_card), which showed up
         # as a visible colored box behind the knob+label - same fix as
         # _add_keygroup_row's own row_widget below.
-        widget.setStyleSheet("background: transparent;")
+        widget.setObjectName("transparentContainer")
         row = QHBoxLayout(widget)
         row.setContentsMargins(0, 0, 0, 0)
         row.setSpacing(4)
@@ -3810,17 +4899,21 @@ class ProgramEditorWindow(QMainWindow):
         # total) plus a 1px border - 28px left only ~2px for the glyph
         # itself, which is why "+"/"-" rendered as barely-visible
         # fragments rather than a font/glyph problem
-        zoom_out_button = QPushButton("-")
-        zoom_out_button.setFixedWidth(36)
-        zoom_out_button.setToolTip("Zoom out (Ctrl+scroll on the waveform also works)")
-        zoom_out_button.clicked.connect(self.waveform_view.zoom_out)
-        zoom_in_button = QPushButton("+")
-        zoom_in_button.setFixedWidth(36)
-        zoom_in_button.setToolTip("Zoom in (Ctrl+scroll on the waveform also works)")
-        zoom_in_button.clicked.connect(self.waveform_view.zoom_in)
-        zoom_fit_button = QPushButton("Fit")
-        zoom_fit_button.setToolTip("Reset zoom to show the whole sample")
-        zoom_fit_button.clicked.connect(self.waveform_view.reset_zoom)
+        # tooltips are finished off with their resolved keyboard shortcut
+        # once self.zoom_in_action/zoom_out_action/zoom_fit_action exist
+        # (built later in __init__, alongside the &View menu) - see
+        # _update_zoom_button_tooltips.
+        self.zoom_out_button = QPushButton("-")
+        self.zoom_out_button.setFixedWidth(36)
+        self.zoom_out_button.setToolTip(tt.SAMPLE_ZOOM_OUT)
+        self.zoom_out_button.clicked.connect(self.waveform_view.zoom_out)
+        self.zoom_in_button = QPushButton("+")
+        self.zoom_in_button.setFixedWidth(36)
+        self.zoom_in_button.setToolTip(tt.SAMPLE_ZOOM_IN)
+        self.zoom_in_button.clicked.connect(self.waveform_view.zoom_in)
+        self.zoom_fit_button = QPushButton("Fit")
+        self.zoom_fit_button.setToolTip(tt.SAMPLE_ZOOM_FIT)
+        self.zoom_fit_button.clicked.connect(self.waveform_view.reset_zoom)
         # small, unobtrusive progress indicator for Trim/Reverse/Fade
         # specifically (see _perform_sample_edit/_on_sample_edit_progress) -
         # NOT shown for ordinary sample-audio loading, which already has
@@ -3841,9 +4934,9 @@ class ProgramEditorWindow(QMainWindow):
         zoom_row = QHBoxLayout()
         zoom_row.setSpacing(6)
         zoom_row.addWidget(QLabel("Zoom"))
-        zoom_row.addWidget(zoom_out_button)
-        zoom_row.addWidget(zoom_in_button)
-        zoom_row.addWidget(zoom_fit_button)
+        zoom_row.addWidget(self.zoom_out_button)
+        zoom_row.addWidget(self.zoom_in_button)
+        zoom_row.addWidget(self.zoom_fit_button)
         zoom_row.addSpacing(12)
         zoom_row.addWidget(self.sample_edit_progress)
         zoom_row.addStretch()
@@ -3865,7 +4958,7 @@ class ProgramEditorWindow(QMainWindow):
         # actually sits in here, so the reserved space read as a visible
         # colored bar even while the real scrollbar inside was hidden.
         # Same fix as _build_multi_part_knob's own widget above.
-        scrollbar_container.setStyleSheet("background: transparent;")
+        scrollbar_container.setObjectName("transparentContainer")
         scrollbar_container_layout = QVBoxLayout(scrollbar_container)
         scrollbar_container_layout.setContentsMargins(0, 0, 0, 0)
         scrollbar_container_layout.addWidget(self.waveform_scrollbar)
@@ -3906,20 +4999,43 @@ class ProgramEditorWindow(QMainWindow):
             swatch.setStyleSheet(
                 f"background-color: {swatch_color}; border-radius: 2px;"
             )
-            spinbox = QSpinBox()
-            spinbox.setRange(0, 0)
-            spinbox.setEnabled(False)
-            spinbox.setFixedWidth(80)
-            spinbox.valueChanged.connect(
+            # Knob, not QSpinBox - start/loop_start/loop_end/end commonly
+            # sit right on top of each other at the same frame (a short or
+            # non-looping sample), which a row of identical-looking number
+            # boxes doesn't make obvious at a glance the way four small
+            # dials (readable by angle, not just digits) do. Same small-
+            # knob convention as the Multis tab (_build_multi_part_knob)
+            # and mod-matrix amount knobs (_build_mod_amount_knob), 28x28.
+            # No built-in numeric readout on Knob (see knob.py) - value_
+            # label below is the same knob+label pattern as
+            # _build_knob_value_row, just with the swatch/name kept to its
+            # left instead of stacked, since this row already had that
+            # layout and losing it would make the four markers harder to
+            # tell apart by color alone.
+            knob = Knob()
+            knob.setRange(0, 0)
+            knob.setFixedSize(28, 28)
+            knob.setToolTip(_MARKER_KNOB_TOOLTIPS[name])
+            value_label = QLabel("-")
+            value_label.setFixedWidth(56)  # frame counts run well past 6 digits
+            knob.valueChanged.connect(lambda v, lbl=value_label: lbl.setText(str(v)))
+            knob.valueChanged.connect(
                 lambda v, n=name: self._on_marker_spinbox_changed(n, v)
             )
-            spinbox.editingFinished.connect(self._flush_marker_write)
-            self._marker_spinboxes[name] = (swatch, spinbox)
+            # Knob has no editingFinished (not a QSpinBox) - sliderReleased
+            # is its own equivalent "value just got committed" signal,
+            # firing on drag release AND on committing a typed value (see
+            # knob.py's Knob._finish_type_edit) - editingFinished never
+            # covered the drag case QSpinBox doesn't have anyway, so this
+            # is a strict improvement, not just a port
+            knob.sliderReleased.connect(self._flush_marker_write)
+            self._marker_spinboxes[name] = (swatch, knob, value_label)
             marker_field = QHBoxLayout()
             marker_field.setSpacing(4)
             marker_field.addWidget(swatch)
             marker_field.addWidget(QLabel(display + ":"))
-            marker_field.addWidget(spinbox)
+            marker_field.addWidget(knob)
+            marker_field.addWidget(value_label)
             legend_row.addLayout(marker_field)
         legend_row.addStretch()
 
@@ -3949,6 +5065,47 @@ class ProgramEditorWindow(QMainWindow):
         self.sample_loop_type_combo.currentIndexChanged.connect(
             self._on_sample_loop_type_changed
         )
+
+        # LDWELL1 ("Loop Hold Time") - the first loop's own dwell setting:
+        # Off (no loop, far left) or Hold (loop forever, far right - the
+        # default) at the two ends of the sweep, a 1-9998ms dwell time
+        # everywhere in between. A knob rather than a spinbox (an earlier
+        # version used LoopHoldSpinBox - removed) at the user's own request,
+        # once Knob gained click-to-type entry (see ui/knob.py's
+        # _begin_type_edit/_finish_type_edit) to fix the imprecision a bare
+        # drag-only knob would have over a 10000-value range. Double-click
+        # already resets to defaultValue() for free (Knob.mouseDoubleClickEvent)
+        # - setDefaultValue(9999) is what makes that land on Hold.
+        loop_hold_label = QLabel("Loop Hold")
+        loop_hold_label.setFixedWidth(70)
+        (
+            self.sample_loop_hold_knob,
+            self.sample_loop_hold_value_label,
+            loop_hold_widget,
+        ) = self._build_multi_part_knob(
+            _LOOP_HOLD_OFF_VALUE, _LOOP_HOLD_HOLD_VALUE, default=_LOOP_HOLD_HOLD_VALUE
+        )
+        self.sample_loop_hold_knob.setEnabled(False)
+        # wider than _build_multi_part_knob's default 28px - that width
+        # only needs to fit a 2-3 digit number, not "Off"/"Hold"/"9998 ms"
+        self.sample_loop_hold_value_label.setFixedWidth(56)
+        self.sample_loop_hold_value_label.setText(
+            _format_loop_hold(_LOOP_HOLD_HOLD_VALUE)
+        )
+        # not wired the generic way, same reason sample_loop_tune_knob isn't
+        # ( _build_multi_part_knob's own value label needs a custom
+        # Off/Hold/"N ms" formatter here, not a bare str(v) )
+        self.sample_loop_hold_knob.valueChanged.connect(
+            lambda v: self.sample_loop_hold_value_label.setText(_format_loop_hold(v))
+        )
+        self.sample_loop_hold_knob.valueChanged.connect(
+            self._on_sample_loop_hold_changed
+        )
+        self.sample_loop_hold_knob.sliderReleased.connect(
+            self._commit_sample_loop_hold
+        )
+        self.sample_loop_hold_knob.setToolTip(tt.SAMPLE_LOOP_HOLD_KNOB)
+
         root_note_label = QLabel("Root Note")
         root_note_label.setFixedWidth(70)
         self.sample_root_note_spinbox = NoteSpinBox()
@@ -3985,6 +5142,7 @@ class ProgramEditorWindow(QMainWindow):
             loop_tune_widget,
         ) = self._build_multi_part_knob(-50, 50, default=0)
         self.sample_loop_tune_knob.setEnabled(False)
+        self.sample_loop_tune_knob.setToolTip(tt.SAMPLE_LOOP_TUNE_KNOB)
         # unlike _build_knob_column, _build_multi_part_knob does NOT wire
         # the value label itself (see the Multis tab's own level_knob/
         # pan_knob, which connect this by hand right after calling it too)
@@ -4022,6 +5180,9 @@ class ProgramEditorWindow(QMainWindow):
         loop_meta_row.addWidget(loop_type_label)
         loop_meta_row.addWidget(self.sample_loop_type_combo)
         loop_meta_row.addSpacing(12)
+        loop_meta_row.addWidget(loop_hold_label)
+        loop_meta_row.addWidget(loop_hold_widget)
+        loop_meta_row.addSpacing(12)
         loop_meta_row.addWidget(loop_tune_label)
         loop_meta_row.addWidget(loop_tune_widget)
         loop_meta_row.addStretch()
@@ -4031,6 +5192,18 @@ class ProgramEditorWindow(QMainWindow):
         tune_meta_row.addSpacing(12)
         tune_meta_row.addWidget(sample_tune_label)
         tune_meta_row.addWidget(self.sample_tune_spinbox)
+        tune_meta_row.addSpacing(12)
+        # needs real audio in memory to analyse, same has_waveform() gate
+        # as Trim/Reverse/etc - see _set_sample_edit_buttons_enabled. Works
+        # fine in demo mode - unlike Duplicate Sample/Export, this never
+        # writes a NEW resident sample, only the same SPITCH/STUNO writes
+        # sample_root_note_spinbox/sample_tune_spinbox already make via
+        # their own existing paths (_commit_sample_root_note/
+        # _commit_sample_tune), which already work in demo mode fine.
+        self.detect_root_note_button = QPushButton("Detect Root Note")
+        self.detect_root_note_button.setToolTip(tt.DETECT_ROOT_NOTE_BUTTON)
+        self.detect_root_note_button.clicked.connect(self._confirm_detect_root_note)
+        tune_meta_row.addWidget(self.detect_root_note_button)
         tune_meta_row.addStretch()
 
         # Trim/Reverse/Fade/Normalise - destructive, hardware-write
@@ -4044,38 +5217,36 @@ class ProgramEditorWindow(QMainWindow):
         sample_edit_row = QHBoxLayout()
         sample_edit_row.setSpacing(8)
         self.trim_sample_button = QPushButton("Trim to Markers")
-        self.trim_sample_button.setToolTip(
-            "Cut the sample down to the current Start/End markers, "
-            "overwriting it on the sampler. Cannot be undone."
-        )
+        self.trim_sample_button.setToolTip(tt.TRIM_SAMPLE_BUTTON)
         self.trim_sample_button.setEnabled(False)
         self.trim_sample_button.clicked.connect(self._confirm_trim_sample)
         self.reverse_sample_button = QPushButton("Reverse sample")
-        self.reverse_sample_button.setToolTip(
-            "Play the sample backwards, overwriting it on the sampler. "
-            "Cannot be undone."
-        )
+        self.reverse_sample_button.setToolTip(tt.REVERSE_SAMPLE_BUTTON)
         self.reverse_sample_button.setEnabled(False)
         self.reverse_sample_button.clicked.connect(self._confirm_reverse_sample)
         self.fade_sample_button = QPushButton("Fade In/Out")
-        self.fade_sample_button.setToolTip(
-            "Linearly fade in from frame 0 up to the Start marker, and "
-            "fade out from the End marker to the last frame, overwriting "
-            "the sample on the sampler. Cannot be undone."
-        )
+        self.fade_sample_button.setToolTip(tt.FADE_SAMPLE_BUTTON)
         self.fade_sample_button.setEnabled(False)
         self.fade_sample_button.clicked.connect(self._confirm_fade_sample)
         self.normalize_sample_button = QPushButton("Normalise Sample")
-        self.normalize_sample_button.setToolTip(
-            "Gain up the whole sample until its loudest point hits maximum "
-            "amplitude, overwriting it on the sampler. Cannot be undone."
-        )
+        self.normalize_sample_button.setToolTip(tt.NORMALIZE_SAMPLE_BUTTON)
         self.normalize_sample_button.setEnabled(False)
         self.normalize_sample_button.clicked.connect(self._confirm_normalize_sample)
+        # unlike the other four transforms here, this one has an actual
+        # PARAMETER (filter type + cutoff frequency) - opens a small
+        # dialog (ui/filter_sample_dialog.py) with a Preview button rather
+        # than a plain QMessageBox.question, same has_waveform() gating
+        # (enabled/disabled alongside the other four - see
+        # _set_sample_edit_buttons_enabled)
+        self.filter_sample_button = QPushButton("Filter Sample…")
+        self.filter_sample_button.setToolTip(tt.FILTER_SAMPLE_BUTTON)
+        self.filter_sample_button.setEnabled(False)
+        self.filter_sample_button.clicked.connect(self._confirm_filter_sample)
         sample_edit_row.addWidget(self.trim_sample_button)
         sample_edit_row.addWidget(self.reverse_sample_button)
         sample_edit_row.addWidget(self.fade_sample_button)
         sample_edit_row.addWidget(self.normalize_sample_button)
+        sample_edit_row.addWidget(self.filter_sample_button)
         sample_edit_row.addStretch()
         # right-aligned, and its own thing rather than a 5th button
         # grouped with the four above - unlike them it never touches the
@@ -4083,13 +5254,20 @@ class ProgramEditorWindow(QMainWindow):
         # comment), it ADDS a new one, so it's not "cannot be undone" in
         # the same destructive sense those four are
         self.duplicate_sample_button = QPushButton("Duplicate Sample")
-        self.duplicate_sample_button.setToolTip(
-            "Send this sample's already-loaded audio to the sampler under "
-            "a new name, copying its loop points and tuning across."
-        )
+        self.duplicate_sample_button.setToolTip(tt.DUPLICATE_SAMPLE_BUTTON)
         self.duplicate_sample_button.setEnabled(False)
         self.duplicate_sample_button.clicked.connect(self._confirm_duplicate_sample)
         sample_edit_row.addWidget(self.duplicate_sample_button)
+        # ReCycle-style breakbeat chopper - manual slice markers, no
+        # transient detection (see AGENTS.md's own design discussion), a
+        # whole separate modal window rather than more controls on this
+        # page. Same demo-mode/has_waveform() gating as Duplicate Sample -
+        # see _open_slice_editor/_set_sample_edit_buttons_enabled.
+        self.slice_editor_button = QPushButton("Slice Editor…")
+        self.slice_editor_button.setToolTip(tt.SLICE_EDITOR_BUTTON)
+        self.slice_editor_button.setEnabled(False)
+        self.slice_editor_button.clicked.connect(self._open_slice_editor)
+        sample_edit_row.addWidget(self.slice_editor_button)
 
         # two section cards, same style as the Programs tab's own (see
         # _build_section_card) - one for the loop editor itself, one for
@@ -4105,12 +5283,26 @@ class ProgramEditorWindow(QMainWindow):
         loop_controls_card = self._build_section_card(
             "Loop Controls", loop_controls_content
         )
+
+        # a small, read-only pane showing the actual SPLICE a loop makes -
+        # the real S3000XL's own LOOP screen is a single widget with one
+        # dividing line (loop-out audio on the left, loop-in audio on the
+        # right), not two independently-zoomed views - see
+        # ui/loop_preview_view.py's own class docstring. Kept live in sync
+        # with the main waveform view's own markers - see
+        # _on_waveform_markers_changed_loop_preview.
+        self.loop_preview = LoopJoinPreview()
+        loop_preview_row = QHBoxLayout()
+        loop_preview_row.addWidget(self.loop_preview)
+        loop_preview_card = self._build_section_card("Loop Preview", loop_preview_row)
+
         tune_card = self._build_section_card("Root Note & Tune", tune_meta_row)
 
         waveform_column = QVBoxLayout()
         waveform_column.setContentsMargins(0, 0, 0, 0)
         waveform_column.setSpacing(10)
         waveform_column.addWidget(loop_controls_card)
+        waveform_column.addWidget(loop_preview_card)
         waveform_column.addWidget(tune_card)
         waveform_column.addStretch()
         waveform_container = QWidget()
@@ -4201,9 +5393,11 @@ class ProgramEditorWindow(QMainWindow):
             level_knob, level_value_label, level_widget = self._build_multi_part_knob(
                 0, 99, default=99
             )
+            level_knob.setToolTip(tt.MULTI_PART_LEVEL_KNOB)
             pan_knob, pan_value_label, pan_widget = self._build_multi_part_knob(
                 -50, 50, default=0
             )
+            pan_knob.setToolTip(tt.MULTI_PART_PAN_KNOB)
 
             row.addWidget(part_label)
             row.addWidget(program_combo, stretch=1)
@@ -4284,6 +5478,44 @@ class ProgramEditorWindow(QMainWindow):
             part_index, program_index, program_name, channel
         )
 
+    def _build_sample_list_row_widget(self, name):
+        # name on the left, duration on the right in the theme's muted
+        # "secondary info" grey (same token/pattern as
+        # _build_mod_fixed_source_label) so it reads as supplementary to
+        # the name rather than part of it. Duration starts blank - it's
+        # filled in asynchronously as sample_length_loaded results arrive,
+        # see _on_samples_loaded/_on_sample_length_loaded.
+        row_widget = QWidget()
+        row_widget.setObjectName("transparentContainer")
+        row_layout = QHBoxLayout(row_widget)
+        # matches QListWidget#sampleList::item's own "padding: 6px 8px"
+        # (style.qss.template) - a custom item widget's sizeHint() is used
+        # as-is for the row's height/width, it does NOT also pick up that
+        # padding the way a plain text item would, so skipping this margin
+        # here shrank every row and made the font look cramped/squashed
+        # against the row's own top/bottom edges
+        row_layout.setContentsMargins(8, 6, 8, 6)
+        row_layout.setSpacing(6)
+
+        name_label = QLabel(name)
+        row_layout.addWidget(name_label, stretch=1)
+
+        duration_label = QLabel("")
+        duration_label.setStyleSheet(
+            f"color: {theme.current_palette()['text_disabled']};"
+        )
+        row_layout.addWidget(duration_label)
+
+        return row_widget, name_label, duration_label
+
+    def _sample_name_at_row(self, row):
+        # the sample list's own QListWidgetItems carry no text of their own
+        # (see _on_samples_loaded) - self._sample_list is the real source
+        # of truth for a row's name everywhere in this file
+        if 0 <= row < len(self._sample_list):
+            return self._sample_list[row]
+        return ""
+
     def _add_keygroup_row(self, index, lo, hi):
         # colored swatch + range text, same row-widget approach as the
         # dashboard's queue/hardware panels - keeps each row's identity tied
@@ -4292,7 +5524,7 @@ class ProgramEditorWindow(QMainWindow):
         item = QListWidgetItem(self.keygroup_list)
 
         row_widget = QWidget()
-        row_widget.setStyleSheet("background: transparent;")
+        row_widget.setObjectName("transparentContainer")
         row_layout = QHBoxLayout(row_widget)
         row_layout.setContentsMargins(8, 6, 8, 6)
         row_layout.setSpacing(8)
@@ -4619,6 +5851,10 @@ class ProgramEditorWindow(QMainWindow):
         self.multi_name_edit.blockSignals(False)
 
     def _on_samples_loaded(self, samples):
+        # captured against the OLD self._sample_list, before it's
+        # overwritten below - see _sample_name_at_row
+        previous_row = self.sample_list_widget.currentRow()
+        previous_sample = self._sample_name_at_row(previous_row)
         self._sample_list = samples
 
         # a sample's INDEX is what addresses its header/audio (see
@@ -4628,20 +5864,50 @@ class ProgramEditorWindow(QMainWindow):
         # silently wrong rather than just stale, so drop it rather than try
         # to carry it forward by name
         self._sample_waveform_cache = {}
-        previous_sample = (
-            self.sample_list_widget.currentItem().text()
-            if self.sample_list_widget.currentItem()
-            else None
-        )
+        self._sample_list_generation += 1
+        generation = self._sample_list_generation
+        self._sample_row_labels = {}
         self.sample_list_widget.blockSignals(True)
         self.sample_list_widget.clear()
-        self.sample_list_widget.addItems(samples)
-        self.sample_list_widget.blockSignals(False)
-        if previous_sample is not None:
-            match = self.sample_list_widget.findItems(
-                previous_sample, Qt.MatchFlag.MatchExactly
+        for name in samples:
+            # no text of its own - the row's custom widget (below) is the
+            # ENTIRE visual for this item. Qt still paints an item's own
+            # text underneath its item widget if one is set (confirmed:
+            # a real double-image render, not just a theoretical risk -
+            # see AGENTS.md's Samples tab section) - _sample_name_at_row is
+            # the actual source of truth for a row's name everywhere else
+            # in this file, not item.text().
+            item = QListWidgetItem()
+            self.sample_list_widget.addItem(item)
+            row_widget, name_label, duration_label = (
+                self._build_sample_list_row_widget(name)
             )
-            self.sample_list_widget.setCurrentItem(match[0] if match else None)
+            item.setSizeHint(row_widget.sizeHint())
+            self.sample_list_widget.setItemWidget(item, row_widget)
+            self._sample_row_labels[self.sample_list_widget.row(item)] = (
+                generation,
+                name_label,
+                duration_label,
+            )
+        self.sample_list_widget.blockSignals(False)
+        # duration isn't in the name/list payload itself - fetch it
+        # separately per sample (lightweight, 2 fields, not the full
+        # 11-field sample_detail - see submit_sample_length's own comment)
+        # so every row fills in progressively without blocking the list
+        # from showing names immediately. BridgeWorker processes its queue
+        # strictly one job at a time regardless of how many are queued here
+        # (see its own class docstring) - MIDI SysEx has no concept of
+        # overlapping requests, so queuing all of them up front is safe,
+        # just not instant for a large sample count.
+        for sample_index in range(len(samples)):
+            self._worker.submit_sample_length(sample_index)
+        if previous_sample is not None:
+            # by name, not by the old row index - a rename/delete/reorder
+            # on the hardware can shift what index means what, same
+            # reasoning as dropping _sample_waveform_cache above
+            self.sample_list_widget.setCurrentRow(
+                samples.index(previous_sample) if previous_sample in samples else -1
+            )
         else:
             self._clear_waveform_view()
 
@@ -4666,6 +5932,10 @@ class ProgramEditorWindow(QMainWindow):
             )  # this is what triggers keygroup loading for the first program
 
     def _on_main_tab_changed(self, index):
+        # a sample preview left playing (especially a "Hold" loop, which
+        # never stops on its own) shouldn't keep sounding once the user's
+        # navigated away from the tab that shows/controls it
+        self._sample_preview_player.stop()
         # select the first sample by default the first time the user
         # switches to the Samples tab, same as the Programs tab already
         # auto-selects its own first row on load (_on_programs_loaded) -
@@ -4677,8 +5947,25 @@ class ProgramEditorWindow(QMainWindow):
             and self.sample_list_widget.count() > 0
         ):
             self.sample_list_widget.setCurrentRow(0)
+        self._update_zoom_actions_enabled()
+
+    def _update_zoom_actions_enabled(self):
+        # the &View menu's Zoom In/Out/to Fit act on self.waveform_view
+        # (the Samples tab's own waveform) - greyed out (and their
+        # keyboard shortcuts inert - see this method's own call site in
+        # __init__) on every other tab, where they'd otherwise silently
+        # zoom a waveform the user can't currently see
+        is_samples_tab = self.main_tabs.currentIndex() == self._samples_tab_index
+        self.zoom_in_action.setEnabled(is_samples_tab)
+        self.zoom_out_action.setEnabled(is_samples_tab)
+        self.zoom_fit_action.setEnabled(is_samples_tab)
 
     def _on_sample_selected(self, current, previous):
+        # a preview mid-flight for the OLD selection (most importantly a
+        # "Hold" loop, which otherwise keeps sounding indefinitely - see
+        # _on_waveform_preview_requested) must not keep playing once the
+        # waveform underneath it changes to a different sample
+        self._sample_preview_player.stop()
         if current is None:
             self._clear_waveform_view()
             return
@@ -4696,7 +5983,11 @@ class ProgramEditorWindow(QMainWindow):
                 entry["end"],
             )
             self._update_sample_meta_controls(
-                entry["sptype"], entry["spitch"], entry["shlto"], entry["stuno"]
+                entry["sptype"],
+                entry["spitch"],
+                entry["shlto"],
+                entry["stuno"],
+                entry["ldwell1"],
             )
             self._set_sample_edit_buttons_enabled(True)
         elif entry is not None:
@@ -4710,7 +6001,11 @@ class ProgramEditorWindow(QMainWindow):
                 entry["end"],
             )
             self._update_sample_meta_controls(
-                entry["sptype"], entry["spitch"], entry["shlto"], entry["stuno"]
+                entry["sptype"],
+                entry["spitch"],
+                entry["shlto"],
+                entry["stuno"],
+                entry["ldwell1"],
             )
             self._set_sample_edit_buttons_enabled(False)
         else:
@@ -4744,13 +6039,19 @@ class ProgramEditorWindow(QMainWindow):
             "spitch": values["SPITCH"],
             "shlto": values["SHLTO"],
             "stuno": values["STUNO"],
+            "ldwell1": values["LDWELL1"],
+            "sbandw": values["SBANDW"],
         }
         self._sample_waveform_cache[sample_index] = entry
         if sample_index == self.sample_list_widget.currentRow():
             self._set_marker_spinbox_range(frame_count)
             self.waveform_view.set_header(frame_count, start, loop_start, loop_end, end)
             self._update_sample_meta_controls(
-                values["SPTYPE"], values["SPITCH"], values["SHLTO"], values["STUNO"]
+                values["SPTYPE"],
+                values["SPITCH"],
+                values["SHLTO"],
+                values["STUNO"],
+                values["LDWELL1"],
             )
             self._set_sample_edit_buttons_enabled(False)
 
@@ -4758,6 +6059,24 @@ class ProgramEditorWindow(QMainWindow):
         if sample_index != self.sample_list_widget.currentRow():
             return
         self.status_bar.showMessage(f"Couldn't read sample header: {error}")
+
+    def _on_sample_length_loaded(self, sample_index, sample_length, sample_rate):
+        entry = self._sample_row_labels.get(sample_index)
+        if entry is None:
+            return
+        generation, _name_label, duration_label = entry
+        if generation != self._sample_list_generation:
+            return  # stale - the list has reloaded since this was queued
+        duration_s = sample_duration_seconds(sample_length, sample_rate)
+        duration_label.setText(f"{duration_s:.2f}s")
+
+    def _on_sample_length_load_failed(self, sample_index, error):
+        # no status bar message - this is a background, best-effort fetch
+        # for every row in the list, not a user-triggered action; a failed
+        # read just leaves that one row's duration blank
+        debug_log.get_logger().debug(
+            f"_on_sample_length_load_failed: sample_index={sample_index}: {error}"
+        )
 
     def _clear_waveform_view(self):
         self.waveform_view.clear()
@@ -4767,7 +6086,7 @@ class ProgramEditorWindow(QMainWindow):
         self._set_sample_edit_buttons_enabled(False)
 
     def _set_sample_edit_buttons_enabled(self, enabled):
-        # Trim/Reverse/Fade/Normalise need real audio in memory to
+        # Trim/Reverse/Fade/Normalise/Filter need real audio in memory to
         # transform, not just header-only markers - has_waveform(), same
         # gate mouseDoubleClickEvent uses to decide whether a double-click
         # should even try loading audio again
@@ -4775,6 +6094,7 @@ class ProgramEditorWindow(QMainWindow):
         self.reverse_sample_button.setEnabled(enabled)
         self.fade_sample_button.setEnabled(enabled)
         self.normalize_sample_button.setEnabled(enabled)
+        self.filter_sample_button.setEnabled(enabled)
         # Duplicate Sample needs the same loaded audio (it re-sends it
         # under a new name - see its own construction comment) AND is
         # unavailable in demo mode (DemoBridge has no add-sample
@@ -4782,14 +6102,29 @@ class ProgramEditorWindow(QMainWindow):
         # _duplicate_keygroup_action in _update_list_context_actions_enabled)
         demo_mode = bool(os.environ.get("AKAISDS_DEMO_SAMPLER"))
         self.duplicate_sample_button.setEnabled(enabled and not demo_mode)
+        # Unlike Duplicate Sample, the Slice Editor is NOT all-or-nothing in
+        # demo mode: placing/dragging/previewing slices needs only the
+        # audio already in memory, nothing hardware-shaped. Only its Export
+        # step is a batch version of the same add-new-resident-sample
+        # primitive Duplicate Sample needs (DemoBridge has none) - so the
+        # button itself stays enabled here, and SliceEditorWindow disables
+        # just its own Export button when demo_mode (see _open_slice_editor).
+        self.slice_editor_button.setEnabled(enabled)
+        # same has_waveform() gate as everything above - Detect Root Note
+        # needs real audio to analyse, but (unlike Duplicate/Export) never
+        # needs actual hardware, so no demo_mode restriction here
+        self.detect_root_note_button.setEnabled(enabled)
 
-    def _update_sample_meta_controls(self, sptype, spitch, shlto=None, stuno=None):
-        # sptype/spitch/shlto/stuno None means "nothing known about this
-        # sample yet" - mirrors _update_marker_spinboxes' own None
+    def _update_sample_meta_controls(
+        self, sptype, spitch, shlto=None, stuno=None, ldwell1=None
+    ):
+        # sptype/spitch/shlto/stuno/ldwell1 None means "nothing known about
+        # this sample yet" - mirrors _update_marker_spinboxes' own None
         # convention, disabling every control rather than showing a stale
         # or zeroed-out value
         enabled = sptype is not None
         self.sample_loop_type_combo.setEnabled(enabled)
+        self.sample_loop_hold_knob.setEnabled(enabled)
         self.sample_root_note_spinbox.setEnabled(enabled)
         self.sample_loop_tune_knob.setEnabled(enabled)
         self.sample_tune_spinbox.setEnabled(enabled)
@@ -4808,6 +6143,11 @@ class ProgramEditorWindow(QMainWindow):
             self.sample_loop_type_combo.setToolTip(
                 _SAMPLE_PLAYBACK_TYPE_OPTIONS[sptype][1]
             )
+        if ldwell1 is not None:
+            self.sample_loop_hold_knob.blockSignals(True)
+            self.sample_loop_hold_knob.setValue(ldwell1)
+            self.sample_loop_hold_knob.blockSignals(False)
+            self.sample_loop_hold_value_label.setText(_format_loop_hold(ldwell1))
         if spitch is not None:
             self.sample_root_note_spinbox.blockSignals(True)
             self.sample_root_note_spinbox.setValue(spitch)
@@ -4856,6 +6196,20 @@ class ProgramEditorWindow(QMainWindow):
     def _commit_sample_root_note(self):
         self._flush_write("SPITCH")
 
+    def _on_sample_loop_hold_changed(self, value):
+        sample_index = self.sample_list_widget.currentRow()
+        if sample_index < 0:
+            return
+        entry = self._sample_waveform_cache.get(sample_index)
+        if entry is not None:
+            entry["ldwell1"] = value
+        self._schedule_write(
+            "LDWELL1", "sample", value, index=sample_index, debounce_key="LDWELL1"
+        )
+
+    def _commit_sample_loop_hold(self):
+        self._flush_write("LDWELL1")
+
     def _on_sample_loop_tune_changed(self, value):
         sample_index = self.sample_list_widget.currentRow()
         if sample_index < 0:
@@ -4866,6 +6220,15 @@ class ProgramEditorWindow(QMainWindow):
         # value_label already kept in sync by the knob's own separate
         # valueChanged connection (see its construction) - nothing extra
         # needed here
+        # valueChanged fires continuously while the knob is being turned
+        # (not just on release), same as WaveformView's own markers_changed
+        # - forwarding every tick here, unthrottled by _schedule_write's own
+        # debounce below, is what lets a preview already looping pick up
+        # the new SHLTO cents live instead of only after the knob is
+        # released (per direct user request - the audio preview didn't
+        # respond to Loop Tune at all before this)
+        if self._sample_preview_player.is_playing():
+            self._sample_preview_player.update_loop_tune_cents(value)
         self._schedule_write(
             "SHLTO", "sample", value, index=sample_index, debounce_key="SHLTO"
         )
@@ -4900,6 +6263,139 @@ class ProgramEditorWindow(QMainWindow):
     def _commit_sample_tune(self):
         self._flush_write("STUNO")
 
+    def _detect_root_note_analysis_window(self, entry):
+        # loop region first preference - already-identified stable,
+        # repeating audio, ideal for pitch analysis and immune to the
+        # attack-transient bias the fallback below has to dodge by hand.
+        # Falls back to a short, attack-skipped chunk of [start, end] only
+        # when the loop region's own span is too small to say anything
+        # meaningful about (loop off, or loop_start/loop_end sitting
+        # at/near the same value) - see _MIN_LOOP_ANALYSIS_FRAMES's own
+        # comment for why that particular floor.
+        markers = self.waveform_view.markers_with_loop_in_range()
+        loop_start, loop_end = markers["loop_start"], markers["loop_end"]
+        if loop_end - loop_start + 1 >= _MIN_LOOP_ANALYSIS_FRAMES:
+            # capped to the SAME length budget as the fallback below - a
+            # real, measured issue: an uncapped loop region's own analysis
+            # time scales with its length (confirmed ~1.5s of real
+            # decaying-tone audio took ~1.5 SECONDS to analyse, entirely
+            # because nothing here capped it), which would make this
+            # button noticeably slow on a sustained pad with a
+            # multi-second loop. Loop content is stable/repeating by
+            # definition, so any representative chunk of it works equally
+            # well - no need to analyse the WHOLE region, just take it
+            # from the start (already past any attack, unlike the
+            # fallback, which has to skip it by hand below).
+            max_frames = round(
+                entry["framerate"] * _ROOT_NOTE_FALLBACK_WINDOW_SECONDS
+            )
+            window_end = min(loop_end, loop_start + max_frames - 1)
+            return entry["samples"][loop_start : window_end + 1]
+
+        start, end = markers["start"], markers["end"]
+        span = end - start + 1
+        skip = min(
+            round(entry["framerate"] * _ROOT_NOTE_ATTACK_SKIP_SECONDS), span // 4
+        )
+        window_start = start + skip
+        window_end = min(
+            end,
+            window_start
+            + round(entry["framerate"] * _ROOT_NOTE_FALLBACK_WINDOW_SECONDS)
+            - 1,
+        )
+        return entry["samples"][window_start : window_end + 1]
+
+    def _confirm_detect_root_note(self):
+        sample_index = self.sample_list_widget.currentRow()
+        if sample_index < 0 or not self.waveform_view.has_waveform():
+            return
+        entry = self._sample_waveform_cache.get(sample_index)
+        if entry is None or entry["samples"] is None:
+            return
+
+        analysis_samples = self._detect_root_note_analysis_window(entry)
+        anchor = self.sample_root_note_spinbox.value()
+        result = root_note_detection.detect_root_note(
+            analysis_samples, entry["framerate"], anchor
+        )
+
+        if result is None or result[2] < root_note_detection.CONFIDENCE_THRESHOLD:
+            # per direct user request: nothing actionable here - no note,
+            # no confidence number, no Yes/No choice to make. Only an
+            # acknowledgement that detection was attempted and came up
+            # empty, not silence (which would read as the button doing
+            # nothing at all).
+            QMessageBox.information(
+                self,
+                "Detect Root Note",
+                "Couldn't reliably detect a pitch for this sample.",
+            )
+            return
+
+        midi_note, cents, confidence = result
+        note_name = midi_note_to_name(midi_note)
+        answer = QMessageBox.question(
+            self,
+            "Detect Root Note",
+            f'Detected root note: {note_name} ({confidence * 100:.0f}% '
+            f"confidence, {cents:+.0f} cents).\n\n"
+            "Set this sample's root note and tune to match?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+
+        # through the SAME existing spinbox write paths ordinary user
+        # editing already uses (_on_sample_root_note_changed/_commit_
+        # sample_root_note, _on_sample_tune_changed/_commit_sample_tune) -
+        # not a raw hardware write of our own - so the in-memory cache
+        # stays consistent with whatever a live edit would have left it as
+        # (see _on_sample_tune_changed's own comment on the stale-cache bug
+        # a raw write bypassing that path caused once already)
+        self.sample_root_note_spinbox.setValue(midi_note)
+        self._commit_sample_root_note()
+        # cents -> this field's own semitone-based display units (see
+        # sample_tune_spinbox's own construction comment: +/-50.00
+        # SEMITONES, not literally MIDI cents, despite the dialog above
+        # calling it "cents" - the friendlier, standard term for this
+        # small a residual).
+        #
+        # NOT a bare overwrite with just the residual, though - Tune
+        # (STUNO) is also where a SEPARATE compensation gets baked in
+        # whenever a sample was originally sent at a non-native rate (the
+        # Akai hardware's playback engine only physically runs at 22050 or
+        # 44100 Hz - anything else needs a permanent tuning offset just to
+        # play back at the right pitch at all, regardless of what its
+        # recorded content actually is). Recomputing that baseline fresh
+        # and adding our own measured residual on top gives the
+        # mathematically correct total either way, rather than risking a
+        # blind overwrite silently discarding hardware-engine compensation
+        # a sample at an odd rate actually needs (comes out to 0 for the
+        # overwhelmingly common native-rate case, so this is a no-op
+        # there).
+        #
+        # baseline_semitones_for_bandwidth (entry["sbandw"], the sample's
+        # OWN real bandwidth field), not compute_bandwidth_and_tuning's own
+        # "nearest bucket to framerate" guess - see that guess's removal
+        # from _on_waveform_preview_requested for the real bug this caused:
+        # "nearest bucket" is only the rule THIS app's own 16-bit Akai
+        # SDATA send path uses (sampler_controller._start_unit); a sample
+        # sent via the generic/universal MIDI SDS path (any OTHER bit
+        # depth) gets its SBANDW/STUNO derived by the hardware itself,
+        # confirmed to NOT pick the nearest bucket. The same wrong-guess
+        # bug applies here identically - re-deriving "nearest bucket" would
+        # write a Tune value baked against the WRONG baseline for any
+        # sample that didn't arrive via our own 16-bit path.
+        baseline_semitones = baseline_semitones_for_bandwidth(
+            entry["framerate"], entry["sbandw"]
+        )
+        total_semitones = baseline_semitones + cents / 100.0
+        total_semitones = max(-50.0, min(50.0, total_semitones))
+        self.sample_tune_spinbox.setValue(total_semitones)
+        self._commit_sample_tune()
+
     def _set_marker_spinbox_range(self, frame_count):
         # each spinbox can address any frame in the WHOLE sample (typing an
         # exact value shouldn't be limited by whatever's currently
@@ -4907,7 +6403,7 @@ class ProgramEditorWindow(QMainWindow):
         # loop_start <= loop_end <= end regardless of this range
         enabled = frame_count > 0
         maximum = max(0, frame_count - 1)
-        for name, (_swatch, spinbox) in self._marker_spinboxes.items():
+        for name, (_swatch, spinbox, _value_label) in self._marker_spinboxes.items():
             # loop_start/loop_end additionally need the current sample's
             # SPTYPE to actually have a loop - see _set_loop_markers_enabled
             spinbox_enabled = enabled and (
@@ -4916,6 +6412,11 @@ class ProgramEditorWindow(QMainWindow):
             spinbox.blockSignals(True)
             spinbox.setEnabled(spinbox_enabled)
             spinbox.setRange(0, maximum)
+            # double-click-to-reset target (Knob.mouseDoubleClickEvent) -
+            # Start defaults to the very first frame, the other three to
+            # the very last one (maximum tracks frame_count, so this stays
+            # correct across loads/trims/reverses, not just at construction)
+            spinbox.setDefaultValue(0 if name == "start" else maximum)
             spinbox.blockSignals(False)
 
     def _set_loop_markers_enabled(self, enabled):
@@ -4954,7 +6455,7 @@ class ProgramEditorWindow(QMainWindow):
             palette["keygroup_color_3"] if enabled else palette["text_disabled"]
         )
         for name in ("loop_start", "loop_end"):
-            swatch, _spinbox = self._marker_spinboxes[name]
+            swatch, _spinbox, _value_label = self._marker_spinboxes[name]
             swatch.setStyleSheet(
                 f"background-color: {loop_swatch_color}; border-radius: 2px;"
             )
@@ -4964,6 +6465,54 @@ class ProgramEditorWindow(QMainWindow):
             if entry is not None:
                 entry.update(new_markers)
             self._schedule_marker_write(sample_index, old_markers, new_markers)
+        # set_loop_enabled(True) only emits markers_changed itself if
+        # re-enabling actually MOVED loop_start/loop_end (see its own
+        # comment) - explicitly refreshed here too so toggling the loop off
+        # (or back on with nothing to reconcile) still switches the Loop
+        # Preview card's placeholder immediately, not just on the next drag
+        current_markers = self.waveform_view.markers()
+        self._refresh_loop_preview(
+            current_markers["loop_start"], current_markers["loop_end"]
+        )
+
+    def _on_waveform_markers_changed_loop_preview(self, start, loop_start, loop_end, end):
+        # WaveformView.markers_changed fires continuously during a drag
+        # (not just on release), AND whenever a new sample's markers load -
+        # same signal _on_waveform_markers_changed_live_preview already
+        # uses for the analogous AUDIO live-preview feature. This is what
+        # lets the Loop Preview card track a loop_start/loop_end drag live,
+        # the same way the S3000XL's own LOOP screen updates as you nudge a
+        # loop point on the front panel.
+        self._refresh_loop_preview(loop_start, loop_end)
+
+    def _refresh_loop_preview(self, loop_start, loop_end):
+        if not self._loop_markers_enabled:
+            # SPTYPE "No looping"/"One-shot" - same gate the main
+            # WaveformView's own loop markers use (they don't just grey
+            # out, they don't draw at all - see set_loop_enabled)
+            self.loop_preview.clear_no_loop()
+            return
+        end_samples = self.waveform_view.samples_before(loop_end, HALF_WINDOW_FRAMES)
+        start_samples = self.waveform_view.samples_after(loop_start, HALF_WINDOW_FRAMES)
+        if end_samples is None or start_samples is None:
+            self.loop_preview.clear()
+        else:
+            self.loop_preview.set_join(end_samples, start_samples)
+
+    def _on_loop_preview_marker_dragged(self, name, delta):
+        # LoopJoinPreview owns no marker state itself - it only measures a
+        # drag against its OWN (much tighter) zoom and reports a frame
+        # DELTA (see its own class docstring on why). Reusing
+        # _on_marker_spinbox_changed wholesale - not reimplementing the
+        # push/sync/write-scheduling dance here - keeps WaveformView the
+        # one place that ever actually decides a marker's new value; this
+        # is just another caller of the exact same entry point the
+        # spinboxes already use, the same way canvas dragging and typing a
+        # value both funnel through their own single entry points too.
+        if not self.waveform_view.has_header():
+            return
+        current = self.waveform_view.markers()[name]
+        self._on_marker_spinbox_changed(name, current + delta)
 
     def _update_marker_spinboxes(self, start, loop_start, loop_end, end):
         # kept in sync with the waveform view live in both directions -
@@ -4975,13 +6524,23 @@ class ProgramEditorWindow(QMainWindow):
             "loop_end": loop_end,
             "end": end,
         }
-        for name, (_swatch, spinbox) in self._marker_spinboxes.items():
+        for name, (_swatch, spinbox, value_label) in self._marker_spinboxes.items():
             value = values[name]
             if value is None:
                 continue
             spinbox.blockSignals(True)
             spinbox.setValue(value)
             spinbox.blockSignals(False)
+            # Knob has no built-in numeric display (unlike QSpinBox) - the
+            # paired value_label is normally kept in sync via the knob's
+            # own valueChanged (see its construction above), but that's
+            # exactly what blockSignals(True) above suppresses, so this
+            # path needs to set it directly - same convention every other
+            # knob+label pair on this page already follows when a program/
+            # sample load sets a knob's value under blockSignals (e.g.
+            # self.pan_value_label.setText(...) beside self.pan_knob.
+            # setValue(...) in _apply_program_values)
+            value_label.setText(str(value))
 
     def _on_marker_spinbox_changed(self, name, value):
         # has_header, not has_waveform - editing must work before/without
@@ -5247,10 +6806,21 @@ class ProgramEditorWindow(QMainWindow):
         # how long the whole thing takes; never fewer than 6 ticks even
         # for a short sample, so it still visibly moves rather than
         # jumping straight to done.
+        #
+        # AKAISDS_DEMO_INSTANT opts OUT of all that pacing - same env-var-
+        # gated shape as AKAISDS_DEMO_SAMPLER itself, re-checked live rather
+        # than cached, for whoever's actually iterating on UI work away
+        # from hardware (the Slice Editor above all) and wants every sample
+        # to load in one step instead of waiting out a realistic transfer
+        # each time they select one.
         total = len(samples)
-        total_seconds = total * _DEMO_MS_PER_WORD / 1000
-        steps = max(6, round(total_seconds / 0.2))
-        step_seconds = total_seconds / steps
+        instant = bool(os.environ.get("AKAISDS_DEMO_INSTANT"))
+        if instant:
+            steps = 1
+        else:
+            total_seconds = total * _DEMO_MS_PER_WORD / 1000
+            steps = max(6, round(total_seconds / 0.2))
+        step_seconds = 0.0 if instant else total_seconds / steps
         last_pushed = 0
         for step in range(1, steps + 1):
             current = total * step // steps
@@ -5430,12 +7000,15 @@ class ProgramEditorWindow(QMainWindow):
 
         self.waveform_view.set_loading(True)
         # freezes the rest of the editor for the duration, deliberately -
-        # see WaveformView's own placeholder copy. Doesn't reach the menu
-        # bar (Cmd+R/Cmd+Delete etc still fire), which is a known gap, not
-        # a guarantee - the real backstop against overlapping transfers is
-        # the is_transfer_busy() check above and BridgeWorker's own queue,
-        # not this disable.
-        self.main_tabs.setEnabled(False)
+        # see WaveformView's own placeholder copy. Also reaches the menu
+        # bar now (Refresh and the Multi/Programs/Samples tab-switch
+        # actions - see _set_hardware_busy_ui): Cmd+R firing a BridgeWorker
+        # request while a real SDS dump is mid-handshake on the shared MIDI
+        # connection is exactly the race the is_transfer_busy() check above
+        # exists to prevent - letting Refresh alone bypass it would defeat
+        # the point. cancel_action is deliberately left reachable so
+        # there's still a way out.
+        self._set_hardware_busy_ui(True)
         self.status_bar.showMessage(
             f"Loading audio for sample {sample_index} - this can take a "
             "while and will freeze the interface..."
@@ -5467,6 +7040,8 @@ class ProgramEditorWindow(QMainWindow):
                 spitch = entry["spitch"]
                 shlto = entry["shlto"]
                 stuno = entry["stuno"]
+                ldwell1 = entry["ldwell1"]
+                sbandw = entry["sbandw"]
             else:
                 # rare: the automatic on-selection fetch hasn't resolved
                 # yet (the user double-clicked before it landed) - fall
@@ -5488,6 +7063,8 @@ class ProgramEditorWindow(QMainWindow):
                 spitch = header["SPITCH"]
                 shlto = header["SHLTO"]
                 stuno = header["STUNO"]
+                ldwell1 = header["LDWELL1"]
+                sbandw = header["SBANDW"]
                 if sample_index == self.sample_list_widget.currentRow():
                     # normally already shown by _on_sample_detail_loaded's
                     # automatic fetch - this branch only runs when that
@@ -5497,7 +7074,9 @@ class ProgramEditorWindow(QMainWindow):
                     self.waveform_view.set_header(
                         frame_count, start, loop_start, loop_end, end
                     )
-                    self._update_sample_meta_controls(sptype, spitch, shlto, stuno)
+                    self._update_sample_meta_controls(
+                        sptype, spitch, shlto, stuno, ldwell1
+                    )
 
             if sample_index == self.sample_list_widget.currentRow():
                 # markers/frame_count are known either way by this point
@@ -5536,6 +7115,8 @@ class ProgramEditorWindow(QMainWindow):
                 "spitch": spitch,
                 "shlto": shlto,
                 "stuno": stuno,
+                "ldwell1": ldwell1,
+                "sbandw": sbandw,
             }
             self._sample_waveform_cache[sample_index] = entry
             if sample_index == self.sample_list_widget.currentRow():
@@ -5558,7 +7139,7 @@ class ProgramEditorWindow(QMainWindow):
                 f"Loaded {len(samples)} sample frames for sample {sample_index}"
             )
         finally:
-            self.main_tabs.setEnabled(True)
+            self._set_hardware_busy_ui(False)
             self.waveform_view.set_loading(False)
 
     def _confirm_trim_sample(self):
@@ -5572,8 +7153,7 @@ class ProgramEditorWindow(QMainWindow):
                 "Nothing to trim - Start/End already cover the whole sample"
             )
             return
-        item = self.sample_list_widget.currentItem()
-        sample_name = item.text() if item is not None else ""
+        sample_name = self._sample_name_at_row(sample_index)
         answer = QMessageBox.question(
             self,
             "Trim Sample",
@@ -5582,7 +7162,7 @@ class ProgramEditorWindow(QMainWindow):
             "This overwrites the sample's audio on the sampler and cannot "
             "be undone.",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes,
         )
         if answer != QMessageBox.StandardButton.Yes:
             return
@@ -5596,8 +7176,7 @@ class ProgramEditorWindow(QMainWindow):
         if entry is None or len(entry["samples"]) <= 1:
             self.status_bar.showMessage("Nothing to reverse - sample is too short")
             return
-        item = self.sample_list_widget.currentItem()
-        sample_name = item.text() if item is not None else ""
+        sample_name = self._sample_name_at_row(sample_index)
         answer = QMessageBox.question(
             self,
             "Reverse Sample",
@@ -5605,7 +7184,7 @@ class ProgramEditorWindow(QMainWindow):
             "This overwrites the sample's audio on the sampler and cannot "
             "be undone.",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes,
         )
         if answer != QMessageBox.StandardButton.Yes:
             return
@@ -5629,8 +7208,7 @@ class ProgramEditorWindow(QMainWindow):
                 "Nothing to fade - Start/End already cover the whole sample"
             )
             return
-        item = self.sample_list_widget.currentItem()
-        sample_name = item.text() if item is not None else ""
+        sample_name = self._sample_name_at_row(sample_index)
         answer = QMessageBox.question(
             self,
             "Fade Sample",
@@ -5639,7 +7217,7 @@ class ProgramEditorWindow(QMainWindow):
             "This overwrites the sample's audio on the sampler and cannot "
             "be undone.",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes,
         )
         if answer != QMessageBox.StandardButton.Yes:
             return
@@ -5666,8 +7244,7 @@ class ProgramEditorWindow(QMainWindow):
         if peak >= sample_editing._MAX_AMPLITUDE:
             self.status_bar.showMessage("Sample is already normalised")
             return
-        item = self.sample_list_widget.currentItem()
-        sample_name = item.text() if item is not None else ""
+        sample_name = self._sample_name_at_row(sample_index)
         answer = QMessageBox.question(
             self,
             "Normalise Sample",
@@ -5676,7 +7253,7 @@ class ProgramEditorWindow(QMainWindow):
             "This overwrites the sample's audio on the sampler and cannot "
             "be undone.",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes,
         )
         if answer != QMessageBox.StandardButton.Yes:
             return
@@ -5684,17 +7261,77 @@ class ProgramEditorWindow(QMainWindow):
             sample_index, sample_editing.normalize_samples, "Normalise"
         )
 
+    def _confirm_filter_sample(self):
+        # unlike Trim/Reverse/Fade/Normalise (a plain QMessageBox.question,
+        # no parameters), this needs an actual filter type + cutoff
+        # frequency from the user first - FilterSampleDialog owns that UI
+        # (plus its own Preview button/player). Its OK button used to BE
+        # the confirmation step outright (no second QMessageBox.question
+        # after it closes accepted) - reversed after real use: OK also
+        # doubles as "audition with Preview, then commit," and a user who
+        # clicks it out of habit/muscle-memory right after previewing has
+        # no way to back out before the sample is already gone out over
+        # SysEx. A second, plain QMessageBox.question here (matching the
+        # other four transforms' own confirm dialog) costs one extra click
+        # for a deliberate filter, but gives that same "wait, not yet"
+        # escape hatch this dialog didn't otherwise have.
+        sample_index = self.sample_list_widget.currentRow()
+        if sample_index < 0 or not self.waveform_view.has_waveform():
+            return
+        entry = self._sample_waveform_cache.get(sample_index)
+        if entry is None or entry["samples"] is None:
+            return
+        sample_name = self._sample_name_at_row(sample_index)
+
+        dialog = FilterSampleDialog(
+            self, sample_name, entry["samples"], entry["framerate"]
+        )
+        if not dialog.exec():
+            return
+
+        answer = QMessageBox.question(
+            self,
+            "Filter Sample",
+            f'Send the filtered audio for "{sample_name}" to the sampler '
+            "now?\n\n"
+            "This overwrites the sample's audio on the sampler and cannot "
+            "be undone.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+
+        # filter_samples needs framerate + both filters' own
+        # enabled/cutoff/slope on top of the standard (samples, start,
+        # loop_start, loop_end, end) shape _perform_sample_edit's
+        # transform(...) call always uses - bound here via
+        # functools.partial so the extra arguments never need to be
+        # visible to that shared dispatcher (see filter_samples' own
+        # docstring)
+        transform = functools.partial(
+            sample_editing.filter_samples,
+            framerate=entry["framerate"],
+            highpass_enabled=dialog.highpass_enabled(),
+            highpass_cutoff_hz=dialog.highpass_cutoff_hz(),
+            highpass_slope_db_per_octave=dialog.highpass_slope_db_per_octave(),
+            lowpass_enabled=dialog.lowpass_enabled(),
+            lowpass_cutoff_hz=dialog.lowpass_cutoff_hz(),
+            lowpass_slope_db_per_octave=dialog.lowpass_slope_db_per_octave(),
+        )
+        self._perform_sample_edit(sample_index, transform, "Filter")
+
     def _perform_sample_edit(self, sample_index, transform, action_label):
         # shared by _confirm_trim_sample/_confirm_reverse_sample/
-        # _confirm_fade_sample/_confirm_normalize_sample - all four are
+        # _confirm_fade_sample/_confirm_normalize_sample/
+        # _confirm_filter_sample - all five are
         # "take the samples already in memory, transform them with a pure
         # function from core/sample_editing.py, then get the result onto
         # the hardware" with nothing else actually different between them
         entry = self._sample_waveform_cache.get(sample_index)
         if entry is None or entry["samples"] is None:
             return
-        item = self.sample_list_widget.currentItem()
-        original_name = item.text() if item is not None else ""
+        original_name = self._sample_name_at_row(sample_index)
         # not .markers() directly - trim_samples/reverse_samples both
         # assume loop_start/loop_end already sit within [start, end] (see
         # their own docstrings in core/sample_editing.py), which can be
@@ -5705,13 +7342,36 @@ class ProgramEditorWindow(QMainWindow):
         # (permanently moving) the actual stored loop points the way
         # turning the loop back on does.
         markers = self.waveform_view.markers_with_loop_in_range()
-        new_samples, new_start, new_loop_start, new_loop_end, new_end = transform(
-            entry["samples"],
-            markers["start"],
-            markers["loop_start"],
-            markers["loop_end"],
-            markers["end"],
-        )
+        try:
+            new_samples, new_start, new_loop_start, new_loop_end, new_end = transform(
+                entry["samples"],
+                markers["start"],
+                markers["loop_start"],
+                markers["loop_end"],
+                markers["end"],
+            )
+        except Exception:
+            # the pure transform (core/sample_editing.py) runs before
+            # anything hardware-facing even starts - nothing else here
+            # catches a failure this early, so without this it would
+            # propagate out of this Qt slot silently in a packaged build.
+            # transform is a functools.partial for _confirm_filter_sample
+            # (binds filter_type/cutoff_hz/framerate - see its own
+            # comment), which has no __name__ of its own, unlike the
+            # plain function every other caller passes - getattr falls
+            # back to partial's own repr (still names the wrapped
+            # function) rather than raising a second, more confusing
+            # AttributeError on top of whatever actually failed
+            transform_name = getattr(transform, "__name__", repr(transform))
+            debug_log.get_logger().error(
+                f"_perform_sample_edit: {transform_name} raised",
+                exc_info=True,
+            )
+            self.status_bar.showMessage(
+                f"{action_label} failed - unexpected error, see "
+                f"{debug_log.LOG_PATH} for details"
+            )
+            return
         framerate = entry["framerate"]
 
         demo_mode = bool(os.environ.get("AKAISDS_DEMO_SAMPLER"))
@@ -5731,7 +7391,7 @@ class ProgramEditorWindow(QMainWindow):
                 return
 
         self.waveform_view.set_loading(True)
-        self.main_tabs.setEnabled(False)
+        self._set_hardware_busy_ui(True)
         self.status_bar.showMessage(
             f'{action_label} "{original_name}" - this can take a while and will '
             "freeze the interface..."
@@ -5756,12 +7416,17 @@ class ProgramEditorWindow(QMainWindow):
                     sample_index,
                     sampler_controller,
                     original_name,
+                    entry,
                     new_samples,
                     framerate,
+                    new_start,
+                    new_loop_start,
+                    new_loop_end,
+                    new_end,
                     action_label,
                 )
         finally:
-            self.main_tabs.setEnabled(True)
+            self._set_hardware_busy_ui(False)
             self.waveform_view.set_loading(False)
             self.sample_edit_progress.setVisible(False)
 
@@ -5815,8 +7480,13 @@ class ProgramEditorWindow(QMainWindow):
         sample_index,
         sampler_controller,
         original_name,
+        entry,
         new_samples,
         framerate,
+        new_start,
+        new_loop_start,
+        new_loop_end,
+        new_end,
         action_label,
     ):
         # The only audio-replace mechanism anywhere in this stack (s3k has
@@ -5973,6 +7643,33 @@ class ProgramEditorWindow(QMainWindow):
                 "SHNAME", "sample", original_name, keygroup_index=0, index=new_index
             )
 
+            # a freshly-sent SDS dump lands with the sampler's own default
+            # header, not the original sample's - without this, Trim/
+            # Reverse's genuinely new (rebased/mirrored) loop points and
+            # Fade/Normalise/Filter's unchanged-but-known ones would both
+            # be silently discarded. Same eight-field pattern
+            # _perform_duplicate_sample_real already uses, just sourced
+            # from the transform's own new_* markers instead of the live
+            # waveform_view (this sample's audio just changed shape, so
+            # the view's current markers don't necessarily apply).
+            loop_length_frames = new_loop_end - new_loop_start
+            for param_name, value in (
+                ("SPTYPE", entry["sptype"]),
+                ("SPITCH", entry["spitch"]),
+                ("SHLTO", entry["shlto"]),
+                ("STUNO", entry["stuno"]),
+                ("SSTART", new_start),
+                ("SMPEND", new_end),
+                ("LOOPAT1", new_loop_end),
+                (
+                    "LLNGTH1",
+                    loop_length_frames * _LOOP_LENGTH_FIXED_POINT_SCALE,
+                ),
+            ):
+                self._write_knob_value(
+                    param_name, "sample", value, keygroup_index=0, index=new_index
+                )
+
             # one more reload so the sample list reflects the rename - and
             # to land on a clean final selection: nothing stayed selected
             # through the two reloads above for _on_samples_loaded's own
@@ -5990,6 +7687,20 @@ class ProgramEditorWindow(QMainWindow):
                     self.sample_list_widget.setCurrentRow(
                         final_samples.index(original_name)
                     )
+        except Exception:
+            # same reasoning as _perform_duplicate_sample_real's own
+            # matching except clause - this function already handles every
+            # anticipated failure above (a refused send, a missing name
+            # after reload, a failed delete); anything else would otherwise
+            # propagate out of this Qt slot uncaught and invisible in a
+            # packaged build with no console/exception hook
+            logger.error(
+                "_perform_sample_edit_real: unexpected error", exc_info=True
+            )
+            self.status_bar.showMessage(
+                f"{action_label} failed - unexpected error, see "
+                f"{debug_log.LOG_PATH} for details"
+            )
         finally:
             try:
                 os.remove(temp_path)
@@ -6119,6 +7830,123 @@ class ProgramEditorWindow(QMainWindow):
     def _on_waveform_scrollbar_moved(self, value):
         self.waveform_view.set_view_start(value)
 
+    def _on_waveform_preview_requested(self):
+        # WaveformView.preview_requested - a single click on empty
+        # waveform space. A click while something's already sounding stops
+        # it outright rather than restarting (the user's own "click again
+        # to stop" request) - this is also the ONLY way a "Hold" loop
+        # (see below) ever stops, since that mode never ends on its own.
+        if self._sample_preview_player.is_playing():
+            self._sample_preview_player.stop()
+            return
+
+        sample_index = self.sample_list_widget.currentRow()
+        entry = self._sample_waveform_cache.get(sample_index)
+        if entry is None or entry["samples"] is None:
+            return  # header-only or nothing loaded - nothing to play
+
+        samples = entry["samples"]
+        framerate = entry["framerate"]
+        markers = self.waveform_view.markers()
+
+        # STUNO ("Tune") has to shift the WHOLE preview to match the
+        # sampler, not just the loop region SHLTO already handles below -
+        # but STUNO also bakes in a baseline compensation for a non-native
+        # recorded rate (see AGENTS.md's "Writing the result does NOT
+        # overwrite Tune outright" and _confirm_detect_root_note's own
+        # comment above), which this PC preview already reproduces exactly
+        # by playing raw samples at their own recorded framerate - applying
+        # STUNO's RAW total here would double that compensation. Only the
+        # portion of STUNO beyond that baseline - whatever the user (or
+        # Detect Root Note) actually dialled in - is a real audible
+        # difference from hardware.
+        #
+        # baseline_semitones_for_bandwidth (not compute_bandwidth_and_
+        # tuning's own "nearest bucket to framerate" guess) - SBANDW is
+        # read directly off the sample's own header rather than re-derived,
+        # because "nearest bucket" is only the rule THIS app's own 16-bit
+        # Akai SDATA send path uses (see sampler_controller._start_unit).
+        # A sample sent via the generic/universal MIDI SDS path (any OTHER
+        # bit depth) never goes through that at all - the hardware derives
+        # its own SBANDW/STUNO from the incoming generic dump using an
+        # undocumented rule that, confirmed against real hardware, does
+        # NOT pick the nearest bucket (an 11025 Hz sample sent at 8-bit or
+        # 12-bit reads back STUNO -24.00, not the -12.00 a 16-bit send of
+        # the same rate produces - exactly what "always bandwidth=1/44100"
+        # gives, not "nearest"). Re-deriving it here produced a real,
+        # reported bug: such a sample previewed an octave low despite
+        # playing back correctly on actual hardware.
+        baseline_semitones = baseline_semitones_for_bandwidth(
+            framerate, entry["sbandw"]
+        )
+        stuno_semitones = self._sample_tune_offset_to_semitones(entry["stuno"])
+        # transposes from the sample's own root key (SPITCH) up/down to
+        # _PREVIEW_ROOT_NOTE, on top of (not instead of) the STUNO
+        # correction above - see _PREVIEW_ROOT_NOTE's own comment for why
+        # this app's preview defaults to a fixed note rather than SPITCH's
+        # own natural pitch, matching the hardware's front-panel PLAY
+        # button rather than "what does this sample sound like as
+        # recorded"
+        root_shift_semitones = _PREVIEW_ROOT_NOTE - entry["spitch"]
+        pitch_shift_semitones = (
+            stuno_semitones - baseline_semitones + root_shift_semitones
+        )
+
+        # SPTYPE (sample_loop_type_combo) and LDWELL1 (sample_loop_hold_
+        # knob) aren't gated on each other anywhere in this UI (see
+        # _update_sample_meta_controls) - a "No looping"/"One-shot" SPTYPE
+        # leaves the Loop Hold knob fully interactive even though it'd be
+        # meaningless hardware-side, and nothing stops LDWELL1 sitting at
+        # "Off" while SPTYPE nominally loops either way. Reconciled here
+        # rather than trusting either control alone: SPTYPE 2/3 has no
+        # loop region to repeat at all, and dwell "Off" means no repeat
+        # regardless of SPTYPE (confirmed with the user directly) - both
+        # fall through to a plain one-shot playback of [start, end].
+        sptype = self.sample_loop_type_combo.currentIndex()
+        dwell = self.sample_loop_hold_knob.value()
+        if sptype in _SPTYPE_VALUES_WITHOUT_LOOP or dwell == _LOOP_HOLD_OFF_VALUE:
+            self._sample_preview_player.play(
+                samples,
+                markers["start"],
+                markers["end"],
+                framerate,
+                pitch_shift_semitones=pitch_shift_semitones,
+            )
+            return
+
+        dwell_ms = None if dwell == _LOOP_HOLD_HOLD_VALUE else dwell
+        self._sample_preview_player.play_loop(
+            samples,
+            markers["start"],
+            markers["loop_start"],
+            markers["loop_end"],
+            markers["end"],
+            framerate,
+            dwell_ms=dwell_ms,
+            loop_tune_cents=self.sample_loop_tune_knob.value(),
+            pitch_shift_semitones=pitch_shift_semitones,
+        )
+
+    def _on_waveform_markers_changed_live_preview(self, start, loop_start, loop_end, end):
+        # WaveformView.markers_changed fires continuously during a drag
+        # (not just on release - see that signal's own docstring), for
+        # WHICHEVER marker moved, AND whenever a new sample's markers load
+        # (set_waveform/set_header) - not just an actual user drag.
+        # update_loop_points() is already a safe no-op with nothing
+        # playing, but the is_playing() check here isn't just belt-and-
+        # braces: without it, selecting a different sample right after
+        # stopping a preview would queue a pointless call every time,
+        # since loading the new sample's own markers fires this same
+        # signal. Dragging start/end alone (not touching loop_start/
+        # loop_end) still correctly forwards unconditionally while a
+        # preview IS running - update_loop_points() only actually rebuilds
+        # anything if the bounds genuinely changed. This is what lets a
+        # user hear their loop point adjustments live while dragging
+        # instead of stopping/restarting preview each time - per direct
+        # user request.
+        if self._sample_preview_player.is_playing():
+            self._sample_preview_player.update_loop_points(loop_start, loop_end)
+
     def _on_zone_sample_changed(self, field, zone_idx):
         text = self._zone_combos[zone_idx].currentText()
         sample_name = "" if text == "-" else text
@@ -6232,12 +8060,35 @@ if __name__ == "__main__":
     from s3ked.demo import DemoBridge
     from ui import theme
 
+    class _StandaloneSamplerController:
+        # the only things _open_slice_editor/_export_slices actually need
+        # from a real SamplerController when there's no Transfer Dashboard
+        # around at all - just enough for the Slice Editor's own busy-check
+        # to pass and for its cancel_callback wiring to have something
+        # (never actually called - Export is disabled in demo mode, so
+        # SliceEditorWindow's own Cancel Transfer path is unreachable here)
+        # to bind to. send_file_queue is deliberately not stubbed - that
+        # one genuinely can't be reached this way.
+        def is_transfer_busy(self):
+            return False
+
+        def cancel_transfer(self):
+            pass
+
     class _StandaloneHost:
         # ProgramEditorWindow.closeEvent() calls main_window.show() to bring
         # the dashboard back - there is none here, so close the app instead
         def show(self):
             QApplication.instance().quit()
 
+        sampler_controller = _StandaloneSamplerController()
+
+    # this script always constructs a DemoBridge two lines down regardless -
+    # setdefault so every demo_mode check elsewhere in this file (audio
+    # fetch path, Slice Editor Export gating, etc.) actually agrees with
+    # that, while still letting AKAISDS_DEMO_INSTANT be set alongside it on
+    # the command line the normal way
+    os.environ.setdefault("AKAISDS_DEMO_SAMPLER", "1")
     app = QApplication(sys.argv)
     theme.apply_to_app(app)
     window = ProgramEditorWindow(_StandaloneHost(), bridge=DemoBridge())

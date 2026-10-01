@@ -10,6 +10,7 @@ from PySide6.QtWidgets import (
     QSpinBox,
 )
 from ui.qt_helpers import widen_popup_to_fit_items
+from ui import tooltips
 
 # Common sample rates offerred in the dropdown
 # if a chosen rate isnt an exact integer divisor of the files real rate, sending falls back to original rate with a status message
@@ -43,9 +44,16 @@ class SampleSettingsDialog(QDialog):
         show_mono=True,
         show_starting_slot=False,
         starting_sample_number=None,
+        show_slice_button=False,
     ):
         super().__init__(parent)
         self.setWindowTitle(title)
+
+        # set True by _request_slice_editor below instead of accept()/
+        # reject()'s usual bool - the caller checks this AFTER exec()
+        # regardless of the dialog's own result, since opening the Slice
+        # Editor is a "do something else instead" action, not a save
+        self.slice_requested = False
 
         layout = QFormLayout(self)
 
@@ -59,9 +67,7 @@ class SampleSettingsDialog(QDialog):
             self.bit_depth_combo.addItem(f"{depth}-bit", depth)
         closest = min(_BIT_DEPTH_OPTIONS, key=lambda d: abs(d - bit_depth))
         self.bit_depth_combo.setCurrentIndex(_BIT_DEPTH_OPTIONS.index(closest))
-        self.bit_depth_combo.setToolTip(
-            "Bit depths of 14 or lower will transmit faster than 16 bit samples"
-        )
+        self.bit_depth_combo.setToolTip(tooltips.BIT_DEPTH)
         self.bit_depth_combo.setSizeAdjustPolicy(
             QComboBox.SizeAdjustPolicy.AdjustToContents
         )
@@ -81,10 +87,7 @@ class SampleSettingsDialog(QDialog):
         if show_mono:
             self.mono_checkbox = QCheckBox("Send as mono (left channel only)")
             self.mono_checkbox.setChecked(mono)
-            self.mono_checkbox.setToolTip(
-                "Only applies to stereo files - sends just the left\n"
-                "channel as a single sample instead of a -L/-R pair."
-            )
+            self.mono_checkbox.setToolTip(tooltips.MONO_ONLY_CHECKBOX)
             layout.addRow(self.mono_checkbox)
 
         self.starting_slot_spin = None
@@ -95,12 +98,7 @@ class SampleSettingsDialog(QDialog):
             self.starting_slot_spin.setValue(
                 -1 if starting_sample_number is None else starting_sample_number
             )
-            self.starting_slot_spin.setToolTip(
-                "Required for a Generic SDS device - it has no way to\n"
-                "auto-detect which slots are already in use, unlike an\n"
-                "Akai. Ignored entirely when talking to an Akai sampler,\n"
-                "which figures this out on its own."
-            )
+            self.starting_slot_spin.setToolTip(tooltips.STARTING_SAMPLE_NUMBER)
             layout.addRow(QLabel("Starting sample number:"), self.starting_slot_spin)
 
         buttons = QDialogButtonBox(
@@ -108,10 +106,25 @@ class SampleSettingsDialog(QDialog):
         )
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
+        if show_slice_button:
+            # an ActionRole button (not Ok/Cancel) so Qt doesn't try to
+            # place it as if it were one of those - jumps straight to the
+            # Slice Editor instead of saving these settings, same reasoning
+            # a "do something else" action always takes here: whatever's in
+            # the name/bit-depth/rate/mono fields right now was never
+            # meant to be committed by this button
+            slice_button = buttons.addButton(
+                "Slice Editor...", QDialogButtonBox.ButtonRole.ActionRole
+            )
+            slice_button.clicked.connect(self._request_slice_editor)
         layout.addRow(buttons)
 
         # fixed window size - computed from actual content rather than hardcoded value
         layout.setSizeConstraint(QLayout.SizeConstraint.SetFixedSize)
+
+    def _request_slice_editor(self):
+        self.slice_requested = True
+        self.reject()
 
     def get_settings(self):
         # returns a dict {"name": str or None, "bit_depth": int,

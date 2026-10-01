@@ -64,3 +64,28 @@ def test_get_settings_reports_no_name_when_name_field_is_hidden(qapp):
     # no per-sample name to edit
     dialog = SampleSettingsDialog(show_name=False)
     assert dialog.get_settings()["name"] is None
+
+
+# --- Slice Editor button (Transfer Dashboard's own per-row Edit dialog) ---
+
+
+def test_slice_button_is_absent_by_default(qapp):
+    from PySide6.QtWidgets import QPushButton
+
+    dialog = SampleSettingsDialog(show_name=True)
+    assert dialog.slice_requested is False
+    assert not any(
+        b.text() == "Slice Editor..." for b in dialog.findChildren(QPushButton)
+    )
+
+
+def test_clicking_slice_button_sets_flag_and_rejects_without_saving(qapp):
+    from PySide6.QtWidgets import QDialog, QPushButton
+
+    dialog = SampleSettingsDialog(show_name=True, show_slice_button=True)
+    slice_button = next(
+        b for b in dialog.findChildren(QPushButton) if b.text() == "Slice Editor..."
+    )
+    slice_button.click()
+    assert dialog.slice_requested is True
+    assert dialog.result() == QDialog.DialogCode.Rejected

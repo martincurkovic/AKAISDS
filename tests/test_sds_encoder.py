@@ -306,6 +306,46 @@ def test_scale_sample_to_16bit_matches_the_write_wav_file_round_trip(tmp_path):
         assert scaled == list(expected)
 
 
+def test_write_wav_file_stereo_round_trips_both_channels(tmp_path):
+    left = [0, 1000, -1000, 32767, -32768]
+    right = [100, -100, 200, -200, 300]
+    path = tmp_path / "stereo16.wav"
+    sds_encoder.write_wav_file_stereo(str(path), left, right, framerate=44100, bit_depth=16)
+
+    channels, rate = sds_encoder.read_wav_channels(str(path))
+    assert len(channels) == 2
+    assert channels[0] == left
+    assert channels[1] == right
+    assert rate == 44100
+
+
+def test_write_wav_file_stereo_8bit_matches_mono_encoding_per_channel(tmp_path):
+    # same unsigned-8-bit convention as write_wav_file, just interleaved -
+    # round-tripping through read_wav_channels (rather than inspecting raw
+    # bytes directly) is enough to catch a channel-order/interleaving bug
+    left = [-128, -1, 0, 1, 127]
+    right = [127, 1, 0, -1, -128]
+    path = tmp_path / "stereo8.wav"
+    sds_encoder.write_wav_file_stereo(str(path), left, right, framerate=22050, bit_depth=8)
+
+    channels, rate = sds_encoder.read_wav_channels(str(path))
+    assert rate == 22050
+    # 8-bit is lossy the same way write_wav_file's own 8-bit test expects -
+    # compare via the same round trip rather than exact equality
+    mono_left_path = tmp_path / "left8.wav"
+    sds_encoder.write_wav_file(str(mono_left_path), left, framerate=22050, bit_depth=8)
+    expected_left, _ = sds_encoder.read_wav_samples(str(mono_left_path))
+    assert channels[0] == list(expected_left)
+
+
+def test_write_wav_file_stereo_rejects_mismatched_channel_lengths(tmp_path):
+    path = tmp_path / "bad.wav"
+    with pytest.raises(ValueError):
+        sds_encoder.write_wav_file_stereo(
+            str(path), [1, 2, 3], [1, 2], framerate=44100, bit_depth=16
+        )
+
+
 # -----------------------
 # MISC HEADER/PACKET HELPERS
 # -----------------------

@@ -23,9 +23,41 @@ QMainWindow {
     background-color: ${bg};
 }
 
+/* A plain QWidget used only as a transparent layout container (so it
+   blends into whatever ancestor panel it actually sits in, instead of
+   picking up the base QWidget rule's own ${bg}) - selected by object name
+   rather than each call site giving it its OWN local setStyleSheet(...).
+   That distinction matters beyond style: QToolTip's tip label copies its
+   palette from the nearest ANCESTOR widget that has a non-empty local
+   stylesheet of its own - a call-site-local "background: transparent;"
+   made every tooltip on a descendant of that container inherit a
+   transparent background with nothing behind it to composite against,
+   rendering solid black on at least some Linux compositors. Routing this
+   through the app-wide stylesheet by object name instead means no widget
+   in this chain has a local stylesheet, so descendant tooltips resolve
+   normally through the QToolTip rule below. See ui/program_editor_window.py's
+   call sites (search "transparentContainer") for where this is applied. */
+QWidget#transparentContainer {
+    background: transparent;
+}
+
 QLabel {
     background: transparent;
     color: ${text};
+}
+
+/* Qt's tooltip (QToolTip) is internally a QLabel too, so without its own
+   rule here it inherits the QLabel rule above - "background: transparent"
+   on a real top-level popup window, with nothing underneath for the
+   compositor to blend against, renders as an undrawn black box on at
+   least some Linux window managers/compositors instead of the OS's normal
+   tooltip look. Give it an explicit opaque background so it never falls
+   through to that. */
+QToolTip {
+    background-color: ${bg_dialog};
+    color: ${text};
+    border: 1px solid ${border};
+    padding: 4px 6px;
 }
 
 /* ---------- Buttons ---------- */
@@ -100,14 +132,24 @@ QListWidget::item:selected {
     background-color: ${bg_selected};
 }
 
-/* Program editor's Programs and Samples lists (plain text rows, no
-   per-row buttons) - scoped by objectName rather than widening
-   QListWidget::item generally, since the dashboard's queue/hardware rows
-   (and the keygroup list's own swatch+label rows) already get their own
-   comfortable height from the custom row widget's own margins and don't
-   need extra item padding stacked on top. */
-QListWidget#programList::item,
-QListWidget#sampleList::item {
+/* Program editor's Programs list (plain text rows, no per-row buttons) -
+   scoped by objectName rather than widening QListWidget::item generally,
+   since the dashboard's queue/hardware rows (and the keygroup list's own
+   swatch+label rows) already get their own comfortable height from the
+   custom row widget's own margins and don't need extra item padding
+   stacked on top.
+
+   Samples list (#sampleList) is deliberately NOT included here even
+   though its rows used to be identical plain text - it now uses a custom
+   per-row widget too (name + duration, see program_editor_window.py's
+   _build_sample_list_row_widget), and giving a QListWidget item BOTH a
+   `::item` CSS rule AND setItemWidget() is a confirmed real Qt/PySide6
+   rendering bug, not a hypothetical: the row widget's own text doubles up
+   into a garbled/illegible overlap the instant this selector matches it,
+   even with the item's own text left empty. The row widget's own margins
+   (matched to this same 6px/8px so the row height doesn't change) are the
+   padding for that list now - see AGENTS.md's Samples tab section. */
+QListWidget#programList::item {
     padding: 6px 8px;
 }
 
@@ -185,10 +227,82 @@ QProgressBar[memoryLevel="warning"]::chunk {
 QProgressBar[memoryLevel="critical"]::chunk {
   background-color: ${critical};
 }
+
+/* ---------- Sliders (currently just the Slice Editor's own Sensitivity
+   control, ui/fine_slider.py's FineSlider) ---------- */
+/* the widget itself, distinct from its ::groove/::handle sub-controls
+   below - without this it picks up the base QWidget rule's own ${bg}
+   as a solid rectangle behind/around the (narrower) groove, reading as
+   an unwanted border/box around the slider */
+QSlider {
+    background: transparent;
+}
+
+QSlider::groove:horizontal {
+    height: 4px;
+    background: ${border};
+    border-radius: 2px;
+}
+
+QSlider::sub-page:horizontal {
+    /* the FILLED portion, left of the handle - the exact same green
+       ui/knob.py's Knob hand-paints its own value arc with (a fixed
+       literal there, not a theme token - same reasoning applies here:
+       it's deliberately the same regardless of dark/light theme, unlike
+       ${accent} which differs between them) */
+    background: #3aa88a;
+    border-radius: 2px;
+}
+
+QSlider::add-page:horizontal {
+    background: ${border};
+    border-radius: 2px;
+}
+
+/* handle is 14px, centered over a 4px groove: margin is
+   -(handle - groove) / 2 = -(14 - 4) / 2 = -5px top/bottom, the standard
+   QSS formula for vertically centering a taller handle over its groove */
+QSlider::handle:horizontal {
+    background: ${text_bright};
+    border: 1px solid ${border_hover};
+    width: 14px;
+    height: 14px;
+    margin: -5px 0;
+    border-radius: 7px;
+}
+
+QSlider::handle:horizontal:hover {
+    background: #3aa88a;
+}
+
+/* explicit :disabled rules, same reasoning AGENTS.md's "Loop type
+   gating" section documents for QComboBox/QSpinBox/QDoubleSpinBox above -
+   Fusion doesn't automatically grey these out without one */
+QSlider::groove:horizontal:disabled,
+QSlider::add-page:horizontal:disabled,
+QSlider::sub-page:horizontal:disabled {
+    background: ${border_disabled};
+}
+
+QSlider::handle:horizontal:disabled {
+    background: ${text_disabled};
+    border: 1px solid ${border_disabled};
+}
 /* ---------- Status bar ---------- */
 QStatusBar {
     background-color: ${bg_statusbar};
     color: ${text_statusbar};
+}
+
+/* Fusion's default QStatusBar::item is a sunken PANEL frame around each
+   permanently-added widget (addWidget()/addPermanentWidget()) - its own
+   border/background isn't covered by the plain QStatusBar rule above
+   (a distinct sub-control, styled separately in Qt Style Sheets), and
+   rendered as a visibly darker box that read as "doesn't match the rest
+   of the app" against this app's own flat, borderless look everywhere
+   else (confirmed from a screenshot, not just reasoned about). */
+QStatusBar::item {
+    border: none;
 }
 
 /* ---------- Dialogs (Edit sample, Global settings, MIDI settings) ---------- */

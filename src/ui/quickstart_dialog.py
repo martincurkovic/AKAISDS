@@ -22,6 +22,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from ui import tooltips
+
 _HELP_DIR = os.path.join(os.path.dirname(__file__), "help")
 _QUICKSTART_PATH = os.path.join(_HELP_DIR, "quickstart.md")
 
@@ -266,15 +268,15 @@ class QuickStartDialog(QDialog):
         self.search_results_label.setFixedWidth(70)
 
         prev_button = QPushButton("←")
-        prev_button.setToolTip("Previous match")
+        prev_button.setToolTip(tooltips.FIND_PREVIOUS_MATCH)
         prev_button.clicked.connect(self._find_previous)
 
         next_button = QPushButton("→")
-        next_button.setToolTip("Next match")
+        next_button.setToolTip(tooltips.FIND_NEXT_MATCH)
         next_button.clicked.connect(self._find_next)
 
         close_button = QPushButton("×")
-        close_button.setToolTip("Close (Esc)")
+        close_button.setToolTip(tooltips.CLOSE_SEARCH_BAR)
         close_button.clicked.connect(self._close_search_bar)
 
         layout.addWidget(self.search_input)

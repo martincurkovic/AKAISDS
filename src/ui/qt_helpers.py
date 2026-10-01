@@ -1,7 +1,14 @@
 from PySide6.QtGui import QFontMetrics, QPixmap, QPainter, QColor
 from PySide6.QtCore import Qt, QRectF, QEvent
 from PySide6.QtSvg import QSvgRenderer
-from PySide6.QtWidgets import QTabBar
+from PySide6.QtWidgets import (
+    QLabel,
+    QScrollArea,
+    QSizePolicy,
+    QTabBar,
+    QVBoxLayout,
+    QWidget,
+)
 
 
 class FullWidthTabBar(QTabBar):
@@ -56,6 +63,60 @@ def widen_popup_to_fit_items(combo):
         default=0,
     )
     combo.view().setMinimumWidth(widest + 40)  # giving extra padding just in case
+
+
+def build_section_card(title, *row_layouts):
+    # groups related rows into one visually distinct card - same surface/
+    # border look as the Program Editor's own keygroup zone card (see
+    # QWidget#sectionCard in style.qss.template). Originally
+    # ProgramEditorWindow._build_section_card (see AGENTS.md's "section
+    # cards, scroll areas" notes for the full history of the gotchas
+    # below) - moved here, unchanged, once ui/settings_dialog.py needed the
+    # exact same behaviour rather than a second hand-rolled copy of it.
+    header = QLabel(title)
+    header.setObjectName("sectionHeader")
+
+    section_layout = QVBoxLayout()
+    section_layout.setContentsMargins(12, 10, 12, 12)
+    section_layout.setSpacing(10)
+    section_layout.addWidget(header)
+    for row in row_layouts:
+        section_layout.addLayout(row)
+    # without this, a card whose content is shorter than the row it's
+    # paired with gets its leftover height split BEFORE the header too, not
+    # just after the content - QBoxLayout distributes surplus space evenly
+    # across every gap when nothing claims a stretch, which reads as the
+    # whole card being vertically centered rather than top-aligned like a
+    # taller neighbor. This claims all of it at the bottom instead.
+    section_layout.addStretch()
+
+    card = QWidget()
+    card.setObjectName("sectionCard")
+    card.setLayout(section_layout)
+    # a bare QWidget defaults to Preferred vertically, which CAN grow past
+    # its own sizeHint when the surrounding layout has surplus space to
+    # hand out - a trailing addStretch() alone isn't enough to stop this
+    # (its own default stretch factor of 0 doesn't outrank a sibling
+    # Preferred-policy widget's equal willingness to grow), so without this
+    # a card can grow taller than its content as its surrounding page
+    # grows. Fixed vertically pins each card to its sizeHint - can't grow
+    # OR compress below it.
+    card.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
+    return card
+
+
+def build_scroll_area(page):
+    # wraps a whole tab/page rather than adding it directly - lets the
+    # window's minimum height stay comfortable without needing to grow
+    # every time a section card is added, at the cost of a scrollbar on a
+    # short window instead of everything always fitting unscrolled. Same
+    # reasoning as ProgramEditorWindow._build_scroll_area, moved here for
+    # ui/settings_dialog.py to share rather than duplicate.
+    scroll_area = QScrollArea()
+    scroll_area.setWidgetResizable(True)
+    scroll_area.setFrameShape(QScrollArea.Shape.NoFrame)
+    scroll_area.setWidget(page)
+    return scroll_area
 
 
 def load_colored_pixmap(svg_path, color, size=16, scale=3):

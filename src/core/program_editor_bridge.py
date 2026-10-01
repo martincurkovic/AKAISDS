@@ -5,7 +5,8 @@ import time
 from collections import deque
 
 from core import akai_sysex, app_config, debug_log
-from s3k.bridge import DeviceError, S3kBridge
+from core import midi_manager as midi_manager_module
+from s3k.bridge import DeviceError, S3kBridge, ThrottledOut
 from PySide6.QtCore import QThread, Signal
 import s3k.messages as m
 import s3k.params as p
@@ -91,7 +92,19 @@ class LoggingBridge:
                         # FAILED logging as everything else on this
                         # connection rather than being invisible to
                         # ~/.akaisds/akaisds.log
-                        "get_header_bytes", "send_and_receive")
+                        "get_header_bytes", "send_and_receive",
+                        # delete_program/delete_keygroup/delete_sample were
+                        # missing from this list entirely - a failed delete
+                        # produced no trace at all in ~/.akaisds/akaisds.log,
+                        # only a transient str(e) shown in the UI. These are
+                        # some of the most likely destructive actions a
+                        # remote user hits and reports as "it didn't work".
+                        # (renumber_programs is deliberately NOT wrapped the
+                        # same way - see _handle_program_change's own
+                        # getattr(..., None) check below, which needs to
+                        # keep telling a demo bridge without this method
+                        # apart from a real one that has it and failed.)
+                        "delete_program", "delete_keygroup", "delete_sample")
 
     def __init__(self, bridge, logger=None):
         self._bridge = bridge
@@ -137,16 +150,57 @@ for _name in LoggingBridge._WRAPPED_METHODS:
 del _name
 
 
-def connect():
+def connect(midi_manager=None):
     # lets the editor be developed away from the hardware sampler - same
     # dummy sampler s3ked itself ships for its --demo flag, duck-typing the
     # slice of S3kBridge this module's loaders/writers actually call
+    logger = debug_log.get_logger()
     if os.environ.get("AKAISDS_DEMO_SAMPLER"):
         from s3ked.demo import DemoBridge
 
+        logger.info("program_editor_bridge.connect(): demo bridge")
         bridge = DemoBridge()
+    elif (
+        midi_manager_module.shared_transport_enabled()
+        and midi_manager is not None
+        and midi_manager.raw_input is not None
+        and midi_manager.raw_output is not None
+    ):
+        # the Transfer Dashboard's own MidiManager already has a shared
+        # raw-rtmidi connection open (see core/midi_manager.py) - build the
+        # Program Editor's S3kBridge from THOSE same ports instead of
+        # opening a second, independent connection to the same physical
+        # device. ThrottledOut still wraps the shared output here exactly
+        # as S3kBridge.standard() would wrap its own - the shared transport
+        # only changes WHERE the raw port comes from, not S3kBridge's own
+        # pacing behaviour. See core/midi_transport.py's own module
+        # docstring and tests/midi_transport_consolidation_test_plan.md.
+        # midi_manager.raw_input/raw_output are only ever non-None if
+        # MidiManager itself already decided shared_transport_enabled() was
+        # true when it opened them - re-checking it here too is deliberate
+        # belt-and-braces, not redundant: see this module's own connect()
+        # tests for exactly the scenario (a stubbed MidiManager with raw
+        # ports set but the flag off) this second check exists to catch.
+        logger.info(
+            "program_editor_bridge.connect(): shared transport "
+            f"({midi_manager.output_name!r})"
+        )
+        bridge = S3kBridge(
+            ThrottledOut(midi_manager.raw_output),
+            midi_manager.raw_input,
+            f"{midi_manager.output_name} (shared)",
+        )
     else:
+        # AKAISDS_SHARED_MIDI_TRANSPORT=1 alone doesn't guarantee the
+        # branch above - falls through here too if midi_manager is None or
+        # its raw ports aren't open yet (e.g. the Dashboard's own
+        # connection hasn't been established), which is exactly the kind
+        # of silent fallback worth being able to see in the log rather
+        # than guess at during hardware testing
         _input_name, output_name = app_config.get_saved_ports()
+        logger.info(
+            f"program_editor_bridge.connect(): standard connection ({output_name!r})"
+        )
         bridge = S3kBridge.standard(output_name)  # type: ignore
     return LoggingBridge(bridge)
 
@@ -230,6 +284,14 @@ _SAMPLE_DETAIL_FIELDS = [
     "LLNGTH1",
     "SLNGTH",
     "SSRATE",
+    "SBANDW",  # native engine bandwidth this sample actually plays through
+    # on hardware - 0=22050Hz, 1=44100Hz (s3k.params: "0 represents 10kHz,
+    # 1 represents 20kHz" - Akai's own spec labels these by audio
+    # bandwidth/Nyquist, not literally by sample rate). Read directly
+    # rather than re-derived from SSRATE ("nearest bucket") for pitch
+    # math - see core/akai_sysex.py's baseline_semitones_for_bandwidth for
+    # why re-deriving it is wrong for a sample sent via the generic/
+    # universal MIDI SDS path (any bit depth other than 16).
     "SPTYPE",  # playback/loop type - 0..3, see program_editor_window.py's
     # _SAMPLE_PLAYBACK_TYPE_OPTIONS for the raw-byte-order label/tooltip list
     "SPITCH",  # original pitch (root note) - 21..127, narrower than the
@@ -239,6 +301,13 @@ _SAMPLE_DETAIL_FIELDS = [
     "STUNO",  # sample's own gross tuning offset, unsigned raw 0..65535
     # centered at 32768 - see program_editor_window.py's sample_tune_spinbox
     # and _semitones_to_sample_tune_offset/_sample_tune_offset_to_semitones
+    "LDWELL1",  # loop hold/dwell time, ms - 0..9999, 0="Off" (no loop),
+    # 9999="Hold" (loop forever, the default), 1..9998 a plain dwell time.
+    # Confirmed on a real S2000, matching s3k.params' own LDWELL1 notes.
+    # This app only edits ONE loop region (LOOPAT1/LLNGTH1), so this is the
+    # first loop's own dwell setting - see program_editor_window.py's
+    # sample_loop_hold_knob (a Knob, ranged 0..9999 - far left is Off, far
+    # right is Hold).
 ]
 
 _PROGRAM_LEVEL_FIELDS = [
@@ -349,6 +418,16 @@ class BridgeWorker(QThread):
     # rather than through this worker (see its _load_sample_waveform).
     sample_detail_loaded = Signal(int, dict)
     sample_detail_load_failed = Signal(int, str)
+
+    # sample_index, sample_length (frames), sample_rate (Hz) - a
+    # deliberately narrower two-field fetch than sample_detail_loaded above
+    # (which reads all of _SAMPLE_DETAIL_FIELDS, 11 round-trips). Used to
+    # populate every row of the Samples tab's list with a duration once the
+    # list itself loads (names only) - fetching the full 11-field detail for
+    # every sample just to show a duration would be 5x more round-trips
+    # than needed for something shown at a glance, not on selection.
+    sample_length_loaded = Signal(int, int, int)
+    sample_length_load_failed = Signal(int, str)
 
     parts_loaded = Signal(list)  # [(program_name, channel, level, pan), ...] per part
     parts_load_failed = Signal(str)
@@ -476,6 +555,12 @@ class BridgeWorker(QThread):
     def submit_sample_detail(self, sample_index):
         self._submit(("sample_detail", sample_index))
 
+    def submit_sample_length(self, sample_index):
+        # not in _COALESCE_KINDS - unlike "sample_detail" (only the current
+        # selection matters), the caller queues one of these per sample in
+        # the list and wants every one of them delivered, not just the last
+        self._submit(("sample_length", sample_index))
+
     def submit_program_change(self, part_index, program_index, program_name, channel):
         self._submit(("program_change", part_index, program_index, program_name, channel))
 
@@ -519,6 +604,36 @@ class BridgeWorker(QThread):
             return self._idle.wait_for(
                 lambda: not self._queue and not self._busy, timeout
             )
+
+    def is_idle(self):
+        # non-blocking snapshot - safe to call from the GUI thread any
+        # time. Pairs with busy_changed(False): a caller on the GUI thread
+        # that needs to wait for idle WITHOUT freezing the UI (unlike
+        # wait_until_idle() - see its own docstring) checks this first to
+        # skip waiting entirely if already idle, then waits for
+        # busy_changed(False) (via a QEventLoop-pumping wait, e.g.
+        # ProgramEditorWindow._wait_for_any_signal) otherwise -
+        # busy_changed(False) only fires once the whole queue drains, not
+        # once already-idle, so skipping ahead of time is required, not
+        # just an optimization.
+        with self._idle:
+            return not self._queue and not self._busy
+
+    def set_bridge(self, bridge):
+        # swaps the underlying bridge run() dispatches every job to -
+        # lets ui/program_editor_window.py rebuild its connection in place
+        # (e.g. after the shared MIDI ports get reopened out from under it
+        # by a MidiSettingsDialog Apply/diagnostic elsewhere - see
+        # MidiManager.connection_changed's own docstring there) without
+        # tearing down and recreating this QThread, which would mean
+        # reconnecting every one of its Signals by hand at every call site
+        # in that file. CALLER'S responsibility to have already confirmed
+        # the worker is idle first (wait_until_idle()) - same
+        # single-job-at-a-time assumption run() already makes about
+        # self._bridge everywhere else, just not one this method can
+        # enforce on its own from the calling (GUI) thread.
+        with self._idle:
+            self._bridge = bridge
 
     def run(self):
         while True:
@@ -676,6 +791,19 @@ class BridgeWorker(QThread):
             return
         self.sample_detail_loaded.emit(sample_index, values)
 
+    def _handle_sample_length(self, sample_index):
+        try:
+            sample_length = self._bridge.get_parameter(
+                p.lookup("SLNGTH", "sample"), sample_index
+            )
+            sample_rate = self._bridge.get_parameter(
+                p.lookup("SSRATE", "sample"), sample_index
+            )
+        except Exception as e:
+            self.sample_length_load_failed.emit(sample_index, str(e))
+            return
+        self.sample_length_loaded.emit(sample_index, sample_length, sample_rate)
+
     def _handle_multi_parts(self):
         parts = []
         try:
@@ -727,7 +855,28 @@ class BridgeWorker(QThread):
                 # its own distinct number before the first change is sent
                 renumber = getattr(self._bridge, "renumber_programs", None)
                 if renumber is not None:
-                    renumber()
+                    # not one of LoggingBridge's wrapped methods (its
+                    # existence has to stay tellable-apart from a demo
+                    # bridge that simply lacks it - see the comment on
+                    # LoggingBridge._WRAPPED_METHODS), so it gets its own
+                    # explicit START/FAILED logging here instead. A failed
+                    # renumber silently breaks every Program Change sent
+                    # afterward (every program can go back to colliding on
+                    # PRGNUM==0 - see this method's own docstring above),
+                    # so this needs to be visible on its own, not just
+                    # inferred from the Program Change itself failing.
+                    thread_name = threading.current_thread().name
+                    logger = debug_log.get_logger()
+                    logger.debug(f"[{thread_name}] START renumber_programs()")
+                    try:
+                        renumber()
+                    except Exception:
+                        logger.error(
+                            f"[{thread_name}] FAILED renumber_programs()",
+                            exc_info=True,
+                        )
+                        raise
+                    logger.debug(f"[{thread_name}] END renumber_programs()")
                 self._programs_renumbered = True
             # get_parameter applies PRGNUM's display_offset (the panel's
             # 1-based numbering, since s3ked's params table declared it -

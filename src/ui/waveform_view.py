@@ -1,14 +1,31 @@
+import sys
+
 from PySide6.QtWidgets import QApplication, QWidget, QSizePolicy
 from PySide6.QtGui import QCursor, QPainter, QPen, QColor, QPolygonF
-from PySide6.QtCore import Qt, QEvent, QRectF, QPointF, Signal
+from PySide6.QtCore import Qt, QEvent, QRectF, QPointF, QTimer, Signal
 
 from core import debug_log
 from ui import theme
 
 _BORDER_RADIUS = 4  # matches envelope_graph.py's own card-edge radius
 _HIT_RADIUS_PX = 6  # how close a click has to land to a marker to grab it
-_HANDLE_SIZE = 5  # the little triangle at the top of each marker line
+_HANDLE_SIZE = 5  # the little triangle at each marker line's own end (top
+# for start/end, bottom for loop_start/loop_end - see paintEvent)
 _FINE_DRAG_DIVISOR = 8  # how much slower a Shift-held drag moves
+
+_MACOS = sys.platform == "darwin"
+# macOS fights the warp-the-cursor-back-every-event trick below: the OS
+# re-centers/coalesces cursor-position events shortly after QCursor.setPos()
+# runs, so the drag felt like it had "inertia" and only gained a little
+# extra precision instead of the intended 1/_FINE_DRAG_DIVISOR. Rather than
+# warp at all here, macOS just applies a bigger plain divisor straight to
+# the raw on-screen delta - less precise than a true infinite-range warp
+# (a large fine-adjustment can run out of screen space to keep dragging),
+# but it actually behaves the way Shift-drag is supposed to feel. Kept
+# modest (1.5x the warp-mode divisor) rather than large - a much bigger
+# divisor technically gives finer control but needs many multiples of the
+# screen's width in physical travel to use, which just feels unresponsive.
+_FINE_DRAG_DIVISOR_MACOS = 12
 
 _MIN_ZOOM = 1.0  # the whole sample visible at once
 _ZOOM_STEP = 1.6  # multiplicative factor per wheel notch / zoom button click
@@ -117,6 +134,45 @@ def x_for_frame(frame, width, view_start, view_length):
     return ((frame - view_start) / (view_length - 1)) * (width - 1)
 
 
+def brighten_for_hover(color, palette):
+    """A vivid variant of *color*, for "you can grab this" hover/drag
+    feedback on a marker - reused by SliceWaveformView too (imported
+    alongside build_envelope/frame_for_x/x_for_frame) rather than each
+    widget hand-picking its own hover colour per marker colour per theme,
+    since between the two widgets there are four distinct base marker
+    colours (this file's own boundary/loop colours, SliceWaveformView's
+    start-end/interior-marker colours) - a computed adjustment covers all
+    of them without four hand-tuned hex pairs to keep in sync.
+
+    Brightening only reads as "lit up" in a dark UI - the same lightness
+    bump in a LIGHT UI would wash the colour out against the already-light
+    background instead, so which direction actually increases contrast
+    depends on the palette currently in use, not a fixed formula. Detected
+    from the palette's own bg_input lightness (never re-derived from the
+    OS colour scheme directly - see theme.current_palette's own docstring
+    on why there is exactly one source of truth for that).
+    """
+    is_dark = QColor(palette["bg_input"]).lightness() < 128
+    c = QColor(color)
+    h, s, l, a = c.getHsl()
+    if is_dark:
+        # blend PARTWAY toward white rather than a flat multiplier - a
+        # multiplier on lightness alone clips an already-fairly-light
+        # colour (e.g. the purple-ish keygroup_color_7) straight to solid
+        # white, losing its own hue entirely; blending only ever approaches
+        # white asymptotically, so the base colour's own identity survives
+        l = int(l + (255 - l) * 0.35)
+        s = min(255, int(s * 1.15) + 10)
+    else:
+        # mirror image for a light UI: blending toward WHITE here would
+        # wash a colour out against an already-light background instead of
+        # making it pop, so this blends partway toward black instead
+        l = int(l * 0.65)
+        s = min(255, int(s * 1.2) + 10)
+    c.setHsl(h, s, l, a)
+    return c
+
+
 def push_marker(order, index, frame, values, frame_count):
     """Moves the marker at order[index] to frame (clamped to the whole
     sample's own bounds, [0, frame_count - 1] - independent of the current
@@ -200,6 +256,14 @@ class WaveformView(QWidget):
     # QScrollBar to size and position itself. Emitted whenever zoom or pan
     # changes, including indirectly (a new sample loading resets the view).
     view_changed = Signal(int, int, int)
+    # emitted on a single click on empty waveform space (not near any
+    # marker) once real audio is loaded - a plain toggle, no payload, since
+    # unlike SliceWaveformView's own click-to-preview (which previews
+    # whichever SLICE the click landed in) there's only ever one thing to
+    # preview here: the sample currently shown, played per its own loop
+    # settings. program_editor_window.py owns the actual SlicePreviewPlayer
+    # and decides start-vs-stop; this widget only ever asks.
+    preview_requested = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -215,6 +279,14 @@ class WaveformView(QWidget):
         self._frame_count = 0
         self._markers = {name: 0 for name in _MARKER_ORDER}
         self._dragging = None
+        # which marker (if any) the cursor is currently near enough to grab -
+        # updated on every mouseMoveEvent while NOT dragging (setMouseTracking
+        # above is what makes move events arrive with no button held at all),
+        # cleared on leaveEvent. Purely a paintEvent hint (brighter, solid
+        # line instead of dashed - see _marker_colors/paintEvent) for "if you
+        # click now, this is what you'll grab" - _markers_within_hit_radius
+        # is still the actual authority mousePressEvent itself consults.
+        self._hover_marker = None
         self._drag_anchor_x = 0.0
         self._drag_value = 0.0  # float accumulator - see mouseMoveEvent
         # click-to-cycle: which marker a press near this same stack of
@@ -232,6 +304,18 @@ class WaveformView(QWidget):
         # (QCursor.setPos() needs global, not widget-local, coordinates).
         self._fine_active = False
         self._warp_anchor_global = None
+        # safety net alongside hideEvent's own below: if the whole
+        # application loses focus mid-fine-drag (Cmd-Tab, a system dialog,
+        # a second monitor) with no mouseReleaseEvent/hideEvent ever
+        # arriving for this widget, the override cursor _enter_fine_drag
+        # set would otherwise stay stuck on QApplication's global cursor
+        # stack forever, masking every OTHER widget's own setCursor()
+        # app-wide - reported once as "this other widget's hover cursor
+        # is just gone", which wasn't a bug there at all, this is what was
+        # actually hiding it.
+        QApplication.instance().applicationStateChanged.connect(
+            self._on_application_state_changed
+        )
         self._loading = False
         self._zoom = _MIN_ZOOM
         self._view_start = 0
@@ -241,12 +325,83 @@ class WaveformView(QWidget):
         # waveform's loop-region tint, and excludes loop_start/loop_end from
         # hit-testing so they can't be dragged, when False.
         self._loop_enabled = True
+        # click-to-preview visual feedback (set_playhead/clear_playhead) -
+        # None whenever nothing is currently sounding
+        self._playhead_frame = None
+        # single-vs-double-click disambiguation, same mechanism/reasoning
+        # as SliceWaveformView's own _schedule_preview_click: Qt delivers
+        # press->release->doubleClick->release for a genuine double-click,
+        # so firing a preview on the bare first press would also play a
+        # stray blip every time a double-click loads a new sample. Deferred
+        # to the platform's own doubleClickInterval() instead, cancelled by
+        # mouseDoubleClickEvent if a second click actually follows in time.
+        self._preview_timer = QTimer(self)
+        self._preview_timer.setSingleShot(True)
+        self._preview_timer.timeout.connect(self.preview_requested.emit)
 
     def has_waveform(self):
         return self._samples is not None
 
     def frame_count(self):
         return self._frame_count
+
+    def samples_before(self, frame, count):
+        """Up to *count* samples ending at (and including) *frame* - the
+        audio leading INTO a loop point, for LoopJoinPreview (see
+        program_editor_window.py's Loop Preview card) - its own "loop out"
+        half. None if no audio has loaded yet at all, or if *frame* is
+        beyond what's loaded SO FAR while a progressive live capture is
+        still filling self._samples in (self._frame_count, set up front by
+        set_header, is the eventual total - still bigger than
+        len(self._samples) until the transfer actually finishes; see
+        begin_live_capture/append_live_samples) - nothing meaningful to
+        show until more of it arrives.
+
+        Once loading is actually complete (len(self._samples) ==
+        self._frame_count - set_waveform's own doing), an out-of-range
+        *frame* is clamped into [0, length - 1] instead of also returning
+        None. This is what actually fixes a real, reported bug: a sample
+        whose header claims one more frame than the SDS dump actually
+        delivered has its own loop_end land exactly one past the real
+        last frame - the Loop Preview card showed "No audio loaded" for
+        an otherwise fully-loaded sample until the user nudged a loop
+        point back into range and it "sprang to life". samples_after
+        below has the same fix for the same reason.
+        """
+        if not self._samples:
+            return None
+        length = len(self._samples)
+        if frame > length - 1 and length < self._frame_count:
+            return None
+        frame = max(0, min(length - 1, frame))
+        lo = max(0, frame - count + 1)
+        return self._samples[lo : frame + 1]
+
+    def samples_after(self, frame, count):
+        """Up to *count* samples starting at (and including) *frame* - the
+        audio leading OUT of a loop point, for LoopJoinPreview's own "loop
+        in" half. Same None-only-while-still-loading/clamp-once-complete
+        behaviour as samples_before above - see its own comment.
+        """
+        if not self._samples:
+            return None
+        length = len(self._samples)
+        if frame > length - 1 and length < self._frame_count:
+            return None
+        frame = max(0, min(length - 1, frame))
+        hi = min(length - 1, frame + count - 1)
+        return self._samples[frame : hi + 1]
+
+    # --- playhead (click-to-preview visual feedback) ------------------------
+
+    def set_playhead(self, frame):
+        self._playhead_frame = frame
+        self.update()
+
+    def clear_playhead(self):
+        if self._playhead_frame is not None:
+            self._playhead_frame = None
+            self.update()
 
     def markers(self):
         return dict(self._markers)
@@ -759,7 +914,31 @@ class WaveformView(QWidget):
         colors = self._marker_colors(palette)
         view_start = self._view_start
         view_length = self._view_length()
-        for name in _MARKER_ORDER:
+        # real hardware's own default header is start=0, end=last frame,
+        # loop_start=loop_end=end - all four markers stacked on the exact
+        # same frame, which used to be genuinely invisible: every marker
+        # drew the same full-height dashed line and a handle triangle at
+        # the same spot (the top), so three of the four markers were
+        # completely hidden behind whichever one _MARKER_ORDER happened to
+        # paint last, with nothing on screen to suggest they were even
+        # there. Reported directly - a real "why can't I see the loop
+        # markers" case, not a hit-testing bug (_markers_within_hit_radius/
+        # the click-to-cycle behaviour already handled the stacked case
+        # fine; only the PAINT side had nothing to show for it).
+        #
+        # Fixed by giving loop_start/loop_end a visually distinct anchor
+        # from start/end, always (not just when they happen to coincide) -
+        # both marker kinds draw the same full-height dashed line, but
+        # boundary markers get a handle triangle at the TOP while loop
+        # markers get one at the BOTTOM. Painting boundary markers first,
+        # THEN loop markers (regardless of _MARKER_ORDER's own start/
+        # loop_start/loop_end/end sequence, which stays as-is for
+        # push_marker/hit-testing tie-breaking) means a loop marker's
+        # handle is always drawn on top rather than getting painted over -
+        # so even fully stacked, the loop marker's own colour and handle
+        # remain visible at the bottom instead of disappearing behind
+        # "end"'s handle at the top.
+        for name in ("start", "end", "loop_start", "loop_end"):
             # no loop on the current sample's SPTYPE - see set_loop_enabled
             # - the loop markers don't just grey out, they don't draw at
             # all, same as they can't be dragged (_markers_within_hit_
@@ -772,19 +951,32 @@ class WaveformView(QWidget):
             if frame < view_start or frame > view_start + view_length - 1:
                 continue
             x = self._x_for(name)
-            pen = QPen(colors[name])
-            pen.setWidthF(1.5)
-            pen.setStyle(Qt.PenStyle.DashLine)
+            is_loop = name in ("loop_start", "loop_end")
+            # "you can grab this" feedback - active while actually being
+            # dragged too, not just hovered, so releasing without first
+            # moving the mouse again doesn't flash back to the dim/dashed
+            # look for one frame (mouseReleaseEvent sets _hover_marker to
+            # match for exactly this reason)
+            is_active = name == self._hover_marker or name == self._dragging
+            color = brighten_for_hover(colors[name], palette) if is_active else colors[name]
+            handle_size = _HANDLE_SIZE * 1.5 if is_active else _HANDLE_SIZE
+            pen = QPen(color)
+            pen.setWidthF(2.0 if is_active else 1.5)
+            pen.setStyle(Qt.PenStyle.SolidLine if is_active else Qt.PenStyle.DashLine)
             painter.setPen(pen)
             painter.drawLine(QPointF(x, 0), QPointF(x, self.height()))
-            painter.setBrush(colors[name])
+            painter.setBrush(color)
             painter.setPen(Qt.PenStyle.NoPen)
+            handle_y = self.height() if is_loop else 0
+            handle_tip_y = (
+                self.height() - handle_size * 1.6 if is_loop else handle_size * 1.6
+            )
             painter.drawPolygon(
                 QPolygonF(
                     [
-                        QPointF(x - _HANDLE_SIZE, 0),
-                        QPointF(x + _HANDLE_SIZE, 0),
-                        QPointF(x, _HANDLE_SIZE * 1.6),
+                        QPointF(x - handle_size, handle_y),
+                        QPointF(x + handle_size, handle_y),
+                        QPointF(x, handle_tip_y),
                     ]
                 )
             )
@@ -805,6 +997,23 @@ class WaveformView(QWidget):
                 Qt.AlignmentFlag.AlignCenter,
                 _LOADING_TEXT if self._loading else _PLACEHOLDER_TEXT,
             )
+
+        self._draw_playhead(painter, palette, view_start, view_length)
+
+    def _draw_playhead(self, painter, palette, view_start, view_length):
+        # drawn last, on top of everything else - a solid, undashed line
+        # (unlike every marker's own dashed line above), same visual
+        # language SliceWaveformView's own playhead uses, so "this is where
+        # playback currently is" never reads as just another marker
+        if self._playhead_frame is None:
+            return
+        if self._playhead_frame < view_start or self._playhead_frame > view_start + view_length - 1:
+            return  # scrolled/zoomed off screen - draw nothing rather than clamp to an edge
+        x = x_for_frame(self._playhead_frame, self.width(), view_start, view_length)
+        pen = QPen(QColor(palette["text_bright"]))
+        pen.setWidthF(2.0)
+        painter.setPen(pen)
+        painter.drawLine(QPointF(x, 0), QPointF(x, self.height()))
 
     def _markers_within_hit_radius(self, x):
         # every visible marker within _HIT_RADIUS_PX of x, closest first
@@ -841,109 +1050,193 @@ class WaveformView(QWidget):
         # here and passed the "is actually the placeholder state" guard at
         # all, before anything downstream (BridgeWorker, SamplerController)
         # ever gets involved.
-        if self._samples is None and not self._loading:
-            debug_log.get_logger().debug(
-                "WaveformView.mouseDoubleClickEvent: accepted, emitting load_requested"
-            )
-            self.load_requested.emit()
-        else:
-            debug_log.get_logger().debug(
-                "WaveformView.mouseDoubleClickEvent: ignored "
-                f"(has_waveform={self._samples is not None}, loading={self._loading})"
+        try:
+            if self._samples is None and not self._loading:
+                debug_log.get_logger().debug(
+                    "WaveformView.mouseDoubleClickEvent: accepted, emitting load_requested"
+                )
+                self.load_requested.emit()
+            else:
+                debug_log.get_logger().debug(
+                    "WaveformView.mouseDoubleClickEvent: ignored "
+                    f"(has_waveform={self._samples is not None}, loading={self._loading})"
+                )
+        except Exception:
+            # this whole widget's mouse handlers used to have no guard at
+            # all - an uncaught exception here is otherwise invisible in a
+            # packaged build with no attached console (same reasoning
+            # SliceWaveformView's own mouse handlers are already wrapped
+            # for). super()/_preview_timer.stop() below still need to run
+            # regardless (see their own ordering comment), so this catches
+            # only the guarded logic above, not the whole method.
+            debug_log.get_logger().error(
+                "WaveformView.mouseDoubleClickEvent: unexpected error",
+                exc_info=True,
             )
         super().mouseDoubleClickEvent(event)
+        # AFTER super(), not before: QWidget's own default
+        # mouseDoubleClickEvent implementation calls mousePressEvent() -
+        # which, for a double-click landing on empty waveform space, is
+        # exactly what just re-armed _preview_timer a second time (see
+        # mousePressEvent's own click-to-preview branch). Stopping it only
+        # BEFORE super() (the first, seemingly obvious place) gets
+        # silently undone by that re-entrant call - confirmed by a real
+        # test failure, not a hypothetical - so a genuine double-click
+        # would otherwise still fire a stray preview shortly afterward
+        # despite "cancelling" it a moment earlier.
+        self._preview_timer.stop()
 
     def mousePressEvent(self, event):
-        # frame_count, not samples - dragging must work in header-only
-        # mode (markers known, no audio/envelope yet) too
-        if self._frame_count == 0:
-            return
-        x = event.position().x()
-        candidates = self._markers_within_hit_radius(x)
-        if candidates and candidates == self._press_cycle_candidates:
-            # same stack of overlapping markers as last press (order-
-            # sensitive on purpose - candidates is always sorted the same
-            # way for the same stack, so this only matches a genuine
-            # repeat click) - advance to the NEXT one in rotation instead
-            # of grabbing the same closest one every time, which is what
-            # made overlapping markers hard to separate again in the
-            # first place (see AGENTS.md)
-            self._press_cycle_index = (self._press_cycle_index + 1) % len(candidates)
-        else:
-            self._press_cycle_candidates = candidates
-            self._press_cycle_index = 0
-        self._dragging = candidates[self._press_cycle_index] if candidates else None
-        if self._dragging is not None:
-            self._drag_anchor_x = x
-            self._drag_value = float(self._markers[self._dragging])
+        # wrapped end to end (same reasoning as mouseDoubleClickEvent above,
+        # and SliceWaveformView's own equivalent handlers) - an uncaught
+        # exception from a Qt mouse handler is otherwise invisible in a
+        # packaged build with no attached console
+        try:
+            # frame_count, not samples - dragging must work in header-only
+            # mode (markers known, no audio/envelope yet) too
+            if self._frame_count == 0:
+                return
+            x = event.position().x()
+            candidates = self._markers_within_hit_radius(x)
+            if not candidates:
+                # empty space, no marker grabbed - click-to-preview territory
+                # (see preview_requested's own docstring). Deferred via
+                # _preview_timer rather than fired immediately, same
+                # single-vs-double-click disambiguation SliceWaveformView's
+                # own _schedule_preview_click uses - see __init__'s comment.
+                # Needs real audio (has_waveform()), not just a header - there
+                # would be nothing to actually play otherwise.
+                if event.button() == Qt.MouseButton.LeftButton and self.has_waveform():
+                    self._preview_timer.start(QApplication.doubleClickInterval())
+                # matches the original (pre-click-to-preview) behaviour: an
+                # empty-space click resets the overlapping-marker click-cycle,
+                # so a later click back on the same stack restarts from the
+                # closest marker rather than resuming wherever it left off
+                self._press_cycle_candidates = []
+                self._press_cycle_index = 0
+                self._dragging = None
+                return
+            if candidates == self._press_cycle_candidates:
+                # same stack of overlapping markers as last press (order-
+                # sensitive on purpose - candidates is always sorted the same
+                # way for the same stack, so this only matches a genuine
+                # repeat click) - advance to the NEXT one in rotation instead
+                # of grabbing the same closest one every time, which is what
+                # made overlapping markers hard to separate again in the
+                # first place (see AGENTS.md)
+                self._press_cycle_index = (self._press_cycle_index + 1) % len(candidates)
+            else:
+                self._press_cycle_candidates = candidates
+                self._press_cycle_index = 0
+            self._dragging = candidates[self._press_cycle_index] if candidates else None
+            if self._dragging is not None:
+                self._drag_anchor_x = x
+                self._drag_value = float(self._markers[self._dragging])
+        except Exception:
+            debug_log.get_logger().error(
+                "WaveformView.mousePressEvent: unexpected error", exc_info=True
+            )
+            self._dragging = None
 
     def mouseMoveEvent(self, event):
-        if self._dragging is None:
-            return
-        fine = bool(event.modifiers() & Qt.KeyboardModifier.ShiftModifier)
-
-        if fine and not self._fine_active:
-            self._enter_fine_drag()
-        elif not fine and self._fine_active:
-            self._exit_fine_drag()
-
-        if self._fine_active:
-            # the cursor gets warped back to _warp_anchor_global at the end
-            # of every move event below, so THIS event's global position is
-            # already the delta since the last one - not since drag start.
-            # The warp itself generates its own synthetic move event on
-            # most platforms, landing exactly on the anchor - skip it
-            # rather than read it as a zero-length real move (harmless
-            # either way since dx would be 0, but skips the redundant
-            # clamp/repaint/signal-emit work)
-            current = event.globalPosition()
-            anchor = self._warp_anchor_global
-            if (round(current.x()), round(current.y())) == (
-                round(anchor.x()),
-                round(anchor.y()),
-            ):
+        try:
+            if self._dragging is None:
+                # not dragging - just update the hover hint (see
+                # _hover_marker's own comment). Closest candidate within the
+                # same hit radius a click would actually grab, same helper
+                # mousePressEvent uses, so hovering always agrees with what
+                # clicking would do.
+                candidates = self._markers_within_hit_radius(event.position().x())
+                hovered = candidates[0] if candidates else None
+                if hovered != self._hover_marker:
+                    self._hover_marker = hovered
+                    self.update()
                 return
-            dx = (current.x() - anchor.x()) / _FINE_DRAG_DIVISOR
-            QCursor.setPos(anchor)  # QCursor.pos() is already a QPoint
-        else:
-            x = event.position().x()
-            dx = x - self._drag_anchor_x
-            self._drag_anchor_x = x
+            fine = bool(event.modifiers() & Qt.KeyboardModifier.ShiftModifier)
 
-        view_length = self._view_length()
-        frames_per_px = (view_length - 1) / max(1, self.width() - 1)
-        # a float accumulator (_drag_value) carries the sub-frame remainder
-        # between events instead of rounding it away each time, so fine
-        # dragging doesn't feel "sticky" or drift off the real cursor
-        # motion over a long drag
-        self._drag_value += dx * frames_per_px
-        frame = int(round(self._drag_value))
-        self._markers = self._push_marker(self._dragging, frame)
-        # ONLY resync the accumulator when *frame* itself just got clamped
-        # to the whole-sample bounds (push_marker's own first line) -
-        # never unconditionally. push_marker itself never stops this
-        # marker short of *frame* for any OTHER reason - it pushes
-        # neighbours along instead, never the dragged marker itself - so
-        # self._markers[self._dragging] == frame in every non-clamped
-        # case, and resyncing to it there would silently throw away
-        # _drag_value's sub-frame remainder on literally every move event.
-        # That's fatal for a slow drag specifically: a smooth, unhurried
-        # mouse move is delivered as many small per-event deltas, each
-        # individually well under half a frame at typical zoom, so each
-        # one's contribution would round right back down to the SAME
-        # frame and vanish before the next event could add to it - the
-        # marker would barely move no matter how far the real cursor
-        # travelled, while a fast flick (fewer, larger per-event deltas,
-        # each already past the rounding threshold on its own) tracked
-        # fine. Only clamp/resync at the true ends, where running the
-        # accumulator past the bound would otherwise make the marker
-        # "stick" through a dead zone before it starts moving back on a
-        # reversed drag.
-        clamped_frame = max(0, min(self._frame_count - 1, frame))
-        if clamped_frame != frame:
-            self._drag_value = clamped_frame
-        self.update()
-        self._emit_markers_changed()
+            if fine and not self._fine_active:
+                self._enter_fine_drag()
+            elif not fine and self._fine_active:
+                self._exit_fine_drag()
+
+            if self._fine_active and _MACOS:
+                # no warp on macOS - see _MACOS's own comment. Just a plain,
+                # larger-divisor delta off the same anchor a non-fine drag
+                # would use.
+                x = event.position().x()
+                dx = (x - self._drag_anchor_x) / _FINE_DRAG_DIVISOR_MACOS
+                self._drag_anchor_x = x
+            elif self._fine_active:
+                # the cursor gets warped back to _warp_anchor_global at the end
+                # of every move event below, so THIS event's global position is
+                # already the delta since the last one - not since drag start.
+                # The warp itself generates its own synthetic move event on
+                # most platforms, landing exactly on the anchor - skip it
+                # rather than read it as a zero-length real move (harmless
+                # either way since dx would be 0, but skips the redundant
+                # clamp/repaint/signal-emit work)
+                current = event.globalPosition()
+                anchor = self._warp_anchor_global
+                if (round(current.x()), round(current.y())) == (
+                    round(anchor.x()),
+                    round(anchor.y()),
+                ):
+                    return
+                dx = (current.x() - anchor.x()) / _FINE_DRAG_DIVISOR
+                QCursor.setPos(anchor)  # QCursor.pos() is already a QPoint
+            else:
+                x = event.position().x()
+                dx = x - self._drag_anchor_x
+                self._drag_anchor_x = x
+
+            view_length = self._view_length()
+            frames_per_px = (view_length - 1) / max(1, self.width() - 1)
+            # a float accumulator (_drag_value) carries the sub-frame remainder
+            # between events instead of rounding it away each time, so fine
+            # dragging doesn't feel "sticky" or drift off the real cursor
+            # motion over a long drag
+            self._drag_value += dx * frames_per_px
+            frame = int(round(self._drag_value))
+            self._markers = self._push_marker(self._dragging, frame)
+            # ONLY resync the accumulator when *frame* itself just got clamped
+            # to the whole-sample bounds (push_marker's own first line) -
+            # never unconditionally. push_marker itself never stops this
+            # marker short of *frame* for any OTHER reason - it pushes
+            # neighbours along instead, never the dragged marker itself - so
+            # self._markers[self._dragging] == frame in every non-clamped
+            # case, and resyncing to it there would silently throw away
+            # _drag_value's sub-frame remainder on literally every move event.
+            # That's fatal for a slow drag specifically: a smooth, unhurried
+            # mouse move is delivered as many small per-event deltas, each
+            # individually well under half a frame at typical zoom, so each
+            # one's contribution would round right back down to the SAME
+            # frame and vanish before the next event could add to it - the
+            # marker would barely move no matter how far the real cursor
+            # travelled, while a fast flick (fewer, larger per-event deltas,
+            # each already past the rounding threshold on its own) tracked
+            # fine. Only clamp/resync at the true ends, where running the
+            # accumulator past the bound would otherwise make the marker
+            # "stick" through a dead zone before it starts moving back on a
+            # reversed drag.
+            clamped_frame = max(0, min(self._frame_count - 1, frame))
+            if clamped_frame != frame:
+                self._drag_value = clamped_frame
+            self.update()
+            self._emit_markers_changed()
+        except Exception:
+            # a stuck self._dragging (or a stuck fine-drag cursor override)
+            # would otherwise keep swallowing every further mouse move on
+            # this widget with no visible cause - logging AND clearing both
+            # here means at worst a drag ends early, not a widget that
+            # silently stops responding to the mouse for the rest of the
+            # session (same reasoning SliceWaveformView's own mouseMoveEvent
+            # except clause already uses)
+            debug_log.get_logger().error(
+                "WaveformView.mouseMoveEvent: unexpected error", exc_info=True
+            )
+            if self._fine_active:
+                self._exit_fine_drag()
+            self._dragging = None
 
     def _enter_fine_drag(self):
         # Shift held mid-drag: the same physical mouse movement now covers
@@ -955,6 +1248,9 @@ class WaveformView(QWidget):
         # the user can keep moving the mouse in one direction indefinitely
         # instead of running out of screen and stalling at the edge.
         self._fine_active = True
+        if _MACOS:
+            # no cursor warp/hide on macOS - see _MACOS's own comment
+            return
         self._warp_anchor_global = QCursor.pos()
         QApplication.setOverrideCursor(Qt.CursorShape.BlankCursor)
 
@@ -963,20 +1259,49 @@ class WaveformView(QWidget):
         # _enter_fine_drag's setOverrideCursor so the app is never left
         # with a permanently invisible cursor
         self._fine_active = False
+        if _MACOS:
+            return
         self._warp_anchor_global = None
         QApplication.restoreOverrideCursor()
 
     def mouseReleaseEvent(self, event):
         if self._dragging is None:
             return
-        if self._fine_active:
-            self._exit_fine_drag()
-        which = self._dragging
-        self._dragging = None
-        m = self._markers
-        self.marker_committed.emit(
-            which, m["start"], m["loop_start"], m["loop_end"], m["end"]
-        )
+        try:
+            if self._fine_active:
+                self._exit_fine_drag()
+            which = self._dragging
+            self._dragging = None
+            # the just-released marker is still (most likely) right under the
+            # cursor - reflects that immediately rather than waiting for the
+            # next mouseMoveEvent to notice, which would otherwise leave the
+            # marker looking neither dragged nor hovered for one repaint
+            self._hover_marker = which
+            self.update()
+            m = self._markers
+            self.marker_committed.emit(
+                which, m["start"], m["loop_start"], m["loop_end"], m["end"]
+            )
+        except Exception:
+            # self._dragging is already cleared above regardless of this -
+            # logged so a release-time failure (e.g. marker_committed's own
+            # listener raising) doesn't just vanish, same reasoning as this
+            # widget's other mouse handlers above
+            debug_log.get_logger().error(
+                "WaveformView.mouseReleaseEvent: unexpected error", exc_info=True
+            )
+            if self._fine_active:
+                self._exit_fine_drag()
+            self._dragging = None
+
+    def leaveEvent(self, event):
+        # the mouse left the widget entirely - mouseMoveEvent won't fire
+        # again to naturally clear a stale hover highlight, so this is the
+        # only place that can
+        if self._hover_marker is not None:
+            self._hover_marker = None
+            self.update()
+        super().leaveEvent(event)
 
     def hideEvent(self, event):
         # safety net: if this widget is hidden mid-drag (switching tabs,
@@ -984,7 +1309,14 @@ class WaveformView(QWidget):
         # sure the app isn't left with a stuck invisible cursor
         if self._fine_active:
             self._exit_fine_drag()
+        self._preview_timer.stop()
         super().hideEvent(event)
+
+    def _on_application_state_changed(self, state):
+        # the OTHER safety net - see __init__'s own comment on why this
+        # exists alongside hideEvent above
+        if state != Qt.ApplicationState.ApplicationActive and self._fine_active:
+            self._exit_fine_drag()
 
     def wheelEvent(self, event):
         # frame_count, not samples - zoom/pan are useful in header-only

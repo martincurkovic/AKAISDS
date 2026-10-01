@@ -17,13 +17,13 @@
 
 Connect your sampler to your MIDI interface. The MIDI output of your sampler should be connected to your interface's MIDI input, and vice versa.
 
-**2. Open MIDI Settings**
+**2. Configure MIDI Settings**
 
 Select your MIDI Input/Output ports and choose your sampler type (Akai or Generic SDS). Select your SysEx channel (0 is the default for almost all MIDI hardware).
 
-You can test your MIDI setup in the **MIDI Hardware Test** tab. If you're having connectivity issues, check your MIDI connections to ensure they are not reversed. If you still don't see your sampler listed in the MIDI Hardware Test tab, see [MIDI Troubleshooting & Diagnostics](#midi-troubleshooting--diagnostics) for details.
+You can test your MIDI setup in the **Troubleshooting** tab. If you're having connectivity issues, check your MIDI connections to ensure they are not reversed. If you still don't see your sampler listed in the MIDI Hardware Test tab, see [MIDI Troubleshooting & Diagnostics](#midi-troubleshooting--diagnostics) for details.
 
-![MIDI Settings](screenshots/midi-settings.png "MIDI Settings")
+![Audio MIDI Settings](screenshots/settings-audio-midi.png "Audio MIDI Settings")
 
 ---
 
@@ -108,11 +108,15 @@ The list of samples will appear on the left. You can right click a sample to del
 
 To load the sample's waveform, double click on the placeholder window. Loading of a sample's waveform is very slow (same speed as sending and receiving samples over SDS). It will also freeze the interface until loading is complete.
 
-Loop points and sample start/edit markers can be edited visually without needing to load the sample's waveform. Hold down *Shift* when dragging sample markers around for more precision. Alternatively you can type a value in to the boxes below the waveform.
+Loop points and sample start/edit markers can be edited visually without needing to load the sample's waveform. Hold down *Shift* when dragging sample markers around for more precision. Alternatively you can type a value in to the boxes below the waveform. The audio can also be previewed (including the loop points) by clicking once on the waveform. The audio preview is an approximation, not an exact 1:1 replica of an Akai sampler.
 
 Trimming, reversing, fading in and out, and normalising a sample are all done by the host computer. The waveform must be loaded to the computer, and the edited sample is then sent back to the Sampler via SDS (slow) *in place* - it overwrites the sample you are editing, and there is no undo button, you have been warned.
 
 Duplicating a sample also happens on the host computer and goes over SDS the same way, but it's not destructive - it sends the loaded audio to the sampler under a new name of your choosing, leaving the original completely untouched.
+
+Slicing a sample works by loading the sample to the host computer first, performing the slice operation and then exporting the sliced audio back to the sampler. A new program with the slices loaded as consecutive keygroups can also be generated, same as ReCycle style slicing.
+
+![Slice Editor](screenshots/slice-editor-manual.png)
 
 ### Refreshing Sampler Data
 
@@ -129,7 +133,7 @@ There are 2 MIDI tests in the AKAISDS Settings window.
 
 ### MIDI Hardware Test
 
-![MIDI Hardware Test](screenshots/midi-hardware-test.png)
+![MIDI Troubleshooting](screenshots/settings-troubleshooting.png)
 
 Use the Hardware test to check if your MIDI sampler is detected by your interface.
 
@@ -138,8 +142,6 @@ To use the hardware test, connect a MIDI cable from your MIDI interface's output
 Click the *Run Hardware Test* button and if successful, your sampler's details should appear in the window.
 
 ### MIDI Loopback Test
-
-![MIDI Loopback Test](screenshots/midi-interface-test-running.png)
 
 Use the Loopback Test to check if your MIDI interface can support MIDI SysEx traffic. Not all interfaces have full SysEx support.
 
@@ -150,4 +152,3 @@ Loopback test results will be shown in a dialog box.
 ![MIDI Interface Test Results](screenshots/midi-interface-test-results.png)
 
 There is a table in the README of the GitHub repository of interfaces that have been tested using this method. If your interface isn't listed there, I encourage you to help out the community by uploading your results (either by submitting a Pull Request or by getting in touch directly).
-

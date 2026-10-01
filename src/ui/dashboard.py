@@ -1,4 +1,5 @@
 import os
+import tempfile
 from PySide6.QtWidgets import (
     QCheckBox,
     QFileDialog,
@@ -16,14 +17,16 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QFont, QFontMetrics
-from core import dropped_files, sds_encoder, program_editor_bridge, debug_log
+from core import dropped_files, sample_slicing, sds_encoder, program_editor_bridge, debug_log
 from ui.qt_helpers import load_colored_pixmap
 from ui.settings_dialog import MidiSettingsDialog
 from ui.drop_list_widget import DropListWidget
 from ui.program_editor_window import ProgramEditorWindow
 from ui.sample_settings_dialog import SampleSettingsDialog
 from ui.sample_info_dialog import SampleInfoDialog
+from ui.slice_editor_window import SliceEditorWindow
 from ui.ascii_logo import LOGO
+from ui import tooltips
 
 SETTINGS_ROLE = Qt.ItemDataRole.UserRole + 1
 
@@ -107,17 +110,17 @@ class TransferDashboard(QWidget):
         top_bar.addWidget(self.lbl_logo)
 
         top_bar.addStretch()
-        self.btn_settings = QPushButton("\u2699 MIDI Settings")
+        self.btn_settings = QPushButton("\u2699 Settings...")
         self.btn_settings.clicked.connect(self.open_settings_dialog)
 
-        self.btn_open_editor = QPushButton("Open Editor")
+        self.btn_open_editor = QPushButton("Open Editor...")
         self.btn_open_editor.clicked.connect(self.open_program_editor)
         # only enabled once there's actually somewhere for the editor to
         # connect TO - both a MIDI input and output port selected, and the
         # sampler type set to "Akai Sampler" (program_editor_bridge.connect()
         # needs Akai-specific SysEx extensions the Generic SDS protocol
         # family doesn't have) - see _update_open_editor_enabled, called
-        # here and after the MIDI Settings dialog closes (open_settings_
+        # here and after the Settings dialog closes (open_settings_
         # dialog), the same two points _update_device_type_ui already
         # hooks for its own device-type-driven enabling.
         settings_editor_column = QVBoxLayout()
@@ -126,8 +129,10 @@ class TransferDashboard(QWidget):
         settings_editor_column.addWidget(self.btn_open_editor)
         # same width, stacked - both requested directly rather than the
         # original side-by-side layout; sized to whichever button's own
-        # text is wider ("MIDI Settings", not "Open Editor") so neither
-        # one gets clipped
+        # text is wider so neither one gets clipped (computed from each
+        # button's own current sizeHint rather than hardcoded, so renaming
+        # either button's text - as already happened once - can't silently
+        # go stale)
         button_width = max(
             self.btn_settings.sizeHint().width(),
             self.btn_open_editor.sizeHint().width(),
@@ -313,9 +318,20 @@ class TransferDashboard(QWidget):
         # public (no leading underscore) since main_window.py's "Program
         # Editor" menu action calls this directly, same as its other
         # menu-wired dashboard methods
+        if self.sampler_controller.is_transfer_busy():
+            # belt-and-braces alongside btn_open_editor/editor_action being
+            # disabled while busy (see _update_open_editor_enabled) - a
+            # second S3kBridge/BridgeWorker connecting to the sampler while
+            # a send/receive is still in flight on the shared MIDI
+            # connection is the exact dual-connection race AGENTS.md's
+            # "Follow-up, first real-hardware session" section documents
+            self.status_bar.showMessage(
+                "Can't open the Program Editor - a MIDI transfer is already in progress"
+            )
+            return
         main_window = self.window()
         try:
-            bridge = program_editor_bridge.connect()
+            bridge = program_editor_bridge.connect(self.midi_manager)
         except Exception as e:
             # connect() failures happen before LoggingBridge ever wraps
             # anything, so without this they're invisible to
@@ -335,6 +351,14 @@ class TransferDashboard(QWidget):
         main_window.hide()
 
     def open_settings_dialog(self):
+        if self.sampler_controller.is_transfer_busy():
+            # same reasoning as open_program_editor's own guard - the
+            # Settings dialog can reopen midi_manager's ports outright,
+            # which would pull them out from under an in-flight transfer
+            self.status_bar.showMessage(
+                "Can't open Settings - a MIDI transfer is already in progress"
+            )
+            return
         dialog = MidiSettingsDialog(self.midi_manager, self.sampler_controller, self)
         dialog.exec()
         self._update_device_type_ui()
@@ -410,7 +434,7 @@ class TransferDashboard(QWidget):
         # doesn't have at all). Called at the two points the dashboard's
         # own knowledge of this state can change: construction (whatever
         # was restored from app_config before this widget was built - see
-        # __init__'s own comment) and after the MIDI Settings dialog closes
+        # __init__'s own comment) and after the Settings dialog closes
         # (open_settings_dialog) - same two hooks _update_device_type_ui
         # already uses for its own device-type-driven enabling.
         # register_menu_actions' polling timer mirrors this onto the
@@ -420,16 +444,27 @@ class TransferDashboard(QWidget):
             self.midi_manager.output_name
         )
         is_akai = self.sampler_controller.device_type == "akai"
-        self.btn_open_editor.setEnabled(has_ports and is_akai)
-        if has_ports and is_akai:
+        # a MIDI transfer in progress (started from here, or from the
+        # Program Editor sharing this same sampler_controller) locks out
+        # BOTH windows that could open a second thing on the wire - see
+        # open_program_editor/open_settings_dialog's own matching guards,
+        # which this only mirrors visually (disabling a button/action
+        # doesn't stop a direct call, hence the guards existing there too)
+        busy = self.sampler_controller.is_transfer_busy()
+        self.btn_settings.setEnabled(not busy)
+        self.btn_settings.setToolTip(
+            tooltips.BUSY_BLOCKS_OTHER_WINDOWS if busy else ""
+        )
+        self.btn_open_editor.setEnabled(has_ports and is_akai and not busy)
+        if busy:
+            self.btn_open_editor.setToolTip(tooltips.BUSY_BLOCKS_OTHER_WINDOWS)
+        elif has_ports and is_akai:
             self.btn_open_editor.setToolTip("")
         elif not has_ports:
-            self.btn_open_editor.setToolTip(
-                "Select both a MIDI Input and MIDI Output in MIDI Settings first"
-            )
+            self.btn_open_editor.setToolTip(tooltips.OPEN_EDITOR_NEEDS_MIDI_PORTS)
         else:
             self.btn_open_editor.setToolTip(
-                'Set Sampler Type to "Akai Sampler" in MIDI Settings first'
+                tooltips.OPEN_EDITOR_NEEDS_AKAI_DEVICE_TYPE
             )
 
     def _update_device_type_ui(self):
@@ -529,8 +564,17 @@ class TransferDashboard(QWidget):
             bit_depth=current_settings["bit_depth"],
             sample_rate=current_settings["sample_rate"],
             mono=current_settings["mono"],
+            show_slice_button=True,
         )
-        if dialog.exec():
+        accepted = dialog.exec()
+        if dialog.slice_requested:
+            # jumps to the Slice Editor instead of saving anything from
+            # this dialog - whatever's in its fields right now was never
+            # meant to be committed (see SampleSettingsDialog._request_
+            # slice_editor's own comment)
+            self._open_slice_editor(item, edit_field)
+            return
+        if accepted:
             settings = dialog.get_settings()
             edit_field.setText(settings["name"])
             # QLineEdit only recomputes its horizontal scroll offset lazily,
@@ -553,6 +597,271 @@ class TransferDashboard(QWidget):
             row_widget = self.list_local.itemWidget(item)
             filepath = item.data(Qt.ItemDataRole.UserRole)
             self._refresh_row_indicators(row_widget, filepath, new_settings)
+
+    def _open_slice_editor(self, item, edit_field):
+        # brings the Slice Editor (ui/slice_editor_window.py) - previously
+        # only reachable from the Program Editor's Samples tab, hardware-
+        # bound and Akai-only - to the Transfer Dashboard's own local
+        # queue instead, so a file can be chopped into one-shot slices
+        # BEFORE it's ever sent anywhere. Works for both Akai and Generic
+        # SDS targets identically, since nothing here talks to a sampler
+        # at all - see _export_slices_to_queue below for why there's no
+        # device-type branching anywhere in this path.
+        #
+        # Stereo: the waveform/marker editing and click-to-preview are
+        # deliberately never made stereo-aware - a slice boundary is just
+        # a frame index, identical for both channels since they're time-
+        # aligned, so SliceEditorWindow only ever sees/plays the left
+        # channel (read_wav_channels()[0], same value read_wav_samples()
+        # would have given). The right channel (if any) is read here too
+        # and only ever touched again in _export below, at the point
+        # sliced audio actually gets written to disk - unlike the Program
+        # Editor's own Slice Editor use, which is genuinely mono-only
+        # (Akai hardware has no such thing as a stereo resident sample -
+        # see AGENTS.md), a queued LOCAL file can be real stereo, and this
+        # app's existing Send path already treats it as one (sends a
+        # -L/-R pair - see sds_encoder.read_wav_channels/
+        # sampler_controller.build_stereo_channel_name) - dropping the
+        # right channel here without at least trying to preserve it would
+        # be a real, silent loss of audio, not just a simplification.
+        filepath = item.data(Qt.ItemDataRole.UserRole)
+        try:
+            channels, framerate = sds_encoder.read_wav_channels(filepath)
+        except Exception as e:
+            debug_log.get_logger().error(
+                f"TransferDashboard: couldn't load {filepath!r} for slicing",
+                exc_info=True,
+            )
+            self.status_bar.showMessage(
+                f"Couldn't open Slice Editor - couldn't read the audio: {e}"
+            )
+            return
+
+        samples = channels[0]
+        right_channel = channels[1] if len(channels) == 2 else None
+
+        sample_name = edit_field.text().strip() or "SLICE"
+
+        def _existing_names():
+            # collision-check against every OTHER queued row's own display
+            # name - nothing's resident on a sampler yet, so there's no
+            # hardware sample list to check against the way
+            # ProgramEditorWindow._open_slice_editor's own
+            # existing_names_provider does
+            names = []
+            for i in range(self.list_local.count()):
+                other_item = self.list_local.item(i)
+                if other_item is item:
+                    continue
+                other_widget = self.list_local.itemWidget(other_item)
+                other_edit = other_widget.findChild(QLineEdit) if other_widget else None
+                if other_edit is not None:
+                    names.append(other_edit.text().strip())
+            return names
+
+        # assigned right below - _export only ever runs later, from a user
+        # click inside dialog itself, so by the time it's actually called
+        # `dialog` is always already set (a plain forward reference within
+        # this same closure, not a race)
+        dialog = None
+
+        def _export(
+            names,
+            slices,
+            slice_framerate,
+            bit_depth,
+            sample_rate,
+            spitch,
+            stuno,
+            shlto,
+            progress_callback,
+            status_callback,
+            busy_callback=None,
+        ):
+            # spitch/stuno/shlto are Akai program-header concepts
+            # (SliceEditorWindow's shared export_callback contract always
+            # forwards them) with no equivalent for a queued file that
+            # hasn't been sent to any sampler yet - accepted positionally,
+            # unused. busy_callback (ProgramEditorWindow._export_slices' own
+            # indeterminate-progress marker for its post-send hardware
+            # verify) is accepted for the same "shared contract" reason but
+            # never called - this export never leaves the local queue, so
+            # there's no hardware round-trip to mark indeterminate.
+            right_slices = None
+            if right_channel is not None:
+                # the exact same start/end/markers that produced `slices`
+                # (the left channel's own sliced buffers) just above, read
+                # live off the still-open dialog - see sample_slicing.
+                # slice_samples's own contract; this can't disagree with
+                # `slices` since nothing else runs between SliceEditorWindow
+                # computing one and calling this callback with the other
+                right_slices = sample_slicing.slice_samples(
+                    right_channel,
+                    dialog.waveform.start(),
+                    dialog.waveform.end(),
+                    dialog.waveform.slice_markers(),
+                )
+            return self._export_slices_to_queue(
+                item,
+                names,
+                slices,
+                slice_framerate,
+                bit_depth,
+                sample_rate,
+                progress_callback,
+                status_callback,
+                right_slices=right_slices,
+            )
+
+        dialog = SliceEditorWindow(
+            self,
+            sample_name,
+            samples,
+            framerate,
+            60,
+            0,
+            0,
+            _existing_names,
+            _export,
+            demo_mode=False,
+            export_confirm_message=lambda slice_count, names: (
+                f'Replace "{sample_name}" in the queue with {slice_count} '
+                f'slice{"s" if slice_count != 1 else ""} '
+                f'("{names[0]}".."{names[-1]}")? This cannot be undone.'
+            ),
+        )
+        dialog.exec()
+
+    def _remove_rows(self, items):
+        for row_item in items:
+            row_widget = self.list_local.itemWidget(row_item)
+            edit_field = row_widget.findChild(QLineEdit) if row_widget else None
+            self._remove_local_row(row_item, edit_field)
+
+    def _export_slices_to_queue(
+        self,
+        item,
+        names,
+        slices,
+        framerate,
+        bit_depth,
+        sample_rate,
+        progress_callback,
+        status_callback,
+        right_slices=None,
+    ):
+        # the Transfer Dashboard's own export_callback for SliceEditorWindow
+        # - see ProgramEditorWindow._export_slices for the hardware-sending
+        # counterpart this mirrors. Nothing here talks to any sampler:
+        # this operates purely on the local queue, replacing the row being
+        # sliced with N new rows, one per slice - each becomes an ordinary
+        # queued file from this point on, sent later (to an Akai OR a
+        # Generic SDS device, identically) through the exact same
+        # send_queued_samples path as any other queued file.
+        #
+        # Deliberately no equivalent of ProgramEditorWindow._export_slices'
+        # own SPTYPE=3 "force one-shot" header write here - that's a
+        # resident-Akai-sample-header concept with no meaning for a file
+        # that hasn't been sent anywhere yet, so there's nothing to
+        # disable for a Generic SDS target either: every file this app
+        # ever sends is already unconditionally encoded as NO_LOOP at the
+        # base SDS dump-header level regardless of device type (see
+        # sds_encoder.build_dump_header) - one-shot is already the only
+        # thing a plain queued-file send has ever produced, for both.
+        #
+        # right_slices (see _open_slice_editor) mirrors `slices` 1:1 when
+        # the source file was stereo - each pair gets written as one real
+        # interleaved stereo WAV (write_wav_file_stereo) rather than two
+        # separate mono files; the existing Send path already knows how to
+        # split a stereo queued file into a -L/-R pair on its own (see
+        # sds_encoder.read_wav_channels/build_stereo_channel_name), so
+        # there's nothing else stereo-specific to do here.
+        logger = debug_log.get_logger()
+        total = len(names)
+        temp_paths = []
+        new_items = []
+        try:
+            for index, name in enumerate(names):
+                status_callback(f"Writing slice {index + 1}/{total}...")
+                fd, temp_path = tempfile.mkstemp(
+                    suffix=".wav", prefix="akaisds_slice_"
+                )
+                os.close(fd)
+                temp_paths.append(temp_path)
+                if right_slices is not None:
+                    sds_encoder.write_wav_file_stereo(
+                        temp_path,
+                        slices[index],
+                        right_slices[index],
+                        framerate,
+                        bit_depth=16,
+                    )
+                else:
+                    sds_encoder.write_wav_file(
+                        temp_path, slices[index], framerate, bit_depth=16
+                    )
+
+                if not self.create_local_row(temp_path):
+                    self._remove_rows(new_items)
+                    return False, (
+                        f"Couldn't add slice {index + 1}/{total} to the queue "
+                        "- see the status bar message above for why"
+                    )
+                new_item = self.list_local.item(self.list_local.count() - 1)
+                new_row_widget = self.list_local.itemWidget(new_item)
+                new_edit_field = (
+                    new_row_widget.findChild(QLineEdit) if new_row_widget else None
+                )
+                if new_edit_field is not None:
+                    new_edit_field.setText(name)
+                    new_edit_field.setCursorPosition(0)
+                # carries the dialog's own chosen bit depth/sample rate
+                # through as this row's transmission override -
+                # create_local_row otherwise defaults every new row to the
+                # dashboard's global settings, which would silently
+                # discard the choice made in the Slice Editor's own Bit
+                # depth/Sample rate combos. mono is forced False for a
+                # stereo source specifically - falling through to the
+                # dashboard's own global mono default here would risk
+                # silently sending just-preserved right-channel audio as
+                # mono anyway the moment that default happens to be True
+                new_settings = {
+                    "bit_depth": bit_depth,
+                    "sample_rate": sample_rate,
+                    "mono": False if right_slices is not None else self._global_mono,
+                }
+                new_item.setData(SETTINGS_ROLE, new_settings)
+                if new_row_widget is not None:
+                    self._refresh_row_indicators(
+                        new_row_widget,
+                        new_item.data(Qt.ItemDataRole.UserRole),
+                        new_settings,
+                    )
+                new_items.append(new_item)
+                progress_callback(index + 1, total)
+
+            # every slice landed - now safe to remove the original row it
+            # replaces
+            self._remove_rows([item])
+            return True, (
+                f"Replaced with {total} slice{'s' if total != 1 else ''}: "
+                f"{names[0]}..{names[-1]}"
+            )
+        except Exception:
+            logger.error("_export_slices_to_queue: unexpected error", exc_info=True)
+            # roll back whatever slices already landed rather than leaving
+            # a half-sliced queue with the original row still present too
+            self._remove_rows(new_items)
+            return False, (
+                f"Slicing failed - unexpected error, see {debug_log.LOG_PATH} "
+                "for details"
+            )
+        finally:
+            for path in temp_paths:
+                try:
+                    os.remove(path)
+                except OSError:
+                    pass
 
     def send_queued_samples(self):
         entries = []
@@ -1017,6 +1326,13 @@ class TransferDashboard(QWidget):
         self._sync_menu_actions()
 
     def _sync_menu_actions(self):
+        # re-derive btn_open_editor/btn_settings' own enabled state every
+        # tick rather than only at the handful of explicit call sites
+        # (construction, Settings closing, transfer start/finish) - a
+        # transfer can also start/stop from the Program Editor side (it
+        # shares this same sampler_controller), which has no reason to
+        # know this dashboard even exists, let alone poke its buttons
+        self._update_open_editor_enabled()
         for button, action in self._enabled_sync_map.items():
             action.setEnabled(button.isEnabled())
         for button, action in self._text_sync_map.items():  # type: ignore

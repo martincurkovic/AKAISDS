@@ -12,6 +12,7 @@ import s3k.messages as s3k_messages
 import s3k.params as s3k_params
 from PySide6.QtCore import Qt, QObject, QTimer, Signal
 from PySide6.QtWidgets import QApplication, QLabel, QWidget
+from ui.loop_preview_view import HALF_WINDOW_FRAMES
 from ui.program_editor_window import ProgramEditorWindow, _LOOP_TYPE_OPTIONS
 from core.program_editor_bridge import MULTI_PART_COUNT
 
@@ -44,11 +45,20 @@ class FakeBridge:
                 # _LOOP_LENGTH_FIXED_POINT_SCALE - so 3000 FRAMES is raw
                 # 3000 * 65536
                 "LLNGTH1": 3000 * 65536, "SLNGTH": 10000, "SSRATE": 44100,
+                # SBANDW - native engine bandwidth (0=22050Hz, 1=44100Hz,
+                # see core/akai_sysex.py's _NATIVE_RATES/
+                # baseline_semitones_for_bandwidth) - 1 here since SSRATE
+                # above is already the 44100 native rate, matching it
+                "SBANDW": 1,
                 "SPTYPE": 0, "SPITCH": 60, "SHLTO": -12,
                 # STUNO is a plain signed 1/256-semitone raw value (same
                 # scale as VTUNO) - see _sample_tune_offset_to_semitones -
                 # so 512 is +2.00 semitones
                 "STUNO": 512,
+                # LDWELL1 - loop hold/dwell time, ms. A real dwell value
+                # (not 0/9999) so a test can catch it being confused with
+                # Off/Hold.
+                "LDWELL1": 1500,
             }
             for i in range(len(self._samples))
         }
@@ -71,6 +81,9 @@ class FakeBridge:
 
     def program_list(self):
         return self._programs
+
+    def delete_keygroup(self, program_index, keygroup_index):
+        del self._keygroups[program_index][keygroup_index]
 
     # -- create program/keygroup (PDATA/KDATA) -------------------------------
     #
@@ -188,7 +201,12 @@ class FakeBridge:
         if param.name == "PRGNUM":
             return 42
         if param.name == "PANPOS":
-            return self._pan[program_index]
+            # .get(..., 0), not [program_index] - a program CREATED by a
+            # test (see test_create_program_from_slices_*) has no entry
+            # here; real hardware would have cloned this field from the
+            # template same as every other program-level field, this fake
+            # just never modeled that for a field nothing else here needs
+            return self._pan.get(program_index, 0)
         if param.name == "PRLOUD":
             return 65
         if param.name == "V_LOUD":
@@ -324,6 +342,13 @@ def editor(qapp):
     editor._worker.wait()
 
 
+class _FakeLeftClick:
+    # Knob.mouseDoubleClickEvent only calls .button() - same minimal
+    # duck-typed fake tests/test_knob.py's own _FakeMouseEvent uses
+    def button(self):
+        return Qt.MouseButton.LeftButton
+
+
 def _keygroup_row_text(editor, row):
     # keygroup rows are a swatch + QLabel row widget (program_editor_window's
     # _add_keygroup_row), not plain text items - the item's own .text() is
@@ -347,6 +372,7 @@ class FakeSamplerController(QObject):
     transfer_progress = Signal(int, int)
     transfer_finished = Signal(bool)
     file_transferred = Signal(str)
+    status_changed = Signal(str)
 
     def __init__(self, bridge):
         super().__init__()
@@ -358,32 +384,51 @@ class FakeSamplerController(QObject):
     def is_transfer_busy(self):
         return self.busy
 
+    def cancel_transfer(self):
+        # only ever exercised by SliceEditorWindow's Ctrl+. shortcut being
+        # constructible against this fake (cancel_callback=sampler_
+        # controller.cancel_transfer in _open_slice_editor) - no test here
+        # actually fires the shortcut, so nothing more than "exists" is
+        # needed
+        pass
+
     def send_file_queue(self, file_entries, channel=None, starting_sample_number=None):
-        entry = file_entries[0]
-        # read the sent WAV's own samples now, while the file still
-        # exists - _perform_sample_edit_real deletes its temp file in a
-        # finally: block as soon as the whole operation returns, well
-        # before a test gets a chance to inspect it afterwards
+        # iterates the WHOLE batch, same as the real SamplerController's
+        # own _file_queue draining (see AGENTS.md/_export_slices' own
+        # comment on why the Slice Editor sends every slice in one
+        # send_file_queue call instead of looping this once per file) -
+        # only the batch's LAST file's path is what transfer_finished
+        # carries forward to _finish_send below, mirroring how the real
+        # one only fires transfer_finished once the whole queue drains
         from core import sds_encoder
 
-        sent_samples, sent_rate = sds_encoder.read_wav_samples(entry["filepath"])
-        self.sent_entries.append({**entry, "samples": list(sent_samples), "rate": sent_rate})
         result = self.next_result
-        if result:
-            new_index = len(self._bridge._samples)
-            self._bridge._samples.append(entry["name"])
-            self._bridge.sample_headers[new_index] = {
-                "SSTART": 0, "SMPEND": 0, "LOOPAT1": 0, "LLNGTH1": 0,
-                "SLNGTH": 0, "SSRATE": 44100, "SPTYPE": 0, "SPITCH": 60,
-                "SHLTO": 0, "STUNO": 0,
-            }
+        last_filepath = None
+        for entry in file_entries:
+            # read the sent WAV's own samples now, while the file still
+            # exists - the real caller deletes its temp file in a
+            # finally: block as soon as the whole operation returns, well
+            # before a test gets a chance to inspect it afterwards
+            sent_samples, sent_rate = sds_encoder.read_wav_samples(entry["filepath"])
+            self.sent_entries.append(
+                {**entry, "samples": list(sent_samples), "rate": sent_rate}
+            )
+            last_filepath = entry["filepath"]
+            if result:
+                new_index = len(self._bridge._samples)
+                self._bridge._samples.append(entry["name"])
+                self._bridge.sample_headers[new_index] = {
+                    "SSTART": 0, "SMPEND": 0, "LOOPAT1": 0, "LLNGTH1": 0,
+                    "SLNGTH": 0, "SSRATE": 44100, "SBANDW": 1, "SPTYPE": 0,
+                    "SPITCH": 60, "SHLTO": 0, "STUNO": 0, "LDWELL1": 0,
+                }
         # deferred, not synchronous - _perform_sample_edit_real connects
         # its _wait_for_any_signal listener AFTER calling send_file_queue,
         # same as the real (fully async) SamplerController; emitting
         # synchronously here would fire before that connection exists and
         # the wait would hang forever, same as the real one would if it
         # somehow replied before the caller finished wiring up
-        QTimer.singleShot(0, lambda: self._finish_send(result, entry["filepath"]))
+        QTimer.singleShot(0, lambda: self._finish_send(result, last_filepath))
         return True
 
     def _finish_send(self, result, filepath):
@@ -491,6 +536,39 @@ def test_a_new_busy_true_during_the_hide_grace_period_cancels_the_hide(editor):
 
     assert not editor._busy_hide_timer.isActive()
     assert not editor._loading_progress.isHidden()  # never actually hid
+
+
+def test_stale_busy_false_is_ignored_while_the_worker_is_actually_busy_again(
+    editor, monkeypatch
+):
+    # regression test for a real, confirmed UI bug: the progress bar could
+    # show for one frame (or not at all) on the editor's own FIRST load
+    # and then vanish before the load was actually done - the exact
+    # symptom reported, worst on first open specifically. __init__'s own
+    # submit_program_list() chains into _on_programs_loaded, which submits
+    # sample_list/multi_parts from WITHIN its own handler. programs_loaded
+    # and that first job's OWN busy_changed(False) are both emitted from
+    # the worker thread and queued for GUI-thread delivery in that order -
+    # but _on_programs_loaded's submit_*() calls run ON the GUI thread, so
+    # THEIR busy_changed(True) fires synchronously (a same-thread direct
+    # connection needs no queuing) and is handled immediately, jumping
+    # ahead of the already-queued-but-undelivered busy_changed(False).
+    # That stale False then arrives here, after the worker is genuinely
+    # busy again, and used to start the hide countdown anyway -
+    # _busy_hide_timer (150ms) reliably beat the already-running
+    # _busy_show_timer (200ms) and cancelled it outright, hiding the bar
+    # before it ever had a chance to show. is_idle() is stubbed rather
+    # than racing a real background thread to land a submit_*() call
+    # before this check runs, to keep this deterministic.
+    editor._on_worker_busy_changed(True)
+    editor._busy_show_timer.timeout.emit()
+    assert not editor._loading_progress.isHidden()
+
+    monkeypatch.setattr(editor._worker, "is_idle", lambda: False)
+    editor._on_worker_busy_changed(False)  # the stale False
+
+    assert not editor._busy_hide_timer.isActive()
+    assert not editor._loading_progress.isHidden()  # never hid
 
 
 def test_refreshing_from_hardware_reports_one_continuous_busy_span(editor, qapp):
@@ -1330,6 +1408,43 @@ def test_switching_to_samples_tab_selects_first_sample_only_once(editor, qapp):
     assert editor.sample_list_widget.currentRow() == 2
 
 
+# --- &View menu's zoom actions are only meaningful on the Samples tab ------
+# they act on self.waveform_view, which only the Samples tab shows - see
+# _update_zoom_actions_enabled. Disabling a QAction disables its keyboard
+# shortcut too (plain Qt behaviour), so these tests only need to check
+# isEnabled() - not that Ctrl+=/Ctrl+-/Ctrl+0 themselves are inert, which
+# would just be re-testing Qt's own guarantee.
+
+
+def test_zoom_actions_disabled_by_default_on_the_programs_tab(editor):
+    # the editor fixture opens on the Programs tab, not Samples (see
+    # __init__'s own "Multis stays the first tab... open on Programs
+    # instead" comment) - this exercises the INITIAL state set right after
+    # the actions are constructed, not just a later tab-change update
+    assert editor.main_tabs.currentIndex() != editor._samples_tab_index
+    assert editor.zoom_in_action.isEnabled() is False
+    assert editor.zoom_out_action.isEnabled() is False
+    assert editor.zoom_fit_action.isEnabled() is False
+
+
+def test_zoom_actions_enabled_on_switching_to_samples_tab(editor):
+    editor.main_tabs.setCurrentIndex(editor._samples_tab_index)
+    assert editor.zoom_in_action.isEnabled() is True
+    assert editor.zoom_out_action.isEnabled() is True
+    assert editor.zoom_fit_action.isEnabled() is True
+
+
+def test_zoom_actions_disabled_again_on_switching_away_from_samples_tab(editor):
+    editor.main_tabs.setCurrentIndex(editor._samples_tab_index)
+    assert editor.zoom_in_action.isEnabled() is True
+
+    editor.main_tabs.setCurrentIndex(0)  # Multis
+
+    assert editor.zoom_in_action.isEnabled() is False
+    assert editor.zoom_out_action.isEnabled() is False
+    assert editor.zoom_fit_action.isEnabled() is False
+
+
 def test_load_sample_waveform_preserves_header_only_edits(editor, qapp, monkeypatch):
     # regression test for the exact bug this whole feature is built to
     # avoid: editing a marker while only the header is loaded must survive
@@ -1467,6 +1582,38 @@ def test_load_sample_waveform_progressively_fills_the_envelope_in_demo_mode(
     # pinning this down catches a regression back to "load everything at
     # once and call append_live_samples (if at all) exactly once"
     assert len(calls) >= 6
+    assert sum(calls) == len(editor._sample_waveform_cache[0]["samples"])
+    assert editor.waveform_view.has_waveform() is True
+
+
+def test_akaisds_demo_instant_skips_the_pacing_loop_entirely(editor, qapp, monkeypatch):
+    # AKAISDS_DEMO_INSTANT opts out of the realistic-transfer-speed pacing
+    # above entirely - for someone actually iterating on UI work (the
+    # Slice Editor above all) who wants every sample to load in one step
+    # rather than waiting out a simulated transfer each time they select
+    # one. Deliberately does NOT cut _DEMO_MS_PER_WORD down like the
+    # sibling test above - if instant mode still consulted it at all, a
+    # real (uncut) value here would make this test itself take real
+    # wall-clock seconds, which it must not.
+    monkeypatch.setenv("AKAISDS_DEMO_SAMPLER", "1")
+    monkeypatch.setenv("AKAISDS_DEMO_INSTANT", "1")
+
+    editor.sample_list_widget.setCurrentRow(0)
+    editor._worker.wait_until_idle()
+    _pump_until(qapp, lambda: editor.waveform_view.has_header())
+
+    calls = []
+    real_append = editor.waveform_view.append_live_samples
+
+    def _recording_append(chunk):
+        calls.append(len(chunk))
+        real_append(chunk)
+
+    monkeypatch.setattr(editor.waveform_view, "append_live_samples", _recording_append)
+
+    editor._load_sample_waveform()
+
+    assert len(calls) == 1  # one step, not the usual >= 6
     assert sum(calls) == len(editor._sample_waveform_cache[0]["samples"])
     assert editor.waveform_view.has_waveform() is True
 
@@ -1832,6 +1979,89 @@ def test_sample_loop_tune_knob_range_is_plus_minus_fifty(editor):
     assert editor.sample_loop_tune_knob.maximum() == 50
 
 
+def test_selecting_a_sample_shows_loop_hold_from_header(editor, qapp):
+    # LDWELL1=1500 in FakeBridge - a real dwell value, not Off(0)/Hold(9999),
+    # so this can't pass by accident if the field got wired to a sentinel
+    editor.sample_list_widget.setCurrentRow(0)
+    editor._worker.wait_until_idle()
+    _pump_until(qapp, lambda: editor.waveform_view.has_header())
+
+    assert editor.sample_loop_hold_knob.isEnabled() is True
+    assert editor.sample_loop_hold_knob.value() == 1500
+    assert editor.sample_loop_hold_value_label.text() == "1500 ms"
+
+
+def test_nothing_selected_disables_loop_hold(editor, qapp):
+    editor.sample_list_widget.setCurrentRow(0)
+    editor._worker.wait_until_idle()
+    _pump_until(qapp, lambda: editor.waveform_view.has_header())
+
+    editor.sample_list_widget.setCurrentRow(-1)
+
+    assert editor.sample_loop_hold_knob.isEnabled() is False
+
+
+def test_changing_sample_loop_hold_writes_ldwell1(editor, qapp):
+    editor.sample_list_widget.setCurrentRow(0)
+    editor._worker.wait_until_idle()
+    _pump_until(qapp, lambda: editor.waveform_view.has_header())
+    bridge = editor._bridge
+
+    editor.sample_loop_hold_knob.setValue(250)
+    editor.sample_loop_hold_knob.sliderReleased.emit()
+    editor._worker.wait_until_idle()
+    _pump_until(qapp, lambda: bridge.set_parameter_calls)
+
+    assert ("LDWELL1", 0, 250, 0) in bridge.set_parameter_calls
+    assert editor._sample_waveform_cache[0]["ldwell1"] == 250
+    assert editor.sample_loop_hold_value_label.text() == "250 ms"
+
+
+def test_sample_loop_hold_knob_range_and_default_is_hold(editor):
+    assert editor.sample_loop_hold_knob.minimum() == 0
+    assert editor.sample_loop_hold_knob.maximum() == 9999
+    assert editor.sample_loop_hold_knob.defaultValue() == 9999
+
+
+def test_double_clicking_sample_loop_hold_sets_hold_and_writes_it(editor, qapp):
+    editor.sample_list_widget.setCurrentRow(0)
+    editor._worker.wait_until_idle()
+    _pump_until(qapp, lambda: editor.waveform_view.has_header())
+    bridge = editor._bridge
+    assert editor.sample_loop_hold_knob.value() == 1500  # not already Hold
+
+    editor.sample_loop_hold_knob.mouseDoubleClickEvent(_FakeLeftClick())
+    assert editor.sample_loop_hold_knob.value() == 9999
+    assert editor.sample_loop_hold_value_label.text() == "Hold"
+    editor._flush_write("LDWELL1")
+    editor._worker.wait_until_idle()
+    _pump_until(qapp, lambda: bridge.set_parameter_calls)
+
+    assert ("LDWELL1", 0, 9999, 0) in bridge.set_parameter_calls
+
+
+def test_typing_a_value_into_sample_loop_hold_knob_writes_ldwell1(editor, qapp):
+    # click-to-type entry (Knob._begin_type_edit/_finish_type_edit) - see
+    # tests/test_knob.py for the mechanism's own unit tests. This just
+    # confirms the Samples tab's write-commit wiring reacts the same way
+    # to a typed commit as it does to a drag-release.
+    editor.sample_list_widget.setCurrentRow(0)
+    editor._worker.wait_until_idle()
+    _pump_until(qapp, lambda: editor.waveform_view.has_header())
+    bridge = editor._bridge
+    knob = editor.sample_loop_hold_knob
+
+    knob._begin_type_edit("3")
+    knob._type_edit.setText("3500")
+    knob._type_edit.returnPressed.emit()
+    editor._worker.wait_until_idle()
+    _pump_until(qapp, lambda: bridge.set_parameter_calls)
+
+    assert knob.value() == 3500
+    assert ("LDWELL1", 0, 3500, 0) in bridge.set_parameter_calls
+    assert editor.sample_loop_hold_value_label.text() == "3500 ms"
+
+
 def test_sample_loop_tune_value_label_updates_as_the_knob_turns(editor, qapp):
     # regression test for a real bug: _build_multi_part_knob (unlike
     # _build_knob_column) doesn't wire its own value label - the caller
@@ -1948,7 +2178,7 @@ def test_confirm_rename_sample_updates_list_zone_combos_and_writes_shname(
     editor._worker.wait_until_idle()
     _pump_until(qapp, lambda: bridge.set_parameter_calls)
 
-    assert editor.sample_list_widget.item(0).text() == "RENAMED"
+    assert editor._sample_name_at_row(0) == "RENAMED"
     assert ("SHNAME", 0, "RENAMED", 0) in bridge.set_parameter_calls
     # index 0 is the blank "-" placeholder (see _on_samples_loaded) - sample
     # 0's own entry is index 1, same offset _update_multi_program_combo_names
@@ -1969,7 +2199,7 @@ def test_confirm_rename_sample_does_nothing_when_dialog_cancelled(
     editor._confirm_rename_sample()
 
     assert bridge.set_parameter_calls == []
-    assert editor.sample_list_widget.item(0).text() == "SQUARE"
+    assert editor._sample_name_at_row(0) == "SQUARE"
 
 
 def test_confirm_delete_sample_submits_delete_on_confirm(editor, qapp, monkeypatch):
@@ -1990,10 +2220,7 @@ def test_confirm_delete_sample_submits_delete_on_confirm(editor, qapp, monkeypat
     assert bridge.sample_list() == ["SAWTOOTH", "PULSE", "SINE"]
     # a full reload, not a targeted removal (see _on_sample_deleted) -
     # the list widget itself should reflect the same shrunk roster
-    assert [
-        editor.sample_list_widget.item(i).text()
-        for i in range(editor.sample_list_widget.count())
-    ] == ["SAWTOOTH", "PULSE", "SINE"]
+    assert editor._sample_list == ["SAWTOOTH", "PULSE", "SINE"]
 
 
 def test_confirm_delete_sample_does_nothing_when_declined(editor, qapp, monkeypatch):
@@ -2045,7 +2272,7 @@ def _stub_demo_audio(editor, monkeypatch, samples, framerate=44100):
     )
 
 
-def test_trim_reverse_fade_and_normalize_buttons_disabled_until_audio_loaded(
+def test_trim_reverse_fade_normalize_and_filter_buttons_disabled_until_audio_loaded(
     editor, qapp, monkeypatch
 ):
     editor.sample_list_widget.setCurrentRow(0)
@@ -2056,6 +2283,7 @@ def test_trim_reverse_fade_and_normalize_buttons_disabled_until_audio_loaded(
     assert editor.reverse_sample_button.isEnabled() is False
     assert editor.fade_sample_button.isEnabled() is False
     assert editor.normalize_sample_button.isEnabled() is False
+    assert editor.filter_sample_button.isEnabled() is False
 
     monkeypatch.setenv("AKAISDS_DEMO_SAMPLER", "1")
     _stub_demo_audio(editor, monkeypatch, [0] * 500)
@@ -2065,6 +2293,7 @@ def test_trim_reverse_fade_and_normalize_buttons_disabled_until_audio_loaded(
     assert editor.reverse_sample_button.isEnabled() is True
     assert editor.fade_sample_button.isEnabled() is True
     assert editor.normalize_sample_button.isEnabled() is True
+    assert editor.filter_sample_button.isEnabled() is True
 
     editor.sample_list_widget.setCurrentRow(-1)
 
@@ -2072,6 +2301,7 @@ def test_trim_reverse_fade_and_normalize_buttons_disabled_until_audio_loaded(
     assert editor.reverse_sample_button.isEnabled() is False
     assert editor.fade_sample_button.isEnabled() is False
     assert editor.normalize_sample_button.isEnabled() is False
+    assert editor.filter_sample_button.isEnabled() is False
 
 
 def test_confirm_trim_sample_does_nothing_when_markers_cover_whole_sample(
@@ -2551,8 +2781,498 @@ def _select_sample_with_full_audio(editor, qapp, sample_index, samples, markers)
     )
     editor._sample_waveform_cache[sample_index] = {
         "samples": samples, "framerate": 44100, "frame_count": len(samples),
-        "sptype": 0, "spitch": 60, **markers,
+        "sptype": 0, "spitch": 60, "shlto": 0, "stuno": 0, "sbandw": 1,
+        **markers,
     }
+
+
+# --- Samples tab: click-to-preview (WaveformView.preview_requested) --------
+# real audio output isn't exercised here at all - the SlicePreviewPlayer
+# instance's own play()/play_loop()/stop()/is_playing() are monkeypatched
+# with a lightweight recorder/state stub (miniaudio and a real device are
+# already covered directly in tests/test_audio_preview.py), so these tests
+# are purely about _on_waveform_preview_requested's OWN dispatch logic:
+# reconciling SPTYPE and Loop Hold/Dwell (which aren't gated on each other
+# in the UI - see that method's own comment) into the right play()/
+# play_loop() call, and the toggle-to-stop behaviour.
+
+
+def _fake_preview_player(editor, monkeypatch):
+    calls = []
+    state = {"playing": False}
+
+    def fake_play(*args, **kwargs):
+        calls.append(("play", args, kwargs))
+        state["playing"] = True
+
+    def fake_play_loop(*args, **kwargs):
+        calls.append(("play_loop", args, kwargs))
+        state["playing"] = True
+
+    def fake_stop():
+        calls.append(("stop", (), {}))
+        state["playing"] = False
+
+    def fake_update_loop_points(*args, **kwargs):
+        calls.append(("update_loop_points", args, kwargs))
+
+    monkeypatch.setattr(editor._sample_preview_player, "play", fake_play)
+    monkeypatch.setattr(editor._sample_preview_player, "play_loop", fake_play_loop)
+    monkeypatch.setattr(editor._sample_preview_player, "stop", fake_stop)
+    monkeypatch.setattr(
+        editor._sample_preview_player, "update_loop_points", fake_update_loop_points
+    )
+    monkeypatch.setattr(
+        editor._sample_preview_player, "is_playing", lambda: state["playing"]
+    )
+    return calls
+
+
+def test_preview_requested_with_nothing_loaded_does_nothing(editor, qapp, monkeypatch):
+    calls = _fake_preview_player(editor, monkeypatch)
+    editor.sample_list_widget.setCurrentRow(-1)
+    editor._on_waveform_preview_requested()
+    assert calls == []
+
+
+def test_preview_requested_one_shot_sptype_plays_once_regardless_of_dwell(
+    editor, qapp, monkeypatch
+):
+    calls = _fake_preview_player(editor, monkeypatch)
+    samples = [0] * 10000
+    markers = {"start": 0, "loop_start": 2500, "loop_end": 7500, "end": 9999}
+    _select_sample_with_full_audio(editor, qapp, 0, samples, markers)
+    editor.sample_loop_type_combo.setCurrentIndex(3)  # "One-shot"
+    editor.sample_loop_hold_knob.setValue(500)  # would otherwise mean "loop"
+    calls.clear()  # discard the stop() from selecting the sample above
+
+    editor._on_waveform_preview_requested()
+
+    assert calls == [
+        ("play", (samples, 0, 9999, 44100), {"pitch_shift_semitones": 0.0})
+    ]
+
+
+def test_preview_requested_looping_sptype_with_a_finite_dwell_plays_loop(
+    editor, qapp, monkeypatch
+):
+    calls = _fake_preview_player(editor, monkeypatch)
+    samples = [0] * 10000
+    markers = {"start": 0, "loop_start": 2500, "loop_end": 7500, "end": 9999}
+    _select_sample_with_full_audio(editor, qapp, 0, samples, markers)
+    editor.sample_loop_type_combo.setCurrentIndex(1)  # "Loop til release"
+    editor.sample_loop_hold_knob.setValue(500)  # 500ms dwell
+    editor.sample_loop_tune_knob.setValue(0)  # not what this test covers
+    calls.clear()  # discard the stop() from selecting the sample above
+
+    editor._on_waveform_preview_requested()
+
+    assert calls == [
+        (
+            "play_loop",
+            (samples, 0, 2500, 7500, 9999, 44100),
+            {
+                "dwell_ms": 500,
+                "loop_tune_cents": 0,
+                "pitch_shift_semitones": 0.0,
+            },
+        )
+    ]
+
+
+def test_preview_requested_looping_sptype_with_hold_loops_forever(
+    editor, qapp, monkeypatch
+):
+    from ui.program_editor_window import _LOOP_HOLD_HOLD_VALUE
+
+    calls = _fake_preview_player(editor, monkeypatch)
+    samples = [0] * 10000
+    markers = {"start": 0, "loop_start": 2500, "loop_end": 7500, "end": 9999}
+    _select_sample_with_full_audio(editor, qapp, 0, samples, markers)
+    editor.sample_loop_type_combo.setCurrentIndex(0)  # "Loop in release"
+    editor.sample_loop_hold_knob.setValue(_LOOP_HOLD_HOLD_VALUE)  # "Hold"
+    editor.sample_loop_tune_knob.setValue(0)  # not what this test covers
+    calls.clear()  # discard the stop() from selecting the sample above
+
+    editor._on_waveform_preview_requested()
+
+    assert calls == [
+        (
+            "play_loop",
+            (samples, 0, 2500, 7500, 9999, 44100),
+            {
+                "dwell_ms": None,
+                "loop_tune_cents": 0,
+                "pitch_shift_semitones": 0.0,
+            },
+        )
+    ]
+
+
+def test_preview_requested_looping_sptype_with_dwell_off_plays_once(
+    editor, qapp, monkeypatch
+):
+    # confirmed with the user directly: dwell "Off" means no loop at all,
+    # regardless of what SPTYPE nominally says - the two controls aren't
+    # gated on each other anywhere in the UI (see
+    # _update_sample_meta_controls)
+    calls = _fake_preview_player(editor, monkeypatch)
+    samples = [0] * 10000
+    markers = {"start": 0, "loop_start": 2500, "loop_end": 7500, "end": 9999}
+    _select_sample_with_full_audio(editor, qapp, 0, samples, markers)
+    editor.sample_loop_type_combo.setCurrentIndex(0)  # "Loop in release"
+    editor.sample_loop_hold_knob.setValue(0)  # "Off"
+    calls.clear()  # discard the stop() from selecting the sample above
+
+    editor._on_waveform_preview_requested()
+
+    assert calls == [
+        ("play", (samples, 0, 9999, 44100), {"pitch_shift_semitones": 0.0})
+    ]
+
+
+def test_preview_requested_applies_stuno_as_a_pitch_shift(editor, qapp, monkeypatch):
+    # STUNO ("Tune") has to shift the WHOLE preview to actually match the
+    # sampler - previously ignored entirely, so a sample tuned away from
+    # its baseline played back at the wrong pitch in-app vs. on real
+    # hardware. framerate here (44100) is already a native engine rate, so
+    # compute_bandwidth_and_tuning's own baseline compensation is 0 -
+    # entry["stuno"]'s whole +2.00 semitones is a real, audible offset the
+    # user actually dialled in, not hardware-engine-speed compensation.
+    calls = _fake_preview_player(editor, monkeypatch)
+    samples = [0] * 10000
+    markers = {"start": 0, "loop_start": 2500, "loop_end": 7500, "end": 9999}
+    _select_sample_with_full_audio(editor, qapp, 0, samples, markers)
+    editor._sample_waveform_cache[0]["stuno"] = (
+        editor._semitones_to_sample_tune_offset(2.0)
+    )
+    editor.sample_loop_type_combo.setCurrentIndex(3)  # "One-shot"
+    calls.clear()  # discard the stop() from selecting the sample above
+
+    editor._on_waveform_preview_requested()
+
+    assert calls == [
+        ("play", (samples, 0, 9999, 44100), {"pitch_shift_semitones": 2.0})
+    ]
+
+
+def test_preview_requested_transposes_from_root_key_to_c3(editor, qapp, monkeypatch):
+    # the hardware's own front-panel PLAY button previews at a fixed note
+    # (C3 - raw MIDI 60, this app's own convention) regardless of the
+    # sample's own root key - see _PREVIEW_ROOT_NOTE's own comment. A
+    # sample rooted at A1 (raw 21, s3k.params' own lowest SPITCH value)
+    # should play back transposed UP by 39 semitones (60 - 21) to land on
+    # C3, on top of (not instead of) STUNO's own correction.
+    calls = _fake_preview_player(editor, monkeypatch)
+    samples = [0] * 10000
+    markers = {"start": 0, "loop_start": 2500, "loop_end": 7500, "end": 9999}
+    _select_sample_with_full_audio(editor, qapp, 0, samples, markers)
+    editor._sample_waveform_cache[0]["spitch"] = 21
+    editor.sample_loop_type_combo.setCurrentIndex(3)  # "One-shot"
+    calls.clear()  # discard the stop() from selecting the sample above
+
+    editor._on_waveform_preview_requested()
+
+    assert calls == [
+        ("play", (samples, 0, 9999, 44100), {"pitch_shift_semitones": 39.0})
+    ]
+
+
+def test_preview_requested_uses_real_sbandw_not_nearest_bucket_guess(
+    editor, qapp, monkeypatch
+):
+    # regression test for a real reported bug: a sample sent at any bit
+    # depth OTHER than 16 goes through the generic/universal MIDI SDS
+    # path (sampler_controller._start_unit), which has no STUNO/SBANDW
+    # fields at all - the SAMPLER ITSELF derives its own internal
+    # SBANDW/STUNO from the incoming dump. Confirmed against real
+    # hardware this does NOT pick the nearest bandwidth bucket the way
+    # compute_bandwidth_and_tuning would: an 11025 Hz sample sent at
+    # 8-bit or 12-bit reads back STUNO -24.00 (bandwidth=1/44100Hz, NOT
+    # the nearer bandwidth=0/22050Hz that same rate gets at 16-bit,
+    # which reads back -12.00). Re-deriving "nearest bucket to
+    # framerate" at preview time (as compute_bandwidth_and_tuning does)
+    # is only correct for a sample THIS app itself sent via the 16-bit
+    # path - here it would wrongly compute baseline=-12, leaving an
+    # uncancelled -12 semitones (an audible octave) rather than 0.
+    # Reading the real entry["sbandw"] instead is what makes this
+    # cancel to 0 correctly regardless of which path actually produced
+    # the STUNO value.
+    calls = _fake_preview_player(editor, monkeypatch)
+    samples = [0] * 10000
+    markers = {"start": 0, "loop_start": 2500, "loop_end": 7500, "end": 9999}
+    _select_sample_with_full_audio(editor, qapp, 0, samples, markers)
+    editor._sample_waveform_cache[0]["framerate"] = 11025
+    editor._sample_waveform_cache[0]["sbandw"] = 1
+    editor._sample_waveform_cache[0]["stuno"] = (
+        editor._semitones_to_sample_tune_offset(-24.0)
+    )
+    editor.sample_loop_type_combo.setCurrentIndex(3)  # "One-shot"
+    calls.clear()  # discard the stop() from selecting the sample above
+
+    editor._on_waveform_preview_requested()
+
+    assert calls == [
+        ("play", (samples, 0, 9999, 11025), {"pitch_shift_semitones": 0.0})
+    ]
+
+
+def test_preview_requested_while_playing_stops_instead_of_restarting(
+    editor, qapp, monkeypatch
+):
+    calls = _fake_preview_player(editor, monkeypatch)
+    samples = [0] * 10000
+    markers = {"start": 0, "loop_start": 2500, "loop_end": 7500, "end": 9999}
+    _select_sample_with_full_audio(editor, qapp, 0, samples, markers)
+    editor.sample_loop_type_combo.setCurrentIndex(3)  # "One-shot"
+    calls.clear()  # discard the stop() from selecting the sample above
+
+    editor._on_waveform_preview_requested()  # starts
+    editor._on_waveform_preview_requested()  # click again - stops
+
+    assert [c[0] for c in calls] == ["play", "stop"]
+
+
+def test_selecting_a_different_sample_stops_a_playing_preview(editor, qapp, monkeypatch):
+    calls = _fake_preview_player(editor, monkeypatch)
+    samples = [0] * 10000
+    markers = {"start": 0, "loop_start": 2500, "loop_end": 7500, "end": 9999}
+    _select_sample_with_full_audio(editor, qapp, 0, samples, markers)
+    editor.sample_loop_type_combo.setCurrentIndex(3)
+    editor._on_waveform_preview_requested()
+    assert editor._sample_preview_player.is_playing() is True
+
+    _select_sample_with_full_audio(editor, qapp, 1, samples, markers)
+
+    assert editor._sample_preview_player.is_playing() is False
+    assert calls[-1][0] == "stop"
+
+
+def test_switching_main_tabs_stops_a_playing_preview(editor, qapp, monkeypatch):
+    calls = _fake_preview_player(editor, monkeypatch)
+    samples = [0] * 10000
+    markers = {"start": 0, "loop_start": 2500, "loop_end": 7500, "end": 9999}
+    _select_sample_with_full_audio(editor, qapp, 0, samples, markers)
+    editor.sample_loop_type_combo.setCurrentIndex(3)
+    editor._on_waveform_preview_requested()
+    assert editor._sample_preview_player.is_playing() is True
+
+    editor.main_tabs.setCurrentIndex(0)  # Multis tab
+
+    assert editor._sample_preview_player.is_playing() is False
+    assert calls[-1][0] == "stop"
+
+
+# --- live loop-point dragging feeds the in-progress preview ---------------
+
+
+def test_dragging_a_loop_marker_live_updates_an_in_progress_preview(
+    editor, qapp, monkeypatch
+):
+    calls = _fake_preview_player(editor, monkeypatch)
+    samples = [0] * 10000
+    markers = {"start": 0, "loop_start": 2500, "loop_end": 7500, "end": 9999}
+    _select_sample_with_full_audio(editor, qapp, 0, samples, markers)
+    editor.sample_loop_type_combo.setCurrentIndex(0)  # "Loop in release"
+    editor.sample_loop_hold_knob.setValue(500)
+    editor._on_waveform_preview_requested()  # start a loop preview
+    assert editor._sample_preview_player.is_playing() is True
+    calls.clear()  # discard the play_loop() call from starting it above
+
+    editor.waveform_view.markers_changed.emit(0, 3000, 7500, 9999)  # dragged loop_start
+
+    assert ("update_loop_points", (3000, 7500), {}) in calls
+
+
+def test_dragging_start_or_end_alone_still_forwards_current_loop_points(
+    editor, qapp, monkeypatch
+):
+    # markers_changed fires for ANY marker moving, not just the loop ones
+    # - update_loop_points() itself is a no-op unless a loop preview is
+    # actually running and the bounds genuinely changed (see its own
+    # docstring), so this handler forwards unconditionally (while a
+    # preview IS running) rather than trying to filter by which marker
+    # moved
+    calls = _fake_preview_player(editor, monkeypatch)
+    samples = [0] * 10000
+    markers = {"start": 0, "loop_start": 2500, "loop_end": 7500, "end": 9999}
+    _select_sample_with_full_audio(editor, qapp, 0, samples, markers)
+    editor.sample_loop_type_combo.setCurrentIndex(0)  # "Loop in release"
+    editor.sample_loop_hold_knob.setValue(500)
+    editor._on_waveform_preview_requested()  # start a loop preview
+    calls.clear()
+
+    editor.waveform_view.markers_changed.emit(500, 2500, 7500, 9999)  # dragged start
+
+    assert calls == [("update_loop_points", (2500, 7500), {})]
+
+
+def test_markers_changed_with_no_preview_playing_forwards_nothing(editor, qapp, monkeypatch):
+    # loading a new sample's own markers (set_waveform/set_header) also
+    # fires markers_changed - must not queue a pointless call when nothing
+    # is playing (which selecting a sample right after stopping a preview
+    # would otherwise do on every selection)
+    calls = _fake_preview_player(editor, monkeypatch)
+    samples = [0] * 10000
+    markers = {"start": 0, "loop_start": 2500, "loop_end": 7500, "end": 9999}
+    _select_sample_with_full_audio(editor, qapp, 0, samples, markers)
+    calls.clear()
+
+    editor.waveform_view.markers_changed.emit(0, 3000, 7500, 9999)
+
+    assert calls == []
+
+
+# --- Loop Preview card (LoopJoinPreview) ------------------------------------
+# the S3000XL front panel's own LOOP screen is a single widget with one
+# dividing line at the loop's own seam (loop-out audio on the left, loop-in
+# audio on the right) - see ui/loop_preview_view.py's own class docstring.
+# Kept live in sync with the main waveform view via the SAME markers_changed
+# signal the audio live-preview feature above already uses. samples is a
+# plain identity ramp (samples[i] == i) in these tests specifically so a
+# slice's own VALUES reveal exactly which frames got captured, rather than
+# needing a separate anchor-frame accessor on the merged widget.
+
+
+def test_selecting_a_sample_populates_the_loop_preview(editor, qapp):
+    samples = list(range(10000))
+    markers = {"start": 0, "loop_start": 2500, "loop_end": 7500, "end": 9999}
+    _select_sample_with_full_audio(editor, qapp, 0, samples, markers)
+
+    assert editor.loop_preview._end_samples == list(
+        range(7500 - HALF_WINDOW_FRAMES + 1, 7501)
+    )  # up to loop_end
+    assert editor.loop_preview._start_samples == list(
+        range(2500, 2500 + HALF_WINDOW_FRAMES)
+    )  # from loop_start
+
+
+def test_dragging_a_loop_marker_live_updates_the_preview(editor, qapp):
+    samples = list(range(10000))
+    markers = {"start": 0, "loop_start": 2500, "loop_end": 7500, "end": 9999}
+    _select_sample_with_full_audio(editor, qapp, 0, samples, markers)
+
+    editor.waveform_view.markers_changed.emit(0, 3000, 7500, 9999)  # dragged loop_start
+
+    assert editor.loop_preview._start_samples == list(
+        range(3000, 3000 + HALF_WINDOW_FRAMES)
+    )
+    assert editor.loop_preview._end_samples == list(
+        range(7500 - HALF_WINDOW_FRAMES + 1, 7501)
+    )  # untouched
+
+
+def test_no_loop_sptype_shows_the_no_loop_placeholder(editor, qapp):
+    samples = [0] * 10000
+    markers = {"start": 0, "loop_start": 2500, "loop_end": 7500, "end": 9999}
+    _select_sample_with_full_audio(editor, qapp, 0, samples, markers)
+
+    editor.sample_loop_type_combo.setCurrentIndex(2)  # "No looping"
+
+    assert editor.loop_preview._combined() is None
+    assert editor.loop_preview._placeholder == "No loop on this sample"
+
+
+def test_switching_back_to_a_looping_sptype_repopulates_the_preview(editor, qapp):
+    # _refresh_loop_preview is called explicitly from _set_loop_markers_
+    # enabled - set_loop_enabled(True) only emits markers_changed itself if
+    # re-enabling actually MOVED loop_start/loop_end (see its own comment),
+    # so this must not depend on that emission to repopulate
+    samples = list(range(10000))
+    markers = {"start": 0, "loop_start": 2500, "loop_end": 7500, "end": 9999}
+    _select_sample_with_full_audio(editor, qapp, 0, samples, markers)
+    editor.sample_loop_type_combo.setCurrentIndex(2)  # "No looping"
+    assert editor.loop_preview._combined() is None
+
+    editor.sample_loop_type_combo.setCurrentIndex(0)  # "Loop in release" - re-enable
+
+    assert editor.loop_preview._end_samples == list(
+        range(7500 - HALF_WINDOW_FRAMES + 1, 7501)
+    )
+    assert editor.loop_preview._start_samples == list(
+        range(2500, 2500 + HALF_WINDOW_FRAMES)
+    )
+
+
+def test_a_degenerate_loop_at_the_samples_own_end_still_populates_the_preview(
+    editor, qapp
+):
+    # regression test for a real, reported bug: a fresh/never-looped
+    # sample's loop points default to the very end of the sample (loop_
+    # start == loop_end == the last frame) - the Loop Preview card showed
+    # "No audio loaded" for this even though audio was plainly loaded,
+    # only recovering once the user dragged a loop point off that exact
+    # boundary (see WaveformView.samples_before/samples_after's own fix)
+    samples = list(range(10000))
+    markers = {"start": 0, "loop_start": 9999, "loop_end": 9999, "end": 9999}
+    _select_sample_with_full_audio(editor, qapp, 0, samples, markers)
+
+    assert editor.loop_preview._combined() is not None
+    assert editor.loop_preview._end_samples == list(
+        range(10000 - HALF_WINDOW_FRAMES, 10000)
+    )
+    assert editor.loop_preview._start_samples == [9999]
+
+
+def test_dragging_the_loop_preview_moves_the_named_marker_and_schedules_a_write(
+    editor, qapp
+):
+    # LoopJoinPreview owns no marker state itself - _on_loop_preview_marker_
+    # dragged is what actually applies the delta, by reusing _on_marker_
+    # spinbox_changed wholesale (see its own comment) - so this exercises
+    # the exact same push/sync/write pipeline the spinboxes already use,
+    # just reached through the drag signal instead
+    editor.sample_list_widget.setCurrentRow(0)
+    editor._worker.wait_until_idle()
+    _pump_until(qapp, lambda: editor.waveform_view.has_header())
+    bridge = editor._bridge
+    # FakeBridge sample 0: start=100, loop_start=5000, loop_end=8000, end=9999
+    before = editor.waveform_view.markers()["loop_end"]
+
+    editor._on_loop_preview_marker_dragged("loop_end", 25)
+    editor._flush_marker_write()
+    editor._worker.wait_until_idle()
+    _pump_until(qapp, lambda: bridge.set_parameter_calls)
+
+    assert editor.waveform_view.markers()["loop_end"] == before + 25
+    assert "LOOPAT1" in [c[0] for c in bridge.set_parameter_calls]
+
+
+def test_dragging_the_loop_preview_past_start_pushes_start_along_too(editor, qapp):
+    # an extreme delta - _on_loop_preview_marker_dragged goes through
+    # WaveformView.set_marker, so the ordinary push_marker cascade applies
+    # here exactly as it does for a canvas drag or a spinbox edit: dragging
+    # loop_start far enough left must shove "start" along with it (down to
+    # 0, both clamped at the buffer's own first frame) rather than just
+    # refusing to cross it - and _schedule_marker_write must write BOTH
+    # fields that actually moved, not just the one named in the drag
+    # signal (see its own comment on why "which marker did the user grab"
+    # isn't enough anymore)
+    editor.sample_list_widget.setCurrentRow(0)
+    editor._worker.wait_until_idle()
+    _pump_until(qapp, lambda: editor.waveform_view.has_header())
+    bridge = editor._bridge
+    # FakeBridge sample 0: start=100, loop_start=5000, loop_end=8000, end=9999
+    # - "start" begins away from the buffer's own edge (0), so a push that
+    # lands it there is a genuine, observable move, not a no-op clamp
+    assert editor.waveform_view.markers()["start"] == 100
+
+    editor._on_loop_preview_marker_dragged("loop_start", -50000)  # way past start
+    editor._flush_marker_write()
+    editor._worker.wait_until_idle()
+    _pump_until(qapp, lambda: bridge.set_parameter_calls)
+
+    markers = editor.waveform_view.markers()
+    assert markers["loop_start"] == 0
+    assert markers["start"] == 0  # pushed along, not left behind
+    written_fields = [c[0] for c in bridge.set_parameter_calls]
+    assert "LOOPAT1" in written_fields
+    assert "SSTART" in written_fields  # "start"'s own field - also moved, also written
+
+
+def test_dragging_the_loop_preview_with_nothing_loaded_does_nothing(editor):
+    editor.sample_list_widget.setCurrentRow(-1)
+    editor._on_loop_preview_marker_dragged("loop_end", 25)  # must not raise
 
 
 def test_reverse_sample_real_mode_happy_path_sends_deletes_and_renames(
@@ -2599,8 +3319,8 @@ def test_reverse_sample_real_mode_happy_path_sends_deletes_and_renames(
 
     assert "complete" in editor.status_bar.currentMessage().lower()
     # landed on a clean final selection - the renamed sample, not nothing
-    assert editor.sample_list_widget.currentItem() is not None
-    assert editor.sample_list_widget.currentItem().text() == "SQUARE"
+    assert editor.sample_list_widget.currentRow() >= 0
+    assert editor._sample_name_at_row(editor.sample_list_widget.currentRow()) == "SQUARE"
 
 
 def test_reverse_sample_real_mode_send_failure_leaves_original_untouched(
@@ -2700,8 +3420,11 @@ def test_duplicate_sample_real_mode_happy_path_sends_and_copies_metadata(
     assert header_calls["LLNGTH1"] == 30 * 65536
 
     assert "complete" in editor.status_bar.currentMessage().lower()
-    assert editor.sample_list_widget.currentItem() is not None
-    assert editor.sample_list_widget.currentItem().text() == "SQUARE COPY"
+    assert editor.sample_list_widget.currentRow() >= 0
+    assert (
+        editor._sample_name_at_row(editor.sample_list_widget.currentRow())
+        == "SQUARE COPY"
+    )
 
 
 def test_duplicate_sample_refuses_a_name_already_in_use(editor, qapp, monkeypatch):
@@ -2729,3 +3452,976 @@ def test_duplicate_sample_refuses_a_name_already_in_use(editor, qapp, monkeypatc
 
     assert fake_sampler.sent_entries == []
     assert bridge.sample_list().count("SAWTOOTH") == 1
+
+
+# --- Slice Editor (Samples tab) ---------------------------------------------
+# _open_slice_editor's own guards (no sampler_controller connected, or a
+# transfer already busy) are tested directly here - the happy path opens a
+# real modal SliceEditorWindow via .exec(), which would hang an offscreen
+# test with nothing to close it, so that path (and everything the dialog
+# itself is responsible for - naming/collisions/confirmations) is covered
+# instead in tests/test_slice_editor_window.py, which fakes export_callback
+# entirely. _export_slices - the actual hardware-talking half this window
+# calls into - is exercised directly here, the same way
+# _perform_duplicate_sample_real is above.
+
+
+def test_slice_editor_button_stays_enabled_in_demo_mode(editor, monkeypatch):
+    # unlike Duplicate Sample (fully disabled in demo mode - see above),
+    # the Slice Editor's marker placement/click-to-preview don't need any
+    # hardware at all - only its own Export button does (see
+    # SliceEditorWindow's demo_mode param, exercised below) - so the button
+    # that opens the dialog in the first place stays enabled either way
+    monkeypatch.setenv("AKAISDS_DEMO_SAMPLER", "1")
+    editor._set_sample_edit_buttons_enabled(True)
+    assert editor.slice_editor_button.isEnabled() is True
+
+    monkeypatch.delenv("AKAISDS_DEMO_SAMPLER", raising=False)
+    editor._set_sample_edit_buttons_enabled(True)
+    assert editor.slice_editor_button.isEnabled() is True
+
+
+def test_open_slice_editor_passes_demo_mode_through(editor, qapp, monkeypatch):
+    # _open_slice_editor's happy path isn't exercised end-to-end elsewhere
+    # (a real SliceEditorWindow.exec() would hang an offscreen test - see
+    # the comment above test_open_slice_editor_does_nothing_without_a_sampler_controller)
+    # - SliceEditorWindow itself is faked here just to confirm the
+    # constructor actually receives the right demo_mode value, the one
+    # thing _open_slice_editor changed
+    captured = {}
+
+    class _FakeSliceEditorWindow:
+        export_succeeded = False
+
+        def __init__(self, *args, **kwargs):
+            captured["demo_mode"] = kwargs.get("demo_mode")
+
+        def exec(self):
+            pass
+
+    monkeypatch.setattr(
+        "ui.program_editor_window.SliceEditorWindow", _FakeSliceEditorWindow
+    )
+    monkeypatch.setenv("AKAISDS_DEMO_SAMPLER", "1")
+
+    bridge = editor._bridge
+    fake_sampler = FakeSamplerController(bridge)
+    editor._main_window.sampler_controller = fake_sampler
+    _select_sample_with_full_audio(
+        editor, qapp, 0, list(range(100)),
+        {
+            "start": 0, "loop_start": 0, "loop_end": 0, "end": 99,
+            "stuno": 0, "shlto": 0,  # _open_slice_editor reads these directly
+        },
+    )
+    editor._open_slice_editor()
+    assert captured["demo_mode"] is True
+
+
+def test_closing_slice_editor_without_exporting_does_not_reload_the_sample_list(
+    editor, qapp, monkeypatch
+):
+    # regression test: this used to call submit_sample_list()
+    # unconditionally on every close, which wipes the whole
+    # _sample_waveform_cache (see _on_samples_loaded's own comment) even
+    # when nothing was exported - reported directly as "the waveform
+    # disappears after closing the Slice Editor". A plain look-then-close
+    # must leave the cache (and the worker queue) untouched.
+    class _FakeSliceEditorWindow:
+        export_succeeded = False
+
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def exec(self):
+            pass
+
+    monkeypatch.setattr(
+        "ui.program_editor_window.SliceEditorWindow", _FakeSliceEditorWindow
+    )
+    bridge = editor._bridge
+    fake_sampler = FakeSamplerController(bridge)
+    editor._main_window.sampler_controller = fake_sampler
+    _select_sample_with_full_audio(
+        editor, qapp, 0, list(range(100)),
+        {
+            "start": 0, "loop_start": 0, "loop_end": 0, "end": 99,
+            "stuno": 0, "shlto": 0,
+        },
+    )
+    editor._worker.wait_until_idle()
+    submit_calls = []
+    monkeypatch.setattr(
+        editor._worker,
+        "submit_sample_list",
+        lambda: submit_calls.append(True),
+    )
+
+    editor._open_slice_editor()
+
+    assert submit_calls == []
+    assert 0 in editor._sample_waveform_cache
+
+
+def test_closing_slice_editor_after_exporting_reloads_the_sample_list(
+    editor, qapp, monkeypatch
+):
+    class _FakeSliceEditorWindow:
+        export_succeeded = True
+
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def exec(self):
+            pass
+
+    monkeypatch.setattr(
+        "ui.program_editor_window.SliceEditorWindow", _FakeSliceEditorWindow
+    )
+    bridge = editor._bridge
+    fake_sampler = FakeSamplerController(bridge)
+    editor._main_window.sampler_controller = fake_sampler
+    _select_sample_with_full_audio(
+        editor, qapp, 0, list(range(100)),
+        {
+            "start": 0, "loop_start": 0, "loop_end": 0, "end": 99,
+            "stuno": 0, "shlto": 0,
+        },
+    )
+    editor._worker.wait_until_idle()
+    submit_calls = []
+    monkeypatch.setattr(
+        editor._worker,
+        "submit_sample_list",
+        lambda: submit_calls.append(True),
+    )
+
+    editor._open_slice_editor()
+
+    assert submit_calls == [True]
+
+
+def test_open_slice_editor_does_nothing_without_a_sampler_controller(editor, qapp):
+    editor._main_window.sampler_controller = None
+    _select_sample_with_full_audio(
+        editor, qapp, 0, list(range(100)),
+        {"start": 0, "loop_start": 0, "loop_end": 0, "end": 99},
+    )
+    editor._open_slice_editor()  # must return early, not open a modal dialog
+    assert "no Transfer Dashboard connection" in editor.status_bar.currentMessage()
+
+
+def test_open_slice_editor_does_nothing_while_a_transfer_is_busy(editor, qapp):
+    bridge = editor._bridge
+    fake_sampler = FakeSamplerController(bridge)
+    fake_sampler.busy = True
+    editor._main_window.sampler_controller = fake_sampler
+    _select_sample_with_full_audio(
+        editor, qapp, 0, list(range(100)),
+        {"start": 0, "loop_start": 0, "loop_end": 0, "end": 99},
+    )
+    editor._open_slice_editor()  # must return early, not open a modal dialog
+    assert "already in progress" in editor.status_bar.currentMessage()
+
+
+# --- Filter Sample (Samples tab) --------------------------------------------
+# a real FilterSampleDialog.exec() would hang an offscreen test (same
+# reasoning as the Slice Editor's own modal dialog above) - the dialog
+# itself (default values, Preview retriggering, accept/reject stopping the
+# preview player) is covered instead in tests/test_filter_sample_dialog.py.
+# Here, _confirm_filter_sample's own wiring is what's under test: does it
+# open the dialog with the right sample data, and does an accepted dialog
+# hand _perform_sample_edit a transform that actually applies
+# sample_editing.filter_samples with the dialog's own chosen settings.
+
+
+class _FakeFilterSampleDialog:
+    def __init__(self, parent, sample_name, samples, framerate, *, accept=True):
+        self.parent = parent
+        self.sample_name = sample_name
+        self.samples = samples
+        self.framerate = framerate
+        self._accept = accept
+
+    def exec(self):
+        return self._accept
+
+    def highpass_enabled(self):
+        return True
+
+    def highpass_cutoff_hz(self):
+        return 500
+
+    def highpass_slope_db_per_octave(self):
+        return 24
+
+    def lowpass_enabled(self):
+        return True
+
+    def lowpass_cutoff_hz(self):
+        return 8000
+
+    def lowpass_slope_db_per_octave(self):
+        return 12
+
+
+def test_confirm_filter_sample_passes_the_right_sample_data_to_the_dialog(
+    editor, qapp, monkeypatch
+):
+    captured = {}
+
+    class _CapturingFakeDialog(_FakeFilterSampleDialog):
+        def __init__(self, parent, sample_name, samples, framerate):
+            captured["sample_name"] = sample_name
+            captured["samples"] = samples
+            captured["framerate"] = framerate
+            super().__init__(parent, sample_name, samples, framerate, accept=False)
+
+    monkeypatch.setattr(
+        "ui.program_editor_window.FilterSampleDialog", _CapturingFakeDialog
+    )
+    samples = list(range(-500, 500))
+    markers = {"start": 0, "loop_start": 100, "loop_end": 900, "end": 999}
+    _select_sample_with_full_audio(editor, qapp, 0, samples, markers)
+
+    editor._confirm_filter_sample()
+
+    assert captured["sample_name"] == "SQUARE"
+    assert captured["samples"] == samples
+    assert captured["framerate"] == 44100
+
+
+def test_confirm_filter_sample_declined_does_not_call_perform_sample_edit(
+    editor, qapp, monkeypatch
+):
+    monkeypatch.setattr(
+        "ui.program_editor_window.FilterSampleDialog",
+        lambda *a, **k: _FakeFilterSampleDialog(*a, **k, accept=False),
+    )
+    calls = []
+    monkeypatch.setattr(
+        editor, "_perform_sample_edit", lambda *a, **k: calls.append((a, k))
+    )
+    samples = list(range(-500, 500))
+    markers = {"start": 0, "loop_start": 100, "loop_end": 900, "end": 999}
+    _select_sample_with_full_audio(editor, qapp, 0, samples, markers)
+
+    editor._confirm_filter_sample()
+
+    assert calls == []
+
+
+def test_confirm_filter_sample_declined_at_the_second_confirmation_does_not_send(
+    editor, qapp, monkeypatch
+):
+    # the dialog itself was accepted (OK clicked), but the extra
+    # QMessageBox.question added after real use (see _confirm_filter_
+    # sample's own comment - an accidental OK click right after Preview
+    # had no way to back out) is answered No - must not perform the edit
+    import ui.program_editor_window as pew
+
+    monkeypatch.setattr(
+        "ui.program_editor_window.FilterSampleDialog",
+        lambda *a, **k: _FakeFilterSampleDialog(*a, **k, accept=True),
+    )
+    monkeypatch.setattr(
+        pew.QMessageBox, "question", lambda *a, **k: pew.QMessageBox.StandardButton.No
+    )
+    calls = []
+    monkeypatch.setattr(
+        editor, "_perform_sample_edit", lambda *a, **k: calls.append((a, k))
+    )
+    samples = list(range(-500, 500))
+    markers = {"start": 0, "loop_start": 100, "loop_end": 900, "end": 999}
+    _select_sample_with_full_audio(editor, qapp, 0, samples, markers)
+
+    editor._confirm_filter_sample()
+
+    assert calls == []
+
+
+def test_confirm_filter_sample_accepted_calls_perform_sample_edit_with_a_working_transform(
+    editor, qapp, monkeypatch
+):
+    import ui.program_editor_window as pew
+
+    monkeypatch.setattr(
+        "ui.program_editor_window.FilterSampleDialog",
+        lambda *a, **k: _FakeFilterSampleDialog(*a, **k, accept=True),
+    )
+    monkeypatch.setattr(
+        pew.QMessageBox, "question", lambda *a, **k: pew.QMessageBox.StandardButton.Yes
+    )
+    calls = []
+    monkeypatch.setattr(
+        editor, "_perform_sample_edit", lambda *a, **k: calls.append((a, k))
+    )
+    samples = list(range(-500, 500))
+    markers = {"start": 0, "loop_start": 100, "loop_end": 900, "end": 999}
+    _select_sample_with_full_audio(editor, qapp, 0, samples, markers)
+
+    editor._confirm_filter_sample()
+
+    assert len(calls) == 1
+    (sample_index, transform, action_label), _kwargs = calls[0]
+    assert sample_index == 0
+    assert action_label == "Filter"
+    # the bound transform must behave exactly like a direct
+    # sample_editing.filter_samples(...) call with BOTH filters' settings
+    # from the dialog (see _FakeFilterSampleDialog) - confirms every one
+    # of the 6 extra arguments actually made it through the
+    # functools.partial binding, not just a couple of them
+    import core.sample_editing as sample_editing_module
+
+    expected = sample_editing_module.filter_samples(
+        samples, markers["start"], markers["loop_start"], markers["loop_end"],
+        markers["end"], 44100,
+        highpass_enabled=True, highpass_cutoff_hz=500, highpass_slope_db_per_octave=24,
+        lowpass_enabled=True, lowpass_cutoff_hz=8000, lowpass_slope_db_per_octave=12,
+    )
+    actual = transform(
+        samples, markers["start"], markers["loop_start"], markers["loop_end"],
+        markers["end"],
+    )
+    assert actual == expected
+
+
+def test_confirm_filter_sample_with_nothing_loaded_does_nothing(editor, qapp, monkeypatch):
+    opened = []
+    monkeypatch.setattr(
+        "ui.program_editor_window.FilterSampleDialog",
+        lambda *a, **k: opened.append(True),
+    )
+    editor.sample_list_widget.setCurrentRow(-1)
+
+    editor._confirm_filter_sample()
+
+    assert opened == []
+
+
+# --- Detect Root Note --------------------------------------------------
+# not testing the detection algorithm itself here (see tests/
+# test_root_note_detection.py) - just this window's own wiring: analysis
+# window selection (loop region vs fallback), the low-confidence/None
+# "nothing actionable" path, and the confirm-then-write path.
+
+
+def test_confirm_detect_root_note_with_nothing_loaded_does_nothing(editor, qapp, monkeypatch):
+    import ui.program_editor_window as pew
+
+    calls = []
+    monkeypatch.setattr(
+        pew.root_note_detection,
+        "detect_root_note",
+        lambda *a, **k: calls.append(a) or None,
+    )
+    editor.sample_list_widget.setCurrentRow(-1)
+
+    editor._confirm_detect_root_note()
+
+    assert calls == []
+
+
+def test_confirm_detect_root_note_none_result_shows_information_only(
+    editor, qapp, monkeypatch
+):
+    import ui.program_editor_window as pew
+
+    monkeypatch.setattr(
+        pew.root_note_detection, "detect_root_note", lambda *a, **k: None
+    )
+    info_calls = []
+    question_calls = []
+    monkeypatch.setattr(
+        pew.QMessageBox, "information", lambda *a, **k: info_calls.append(a)
+    )
+    monkeypatch.setattr(
+        pew.QMessageBox,
+        "question",
+        lambda *a, **k: question_calls.append(a) or pew.QMessageBox.StandardButton.Yes,
+    )
+    samples = list(range(-5000, 5000))
+    markers = {"start": 0, "loop_start": 100, "loop_end": 900, "end": 999}
+    _select_sample_with_full_audio(editor, qapp, 0, samples, markers)
+
+    editor._confirm_detect_root_note()
+
+    assert len(info_calls) == 1
+    assert question_calls == []  # never offered a choice with no result at all
+
+
+def test_confirm_detect_root_note_low_confidence_shows_information_only(
+    editor, qapp, monkeypatch
+):
+    import ui.program_editor_window as pew
+
+    # below CONFIDENCE_THRESHOLD - per direct user request, no note/
+    # confidence/option shown, just an acknowledgement nothing reliable
+    # was found
+    monkeypatch.setattr(
+        pew.root_note_detection, "detect_root_note", lambda *a, **k: (60, 0.0, 0.1)
+    )
+    info_calls = []
+    question_calls = []
+    monkeypatch.setattr(
+        pew.QMessageBox, "information", lambda *a, **k: info_calls.append(a)
+    )
+    monkeypatch.setattr(
+        pew.QMessageBox,
+        "question",
+        lambda *a, **k: question_calls.append(a) or pew.QMessageBox.StandardButton.Yes,
+    )
+    samples = list(range(-5000, 5000))
+    markers = {"start": 0, "loop_start": 100, "loop_end": 900, "end": 999}
+    _select_sample_with_full_audio(editor, qapp, 0, samples, markers)
+
+    editor._confirm_detect_root_note()
+
+    assert len(info_calls) == 1
+    assert question_calls == []
+
+
+def test_confirm_detect_root_note_declined_does_not_write(editor, qapp, monkeypatch):
+    import ui.program_editor_window as pew
+
+    monkeypatch.setattr(
+        pew.root_note_detection, "detect_root_note", lambda *a, **k: (72, 15.0, 0.9)
+    )
+    monkeypatch.setattr(
+        pew.QMessageBox, "question", lambda *a, **k: pew.QMessageBox.StandardButton.No
+    )
+    samples = list(range(-5000, 5000))
+    markers = {"start": 0, "loop_start": 100, "loop_end": 900, "end": 999}
+    _select_sample_with_full_audio(editor, qapp, 0, samples, markers)
+    editor.sample_root_note_spinbox.setValue(60)
+    editor.sample_tune_spinbox.setValue(0.0)
+
+    editor._confirm_detect_root_note()
+
+    assert editor.sample_root_note_spinbox.value() == 60
+    assert editor.sample_tune_spinbox.value() == 0.0
+
+
+def test_confirm_detect_root_note_confirmed_writes_note_and_tune(
+    editor, qapp, monkeypatch
+):
+    import ui.program_editor_window as pew
+
+    monkeypatch.setattr(
+        pew.root_note_detection, "detect_root_note", lambda *a, **k: (72, 15.0, 0.9)
+    )
+    monkeypatch.setattr(
+        pew.QMessageBox, "question", lambda *a, **k: pew.QMessageBox.StandardButton.Yes
+    )
+    samples = list(range(-5000, 5000))
+    markers = {"start": 0, "loop_start": 100, "loop_end": 900, "end": 999}
+    _select_sample_with_full_audio(editor, qapp, 0, samples, markers)
+    editor.sample_root_note_spinbox.setValue(60)
+    editor.sample_tune_spinbox.setValue(0.0)
+
+    editor._confirm_detect_root_note()
+
+    assert editor.sample_root_note_spinbox.value() == 72
+    # cents (15.0) -> this field's own semitone-based display units - see
+    # _confirm_detect_root_note's own comment
+    assert editor.sample_tune_spinbox.value() == pytest.approx(0.15)
+
+
+def test_confirm_detect_root_note_adds_hardware_engine_compensation_for_non_native_rate(
+    editor, qapp, monkeypatch
+):
+    # regression test for a real gap: a sample originally sent at a
+    # non-native rate (anything but 44100/22050) carries a permanent
+    # STUNO tuning offset from core.akai_sysex.compute_bandwidth_and_tuning,
+    # compensating for the Akai hardware's playback engine only physically
+    # running at one of those two speeds - completely unrelated to this
+    # sample's own recorded pitch. A bare overwrite of Tune with just the
+    # detected residual would silently discard that compensation, causing
+    # the sample to mistune on real hardware afterward even though nothing
+    # about its audio changed. The fix recomputes that baseline fresh from
+    # the sample's own declared rate and adds the residual on top.
+    import ui.program_editor_window as pew
+    from core.akai_sysex import compute_bandwidth_and_tuning
+
+    monkeypatch.setattr(
+        pew.root_note_detection, "detect_root_note", lambda *a, **k: (72, 15.0, 0.9)
+    )
+    monkeypatch.setattr(
+        pew.QMessageBox, "question", lambda *a, **k: pew.QMessageBox.StandardButton.Yes
+    )
+    samples = list(range(-5000, 5000))
+    markers = {"start": 0, "loop_start": 100, "loop_end": 900, "end": 999}
+    _select_sample_with_full_audio(editor, qapp, 0, samples, markers)
+    editor._sample_waveform_cache[0]["framerate"] = 48000  # non-native rate
+    editor.sample_root_note_spinbox.setValue(60)
+    editor.sample_tune_spinbox.setValue(0.0)
+
+    editor._confirm_detect_root_note()
+
+    _, baseline_semitones = compute_bandwidth_and_tuning(48000)
+    assert editor.sample_root_note_spinbox.value() == 72
+    # abs=0.005 - sample_tune_spinbox is a 2-decimal-place QDoubleSpinBox,
+    # which rounds whatever's set to its own display precision
+    assert editor.sample_tune_spinbox.value() == pytest.approx(
+        baseline_semitones + 0.15, abs=0.005
+    )
+    # confirms this genuinely differs from the native-rate case above -
+    # the whole point of the fix
+    assert editor.sample_tune_spinbox.value() != pytest.approx(0.15, abs=0.005)
+
+
+def test_confirm_detect_root_note_uses_real_sbandw_not_nearest_bucket_guess(
+    editor, qapp, monkeypatch
+):
+    # same real bug/fix as _on_waveform_preview_requested's own
+    # test_preview_requested_uses_real_sbandw_not_nearest_bucket_guess -
+    # an 11025 Hz sample sent at any bit depth other than 16 gets its
+    # SBANDW/STUNO derived by the hardware itself (the generic/universal
+    # MIDI SDS path has no such fields), confirmed to land on
+    # bandwidth=1/44100 rather than the nearer bandwidth=0/22050 that
+    # rate would get at 16-bit. Deliberately uses a rate/sbandw
+    # combination where "nearest bucket to framerate" (bandwidth=0, since
+    # 11025 is nearer 22050) and the sample's REAL sbandw (1) disagree -
+    # unlike the sibling test above (48000 Hz), whose nearest bucket and
+    # fixture sbandw happen to already match, so it wouldn't catch a
+    # reversion back to the wrong "nearest bucket" guess.
+    import ui.program_editor_window as pew
+
+    monkeypatch.setattr(
+        pew.root_note_detection, "detect_root_note", lambda *a, **k: (72, 0.0, 0.9)
+    )
+    monkeypatch.setattr(
+        pew.QMessageBox, "question", lambda *a, **k: pew.QMessageBox.StandardButton.Yes
+    )
+    samples = list(range(-5000, 5000))
+    markers = {"start": 0, "loop_start": 100, "loop_end": 900, "end": 999}
+    _select_sample_with_full_audio(editor, qapp, 0, samples, markers)
+    editor._sample_waveform_cache[0]["framerate"] = 11025
+    editor._sample_waveform_cache[0]["sbandw"] = 1
+    editor.sample_root_note_spinbox.setValue(60)
+    editor.sample_tune_spinbox.setValue(0.0)
+
+    editor._confirm_detect_root_note()
+
+    # -24.00 (the real bandwidth=1 baseline), NOT -12.00 (what a
+    # nearest-bucket-to-11025 guess would wrongly produce)
+    assert editor.sample_tune_spinbox.value() == pytest.approx(-24.0, abs=0.005)
+
+
+def test_detect_root_note_analysis_window_prefers_a_large_enough_loop_region(
+    editor, qapp, monkeypatch
+):
+    import ui.program_editor_window as pew
+
+    captured = {}
+
+    def _fake_detect(samples, framerate, anchor):
+        captured["samples"] = samples
+        return (60, 0.0, 0.9)
+
+    monkeypatch.setattr(pew.root_note_detection, "detect_root_note", _fake_detect)
+    monkeypatch.setattr(
+        pew.QMessageBox, "question", lambda *a, **k: pew.QMessageBox.StandardButton.Yes
+    )
+    samples = list(range(20000))
+    loop_start, loop_end = 5000, 5000 + pew._MIN_LOOP_ANALYSIS_FRAMES
+    markers = {"start": 0, "loop_start": loop_start, "loop_end": loop_end, "end": 19999}
+    _select_sample_with_full_audio(editor, qapp, 0, samples, markers)
+
+    editor._confirm_detect_root_note()
+
+    assert captured["samples"] == samples[loop_start : loop_end + 1]
+
+
+def test_detect_root_note_analysis_window_caps_an_overly_long_loop_region(
+    editor, qapp, monkeypatch
+):
+    # real, measured issue found while smoke-testing this feature: an
+    # uncapped loop region's own analysis time scales with its length
+    # (~1.5 SECONDS to analyse ~1.5s of real audio) - a sustained pad with
+    # a multi-second loop would make this button noticeably slow without
+    # a cap. Takes a fixed-length chunk from the START of an overly long
+    # loop region rather than the whole thing.
+    import ui.program_editor_window as pew
+
+    captured = {}
+
+    def _fake_detect(samples, framerate, anchor):
+        captured["samples"] = samples
+        return (60, 0.0, 0.9)
+
+    monkeypatch.setattr(pew.root_note_detection, "detect_root_note", _fake_detect)
+    monkeypatch.setattr(
+        pew.QMessageBox, "question", lambda *a, **k: pew.QMessageBox.StandardButton.Yes
+    )
+    samples = list(range(200000))
+    loop_start, loop_end = 10000, 190000  # far longer than the analysis cap
+    markers = {"start": 0, "loop_start": loop_start, "loop_end": loop_end, "end": 199999}
+    _select_sample_with_full_audio(editor, qapp, 0, samples, markers)
+
+    editor._confirm_detect_root_note()
+
+    max_frames = round(44100 * pew._ROOT_NOTE_FALLBACK_WINDOW_SECONDS)
+    assert captured["samples"] == samples[loop_start : loop_start + max_frames]
+    assert len(captured["samples"]) < (loop_end - loop_start + 1)
+
+
+def test_detect_root_note_analysis_window_falls_back_when_loop_too_small(
+    editor, qapp, monkeypatch
+):
+    import ui.program_editor_window as pew
+
+    captured = {}
+
+    def _fake_detect(samples, framerate, anchor):
+        captured["samples"] = samples
+        return (60, 0.0, 0.9)
+
+    monkeypatch.setattr(pew.root_note_detection, "detect_root_note", _fake_detect)
+    monkeypatch.setattr(
+        pew.QMessageBox, "question", lambda *a, **k: pew.QMessageBox.StandardButton.Yes
+    )
+    samples = list(range(20000))
+    # degenerate loop (same value, per the user's own wording) - too small
+    # a span to analyse, must fall back
+    markers = {"start": 0, "loop_start": 5000, "loop_end": 5000, "end": 19999}
+    _select_sample_with_full_audio(editor, qapp, 0, samples, markers)
+
+    editor._confirm_detect_root_note()
+
+    framerate = 44100
+    skip = min(
+        round(framerate * pew._ROOT_NOTE_ATTACK_SKIP_SECONDS), (19999 - 0 + 1) // 4
+    )
+    window_start = skip
+    window_end = min(
+        19999, window_start + round(framerate * pew._ROOT_NOTE_FALLBACK_WINDOW_SECONDS) - 1
+    )
+    assert captured["samples"] == samples[window_start : window_end + 1]
+
+
+def test_export_slices_real_mode_happy_path_sends_batch_and_writes_headers(
+    editor, qapp, monkeypatch
+):
+    monkeypatch.delenv("AKAISDS_DEMO_SAMPLER", raising=False)
+    bridge = editor._bridge
+    fake_sampler = FakeSamplerController(bridge)
+    editor._main_window.sampler_controller = fake_sampler
+
+    slices = [list(range(0, 50)), list(range(50, 120)), list(range(120, 200))]
+    names = ["BREAK-1", "BREAK-2", "BREAK-3"]
+    progress_calls = []
+    status_calls = []
+
+    success, message = editor._export_slices(
+        names, slices, 44100, 16, None, 60, 128, 3,
+        lambda cur, total: progress_calls.append((cur, total)),
+        lambda text: status_calls.append(text),
+    )
+
+    assert success is True
+    assert "3 slices" in message
+    # one send_file_queue call for the WHOLE batch, not one per slice (see
+    # AGENTS.md's own note on why) - sent_entries covers all 3 from that
+    # single call, in order
+    assert [e["name"] for e in fake_sampler.sent_entries] == names
+    assert fake_sampler.sent_entries[0]["samples"] == slices[0]
+    assert fake_sampler.sent_entries[1]["samples"] == slices[1]
+    assert fake_sampler.sent_entries[2]["samples"] == slices[2]
+    for entry in fake_sampler.sent_entries:
+        assert entry["bit_depth"] == 16
+        assert entry["sample_rate"] is None
+        assert entry["mono"] is True
+
+    for name, slice_samples in zip(names, slices):
+        index = bridge.sample_list().index(name)
+        header_calls = {
+            c[0]: c[2] for c in bridge.set_parameter_calls if c[1] == index
+        }
+        # SPTYPE forced to one-shot regardless of the source's own loop -
+        # see _export_slices' own comment
+        assert header_calls["SPTYPE"] == 3
+        # SPITCH/STUNO/SHLTO copied from the source sample (60/128/3, the
+        # arguments passed above), same fields Duplicate Sample copies
+        assert header_calls["SPITCH"] == 60
+        assert header_calls["STUNO"] == 128
+        assert header_calls["SHLTO"] == 3
+        assert header_calls["SSTART"] == 0
+        assert header_calls["SMPEND"] == len(slice_samples) - 1
+
+
+def test_export_slices_toggles_busy_callback_around_the_post_send_reload(
+    editor, qapp, monkeypatch
+):
+    # _export_slices' own post-send _reload_sample_list_with_retries() call
+    # has nothing numeric to report - busy_callback(True)/(False) around it
+    # is what lets SliceEditorWindow switch its progress bar to
+    # indeterminate for that stretch instead of sitting frozen at whatever
+    # percentage the batch send itself last reported (see ui/slice_editor_
+    # window.py's own _on_export_busy)
+    monkeypatch.delenv("AKAISDS_DEMO_SAMPLER", raising=False)
+    bridge = editor._bridge
+    fake_sampler = FakeSamplerController(bridge)
+    editor._main_window.sampler_controller = fake_sampler
+
+    busy_calls = []
+    success, message = editor._export_slices(
+        ["BREAK-1"], [list(range(10))], 44100, 16, None, 60, 0, 0,
+        lambda *a: None, lambda *a: None,
+        busy_callback=lambda busy: busy_calls.append(busy),
+    )
+
+    assert success is True
+    # at least one True/False pair for the post-send reload, and another
+    # for the closing reload right before returning - not asserting an
+    # exact count since both reloads use the same helper
+    assert True in busy_calls
+    assert busy_calls[-1] is False
+
+
+def test_export_slices_reports_failure_when_the_batch_send_fails(
+    editor, qapp, monkeypatch
+):
+    monkeypatch.delenv("AKAISDS_DEMO_SAMPLER", raising=False)
+    bridge = editor._bridge
+    fake_sampler = FakeSamplerController(bridge)
+    fake_sampler.next_result = False
+    editor._main_window.sampler_controller = fake_sampler
+
+    success, message = editor._export_slices(
+        ["BREAK-1"], [list(range(10))], 44100, 16, None, 60, 0, 0,
+        lambda *a: None, lambda *a: None,
+    )
+
+    assert success is False
+    assert "did not complete" in message
+    assert bridge.sample_list().count("BREAK-1") == 0
+
+
+def test_export_slices_returns_false_without_a_sampler_controller(editor):
+    editor._main_window.sampler_controller = None
+    success, message = editor._export_slices(
+        ["X-1"], [[0, 1, 2]], 44100, 16, None, 60, 0, 0,
+        lambda *a: None, lambda *a: None,
+    )
+    assert success is False
+    assert "no Transfer Dashboard connection" in message
+
+
+def test_export_slices_returns_false_while_a_transfer_is_busy(editor):
+    bridge = editor._bridge
+    fake_sampler = FakeSamplerController(bridge)
+    fake_sampler.busy = True
+    editor._main_window.sampler_controller = fake_sampler
+    success, message = editor._export_slices(
+        ["X-1"], [[0, 1, 2]], 44100, 16, None, 60, 0, 0,
+        lambda *a: None, lambda *a: None,
+    )
+    assert success is False
+    assert "already in progress" in message
+
+
+# --- _create_program_from_slices (Slice Editor's "ReCycle-style export") ----
+# FakeBridge's program 0 comes with 2 keygroups ((24, 60), (61, 96)) - a
+# template with MORE than one keygroup, so these tests also exercise the
+# "delete every extra cloned keygroup" step, not just the "add one per
+# slice" one.
+
+
+def test_create_program_from_slices_happy_path_maps_from_c1(editor, qapp):
+    bridge = editor._bridge
+    names = ["BREAK-01", "BREAK-02", "BREAK-03"]
+    progress_calls = []
+    status_calls = []
+
+    success, message = editor._create_program_from_slices(
+        names, 0, "BREAK",
+        lambda cur, total: progress_calls.append((cur, total)),
+        lambda text: status_calls.append(text),
+    )
+
+    assert success is True
+    assert "3" in message
+    new_index = bridge.program_list().index("BREAK")
+    assert new_index == 2  # appended after the 2 programs FakeBridge starts with
+
+    # exactly one keygroup per slice - the template's own 2nd keygroup
+    # ((61, 96)) must have been deleted, not left dangling alongside 3 new
+    # ones. FakeBridge's own set_parameter fake doesn't mutate _keygroups
+    # for a plain LONOTE/HINOTE write (only the KDATA-based create/delete
+    # path does), so the note RANGE values are checked below via
+    # set_parameter_calls instead - this only confirms the final COUNT,
+    # exactly what _create_program_from_slices' own final verification
+    # step checks too.
+    assert len(bridge._keygroups[new_index]) == 3
+
+    keygroup_writes = {
+        (keygroup, param): value
+        for param, index, value, keygroup in bridge.set_parameter_calls
+        if index == new_index
+    }
+    for i, name in enumerate(names):
+        assert keygroup_writes[(i, "SNAME1")] == name
+        assert keygroup_writes[(i, "LONOTE")] == 36 + i
+        assert keygroup_writes[(i, "HINOTE")] == 36 + i
+    # CP1 (Const Pitch)/ZPLAY1/cleared zones 2-4 are only ever written on
+    # keygroup 0 - every other keygroup inherits them by being CLONED from
+    # it (see _create_program_from_slices' own comment on why)
+    assert keygroup_writes[(0, "CP1")] == 1
+    assert keygroup_writes[(0, "ZPLAY1")] == 0
+    assert keygroup_writes[(0, "SNAME2")] == ""
+    assert keygroup_writes[(0, "SNAME3")] == ""
+    assert keygroup_writes[(0, "SNAME4")] == ""
+    assert (1, "CP1") not in keygroup_writes
+    assert (2, "CP1") not in keygroup_writes
+
+
+def test_create_program_from_slices_toggles_busy_callback_around_final_verify(
+    editor, qapp
+):
+    # the per-keygroup progress_callback calls stop once the last keygroup
+    # is CREATED - the final keygroup-count verify (re-reading keygroups
+    # back, then refreshing the program list) is separate real wait time
+    # with nothing numeric left to report, so it's wrapped in busy_callback
+    # the same way _export_slices' own post-send reload is
+    busy_calls = []
+    success, message = editor._create_program_from_slices(
+        ["BREAK-01", "BREAK-02", "BREAK-03"], 0, "BREAK",
+        lambda *a: None, lambda *a: None,
+        busy_callback=lambda busy: busy_calls.append(busy),
+    )
+    assert success is True
+    assert busy_calls == [True, False]
+
+
+def test_create_program_from_slices_single_slice_maps_only_c1(editor, qapp):
+    bridge = editor._bridge
+    success, message = editor._create_program_from_slices(
+        ["TRIM"], 0, "TRIM PROG", lambda *a: None, lambda *a: None,
+    )
+    assert success is True
+    new_index = bridge.program_list().index("TRIM PROG")
+    # template had 2 keygroups - both extras deleted down to exactly 1
+    assert len(bridge._keygroups[new_index]) == 1
+    keygroup_writes = {
+        (keygroup, param): value
+        for param, index, value, keygroup in bridge.set_parameter_calls
+        if index == new_index
+    }
+    assert keygroup_writes[(0, "LONOTE")] == 36
+    assert keygroup_writes[(0, "HINOTE")] == 36
+    assert keygroup_writes[(0, "SNAME1")] == "TRIM"
+
+
+def test_create_program_from_slices_refuses_more_than_99_keygroups(editor):
+    bridge = editor._bridge
+    programs_before = list(bridge.program_list())
+    success, message = editor._create_program_from_slices(
+        [f"S-{i}" for i in range(100)], 0, "TOO BIG",
+        lambda *a: None, lambda *a: None,
+    )
+    assert success is False
+    assert "99" in message
+    assert bridge.program_list() == programs_before  # never even started
+
+
+def test_create_program_from_slices_reports_failure_when_creation_fails(editor):
+    # an out-of-range template index makes BridgeWorker._handle_create_
+    # program's own get_header_bytes call raise (FakeBridge's own
+    # self._programs[index] IndexError), which should surface as a clean
+    # failure message rather than an unhandled exception
+    success, message = editor._create_program_from_slices(
+        ["BREAK-01"], 999, "BREAK", lambda *a: None, lambda *a: None,
+    )
+    assert success is False
+    assert "Failed to create program" in message
+
+
+# --- _reload_sample_list_with_retries ----------------------------------------
+# real-hardware root cause (confirmed against an actual akaisds.log): this
+# window's own BridgeWorker connection and the Transfer Dashboard's
+# sampler_controller connection share one physical MIDI port (see AGENTS.md's
+# "Samples tab" section) - a big batch export finishing right as
+# sampler_controller does its own post-send RSTAT/RSLIST chatter can leave
+# this connection reading a reply meant for the OTHER one, which
+# s3k.bridge.sample_list() surfaces as a hard decode error rather than a
+# silent skip. A short retry clears the transient case without the user
+# ever seeing it.
+
+
+def test_reload_sample_list_with_retries_recovers_from_one_transient_failure(
+    editor, qapp
+):
+    bridge = editor._bridge
+    real_sample_list = bridge.sample_list
+    calls = {"n": 0}
+
+    def flaky_sample_list():
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise ValueError("SampleList: expected command 0x05, got 0x16")
+        return real_sample_list()
+
+    bridge.sample_list = flaky_sample_list
+    which, args = editor._reload_sample_list_with_retries(
+        attempts=3, retry_delay_seconds=0
+    )
+    assert which == 0  # samples_loaded, not samples_load_failed
+    assert calls["n"] == 2  # failed once, succeeded on the retry
+
+
+def test_reload_sample_list_with_retries_gives_up_after_every_attempt_fails(
+    editor, qapp
+):
+    bridge = editor._bridge
+    calls = {"n": 0}
+
+    def always_fails():
+        calls["n"] += 1
+        raise ValueError("SampleList: expected command 0x05, got 0x16")
+
+    bridge.sample_list = always_fails
+    which, args = editor._reload_sample_list_with_retries(
+        attempts=2, retry_delay_seconds=0
+    )
+    assert which == 1  # samples_load_failed
+    assert calls["n"] == 2  # exactly `attempts` tries, not more
+
+
+def test_export_slices_uses_the_retrying_reload_not_a_single_attempt(
+    editor, qapp, monkeypatch
+):
+    # end-to-end: a batch export whose header-fixup reload flakes once
+    # should still report success, not the "couldn't be refreshed" failure
+    monkeypatch.delenv("AKAISDS_DEMO_SAMPLER", raising=False)
+    bridge = editor._bridge
+    fake_sampler = FakeSamplerController(bridge)
+    editor._main_window.sampler_controller = fake_sampler
+
+    real_sample_list = bridge.sample_list
+    calls = {"n": 0}
+
+    def flaky_once_per_reload(seen=set()):
+        calls["n"] += 1
+        # fail only the FIRST reload attempt overall - proves a single
+        # transient failure doesn't sink the whole export
+        if calls["n"] == 1:
+            raise ValueError("SampleList: expected command 0x05, got 0x16")
+        return real_sample_list()
+
+    bridge.sample_list = flaky_once_per_reload
+    monkeypatch.setattr(
+        editor,
+        "_reload_sample_list_with_retries",
+        lambda: editor.__class__._reload_sample_list_with_retries(
+            editor, attempts=3, retry_delay_seconds=0
+        ),
+    )
+
+    success, message = editor._export_slices(
+        ["BREAK-1"], [list(range(20))], 44100, 16, None, 60, 0, 0,
+        lambda *a: None, lambda *a: None,
+    )
+    assert success is True
+    assert calls["n"] >= 2
+
