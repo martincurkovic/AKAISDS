@@ -6,6 +6,16 @@
 # machine with no audio output device at all, same reasoning
 # tests/test_dashboard.py etc. use for anything that would otherwise need
 # real hardware.
+#
+# ALSA enumeration (list_output_devices()) isn't a reliable proxy for "a
+# device actually opens" - a headless CI container can still enumerate a
+# default/dmix entry from ALSA's own config while having zero real sound
+# cards, so SlicePreviewPlayer._open_device() fails outright
+# (MiniaudioError -401/MA_NO_DEVICE) even though the skip check above would
+# otherwise consider a device present. Confirmed on GitHub's ubuntu-latest
+# runner. AKAISDS_CI_NO_AUDIO_DEVICE=1 (set by .github/workflows/build.yml's
+# test job) forces the skip in that environment without weakening coverage
+# on real machines (macOS, Arch, etc.) where enumeration does mean usable.
 
 import os
 
@@ -29,7 +39,9 @@ def qapp():
     yield app
 
 
-_HAS_AUDIO_DEVICE = bool(audio_preview.list_output_devices())
+_HAS_AUDIO_DEVICE = not os.environ.get("AKAISDS_CI_NO_AUDIO_DEVICE") and bool(
+    audio_preview.list_output_devices()
+)
 _requires_audio_device = pytest.mark.skipif(
     not _HAS_AUDIO_DEVICE, reason="no audio output device available in this environment"
 )

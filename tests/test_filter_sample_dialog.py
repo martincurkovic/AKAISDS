@@ -4,7 +4,9 @@
 # QMessageBox.question - see program_editor_window.py's
 # _confirm_filter_sample). Preview is exercised against a real
 # SlicePreviewPlayer/miniaudio device where one's available, same
-# reasoning tests/test_audio_preview.py already uses, skipped otherwise.
+# reasoning tests/test_audio_preview.py already uses, skipped otherwise -
+# including AKAISDS_CI_NO_AUDIO_DEVICE's override, see that file's own
+# comment on why ALSA enumeration alone isn't trustworthy in CI.
 
 import os
 
@@ -27,7 +29,9 @@ def qapp():
     yield app
 
 
-_HAS_AUDIO_DEVICE = bool(audio_preview.list_output_devices())
+_HAS_AUDIO_DEVICE = not os.environ.get("AKAISDS_CI_NO_AUDIO_DEVICE") and bool(
+    audio_preview.list_output_devices()
+)
 _requires_audio_device = pytest.mark.skipif(
     not _HAS_AUDIO_DEVICE, reason="no audio output device available in this environment"
 )
