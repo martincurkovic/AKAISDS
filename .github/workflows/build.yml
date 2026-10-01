@@ -20,6 +20,8 @@ jobs:
       - name: Sync environment
         run: uv sync
       - name: Run tests
+        env:
+          AKAISDS_CI_NO_AUDIO_DEVICE: "1"
         run: uv run pytest tests/ -v
 
   build-macos-arm:
