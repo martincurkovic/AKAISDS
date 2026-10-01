@@ -40,9 +40,7 @@ OPEN_EDITOR_NEEDS_AKAI_DEVICE_TYPE = (
 # consumer racing the in-flight one on the same shared connection (Settings
 # can also reopen the ports outright), see AGENTS.md's "Follow-up, first
 # real-hardware session: a confirmed dual-connection MIDI race" for why
-BUSY_BLOCKS_OTHER_WINDOWS = (
-    "Can't do this while a MIDI transfer is in progress"
-)
+BUSY_BLOCKS_OTHER_WINDOWS = "Can't do this while a MIDI transfer is in progress"
 
 # =============================================================================
 # ui/settings_dialog.py
@@ -133,15 +131,13 @@ ZOOM_FIT = "Zoom to fit the whole sample"
 
 # new - shown whenever the button/checkbox is actually enabled; the demo-
 # mode/no-template messages below explain the two DISABLED cases instead
-EXPORT_SLICES_BUTTON = (
-    "Send every slice to the sampler as its own new one-shot sample."
-)
+EXPORT_SLICES_BUTTON = "Send every slice to the sampler as its own new one-shot sample."
 
 CREATE_PROGRAM_CHECKBOX = (
     "Also create a new program with one keygroup per slice, mapped to "
     "its own key starting at C1, in Const Pitch (no key tracking) and "
     "one-shot mode - the same layout ReCycle's own \"export to Akai "
-    "sampler format\" produces."
+    'sampler format" produces.'
 )
 
 EXPORT_SLICES_DEMO_MODE = (
@@ -151,8 +147,7 @@ EXPORT_SLICES_DEMO_MODE = (
 )
 
 CREATE_PROGRAM_DEMO_MODE = (
-    "Creating a program needs a real hardware connection - "
-    "not available in demo mode."
+    "Creating a program needs a real hardware connection - not available in demo mode."
 )
 
 CREATE_PROGRAM_NO_TEMPLATE = (
@@ -161,15 +156,11 @@ CREATE_PROGRAM_NO_TEMPLATE = (
 )
 
 # new
-EQUAL_SLICES_BUTTON = (
-    "Replace any existing slice markers with N evenly-spaced ones."
-)
+EQUAL_SLICES_BUTTON = "Replace any existing slice markers with N evenly-spaced ones."
 
 TRANSIENT_SENSITIVITY_SLIDER = (
     "Live transient detection - replaces the current slice markers as you "
-    "drag. 0% is off; higher sensitivity detects more, quieter transients. "
-    "A starting point, not a final result - hand-edit (drag/double-click/"
-    "right-click) afterward as needed."
+    "drag. 0% is off; higher sensitivity detects more, quieter transients."
 )
 
 # =============================================================================
@@ -216,12 +207,10 @@ PORTAMENTO_TYPE_TIME = (
 # --- Programs/Keygroups list context menus ----------------------------------
 
 DUPLICATE_PROGRAM_DEMO_MODE = (
-    "Not available in demo mode - the fake sampler has no way to "
-    "create new programs"
+    "Not available in demo mode - the fake sampler has no way to create new programs"
 )
 DUPLICATE_KEYGROUP_DEMO_MODE = (
-    "Not available in demo mode - the fake sampler has no way to "
-    "create new keygroups"
+    "Not available in demo mode - the fake sampler has no way to create new keygroups"
 )
 
 # base text only - the resolved keyboard shortcut is appended at the call
@@ -248,14 +237,14 @@ SAMPLE_ZOOM_FIT = "Reset zoom to show the whole sample"
 # Duplicate/Slice Editor buttons ---------------------------------------------
 
 SAMPLE_LOOP_TUNE_KNOB = (
-    "SHLTO - a fine tuning offset (+/-50 cents) applied only while the "
+    "Fine tuning offset (+/-50 cents). Applied only while the "
     "loop is sounding, on top of the sample's own overall Tune."
 )
 
 SAMPLE_LOOP_HOLD_KNOB = (
     "How long the loop dwells before releasing: Off (no loop, far "
     "left), Hold (loops forever, far right), or a 1-9998ms dwell "
-    "time in between. Click then type a number for an exact value."
+    "time in between. Click and type a number to set an exact value."
 )
 
 TRIM_SAMPLE_BUTTON = (
@@ -263,8 +252,7 @@ TRIM_SAMPLE_BUTTON = (
     "overwriting it on the sampler. Cannot be undone."
 )
 REVERSE_SAMPLE_BUTTON = (
-    "Play the sample backwards, overwriting it on the sampler. "
-    "Cannot be undone."
+    "Play the sample backwards, overwriting it on the sampler. Cannot be undone."
 )
 FADE_SAMPLE_BUTTON = (
     "Linearly fade in from frame 0 up to the Start marker, and "
@@ -284,29 +272,27 @@ DUPLICATE_SAMPLE_BUTTON = (
     "a new name, copying its loop points and tuning across."
 )
 SLICE_EDITOR_BUTTON = (
-    "Manually chop this sample's already-loaded audio into slices "
-    "and export them back to the sampler as new one-shot samples."
+    "Chop this sample's audio into slices "
+    "and export them back to the sampler as new samples."
 )
 DETECT_ROOT_NOTE_BUTTON = (
-    "Estimate this sample's fundamental pitch from its already-loaded "
-    "audio (the loop region if one is set, otherwise a short chunk of "
-    "the sample), and offer to set Root Note and Tune to match. "
-    "Monophonic melodic material only - not meaningful for drums, "
-    "chords, or noise."
+    "Estimate this sample's fundamental pitch from its "
+    "loop region (if one is set). Otherwise analyses a short chunk of "
+    "the sample."
 )
 
 # --- Filter section (Program/Keygroup tabs) - new ---------------------------
 
 FILTER_CUTOFF_KNOB = (
-    "FILFRQ - the filter's cutoff frequency. 99 is fully open (no "
+    "Filter cutoff frequency. 99 is fully open (no "
     "filtering); lower values darken the sound progressively more."
 )
 FILTER_RESONANCE_KNOB = (
-    "FILQ - emphasizes frequencies right at the cutoff point. Higher "
+    "Filter resonance - emphasizes frequencies right at the cutoff point. Higher "
     "values give a more pronounced, resonant/peaky character."
 )
 FILTER_KEY_TRACK_KNOB = (
-    "K_FREQ - how much the cutoff frequency rises as you play higher "
+    "Keytracking - how much the cutoff frequency rises as you play higher "
     "notes. 0 is no tracking (cutoff stays fixed across the keyboard); "
     "positive values open the filter further for higher notes, negative "
     "values close it further."
@@ -324,41 +310,46 @@ ENV1_RELEASE_KNOB = "Envelope 1 (amp) release time - how long the sound takes to
 # stages - one shared Rate/Level tooltip covers all 4, with the stage
 # number substituted in at the call site via .format(stage=i)
 ENV2_RATE_KNOB = (
-    "Envelope 2, stage {stage}: how long this stage takes to reach its "
-    "own Level."
+    "Envelope 2, stage {stage}: how long this stage takes to reach its own Level."
 )
-ENV2_LEVEL_KNOB = (
-    "Envelope 2, stage {stage}: the level this stage rises or falls to."
-)
+ENV2_LEVEL_KNOB = "Envelope 2, stage {stage}: the level this stage rises or falls to."
 
 # --- Volume, Pan & Velocity / per-zone equivalents - new --------------------
 
-PROGRAM_PAN_KNOB = "PANPOS - the program's overall stereo position, before any per-zone or modulation offset."
-PROGRAM_LOUDNESS_KNOB = "PRLOUD - the program's overall output level."
-PROGRAM_VELOCITY_KNOB = "V_LOUD - how much velocity (how hard a key is struck) affects loudness."
+PROGRAM_PAN_KNOB = "The program's overall stereo pan position, before any per-zone or modulation offset."
+PROGRAM_LOUDNESS_KNOB = "The program's overall output level."
+PROGRAM_VELOCITY_KNOB = "Velocity sensitivity - how much velocity (how hard a key is struck) affects loudness."
 
 # per velocity zone (up to 4 per keygroup) - added on TOP of the program's
 # own Pan/Loud above, not a replacement for it
-ZONE_LOUDNESS_KNOB = "This zone's own loudness offset, added to the program's overall Loud."
+ZONE_LOUDNESS_KNOB = (
+    "This zone's own loudness offset, added to the program's overall Loud."
+)
 ZONE_PAN_KNOB = "This zone's own pan offset, added to the program's overall Pan."
 
 # --- LFO1/LFO2 knobs - new ---------------------------------------------------
 
-LFO1_RATE_KNOB = "LFORAT - LFO1's speed."
-LFO1_DEPTH_KNOB = "LFODEP - LFO1's modulation depth (how strongly it affects whatever it's routed to)."
-LFO1_DELAY_KNOB = "LFODEL - how long LFO1 waits after a key is pressed before it starts modulating."
+LFO1_RATE_KNOB = "LFO1's speed."
+LFO1_DEPTH_KNOB = (
+    "LFO1's modulation depth (how strongly it affects whatever it's routed to)."
+)
+LFO1_DELAY_KNOB = (
+    "How long LFO1 waits after a key is pressed before it starts modulating."
+)
 
 # LFO2 is hardwired to auto-pan (see AGENTS.md's "LFO2 and the modulation
 # matrix" section) - its rate/depth/delay are PANRAT/PANDEP/PANDEL, stored
 # in the program's own pan fields despite being LFO2's controls
-LFO2_RATE_KNOB = "PANRAT - LFO2's speed. LFO2 is hardwired to auto-pan (see the Pan modulation matrix), not freely assignable like LFO1."
-LFO2_DEPTH_KNOB = "PANDEP - LFO2's modulation depth, i.e. how wide the auto-pan sweep is."
-LFO2_DELAY_KNOB = "PANDEL - how long LFO2 waits after a key is pressed before the auto-pan starts."
+LFO2_RATE_KNOB = "LFO2's speed. LFO2 is hardwired to auto-pan (see the Pan modulation matrix), not freely assignable like LFO1."
+LFO2_DEPTH_KNOB = "LFO2's modulation depth, i.e. how wide the auto-pan sweep is."
+LFO2_DELAY_KNOB = (
+    "How long LFO2 waits after a key is pressed before the auto-pan starts."
+)
 
 # --- Portamento - new --------------------------------------------------------
 
 PORTAMENTO_RATE_KNOB = (
-    "PORTIME - how fast the pitch glides between notes (see Portamento "
+    "How fast the pitch glides between notes (see Portamento "
     "Type for whether this is a fixed speed or a fixed total time)."
 )
 
@@ -378,8 +369,12 @@ MOD_MATRIX_AMOUNT_KNOB = (
 # --- Multis tab: per-part level/pan knobs - new -----------------------------
 # shared across every knob built via _build_multi_part_knob for the 16
 # parts' own Level/Pan controls
-MULTI_PART_LEVEL_KNOB = "This part's own output level, independent of the program's own."
-MULTI_PART_PAN_KNOB = "This part's own stereo position, independent of the program's own."
+MULTI_PART_LEVEL_KNOB = (
+    "This part's own output level, independent of the program's own."
+)
+MULTI_PART_PAN_KNOB = (
+    "This part's own stereo position, independent of the program's own."
+)
 
 # --- Keygroup tab: Zone 1-4 tabs - new ---------------------------------------
 ZONE_TAB = (
@@ -389,27 +384,28 @@ ZONE_TAB = (
 
 # --- Voice & MIDI / Pitch section combos - new ------------------------------
 MIDI_CHANNEL_COMBO = (
-    "PMCHAN - which MIDI channel this program responds to. \"Omni\" "
+    'Which MIDI channel this program responds to. "Omni" '
     "responds on every channel at once."
 )
-POLYPHONY_COMBO = "POLYPH - the maximum number of voices this program can sound at once."
+POLYPHONY_COMBO = "The maximum number of voices this program can sound at once."
 NOTE_PRIORITY_COMBO = (
-    "PRIORT - which notes get dropped first once Polyphony's own voice "
+    "Dictates which notes get dropped first once Polyphony's own voice "
     "limit is exceeded: Low/High drop the extreme end of the range first, "
     "Normal drops the oldest note, Hold never drops a held note."
 )
-BEND_UP_COMBO = "B_PTCH - how many semitones the pitch bend wheel raises the pitch at full deflection."
-BEND_DOWN_COMBO = "B_PTCHD - how many semitones the pitch bend wheel lowers the pitch at full deflection."
+BEND_UP_COMBO = (
+    "How many semitones the pitch bend wheel raises the pitch at full deflection."
+)
+BEND_DOWN_COMBO = (
+    "How many semitones the pitch bend wheel lowers the pitch at full deflection."
+)
 LFO1_SYNC_COMBO = (
-    "DESYNC - On restarts LFO1's cycle fresh on every new note (in phase "
-    "across notes); Off lets it free-run continuously instead."
+    "On = restarts LFO1's cycle fresh on every new note (in phase "
+    "across notes); Off = lets it free-run continuously instead."
 )
-LFO1_SHAPE_COMBO = (
-    "LFO1WAVE - LFO1's waveform shape. \"Random\" is a measured 4th shape "
-    "not documented in the field's own spec - see AGENTS.md."
-)
-LFO2_SHAPE_COMBO = "LFO2WAVE - the auto-pan LFO's waveform shape."
+LFO1_SHAPE_COMBO = "LFO1's waveform shape"
+LFO2_SHAPE_COMBO = "LFO2's waveform shape."
 LFO2_TRIG_COMBO = (
-    "LFO2TRIG - On restarts the auto-pan LFO's cycle on every new note; "
-    "Off lets it free-run continuously instead."
+    "On = restarts the LFO's cycle on every new note; "
+    "Off = lets it free-run continuously instead."
 )
