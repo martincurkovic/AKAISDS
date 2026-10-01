@@ -24,7 +24,7 @@ def shared_transport_enabled():
     # consolidation_test_plan.md) - config.json's "shared_midi_transport"
     # key is the persisted, manually-editable-by-hand override for an end
     # user who hits a problem with it (see app_config.get_shared_midi_
-    # transport_enabled/ensure_shared_midi_transport_key_saved - there's no
+    # transport_enabled/ensure_defaults_saved - there's no
     # Settings UI for this on purpose). AKAISDS_SHARED_MIDI_TRANSPORT, if
     # explicitly set in the environment, takes priority over that - a
     # developer/tester override, same convention AKAISDS_DEMO_SAMPLER/

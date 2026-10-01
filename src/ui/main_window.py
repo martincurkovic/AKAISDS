@@ -22,12 +22,12 @@ class ApplicationWindow(QMainWindow):
         self.setWindowTitle("AKAISDS")
         self.setMinimumSize(1030, 600)
 
-        # writes config.json's "shared_midi_transport" key if it isn't
-        # already there (fresh install, or upgrading from a version before
-        # this setting existed) - must happen before MidiManager opens any
-        # port below, since core.midi_manager.shared_transport_enabled()
-        # reads this same key live
-        app_config.ensure_shared_midi_transport_key_saved()
+        # backfills any config.json key missing a default (fresh install,
+        # or upgrading from a version before that key existed) - must
+        # happen before MidiManager opens any port below, since
+        # core.midi_manager.shared_transport_enabled() reads
+        # "shared_midi_transport" live and expects it already resolved
+        app_config.ensure_defaults_saved()
 
         # owns the real mido ports for the app's lifetime
         self.midi_manager = MidiManager()

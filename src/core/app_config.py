@@ -94,30 +94,16 @@ def save_device_type(device_type):
 # the default connection mode - see core/midi_manager.py's own
 # shared_transport_enabled(). Manual-edit-only by design: there's
 # deliberately no Settings UI for this (an end user having a problem with
-# it edits config.json by hand and sets this to false), so unlike the
-# other settings below, ensure_shared_midi_transport_key_saved() writes
-# this key to disk unconditionally rather than only implicitly defaulting
-# it in the getter - a hand-editing user needs to actually find the key
-# there to know it exists
+# it edits config.json by hand and sets this to false), so this key needs
+# to actually land on disk (see _DEFAULTS/ensure_defaults_saved() below)
+# rather than only implicitly defaulting in the getter - a hand-editing
+# user needs to find the key there to know it exists
 _DEFAULT_SHARED_MIDI_TRANSPORT = True
 
 
 def get_shared_midi_transport_enabled():
     config = load_config()
     return config.get("shared_midi_transport", _DEFAULT_SHARED_MIDI_TRANSPORT)
-
-
-def ensure_shared_midi_transport_key_saved():
-    # writes "shared_midi_transport" into config.json if it isn't already
-    # there - covers both a brand new install (load_config() returns {},
-    # nothing on disk yet) and a user upgrading from a version before this
-    # setting existed (an existing config.json missing just this one key).
-    # Call once at startup, before anything reads the live value - see
-    # ui/main_window.py's own call site.
-    config = load_config()
-    if "shared_midi_transport" not in config:
-        config["shared_midi_transport"] = _DEFAULT_SHARED_MIDI_TRANSPORT
-        save_config(config)
 
 
 # samples, not ms/bytes - same unit an Ableton-style buffer-size combobox
@@ -175,3 +161,36 @@ def save_skipped_update_version(version):
     config = load_config()
     config["skipped_update_version"] = version
     save_config(config)
+
+
+# keys with a real default value worth persisting to disk, so a hand-edited
+# or version-upgraded config.json that's missing one of them gets it filled
+# back in rather than only ever defaulting implicitly in the getter above
+# (every getter already does that too, so a missing key never crashes or
+# misbehaves even before ensure_defaults_saved() below runs - this is about
+# the key being discoverable/visible in the file, same reasoning
+# shared_midi_transport originally needed). Deliberately excludes keys whose
+# "unset" meaning (ports, audio_output_device, skipped_update_version,
+# last_update_check=0/never) is itself the correct default - writing those
+# out would just be noise, not a real default being filled in.
+_DEFAULTS = {
+    "midi_channel": 0,
+    "device_type": "akai",
+    "shared_midi_transport": _DEFAULT_SHARED_MIDI_TRANSPORT,
+    "audio_buffer_samples": _DEFAULT_AUDIO_BUFFER_SAMPLES,
+}
+
+
+def ensure_defaults_saved():
+    # writes any key in _DEFAULTS into config.json that isn't already there
+    # - covers both a brand new install (load_config() returns {}, nothing
+    # on disk yet) and a user upgrading from a version before a given key
+    # existed. Adding a new entry to _DEFAULTS is all a future setting
+    # needs to get this same treatment. Call once at startup, before
+    # anything reads the live config - see ui/main_window.py's own call
+    # site.
+    config = load_config()
+    missing = {key: value for key, value in _DEFAULTS.items() if key not in config}
+    if missing:
+        config.update(missing)
+        save_config(config)
