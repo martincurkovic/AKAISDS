@@ -229,6 +229,17 @@ _NAME_INPUT_PATTERN = (
 # as a few milliseconds, not the intended few hundred frames).
 _LOOP_LENGTH_FIXED_POINT_SCALE = 65536
 
+# tooltips for the four marker knobs built in the loop below (start/
+# loop_start/loop_end/end) - keyed by the same marker name used
+# everywhere else on this page (WaveformView.markers(), self.
+# _marker_spinboxes, _schedule_marker_write), not the display label
+_MARKER_KNOB_TOOLTIPS = {
+    "start": tt.SAMPLE_START_KNOB,
+    "loop_start": tt.LOOP_START_KNOB,
+    "loop_end": tt.LOOP_END_KNOB,
+    "end": tt.SAMPLE_END_KNOB,
+}
+
 # Detect Root Note (core/root_note_detection.py) - window selection: the
 # loop region (already-identified stable, repeating audio) is strongly
 # preferred over blindly analysing the whole sample, which would both be
@@ -4988,20 +4999,43 @@ class ProgramEditorWindow(QMainWindow):
             swatch.setStyleSheet(
                 f"background-color: {swatch_color}; border-radius: 2px;"
             )
-            spinbox = QSpinBox()
-            spinbox.setRange(0, 0)
-            spinbox.setEnabled(False)
-            spinbox.setFixedWidth(80)
-            spinbox.valueChanged.connect(
+            # Knob, not QSpinBox - start/loop_start/loop_end/end commonly
+            # sit right on top of each other at the same frame (a short or
+            # non-looping sample), which a row of identical-looking number
+            # boxes doesn't make obvious at a glance the way four small
+            # dials (readable by angle, not just digits) do. Same small-
+            # knob convention as the Multis tab (_build_multi_part_knob)
+            # and mod-matrix amount knobs (_build_mod_amount_knob), 28x28.
+            # No built-in numeric readout on Knob (see knob.py) - value_
+            # label below is the same knob+label pattern as
+            # _build_knob_value_row, just with the swatch/name kept to its
+            # left instead of stacked, since this row already had that
+            # layout and losing it would make the four markers harder to
+            # tell apart by color alone.
+            knob = Knob()
+            knob.setRange(0, 0)
+            knob.setFixedSize(28, 28)
+            knob.setToolTip(_MARKER_KNOB_TOOLTIPS[name])
+            value_label = QLabel("-")
+            value_label.setFixedWidth(56)  # frame counts run well past 6 digits
+            knob.valueChanged.connect(lambda v, lbl=value_label: lbl.setText(str(v)))
+            knob.valueChanged.connect(
                 lambda v, n=name: self._on_marker_spinbox_changed(n, v)
             )
-            spinbox.editingFinished.connect(self._flush_marker_write)
-            self._marker_spinboxes[name] = (swatch, spinbox)
+            # Knob has no editingFinished (not a QSpinBox) - sliderReleased
+            # is its own equivalent "value just got committed" signal,
+            # firing on drag release AND on committing a typed value (see
+            # knob.py's Knob._finish_type_edit) - editingFinished never
+            # covered the drag case QSpinBox doesn't have anyway, so this
+            # is a strict improvement, not just a port
+            knob.sliderReleased.connect(self._flush_marker_write)
+            self._marker_spinboxes[name] = (swatch, knob, value_label)
             marker_field = QHBoxLayout()
             marker_field.setSpacing(4)
             marker_field.addWidget(swatch)
             marker_field.addWidget(QLabel(display + ":"))
-            marker_field.addWidget(spinbox)
+            marker_field.addWidget(knob)
+            marker_field.addWidget(value_label)
             legend_row.addLayout(marker_field)
         legend_row.addStretch()
 
@@ -6369,7 +6403,7 @@ class ProgramEditorWindow(QMainWindow):
         # loop_start <= loop_end <= end regardless of this range
         enabled = frame_count > 0
         maximum = max(0, frame_count - 1)
-        for name, (_swatch, spinbox) in self._marker_spinboxes.items():
+        for name, (_swatch, spinbox, _value_label) in self._marker_spinboxes.items():
             # loop_start/loop_end additionally need the current sample's
             # SPTYPE to actually have a loop - see _set_loop_markers_enabled
             spinbox_enabled = enabled and (
@@ -6378,6 +6412,11 @@ class ProgramEditorWindow(QMainWindow):
             spinbox.blockSignals(True)
             spinbox.setEnabled(spinbox_enabled)
             spinbox.setRange(0, maximum)
+            # double-click-to-reset target (Knob.mouseDoubleClickEvent) -
+            # Start defaults to the very first frame, the other three to
+            # the very last one (maximum tracks frame_count, so this stays
+            # correct across loads/trims/reverses, not just at construction)
+            spinbox.setDefaultValue(0 if name == "start" else maximum)
             spinbox.blockSignals(False)
 
     def _set_loop_markers_enabled(self, enabled):
@@ -6416,7 +6455,7 @@ class ProgramEditorWindow(QMainWindow):
             palette["keygroup_color_3"] if enabled else palette["text_disabled"]
         )
         for name in ("loop_start", "loop_end"):
-            swatch, _spinbox = self._marker_spinboxes[name]
+            swatch, _spinbox, _value_label = self._marker_spinboxes[name]
             swatch.setStyleSheet(
                 f"background-color: {loop_swatch_color}; border-radius: 2px;"
             )
@@ -6485,13 +6524,23 @@ class ProgramEditorWindow(QMainWindow):
             "loop_end": loop_end,
             "end": end,
         }
-        for name, (_swatch, spinbox) in self._marker_spinboxes.items():
+        for name, (_swatch, spinbox, value_label) in self._marker_spinboxes.items():
             value = values[name]
             if value is None:
                 continue
             spinbox.blockSignals(True)
             spinbox.setValue(value)
             spinbox.blockSignals(False)
+            # Knob has no built-in numeric display (unlike QSpinBox) - the
+            # paired value_label is normally kept in sync via the knob's
+            # own valueChanged (see its construction above), but that's
+            # exactly what blockSignals(True) above suppresses, so this
+            # path needs to set it directly - same convention every other
+            # knob+label pair on this page already follows when a program/
+            # sample load sets a knob's value under blockSignals (e.g.
+            # self.pan_value_label.setText(...) beside self.pan_knob.
+            # setValue(...) in _apply_program_values)
+            value_label.setText(str(value))
 
     def _on_marker_spinbox_changed(self, name, value):
         # has_header, not has_waveform - editing must work before/without

@@ -409,3 +409,12 @@ LFO2_TRIG_COMBO = (
     "On = restarts the LFO's cycle on every new note; "
     "Off = lets it free-run continuously instead."
 )
+
+# --- Samples tab: start/loop/end marker knobs - new -------------------------
+SAMPLE_START_KNOB = "Where sample playback begins. Audio before this point is ignored."
+LOOP_START_KNOB = "Where the loop region begins."
+LOOP_END_KNOB = (
+    "Where the loop region ends - playback repeats between Loop Start "
+    "and Loop End for as long as a note is held."
+)
+SAMPLE_END_KNOB = "Where sample playback ends. Audio after this point is ignored."
