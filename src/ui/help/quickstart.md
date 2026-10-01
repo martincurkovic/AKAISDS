@@ -23,7 +23,7 @@ Select your MIDI Input/Output ports and choose your sampler type (Akai or Generi
 
 You can test your MIDI setup in the **Troubleshooting** tab. If you're having connectivity issues, check your MIDI connections to ensure they are not reversed. If you still don't see your sampler listed in the MIDI Hardware Test tab, see [MIDI Troubleshooting & Diagnostics](#midi-troubleshooting--diagnostics) for details.
 
-![MIDI Settings](screenshots/midi-settings.png "MIDI Settings")
+![Audio MIDI Settings](screenshots/settings-audio-midi.png "Audio MIDI Settings")
 
 ---
 
@@ -116,6 +116,8 @@ Duplicating a sample also happens on the host computer and goes over SDS the sam
 
 Slicing a sample works by loading the sample to the host computer first, performing the slice operation and then exporting the sliced audio back to the sampler. A new program with the slices loaded as consecutive keygroups can also be generated, same as ReCycle style slicing.
 
+![Slice Editor](screenshots/slice-editor-manual.png)
+
 ### Refreshing Sampler Data
 
 If you edit a parameter on the front display of your sampler, the edit is unlikely to be picked up by AKAISDS automatically. To get around this, you can use the *Refresh* button on the bottom left of the window (or by pressing Command + R or Ctrl + R depending on your platform).
@@ -131,7 +133,7 @@ There are 2 MIDI tests in the AKAISDS Settings window.
 
 ### MIDI Hardware Test
 
-![MIDI Hardware Test](screenshots/midi-hardware-test.png)
+![MIDI Troubleshooting](screenshots/settings-troubleshooting.png)
 
 Use the Hardware test to check if your MIDI sampler is detected by your interface.
 
@@ -140,8 +142,6 @@ To use the hardware test, connect a MIDI cable from your MIDI interface's output
 Click the *Run Hardware Test* button and if successful, your sampler's details should appear in the window.
 
 ### MIDI Loopback Test
-
-![MIDI Loopback Test](screenshots/midi-interface-test-running.png)
 
 Use the Loopback Test to check if your MIDI interface can support MIDI SysEx traffic. Not all interfaces have full SysEx support.
 
