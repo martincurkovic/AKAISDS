@@ -1017,6 +1017,57 @@ def test_receive_stall_aborts_the_receive_and_reports_failure(controller):
     assert any("No reply from the sampler" in s for s in statuses)
 
 
+def test_mid_receive_stall_nudges_the_sampler_before_giving_up(controller):
+    from core import sds_encoder
+
+    finished = []
+    controller.receive_finished.connect(finished.append)
+    controller._receiving = True
+    controller._receive_channel = 0
+    controller._receive_header_info = {
+        "bit_depth": 16,
+        "sample_length": 500,
+        "sample_number": 1,
+        "sample_rate": 44100,
+    }
+    controller._receive_expected_packets = 5
+    controller._receive_packets = [b"x"] * 2
+    controller._receive_last_packet_num = 1
+    controller._arm_reply_timeout("next data packet", 3000)
+
+    sent_before = len(controller.midi_manager.sent)
+    controller._on_reply_timeout(controller._reply_generation)
+    assert controller._receiving is True
+    assert list(controller.midi_manager.sent[sent_before][2:]) == [sds_encoder.ACK, 1]
+    controller._on_reply_timeout(controller._reply_generation)
+    assert list(controller.midi_manager.sent[sent_before + 1][2:]) == [sds_encoder.NAK, 2]
+    controller._on_reply_timeout(controller._reply_generation)
+    assert controller._receiving is True
+    controller._on_reply_timeout(controller._reply_generation)  # retries exhausted
+    assert controller._receiving is False
+    assert finished == [False]
+
+
+def test_duplicate_data_packet_is_acked_but_not_appended_twice(controller):
+    from core import sds_encoder
+
+    controller._receiving = True
+    controller._receive_channel = 0
+    controller._receive_header_info = {
+        "bit_depth": 16,
+        "sample_length": 500,
+        "sample_number": 1,
+        "sample_rate": 44100,
+    }
+    controller._receive_expected_packets = 5
+    controller._receive_packets = []
+    packet = sds_encoder.build_data_packets([1, 2, 3], channel=0, bit_depth=16)[0]
+    controller.on_sysex_received(list(packet[1:-1]))
+    controller.on_sysex_received(list(packet[1:-1]))
+    assert len(controller._receive_packets) == 1
+    assert controller.midi_manager.sent[-1][2] == sds_encoder.ACK
+
+
 def test_sample_info_timeout_clears_the_busy_flag(controller):
     controller.request_sample_info(0)
     assert controller.is_transfer_busy() is True

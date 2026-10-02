@@ -52,6 +52,12 @@ class SamplerController(QObject):
         self._reply_wait_timeout_ms = self._reply_timeout_ms
         # receiving waits longer - the hardware can take a while to start streaming
         self._receive_timeout_ms = 10000
+        # mid-transfer stalls (a lost data packet or lost ACK - seen on a real
+        # S1000 behind a MIDI interface) get a few cheap nudges before giving up
+        self._receive_packet_retry_ms = 3000
+        self._receive_packet_max_retries = 3
+        self._receive_packet_retries = 0
+        self._receive_last_packet_num = None
         self._receive_checksum_errors = 0
 
         # per-unit send diagnostics, logged once when the unit ends (never per packet,
@@ -218,6 +224,28 @@ class SamplerController(QObject):
         self._reply_generation += 1  # invalidates the pending timer
         self._reply_wait_label = None
 
+    def _nudge_stalled_receive(self):
+        # alternate between re-ACKing the last packet (our ACK may have been lost)
+        # and NAKing the one we expect next (the packet itself may have been lost) -
+        # a duplicate/resent packet is tolerated by _on_receive_data_packet
+        self._receive_packet_retries += 1
+        last = self._receive_last_packet_num
+        if self._receive_packet_retries % 2 == 1 and last is not None:
+            kind, packet_num = sds_encoder.ACK, last
+        else:
+            kind = sds_encoder.NAK
+            packet_num = 0 if last is None else (last + 1) & 0x7F
+        debug_log.get_logger().warning(
+            f"SamplerController: receive stalled at {len(self._receive_packets)}/"
+            f"{self._receive_expected_packets} - retry {self._receive_packet_retries}/"
+            f"{self._receive_packet_max_retries} ({'ACK' if kind == sds_encoder.ACK else 'NAK'} "
+            f"packet {packet_num})"
+        )
+        self.midi_manager.send_sysex(
+            [0x7E, self._receive_channel & 0x7F, kind, packet_num]
+        )
+        self._arm_reply_timeout("next data packet", self._receive_packet_retry_ms)
+
     def _on_reply_timeout(self, expected_generation):
         if expected_generation != self._reply_generation:
             return  # reply arrived (or a newer request superseded this one)
@@ -245,6 +273,12 @@ class SamplerController(QObject):
             self._pre_send_names = []
             self.status_changed.emit(message + " - couldn't rename the new sample")
             self._finish_unit(True)
+        elif (
+            label == "next data packet"
+            and self._receiving
+            and self._receive_packet_retries < self._receive_packet_max_retries
+        ):
+            self._nudge_stalled_receive()
         elif self._receiving or self._receive_queue:
             info = self._receive_header_info
             expected = self._receive_expected_packets if info else "?"
@@ -1018,6 +1052,8 @@ class SamplerController(QObject):
         info = akai_sysex.parse_sdata_response(data_bytes)
         self._receive_header_info = info
         self._receive_packets = []
+        self._receive_packet_retries = 0
+        self._receive_last_packet_num = None
 
         bytes_per_word = (info["bit_depth"] + 6) // 7
         words_per_packet = sds_encoder.DATA_BYTES_PER_PACKET // bytes_per_word
@@ -1046,6 +1082,8 @@ class SamplerController(QObject):
         info = sds_encoder.parse_dump_header(data_bytes)
         self._receive_header_info = info
         self._receive_packets = []
+        self._receive_packet_retries = 0
+        self._receive_last_packet_num = None
 
         bytes_per_word = (info["bit_depth"] + 6) // 7
         words_per_packet = sds_encoder.DATA_BYTES_PER_PACKET // bytes_per_word
@@ -1091,7 +1129,17 @@ class SamplerController(QObject):
             )
             return
 
+        if packet_num == self._receive_last_packet_num and self._receive_packets:
+            # duplicate (a resend after a retry nudge) - ACK again, don't append twice
+            self.midi_manager.send_sysex(
+                [0x7E, self._receive_channel & 0x7F, sds_encoder.ACK, packet_num]
+            )
+            self._arm_reply_timeout("next data packet", self._receive_timeout_ms)
+            return
+
         self._receive_packets.append(bytes(payload))
+        self._receive_last_packet_num = packet_num
+        self._receive_packet_retries = 0
         self.midi_manager.send_sysex(
             [0x7E, self._receive_channel & 0x7F, sds_encoder.ACK, packet_num]
         )
@@ -1133,7 +1181,7 @@ class SamplerController(QObject):
         if len(self._receive_packets) >= self._receive_expected_packets:
             self._finish_receiving()
         else:
-            self._arm_reply_timeout("next data packet", self._receive_timeout_ms)
+            self._arm_reply_timeout("next data packet", self._receive_packet_retry_ms)
 
     def _finish_receiving(self):
         info = self._receive_header_info
