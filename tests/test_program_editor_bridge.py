@@ -1531,3 +1531,70 @@ def test_logging_bridge_wraps_get_header_bytes_and_send_and_receive():
     assert any("START send_and_receive" in m for m in logger.debug_calls)
     assert any("END send_and_receive" in m for m in logger.debug_calls)
     assert logger.error_calls == []
+
+
+# --- LoggingBridge logs a Parameter as its name, not its whole table entry ------------------------
+
+
+class _RecordingLogger:
+    def __init__(self):
+        self.lines = []
+
+    def debug(self, message, *a, **k):
+        self.lines.append(message)
+
+    def error(self, message, *a, **k):
+        self.lines.append(message)
+
+
+class _OneFieldBridge:
+    def get_parameter(self, param, index, *, keygroup=0, region=None):
+        return 7
+
+    def set_parameter(self, param, index, value, *, keygroup=0, region=None):
+        pass
+
+
+def test_logging_bridge_logs_a_parameter_as_region_dot_name():
+    logger = _RecordingLogger()
+    bridge = LoggingBridge(_OneFieldBridge(), logger=logger)
+    param = p.lookup("GROUPS", "program")
+
+    bridge.get_parameter(param, 3, keygroup=2)
+
+    start, end = logger.lines
+    assert "START get_parameter(program.GROUPS, 3, keygroup=2)" in start
+    assert "END get_parameter(program.GROUPS, 3, keygroup=2) -> 7" in end
+
+
+def test_logging_bridge_no_longer_dumps_the_whole_parameter_entry():
+    logger = _RecordingLogger()
+    bridge = LoggingBridge(_OneFieldBridge(), logger=logger)
+    bridge.get_parameter(p.lookup("GROUPS", "program"), 0)
+    bridge.set_parameter(p.lookup("PRLOUD", "program"), 0, 40)
+    text = "\n".join(logger.lines)
+    # none of the Parameter dataclass's own fields leak into the log
+    for leaked in ("Parameter(", "minimum=", "maximum=", "notes=", "desc=", "group="):
+        assert leaked not in text
+    assert all(len(line) < 120 for line in logger.lines)
+
+
+def test_logging_bridge_still_logs_plain_arguments_and_values_in_full():
+    logger = _RecordingLogger()
+    bridge = LoggingBridge(_OneFieldBridge(), logger=logger)
+    bridge.set_parameter(p.lookup("PRNAME", "program"), 5, "MY PROGRAM")
+    assert "set_parameter(program.PRNAME, 5, 'MY PROGRAM')" in logger.lines[0]
+
+
+def test_logging_bridge_failures_name_the_field_too():
+    class _Failing:
+        def get_parameter(self, param, index, **kwargs):
+            raise TimeoutError("no reply within 2.0s")
+
+    logger = _RecordingLogger()
+    bridge = LoggingBridge(_Failing(), logger=logger)
+    with pytest.raises(TimeoutError):
+        bridge.get_parameter(p.lookup("SLNGTH", "sample"), 0)
+    failed = [line for line in logger.lines if "FAILED" in line]
+    assert failed and "get_parameter(sample.SLNGTH, 0)" in failed[0]
+    assert "Parameter(" not in failed[0]

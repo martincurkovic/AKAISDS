@@ -188,6 +188,14 @@ class S1000Bridge:
             payload.append(selector)
         return payload
 
+    @staticmethod
+    def _describe(region, index, selector):
+        # "program 2", "keygroup 1 of program 2", "sample 5" - for log lines
+        # and error messages (a keygroup is addressed by program AND keygroup)
+        if region == "keygroup":
+            return f"keygroup {selector} of program {index}"
+        return f"{region} {index}"
+
     def _read_block(self, region, index, selector, *, timeout=None, fresh=False):
         key = (region, index, selector)
         cached = self._blocks.get(key)
@@ -198,9 +206,7 @@ class S1000Bridge:
         ):
             return cached[1]
 
-        what = f"{region} {index}" + (
-            f" keygroup {selector}" if region == "keygroup" else ""
-        )
+        what = self._describe(region, index, selector)
         frame = m.build_frame(
             _REQUEST[region],
             self._address(region, index, selector),
@@ -300,7 +306,7 @@ class S1000Bridge:
             index,
             selector,
             block,
-            f"{region} {index} at offset {offset}",
+            f"{self._describe(region, index, selector)} at offset {offset}",
             timeout=timeout,
         )
 

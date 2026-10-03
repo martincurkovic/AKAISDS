@@ -117,9 +117,24 @@ class LoggingBridge:
             return _LoggingOut(value, self._logger)
         return value
 
+    @staticmethod
+    def _describe(value):
+        # a Parameter's own repr is its whole table entry (range, notes,
+        # description - ~500 characters), printed twice per call (START and
+        # END) for every one of the dozens of get_parameter calls a single
+        # keygroup load makes: it was 99% of the log's volume, none of it
+        # telling you anything the field's name doesn't. Everything else
+        # (indexes, values, raw SysEx frames) is logged as before.
+        if isinstance(value, p.Parameter):
+            return f"{value.region}.{value.name}"
+        return repr(value)
+
     def _call(self, method_name, *args, **kwargs):
         thread_name = threading.current_thread().name
-        call_desc = f"{method_name}(args={args!r}, kwargs={kwargs!r})"
+        arguments = [self._describe(a) for a in args] + [
+            f"{key}={self._describe(value)}" for key, value in kwargs.items()
+        ]
+        call_desc = f"{method_name}({', '.join(arguments)})"
         self._logger.debug(f"[{thread_name}] START {call_desc}")
         start = time.monotonic()
         try:
