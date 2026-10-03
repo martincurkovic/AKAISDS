@@ -293,3 +293,16 @@ def test_s2000_s3000_window_still_has_the_four_stage_envelope_2(qapp):
     finally:
         editor._worker.stop()
         editor._worker.wait()
+
+
+def test_the_two_visible_tabs_span_the_full_width(editor, qapp):
+    # with Multi hidden, Programs + Samples must share the whole tab bar,
+    # not be left-aligned at two thirds of it (FullWidthTabBar used to
+    # divide by the total tab count, hidden ones included)
+    editor.show()
+    qapp.processEvents()
+    bar = editor.main_tabs.tabBar()
+    widths = [bar.tabRect(i).width() for i in (1, 2)]
+    assert sum(widths) == editor.main_tabs.width()
+    assert abs(widths[0] - widths[1]) <= 1
+    editor.hide()
