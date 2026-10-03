@@ -19,6 +19,7 @@ A simple way to send and receive audio samples (WAV, AIFF, FLAC) to an Akai S100
 - Drag-and-drop support for adding samples
 - Audio preview for samples
 - Batch transmission queue for sending and receiving samples
+- Light, dark, or follow-the-system theme (Settings > Appearance), switching live
 - Sampler memory status bar to display how much RAM is free (Akai sampler specific only)
 - Open-loop fallback for one-way MIDI cable setups, including timeout detection if a cable is unplugged mid-transfer
 - Built in MIDI diagnostic tests
