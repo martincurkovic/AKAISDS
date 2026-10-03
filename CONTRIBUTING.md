@@ -15,7 +15,7 @@ Given this project talk to physical hardware, often decades old at this point, o
 Open a GitHub Issue. The more info the better, especially when it comes to anything hardware related. Ideally you should include:
 
 - Your OS and which version of AKAISDS you are running
-- Your sampler type (Akai or Generic SDS and the name of your hardware)
+- Your sampler type (Akai S1000, Akai S2000/S3000 or Generic SDS, and the name of your hardware)
 - Your MIDI interface
 - Whatever the app's status bar/console output displayed at the time
 
