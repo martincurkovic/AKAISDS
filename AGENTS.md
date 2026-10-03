@@ -172,6 +172,18 @@ the S1000 has 8 loops and `SALOOP` ("first active loop") says which one plays - 
 isn't guaranteed to be it. Drum-trigger (`DDATA`) and misc/MIDI-channel (`MDATA`)
 blocks exist on an S1000 and have no UI at all.
 
+**The S1000 spec's name rule is destructive, so renames are guarded**: a `PDATA`/`SDATA`
+whose name matches a DIFFERENT resident program/sample deletes that one first. Duplicate
+Program/Sample already refused a clashing name; renaming (`_confirm_rename_program`, the
+program-name field's `_commit_program_name`, `_confirm_rename_sample`) now does too, on an
+S1000 only (on an S2000/S3000 a duplicate name is ambiguous, not destructive). The name
+field's `editingFinished` also fires on any click-away, so on an S1000 an UNCHANGED name
+writes nothing (every S1000 write re-sends the whole block); the baseline is
+`_program_name_on_sampler`, because `_on_program_name_typed` overwrites the list item's text
+live while typing. `FakeS1000` models the delete-on-clash rule (`deleted_by_name_clash`), and
+treats a rewrite under an item's OWN name as a plain replace - an assumption the spec doesn't
+state and every editor write depends on: **the first thing a real S1000 must confirm.**
+
 **Duplicate Program/Keygroup and "create program from slices" are ENABLED** (same
 `PDATA`/`KDATA` clone flows as the S2000/S3000, `BridgeWorker._handle_create_*`),
 specifically so the first S1000 tester can find out whether they work - the spec's
@@ -203,6 +215,45 @@ model selected uses it. Its blocks are 150 bytes with `0xA5` junk past the spec
 fields (tests also try 72..192) specifically so wrongly-read or dropped trailing
 bytes are caught. Also: **`PRGNUM`'s +1 display offset applies on the S1000 too**
 (unverified there - same `s3k.params` entry).
+
+## Theme preference (Settings > Settings tab > Appearance)
+
+`config.json`'s `"theme"` is `"system"` (default - follows the OS light/dark setting live, as
+the app always has), `"light"` or `"dark"` (`app_config.THEME_*`; unrecognised values read as
+`system`; `ensure_defaults_saved` creates the key). The first Settings tab used to be called
+"Audio/MIDI" - renamed once Appearance joined it. `ui/theme.py` owns the switching:
+`apply_to_app(app, preference=None)` at startup, `set_theme_preference()` live. The dialog
+saves + applies the moment an option is PICKED (`combo_theme.activated` ->
+`_on_theme_chosen`), not on OK, so Cancel does NOT undo it - the only setting here that
+behaves that way. `activated` (user picks only) rather than `currentIndexChanged`, so
+restoring the saved value into the combo when the dialog opens writes nothing.
+`QComboBox` has no `editingFinished`. The Settings page's three `QFormLayout` cards share one
+label-column width (`qt_helpers.align_form_label_columns`) so every entry field starts at the
+same x - each form otherwise sizes its label column to its own widest label. Things worth knowing:
+
+- **The palette follows the preference itself for a pinned theme, never `colorScheme()`.**
+  `set_theme_preference` also calls Qt's `setColorScheme`/`unsetColorScheme` (6.8+) so native
+  chrome like the macOS title bar follows, but that override is best-effort: the offscreen test
+  platform ignores it (`colorScheme()` stays `Unknown`) and older Qt lacks it. Only "System"
+  asks the OS (`_effective_scheme`).
+- `_render_for_current_scheme` skips re-rendering when the palette object is unchanged, so the OS
+  re-announcing a scheme we already show, or picking "Dark" on a dark OS, does no app-wide restyle.
+- A live switch costs roughly 0.4s per open editor window (it's `QApplication.setStyleSheet`
+  restyling every live widget - the same cost the OS-scheme path always had).
+- **Colors baked in at widget construction can't follow a live switch.** Fixed ones: muted text
+  now uses the `QLabel#mutedLabel` rule in `style.qss.template` (not an inline `setStyleSheet`),
+  and the keygroup-row / marker-legend swatches carry a `swatchKind` property and are recolored by
+  `ProgramEditorWindow._refresh_themed_swatches` on `theme.notifier.changed` (disconnected in
+  `closeEvent`). Anything NEW that bakes `theme.current_palette()[...]` into an inline stylesheet
+  or a list-row widget at build time has this same bug - use a QSS rule, or hook the notifier.
+  Paint-time reads of `current_palette()` (knobs, waveforms, range bar) are fine.
+- Generated chevron SVGs are named per color (`down_arrow_<hex>.svg`): Qt caches stylesheet
+  images by path, so rewriting one fixed filename with a new color on a switch can keep serving
+  the old arrow.
+- **Tests that switch theme must not restyle the real `QApplication`**: the suite leaves many
+  windows alive, and `setStyleSheet` restyles all of them (a full-suite run went from ~20s to
+  minutes). `test_theme_switching.py`/the S1000 window tests pass a stand-in app object to
+  `apply_to_app`. Also `ProgramEditorWindow` fixtures `deleteLater()` their window (`_dispose`).
 
 ## Update checker
 
