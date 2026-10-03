@@ -19,7 +19,7 @@ Connect your sampler to your MIDI interface. The MIDI output of your sampler sho
 
 **2. Configure MIDI Settings**
 
-Select your MIDI Input/Output ports and choose your sampler type (Akai or Generic SDS). Select your SysEx channel (0 is the default for almost all MIDI hardware).
+Select your MIDI Input/Output ports and choose your sampler type (Akai S1000, Akai S2000/S3000 or Generic SDS). Select your SysEx channel (0 is the default for almost all MIDI hardware).
 
 You can test your MIDI setup in the **Troubleshooting** tab. If you're having connectivity issues, check your MIDI connections to ensure they are not reversed. If you still don't see your sampler listed in the MIDI Hardware Test tab, see [MIDI Troubleshooting & Diagnostics](#midi-troubleshooting--diagnostics) for details.
 
@@ -76,7 +76,7 @@ These are theoretical best-case figures based on MIDI's fixed wire speed of 31,2
 
 The editor is powered under the hood by *s3ked*. It offers control over the most commonly used functions in an Akai S2000 and S3000 series samplers. Not all functions have controls (yet). The intention was to keep the interface as easy to understand as possible at first glance.
 
-Akai S1000 series samplers will likely work for most controls too, with the obvious exception of the Multi tab.
+The editor also supports the Akai S1000 (experimental) - set the Sampler Type to *Akai S1000* in Settings first. An S1000 has no Multi tab, modulation matrix, LFO2, portamento or Envelope 3, so those controls are hidden (its Envelope 2 is a plain ADSR).
 
 By default the editor opens up on the Programs page. It will take a second or two to load, especially if you have lots of Programs and Keygroups on your Akai sampler.
 
