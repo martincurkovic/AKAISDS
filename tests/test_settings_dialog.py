@@ -126,7 +126,7 @@ def test_dialog_widens_for_a_long_port_name(qapp):
 
 
 def test_dialog_width_ignores_which_tab_is_currently_shown(qapp):
-    # the wide combo lives on the Audio/MIDI tab, which is index 0 (already
+    # the wide combo lives on the Settings tab, which is index 0 (already
     # showing by default) - construct twice and confirm the SAME width
     # comes out regardless, since _minimum_width_for_pages measures BOTH
     # pages up front rather than just whichever tab happens to be visible
@@ -174,3 +174,198 @@ def test_hardware_test_speaks_the_akai_protocol_for_the_s1000(qapp):
             dialog.combo_device_type.findData(selection)
         )
         assert dialog._selected_protocol_family() == family
+
+
+# --- Settings tab + Appearance card ---------------------------------------------------------------
+
+
+def _tab_titles(dialog):
+    from PySide6.QtWidgets import QTabWidget
+
+    tabs = dialog.findChild(QTabWidget)
+    return [tabs.tabText(i) for i in range(tabs.count())]
+
+
+def test_first_tab_is_called_settings(qapp):
+    # was "Audio/MIDI" until the Appearance card joined it
+    dialog = MidiSettingsDialog(_FakeMidiManager(["In A"], ["Out A"]), _FakeSamplerController())
+    assert _tab_titles(dialog) == ["Settings", "Troubleshooting"]
+
+
+def test_troubleshooting_notes_point_at_the_renamed_tab(qapp):
+    from PySide6.QtWidgets import QLabel
+
+    dialog = MidiSettingsDialog(_FakeMidiManager(["In A"], ["Out A"]), _FakeSamplerController())
+    notes = " ".join(label.text() for label in dialog.findChildren(QLabel))
+    assert "Audio/MIDI" not in notes
+    assert "Settings tab" in notes
+
+
+def test_appearance_card_offers_system_light_dark_defaulting_to_system(qapp, monkeypatch, tmp_path):
+    from core import app_config
+    from PySide6.QtWidgets import QLabel
+
+    monkeypatch.setattr(app_config, "CONFIG_PATH", tmp_path / "config.json")
+    dialog = MidiSettingsDialog(_FakeMidiManager(["In A"], ["Out A"]), _FakeSamplerController())
+    combo = dialog.combo_theme
+    assert [combo.itemText(i) for i in range(combo.count())] == ["System", "Light", "Dark"]
+    assert [combo.itemData(i) for i in range(combo.count())] == ["system", "light", "dark"]
+    assert combo.currentData() == "system"
+    headers = [l.text() for l in dialog.findChildren(QLabel) if l.objectName() == "sectionHeader"]
+    assert "Appearance" in headers
+
+
+def test_appearance_combo_starts_on_the_saved_theme(qapp, monkeypatch, tmp_path):
+    from core import app_config
+
+    monkeypatch.setattr(app_config, "CONFIG_PATH", tmp_path / "config.json")
+    app_config.save_theme("dark")
+    dialog = MidiSettingsDialog(_FakeMidiManager(["In A"], ["Out A"]), _FakeSamplerController())
+    assert dialog.combo_theme.currentData() == "dark"
+
+
+class _ApplyableMidiManager(_FakeMidiManager):
+    input_name = None
+    output_name = None
+
+    def open_input(self, name):
+        self.input_name = name
+
+    def open_output(self, name):
+        self.output_name = name
+
+
+def _record_theme_applications(monkeypatch):
+    from ui import settings_dialog
+
+    applied = []
+    monkeypatch.setattr(settings_dialog.theme, "set_theme_preference", applied.append)
+    return applied
+
+
+def test_picking_a_theme_saves_and_applies_it_immediately(qapp, monkeypatch, tmp_path):
+    # not on OK - the change is live while the dialog is still open
+    from core import app_config
+
+    monkeypatch.setattr(app_config, "CONFIG_PATH", tmp_path / "config.json")
+    applied = _record_theme_applications(monkeypatch)
+    dialog = MidiSettingsDialog(_FakeMidiManager(["In A"], ["Out A"]), _FakeSamplerController())
+
+    index = dialog.combo_theme.findData("light")
+    dialog.combo_theme.setCurrentIndex(index)
+    dialog.combo_theme.activated.emit(index)  # what a user's click emits
+
+    assert applied == ["light"]
+    assert app_config.get_saved_theme() == "light"
+
+
+def test_each_pick_is_applied_in_turn(qapp, monkeypatch, tmp_path):
+    from core import app_config
+
+    monkeypatch.setattr(app_config, "CONFIG_PATH", tmp_path / "config.json")
+    applied = _record_theme_applications(monkeypatch)
+    dialog = MidiSettingsDialog(_FakeMidiManager(["In A"], ["Out A"]), _FakeSamplerController())
+    for value in ("dark", "light", "system"):
+        index = dialog.combo_theme.findData(value)
+        dialog.combo_theme.setCurrentIndex(index)
+        dialog.combo_theme.activated.emit(index)
+    assert applied == ["dark", "light", "system"]
+    assert app_config.get_saved_theme() == "system"
+
+
+def test_opening_the_dialog_does_not_reapply_the_saved_theme(qapp, monkeypatch, tmp_path):
+    # restoring the saved value into the combo is a programmatic change,
+    # not a user pick - it must not write or restyle anything
+    from core import app_config
+
+    monkeypatch.setattr(app_config, "CONFIG_PATH", tmp_path / "config.json")
+    app_config.save_theme("dark")
+    applied = _record_theme_applications(monkeypatch)
+    dialog = MidiSettingsDialog(_FakeMidiManager(["In A"], ["Out A"]), _FakeSamplerController())
+    dialog.combo_theme.setCurrentIndex(dialog.combo_theme.findData("light"))  # programmatic
+    assert applied == []
+    assert app_config.get_saved_theme() == "dark"
+
+
+def test_ok_and_cancel_leave_the_theme_to_the_combo(qapp, monkeypatch, tmp_path):
+    # the theme was already applied when picked, so neither button touches it
+    from core import app_config
+
+    monkeypatch.setattr(app_config, "CONFIG_PATH", tmp_path / "config.json")
+    applied = _record_theme_applications(monkeypatch)
+    dialog = MidiSettingsDialog(_ApplyableMidiManager(["In A"], ["Out A"]), _FakeSamplerController())
+    dialog.combo_theme.setCurrentIndex(dialog.combo_theme.findData("dark"))  # not a pick
+
+    dialog._apply_and_close()
+    dialog.reject()
+
+    assert applied == []
+    assert app_config.get_saved_theme() == "system"
+
+
+# --- entry fields line up across the section cards ----------------------------------------------
+
+
+def _field_x(dialog, widget):
+    from PySide6.QtCore import QPoint
+
+    return widget.mapTo(dialog, QPoint(0, 0)).x()
+
+
+def test_entry_fields_start_at_the_same_x_in_every_card(qapp):
+    # each card is its own QFormLayout, which sizes its label column to its
+    # own widest label - so MIDI Input/Output, Audio Output and Appearance
+    # used to start their fields at three different x positions
+    dialog = MidiSettingsDialog(_FakeMidiManager(["In A"], ["Out A"]), _FakeSamplerController())
+    dialog.show()
+    qapp.processEvents()
+    fields = [
+        dialog.combo_input,
+        dialog.combo_output,
+        dialog.spin_channel,
+        dialog.combo_device_type,
+        dialog.combo_audio_output,
+        dialog.combo_audio_buffer,
+        dialog.combo_theme,
+    ]
+    xs = {_field_x(dialog, field) for field in fields}
+    assert len(xs) == 1, f"fields start at different x positions: {sorted(xs)}"
+    dialog.hide()
+
+
+def test_fields_stay_aligned_when_the_dialog_is_resized(qapp):
+    dialog = MidiSettingsDialog(_FakeMidiManager(["In A"], ["Out A"]), _FakeSamplerController())
+    dialog.show()
+    dialog.resize(dialog.width() + 200, dialog.height())
+    qapp.processEvents()
+    assert len({_field_x(dialog, f) for f in (dialog.combo_input, dialog.combo_audio_output, dialog.combo_theme)}) == 1
+    dialog.hide()
+
+
+def test_align_form_label_columns_equalises_every_label(qapp):
+    from PySide6.QtWidgets import QFormLayout, QLabel, QLineEdit
+    from ui.qt_helpers import align_form_label_columns
+
+    forms = []
+    labels = []
+    for text in ("A:", "A much longer label:", "Mid:"):
+        form = QFormLayout()
+        label = QLabel(text)
+        form.addRow(label, QLineEdit())
+        forms.append(form)
+        labels.append(label)
+    # a note spanning the full width has no label and must be skipped
+    forms[0].addRow(QLabel("spanning note"))
+
+    align_form_label_columns(*forms)
+
+    widest = max(label.sizeHint().width() for label in labels)
+    assert [label.minimumWidth() for label in labels] == [widest] * 3
+
+
+def test_align_form_label_columns_tolerates_no_labels(qapp):
+    from PySide6.QtWidgets import QFormLayout
+    from ui.qt_helpers import align_form_label_columns
+
+    align_form_label_columns(QFormLayout())  # nothing to do, no crash
+    align_form_label_columns()

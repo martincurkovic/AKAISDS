@@ -588,3 +588,32 @@ def test_worker_reads_the_controller_fields_only_when_asked(fake):
     without = load()
     assert "K_LOUD" not in without["program"]
     assert "E_FREQ" not in without["detail"]
+
+
+# --- the spec's name rule (modelled by FakeS1000) -----------------------------------------------
+
+
+def test_fake_models_a_clashing_program_name_deleting_the_other_program(fake, bridge):
+    # S1000 spec: a PDATA whose name matches another resident program
+    # deletes that program first - this is the hazard the editor's rename
+    # guards exist for
+    bridge.set_parameter(_param("PRNAME", "program"), 1, "DRUMS")  # DRUMS exists at 0
+    assert bridge.program_list() == ["DRUMS"]
+    assert fake.deleted_by_name_clash == [("program", 0)]
+
+
+def test_fake_models_a_clashing_sample_name_deleting_the_other_sample(fake, bridge):
+    bridge.set_parameter(_param("SHNAME", "sample"), 0, "SNARE")  # SNARE exists at 1
+    assert bridge.sample_list() == ["SNARE", "PAD"]
+    assert fake.deleted_by_name_clash == [("sample", 1)]
+
+
+def test_rewriting_an_item_under_its_own_name_deletes_nothing(fake, bridge):
+    # every editor write re-sends the block with its own unchanged name - the
+    # fake treats that as an in-place replace (the spec doesn't say so
+    # outright; a real S1000 is the thing to confirm it)
+    bridge.set_parameter(_param("PRLOUD", "program"), 0, 40)
+    bridge.set_parameter(_param("SPITCH", "sample"), 2, 61)
+    assert fake.deleted_by_name_clash == []
+    assert bridge.program_list() == ["DRUMS", "PAD PROG"]
+    assert bridge.sample_list() == ["KICK", "SNARE", "PAD"]

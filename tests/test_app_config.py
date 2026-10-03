@@ -251,3 +251,47 @@ def test_settings_saved_independently_dont_clobber_each_other(monkeypatch, tmp_p
     assert app_config.get_saved_ports() == ("In", "Out")
     assert app_config.get_saved_channel() == 3
     assert app_config.get_saved_device_type() == "generic"
+
+
+# --- theme (Settings > Appearance) ---------------------------------------------------------
+
+
+def test_get_saved_theme_defaults_to_system(monkeypatch, tmp_path):
+    _use_temp_config(monkeypatch, tmp_path)
+    assert app_config.get_saved_theme() == "system"
+
+
+def test_save_and_get_theme_round_trip(monkeypatch, tmp_path):
+    _use_temp_config(monkeypatch, tmp_path)
+    for value in ("light", "dark", "system"):
+        app_config.save_theme(value)
+        assert app_config.get_saved_theme() == value
+
+
+def test_unrecognised_saved_theme_falls_back_to_system(monkeypatch, tmp_path):
+    # a hand-edited config.json, or one written by a newer version
+    _use_temp_config(monkeypatch, tmp_path)
+    config = app_config.load_config()
+    config["theme"] = "solarized"
+    app_config.save_config(config)
+    assert app_config.get_saved_theme() == "system"
+
+
+def test_saving_an_unrecognised_theme_stores_system(monkeypatch, tmp_path):
+    _use_temp_config(monkeypatch, tmp_path)
+    app_config.save_theme("solarized")
+    assert app_config.load_config()["theme"] == "system"
+
+
+def test_ensure_defaults_saved_creates_the_theme_entry(monkeypatch, tmp_path):
+    _use_temp_config(monkeypatch, tmp_path)
+    assert "theme" not in app_config.load_config()
+    app_config.ensure_defaults_saved()
+    assert app_config.load_config()["theme"] == "system"
+
+
+def test_ensure_defaults_saved_keeps_a_saved_theme(monkeypatch, tmp_path):
+    _use_temp_config(monkeypatch, tmp_path)
+    app_config.save_theme("dark")
+    app_config.ensure_defaults_saved()
+    assert app_config.load_config()["theme"] == "dark"

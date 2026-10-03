@@ -16,6 +16,8 @@ from types import SimpleNamespace
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
+from PySide6.QtCore import QEvent
+from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import QApplication, QLabel, QWidget
 
 import s3k.params as p
@@ -38,6 +40,17 @@ def _pump_until(qapp, predicate, timeout=5.0):
         qapp.processEvents()
         if time.monotonic() > deadline:
             raise TimeoutError("condition not met before timeout")
+
+
+def _dispose(editor):
+    # stop the worker AND delete the window. Not deleting leaks every test's
+    # editor for the rest of the run: each one stays alive, stays connected
+    # to theme.notifier, and is restyled on every theme change - which made
+    # the theme tests late in this file slower with every editor before them
+    editor._worker.stop()
+    editor._worker.wait()
+    editor.deleteLater()
+    QApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
 
 
 class _Host(QWidget):
@@ -76,8 +89,7 @@ def editor(qapp, fake):
     editor = _make_editor(qapp, "akai_s1000", bridge)
     editor._fake = fake
     yield editor
-    editor._worker.stop()
-    editor._worker.wait()
+    _dispose(editor)
 
 
 def test_loads_programs_keygroups_and_samples_from_an_s1000(editor):
@@ -305,8 +317,7 @@ def test_s2000_s3000_window_keeps_every_card(qapp):
         assert all(k.isEnabled() for k in editor._env2_rate_knobs)
         assert editor.windowTitle() == "AKAISDS - Program Editor"
     finally:
-        editor._worker.stop()
-        editor._worker.wait()
+        _dispose(editor)
 
 
 def test_s2000_s3000_window_still_has_the_four_stage_envelope_2(qapp):
@@ -317,8 +328,7 @@ def test_s2000_s3000_window_still_has_the_four_stage_envelope_2(qapp):
         assert not hasattr(editor, "env2_adsr_graph")
         assert len(editor._env2_rate_knobs) == 4
     finally:
-        editor._worker.stop()
-        editor._worker.wait()
+        _dispose(editor)
 
 
 def test_the_two_visible_tabs_span_the_full_width(editor, qapp):
@@ -430,8 +440,7 @@ def test_program_controller_knobs_load_signed_values_from_the_sampler(
             assert knob.value() == expected, field
             assert label.text() == str(expected), field
     finally:
-        editor._worker.stop()
-        editor._worker.wait()
+        _dispose(editor)
 
 
 def test_editing_a_program_controller_writes_only_that_field(editor, qapp):
@@ -504,8 +513,7 @@ def test_s2000_s3000_window_has_no_s1000_controller_cards(qapp):
         assert card.findChild(QLabel, "sectionHeader").text() == "LFO2"
         assert editor.lfo2_shape_combo.isVisibleTo(editor)
     finally:
-        editor._worker.stop()
-        editor._worker.wait()
+        _dispose(editor)
 
 
 # --- controller grids are styled like the S2000/S3000 mod matrix -----------------------------------
@@ -572,3 +580,240 @@ def test_label_column_is_sized_per_grid(editor):
         for matrix in _s1000_matrices(editor)
     }
     assert widths[2] > widths[4]  # envelope response labels are longer
+
+
+class _FakeThemeApp:
+    # a real QApplication.setStyleSheet() restyles every live widget in the
+    # process (slow once earlier tests have left windows around) - these
+    # tests only need theme.py to switch palettes and notify
+    def setStyle(self, name):
+        pass
+
+    def setStyleSheet(self, sheet):
+        pass
+
+
+# --- colors baked at build time follow a live theme switch ---------------------------------------
+
+
+def _swatch_colors(editor, kind):
+    return [
+        label.styleSheet()
+        for label in editor.findChildren(QLabel)
+        if label.property("swatchKind") == kind
+    ]
+
+
+def test_keygroup_swatches_recolor_when_the_theme_changes(editor, qapp, monkeypatch, tmp_path):
+    from ui import theme
+
+    monkeypatch.setattr(theme, "_GENERATED_ICONS_DIR", str(tmp_path / "icons"))
+    saved = (theme._active_palette, theme._app, theme._preference)
+    try:
+        theme.apply_to_app(_FakeThemeApp(), "dark")
+        assert editor.keygroup_list.count() == 2
+        dark = _swatch_colors(editor, "keygroup")
+        assert len(dark) == 2
+        assert theme.DARK_PALETTE["keygroup_color_1"] in dark[0]
+
+        theme.set_theme_preference("light")
+        light = _swatch_colors(editor, "keygroup")
+        assert theme.LIGHT_PALETTE["keygroup_color_1"] in light[0]
+        assert theme.LIGHT_PALETTE["keygroup_color_2"] in light[1]
+        assert light != dark
+    finally:
+        QGuiApplication.styleHints().unsetColorScheme()
+        theme._active_palette, theme._app, theme._preference = saved
+
+
+def test_marker_legend_swatches_recolor_when_the_theme_changes(editor, qapp, monkeypatch, tmp_path):
+    from ui import theme
+
+    monkeypatch.setattr(theme, "_GENERATED_ICONS_DIR", str(tmp_path / "icons"))
+    saved = (theme._active_palette, theme._app, theme._preference)
+    try:
+        theme.apply_to_app(_FakeThemeApp(), "dark")
+        theme.set_theme_preference("light")
+        boundary = _swatch_colors(editor, "marker_boundary")
+        loop = _swatch_colors(editor, "marker_loop")
+        assert len(boundary) == 2 and len(loop) == 2  # start/end, loop start/end
+        assert all(theme.LIGHT_PALETTE["text_disabled"] in s for s in boundary)
+        assert all(theme.LIGHT_PALETTE["keygroup_color_3"] in s for s in loop)
+        # a loop-less sample greys the loop swatches - and that must survive
+        # a theme change too, not snap back to the loop color
+        editor._loop_markers_enabled = False
+        theme.set_theme_preference("dark")
+        assert all(theme.DARK_PALETTE["text_disabled"] in s for s in _swatch_colors(editor, "marker_loop"))
+    finally:
+        QGuiApplication.styleHints().unsetColorScheme()
+        theme._active_palette, theme._app, theme._preference = saved
+
+
+def test_a_closed_editor_stops_listening_for_theme_changes(qapp, fake, monkeypatch, tmp_path):
+    from ui import theme
+
+    monkeypatch.setattr(theme, "_GENERATED_ICONS_DIR", str(tmp_path / "icons"))
+    # counted at the CLASS level, before the editor exists, so the signal
+    # connection made in __init__ is to this very function
+    calls = []
+    original = ProgramEditorWindow._refresh_themed_swatches
+    monkeypatch.setattr(
+        ProgramEditorWindow,
+        "_refresh_themed_swatches",
+        lambda self: calls.append(self) or original(self),
+    )
+    bridge = LoggingBridge(S1000Bridge(fake.bridge(timeout=0.3)))
+    editor = _make_editor(qapp, "akai_s1000", bridge)
+    saved = (theme._active_palette, theme._app, theme._preference)
+    try:
+        theme.apply_to_app(_FakeThemeApp(), "dark")
+        theme.set_theme_preference("light")
+        # by identity - editors leaked by OTHER test files are still
+        # connected and would be counted too
+        assert editor in calls, "an open editor should hear about theme changes"
+
+        editor.close()
+        calls.clear()
+        theme.set_theme_preference("dark")
+        theme.set_theme_preference("light")
+        assert editor not in calls  # closed: no longer listening
+    finally:
+        QGuiApplication.styleHints().unsetColorScheme()
+        theme._active_palette, theme._app, theme._preference = saved
+        _dispose(editor)
+
+
+# --- renames must not land on another item's name (S1000 deletes the other) ----------------------
+
+
+@pytest.fixture
+def warnings(monkeypatch):
+    from ui import program_editor_window
+
+    shown = []
+    monkeypatch.setattr(
+        program_editor_window.QMessageBox,
+        "warning",
+        lambda parent, title, text, *a: shown.append((title, text)),
+    )
+    return shown
+
+
+def _settle(editor, qapp):
+    editor._worker.wait_until_idle()
+    for _ in range(10):
+        qapp.processEvents()
+
+
+def test_renaming_a_program_to_an_existing_name_is_refused(editor, qapp, warnings, monkeypatch):
+    monkeypatch.setattr(editor, "_prompt_program_name", lambda current: "PAD PROG")
+    writes = editor._fake.writes
+    editor.program_list.setCurrentRow(0)
+    editor._confirm_rename_program()
+    _settle(editor, qapp)
+
+    assert editor._fake.writes == writes  # nothing sent
+    assert editor._fake.deleted_by_name_clash == []
+    assert editor.program_list.item(0).text() == "DRUMS"
+    assert editor._bridge.program_list() == ["DRUMS", "PAD PROG"]
+    assert warnings and "Rename Program" in warnings[0][0]
+    assert "deletes the existing one" in warnings[0][1]
+
+
+def test_renaming_a_program_to_a_free_name_still_works(editor, qapp, warnings, monkeypatch):
+    monkeypatch.setattr(editor, "_prompt_program_name", lambda current: "BREAKS")
+    editor.program_list.setCurrentRow(0)
+    editor._confirm_rename_program()
+    _settle(editor, qapp)
+
+    assert warnings == []
+    assert editor.program_list.item(0).text() == "BREAKS"
+    assert editor._fake.deleted_by_name_clash == []
+    assert editor._bridge.program_list() == ["BREAKS", "PAD PROG"]
+
+
+def test_typing_an_existing_program_name_is_reverted_not_written(editor, qapp, warnings):
+    editor.program_list.setCurrentRow(0)
+    _settle(editor, qapp)
+    writes = editor._fake.writes
+    editor.program_name_edit.setText("PAD PROG")
+    editor._on_program_name_typed("PAD PROG")  # the live-typing handler
+    editor._commit_program_name()  # Enter / click away
+    _settle(editor, qapp)
+
+    assert editor._fake.writes == writes
+    assert editor._fake.deleted_by_name_clash == []
+    assert editor.program_name_edit.text() == "DRUMS"  # restored
+    assert editor.program_list.item(0).text() == "DRUMS"
+    assert warnings
+
+
+def test_typing_a_free_program_name_is_written(editor, qapp, warnings):
+    editor.program_list.setCurrentRow(0)
+    _settle(editor, qapp)
+    editor.program_name_edit.setText("LOOPS")
+    editor._on_program_name_typed("LOOPS")
+    editor._commit_program_name()
+    _settle(editor, qapp)
+
+    assert warnings == []
+    assert editor._bridge.program_list() == ["LOOPS", "PAD PROG"]
+    # and the new name is now the baseline: committing it again is a no-op
+    writes = editor._fake.writes
+    editor._commit_program_name()
+    _settle(editor, qapp)
+    assert editor._fake.writes == writes
+
+
+def test_clicking_away_from_an_unchanged_program_name_writes_nothing(editor, qapp, warnings):
+    # editingFinished fires on any click-away - on an S1000 every write
+    # re-sends the whole program block, so an unchanged name must not write
+    editor.program_list.setCurrentRow(0)
+    _settle(editor, qapp)
+    writes = editor._fake.writes
+    editor._commit_program_name()
+    _settle(editor, qapp)
+    assert editor._fake.writes == writes
+    assert warnings == []
+
+
+def test_renaming_a_sample_to_an_existing_name_is_refused(editor, qapp, warnings, monkeypatch):
+    monkeypatch.setattr(editor, "_prompt_sample_name", lambda current: "SNARE")
+    _pump_until(qapp, lambda: len(editor._sample_list) == 3)
+    editor.sample_list_widget.setCurrentRow(0)
+    writes = editor._fake.writes
+    editor._confirm_rename_sample()
+    _settle(editor, qapp)
+
+    assert editor._fake.writes == writes
+    assert editor._fake.deleted_by_name_clash == []
+    assert editor._sample_list == ["KICK", "SNARE", "PAD"]
+    assert warnings and "Rename Sample" in warnings[0][0]
+
+
+def test_renaming_a_sample_to_a_free_name_still_works(editor, qapp, warnings, monkeypatch):
+    monkeypatch.setattr(editor, "_prompt_sample_name", lambda current: "KICK2")
+    _pump_until(qapp, lambda: len(editor._sample_list) == 3)
+    editor.sample_list_widget.setCurrentRow(0)
+    editor._confirm_rename_sample()
+    _settle(editor, qapp)
+
+    assert warnings == []
+    assert editor._bridge.sample_list() == ["KICK2", "SNARE", "PAD"]
+
+
+def test_the_s2000_s3000_window_does_not_apply_the_s1000_rename_guard(qapp, warnings, monkeypatch):
+    # there a duplicate name is ambiguous, not destructive - behaviour unchanged
+    from s3ked.demo import DemoBridge
+
+    editor = _make_editor(qapp, "akai_s2000_s3000", DemoBridge())
+    try:
+        names = [editor.program_list.item(i).text() for i in range(editor.program_list.count())]
+        assert len(names) >= 2
+        monkeypatch.setattr(editor, "_prompt_program_name", lambda current: names[1])
+        editor.program_list.setCurrentRow(0)
+        editor._confirm_rename_program()
+        assert warnings == []
+        assert editor.program_list.item(0).text() == names[1]
+    finally:
+        _dispose(editor)

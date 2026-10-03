@@ -73,7 +73,7 @@ cd /home/martin/Development/AKAISDS
 uv run python src/main.py
 ```
 
-Then in the app: **Settings → Audio/MIDI** (or the dashboard's own MIDI
+Then in the app: **Settings → Settings tab** (or the dashboard's own MIDI
 Settings button), pick your sampler's input and output ports, same as
 always. Watch the log for `MidiManager: opened input ...` /
 `MidiManager: opened output ...` - with the flag on, these lines come from
