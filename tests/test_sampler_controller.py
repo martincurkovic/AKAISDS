@@ -1090,3 +1090,35 @@ def test_unexpected_sysex_is_logged(controller, caplog):
     with caplog.at_level(logging.WARNING, logger="akaisds"):
         controller._on_sysex_received_impl(bytes([0x47, 0, 0x55, 1, 2]))
     assert any("unrecognised Akai message" in r.message for r in caplog.records)
+
+
+# --- Sampler Type: S1000 vs S2000/S3000 vs Generic ------------------------------
+
+
+def test_set_device_type_s1000_keeps_the_akai_protocol_family(controller):
+    # transfers only care about the protocol family - an S1000's SDS/RSTAT/
+    # list traffic is the same as an S2000/S3000's - while the full model
+    # stays available for the Program Editor
+    controller.set_device_type("akai_s1000")
+    assert controller.device_type == "akai"
+    assert controller.sampler_model == "akai_s1000"
+
+
+def test_set_device_type_s2000_s3000_is_the_akai_family(controller):
+    controller.set_device_type("akai_s1000")
+    controller.set_device_type("akai_s2000_s3000")
+    assert controller.device_type == "akai"
+    assert controller.sampler_model == "akai_s2000_s3000"
+
+
+def test_set_device_type_accepts_the_legacy_akai_key(controller):
+    # a config.json from before the S1000 existed
+    controller.set_device_type("akai")
+    assert controller.device_type == "akai"
+    assert controller.sampler_model == "akai_s2000_s3000"
+
+
+def test_set_device_type_generic_is_its_own_family(controller):
+    controller.set_device_type("generic")
+    assert controller.device_type == "generic"
+    assert controller.sampler_model == "generic"

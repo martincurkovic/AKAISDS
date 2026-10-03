@@ -115,7 +115,7 @@ def test_open_editor_tooltip_explains_whats_missing(dashboard):
     dashboard.midi_manager.output_name = "Fake Out"
     dashboard.sampler_controller.device_type = "generic"
     dashboard._update_open_editor_enabled()
-    assert "Akai Sampler" in dashboard.btn_open_editor.toolTip()
+    assert "Akai S2000/S3000" in dashboard.btn_open_editor.toolTip()
 
     dashboard.sampler_controller.device_type = "akai"
     dashboard._update_open_editor_enabled()
@@ -578,3 +578,129 @@ def test_open_slice_editor_wires_both_channels_through_to_export(
         channels, _rate = sds_encoder.read_wav_channels(new_path)
         assert channels[0] == [1000] * 2205
         assert channels[1] == [-1000] * 2205
+
+
+# --- Program Editor + the Akai S1000 ----------------------------------------------
+
+
+def _stub_editor_opening(monkeypatch, dashboard):
+    # records connect() calls and swaps ProgramEditorWindow for a stub, so
+    # open_program_editor() can be driven without a real bridge/window
+    from ui import dashboard as dashboard_module
+
+    connects = []
+    monkeypatch.setattr(
+        dashboard_module.program_editor_bridge,
+        "connect",
+        lambda midi_manager, sampler_model=None: connects.append(sampler_model)
+        or object(),
+    )
+
+    class _StubEditor:
+        def __init__(self, main_window, bridge):
+            pass
+
+        def show(self):
+            pass
+
+    monkeypatch.setattr(dashboard_module, "ProgramEditorWindow", _StubEditor)
+    return connects
+
+
+def _isolate_s1000_warning(monkeypatch, acknowledged):
+    from ui import dashboard as dashboard_module
+
+    state = {"acknowledged": acknowledged}
+    monkeypatch.setattr(
+        dashboard_module.app_config,
+        "get_s1000_editor_warning_acknowledged",
+        lambda: state["acknowledged"],
+    )
+    monkeypatch.setattr(
+        dashboard_module.app_config,
+        "save_s1000_editor_warning_acknowledged",
+        lambda acknowledged=True: state.update(acknowledged=acknowledged),
+    )
+    return state
+
+
+def _stub_warning(monkeypatch, answer):
+    from PySide6.QtWidgets import QMessageBox
+    from ui import dashboard as dashboard_module
+
+    shown = []
+
+    def fake_warning(parent, title, text, *args):
+        shown.append(title)
+        return answer
+
+    monkeypatch.setattr(dashboard_module.QMessageBox, "warning", fake_warning)
+    return shown
+
+
+def test_s1000_editor_asks_before_first_open_and_remembers_ok(
+    dashboard, monkeypatch
+):
+    from PySide6.QtWidgets import QMessageBox
+
+    connects = _stub_editor_opening(monkeypatch, dashboard)
+    state = _isolate_s1000_warning(monkeypatch, acknowledged=False)
+    shown = _stub_warning(monkeypatch, QMessageBox.StandardButton.Ok)
+    dashboard.sampler_controller.set_device_type("akai_s1000")
+
+    dashboard.open_program_editor()
+
+    assert shown == ["Akai S1000 - experimental"]
+    assert state["acknowledged"] is True
+    assert connects == ["akai_s1000"]
+
+
+def test_s1000_editor_cancelling_the_warning_does_not_connect(
+    dashboard, monkeypatch
+):
+    from PySide6.QtWidgets import QMessageBox
+
+    connects = _stub_editor_opening(monkeypatch, dashboard)
+    state = _isolate_s1000_warning(monkeypatch, acknowledged=False)
+    _stub_warning(monkeypatch, QMessageBox.StandardButton.Cancel)
+    dashboard.sampler_controller.set_device_type("akai_s1000")
+
+    dashboard.open_program_editor()
+
+    assert connects == []
+    assert state["acknowledged"] is False
+
+
+def test_s1000_editor_does_not_ask_again_once_acknowledged(dashboard, monkeypatch):
+    from PySide6.QtWidgets import QMessageBox
+
+    connects = _stub_editor_opening(monkeypatch, dashboard)
+    _isolate_s1000_warning(monkeypatch, acknowledged=True)
+    shown = _stub_warning(monkeypatch, QMessageBox.StandardButton.Cancel)
+    dashboard.sampler_controller.set_device_type("akai_s1000")
+
+    dashboard.open_program_editor()
+
+    assert shown == []
+    assert connects == ["akai_s1000"]
+
+
+def test_s2000_s3000_editor_never_shows_the_s1000_warning(dashboard, monkeypatch):
+    from PySide6.QtWidgets import QMessageBox
+
+    connects = _stub_editor_opening(monkeypatch, dashboard)
+    _isolate_s1000_warning(monkeypatch, acknowledged=False)
+    shown = _stub_warning(monkeypatch, QMessageBox.StandardButton.Cancel)
+
+    dashboard.open_program_editor()
+
+    assert shown == []
+    assert connects == ["akai_s2000_s3000"]
+
+
+def test_open_editor_is_enabled_for_the_s1000_too(dashboard):
+    dashboard.midi_manager.input_name = "Fake In"
+    dashboard.midi_manager.output_name = "Fake Out"
+    dashboard.sampler_controller.set_device_type("akai_s1000")
+    dashboard._update_open_editor_enabled()
+    assert dashboard.btn_open_editor.isEnabled() is True

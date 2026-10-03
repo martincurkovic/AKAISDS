@@ -89,6 +89,7 @@ class _FakeMidiManager:
 class _FakeSamplerController:
     channel = 0
     device_type = "akai"
+    sampler_model = "akai_s2000_s3000"
 
     def is_open_loop(self):
         return False
@@ -96,8 +97,9 @@ class _FakeSamplerController:
     def set_channel(self, channel):
         self.channel = channel
 
-    def set_device_type(self, device_type):
-        self.device_type = device_type
+    def set_device_type(self, selection):
+        self.sampler_model = selection
+        self.device_type = "generic" if selection == "generic" else "akai"
 
 
 def test_dialog_width_never_drops_below_the_floor_with_short_port_names(qapp):
@@ -133,3 +135,42 @@ def test_dialog_width_ignores_which_tab_is_currently_shown(qapp):
     dialog_a = MidiSettingsDialog(midi_manager, _FakeSamplerController())
     dialog_b = MidiSettingsDialog(midi_manager, _FakeSamplerController())
     assert dialog_a.minimumWidth() == dialog_b.minimumWidth()
+
+
+# --- Sampler Type combo (S1000 / S2000/S3000 / Generic) ----------------------
+
+
+def test_sampler_type_combo_lists_the_three_models_alphabetically(qapp):
+    dialog = MidiSettingsDialog(_FakeMidiManager(["In A"], ["Out A"]), _FakeSamplerController())
+    labels = [
+        dialog.combo_device_type.itemText(i)
+        for i in range(dialog.combo_device_type.count())
+    ]
+    assert labels == ["Akai S1000", "Akai S2000/S3000", "Generic SDS"]
+    assert labels == sorted(labels)
+    assert [dialog.combo_device_type.itemData(i) for i in range(3)] == [
+        "akai_s1000",
+        "akai_s2000_s3000",
+        "generic",
+    ]
+
+
+def test_sampler_type_combo_starts_on_the_controllers_current_model(qapp):
+    controller = _FakeSamplerController()
+    controller.sampler_model = "akai_s1000"
+    dialog = MidiSettingsDialog(_FakeMidiManager(["In A"], ["Out A"]), controller)
+    assert dialog.combo_device_type.currentData() == "akai_s1000"
+
+
+def test_hardware_test_speaks_the_akai_protocol_for_the_s1000(qapp):
+    # the Run Hardware Test button only cares about the protocol family
+    dialog = MidiSettingsDialog(_FakeMidiManager(["In A"], ["Out A"]), _FakeSamplerController())
+    for selection, family in [
+        ("akai_s1000", "akai"),
+        ("akai_s2000_s3000", "akai"),
+        ("generic", "generic"),
+    ]:
+        dialog.combo_device_type.setCurrentIndex(
+            dialog.combo_device_type.findData(selection)
+        )
+        assert dialog._selected_protocol_family() == family
