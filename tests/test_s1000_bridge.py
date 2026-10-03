@@ -441,3 +441,150 @@ def test_reading_after_a_duplicate_sees_the_new_group_count(fake):
     worker.submit_keygroups(0)
     worker.process_pending()
     assert [len(r) for r in loaded] == [2, 3]
+
+
+# --- S1000 controller routing: fields s3k.params calls "not used" ----------------------------
+#
+# s3k.params declares K_LOUD/P_LOUD/K_PANP/MW_PAN/K_LRAT/K_LDEP/K_LDEL (program)
+# and V_FREQ/P_FREQ/E_FREQ/E_PTCH/KV_LO (keygroup) as range 0..0, "fixed value
+# in the specification" (true of the S3000). The S1000 spec lists every one as
+# "+/-50". Left uncorrected, the range check refuses every non-zero write and a
+# stored negative reads back as 256 - n.
+
+from core.program_editor_bridge import S1000_KEYGROUP_FIELDS, S1000_PROGRAM_FIELDS
+from core.s1000_bridge import s1000_param
+
+_NOT_USED_ON_S3000 = [
+    ("K_LOUD", "program"),
+    ("P_LOUD", "program"),
+    ("K_PANP", "program"),
+    ("MW_PAN", "program"),
+    ("K_LRAT", "program"),
+    ("K_LDEP", "program"),
+    ("K_LDEL", "program"),
+    ("V_FREQ", "keygroup"),
+    ("P_FREQ", "keygroup"),
+    ("E_FREQ", "keygroup"),
+    ("E_PTCH", "keygroup"),
+    ("KV_LO", "keygroup"),
+]
+
+
+def _raw_byte(fake, name, region, index=0, keygroup=0):
+    offset = _param(name, region).offset
+    if region == "program":
+        return fake.programs[index]["block"][offset]
+    return fake.programs[index]["keygroups"][keygroup][offset]
+
+
+@pytest.mark.parametrize("name,region", _NOT_USED_ON_S3000)
+def test_s3000_not_used_fields_get_the_s1000s_plus_minus_50_range(name, region):
+    corrected = s1000_param(_param(name, region))
+    assert (corrected.minimum, corrected.maximum) == (-50, 50)
+    # a corrected COPY - s3k.params itself is untouched (it's a dependency)
+    assert _param(name, region).maximum == 0
+
+
+@pytest.mark.parametrize("name,region", _NOT_USED_ON_S3000)
+def test_negative_amounts_round_trip_through_the_declared_parameter(
+    fake, bridge, name, region
+):
+    # exactly what the editor does: hands in s3k.params' OWN (0..0) Parameter
+    declared = _param(name, region)
+    bridge.set_parameter(declared, 0, -20, keygroup=1)
+    assert bridge.get_parameter(declared, 0, keygroup=1) == -20
+    # stored as the two's-complement byte the S1000 expects
+    assert _raw_byte(fake, name, region, keygroup=1) == (-20) & 0xFF
+    bridge.set_parameter(declared, 0, 50, keygroup=1)
+    assert bridge.get_parameter(declared, 0, keygroup=1) == 50
+    bridge.set_parameter(declared, 0, -50, keygroup=1)
+    assert bridge.get_parameter(declared, 0, keygroup=1) == -50
+
+
+@pytest.mark.parametrize("name,region", _NOT_USED_ON_S3000)
+def test_out_of_range_amounts_are_still_refused(fake, bridge, name, region):
+    declared = _param(name, region)
+    for value in (51, -51):
+        with pytest.raises(ValueError):
+            bridge.set_parameter(declared, 0, value)
+    assert fake.writes == 0
+
+
+def test_a_negative_byte_already_on_the_sampler_reads_as_negative(fake, bridge):
+    offset = _param("E_FREQ", "keygroup").offset
+    fake.programs[0]["keygroups"][0][offset] = 0xEC  # -20, written on the panel
+    assert bridge.get_parameter(_param("E_FREQ", "keygroup"), 0, keygroup=0) == -20
+
+
+def test_get_header_applies_the_corrections_too(fake, bridge):
+    fake.programs[0]["block"][_param("K_LOUD", "program").offset] = 0xF6  # -10
+    assert bridge.get_header("program", 0)["K_LOUD"] == -10
+
+
+def test_fields_with_a_correct_declared_range_are_untouched():
+    for name, region in [("V_LOUD", "program"), ("P_PTCH", "program"),
+                         ("MWLDEP", "program"), ("V_ATT1", "keygroup"),
+                         ("V_ENV2", "keygroup"), ("K_FREQ", "keygroup")]:
+        declared = _param(name, region)
+        assert s1000_param(declared) is declared
+
+
+@pytest.mark.parametrize("name", S1000_PROGRAM_FIELDS)
+def test_every_s1000_program_controller_field_round_trips(fake, bridge, name):
+    param = s1000_param(_param(name, "program"))
+    assert supports(param) and param.writable
+    for value in sorted({param.minimum, param.maximum, 7}):
+        bridge.set_parameter(_param(name, "program"), 1, value)
+        assert bridge.get_parameter(_param(name, "program"), 1) == value
+
+
+@pytest.mark.parametrize("name", S1000_KEYGROUP_FIELDS)
+def test_every_s1000_keygroup_controller_field_round_trips(fake, bridge, name):
+    param = s1000_param(_param(name, "keygroup"))
+    assert supports(param) and param.writable
+    for value in sorted({param.minimum, param.maximum, 7}):
+        bridge.set_parameter(_param(name, "keygroup"), 0, value, keygroup=1)
+        assert bridge.get_parameter(_param(name, "keygroup"), 0, keygroup=1) == value
+    assert fake.ignored_ops == []
+
+
+def test_writing_one_controller_leaves_its_neighbours_alone(fake, bridge):
+    before = bytes(fake.programs[0]["keygroups"][0])
+    bridge.set_parameter(_param("E_FREQ", "keygroup"), 0, -33, keygroup=0)
+    after = bytes(fake.programs[0]["keygroups"][0])
+    offset = _param("E_FREQ", "keygroup").offset
+    assert after[offset] == (-33) & 0xFF
+    assert after[:offset] + after[offset + 1 :] == before[:offset] + before[offset + 1 :]
+
+
+def test_worker_reads_the_controller_fields_only_when_asked(fake):
+    fake.programs[0]["block"][_param("K_LOUD", "program").offset] = 0xF6  # -10
+    fake.programs[0]["keygroups"][0][_param("E_FREQ", "keygroup").offset] = 30
+    bridge = LoggingBridge(S1000Bridge(fake.bridge(timeout=0.3)))
+
+    def load(**extras):
+        worker = BridgeWorker(bridge, **extras)
+        got = {}
+        worker.keygroups_loaded.connect(lambda pi, r, v: got.update(program=v))
+        worker.detail_loaded.connect(lambda pi, ki, v: got.update(detail=v))
+        worker.submit_keygroups(0)
+        worker.process_pending()
+        worker.submit_detail(0, 0)
+        worker.process_pending()
+        return got
+
+    with_extras = load(
+        extra_program_fields=S1000_PROGRAM_FIELDS,
+        extra_keygroup_fields=S1000_KEYGROUP_FIELDS,
+    )
+    assert with_extras["program"]["K_LOUD"] == -10
+    assert with_extras["detail"]["E_FREQ"] == 30
+    for name in S1000_PROGRAM_FIELDS:
+        assert name in with_extras["program"]
+    for name in S1000_KEYGROUP_FIELDS:
+        assert name in with_extras["detail"]
+
+    # an S2000/S3000 worker never reads them (each would cost a round trip)
+    without = load()
+    assert "K_LOUD" not in without["program"]
+    assert "E_FREQ" not in without["detail"]

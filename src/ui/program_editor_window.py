@@ -74,7 +74,12 @@ from core import sampler_models
 from core import sample_editing
 from core import sds_encoder
 from core.midi_notes import midi_note_to_name
-from core.program_editor_bridge import BridgeWorker, MULTI_PART_COUNT
+from core.program_editor_bridge import (
+    BridgeWorker,
+    MULTI_PART_COUNT,
+    S1000_KEYGROUP_FIELDS,
+    S1000_PROGRAM_FIELDS,
+)
 from core.sample_duration import sample_duration_seconds
 from ui.settings_dialog import MidiSettingsDialog
 
@@ -469,6 +474,10 @@ class ProgramEditorWindow(QMainWindow):
             )
         )
         self._is_s1000 = sampler_models.is_s1000(self._sampler_model)
+        # (knob, value_label, field, region) for every S1000-only controller
+        # knob built by _build_s1000_controller_grid - loaded from
+        # keygroups_loaded/detail_loaded by _load_s1000_controls
+        self._s1000_controls = []
 
         # a single persistent worker thread owns every call to the bridge
         # for this window's whole lifetime, taking requests off a queue and
@@ -524,7 +533,13 @@ class ProgramEditorWindow(QMainWindow):
         # this one lives as long as the editor window itself does.
         self._sample_preview_player = SlicePreviewPlayer(self)
 
-        self._worker = BridgeWorker(self._bridge)
+        self._worker = BridgeWorker(
+            self._bridge,
+            # an S1000 also reads its fixed controller routing (see
+            # program_editor_bridge.S1000_PROGRAM_FIELDS)
+            extra_program_fields=S1000_PROGRAM_FIELDS if self._is_s1000 else (),
+            extra_keygroup_fields=S1000_KEYGROUP_FIELDS if self._is_s1000 else (),
+        )
         self._worker.busy_changed.connect(self._on_worker_busy_changed)
         self._worker.programs_loaded.connect(self._on_programs_loaded)
         self._worker.programs_load_failed.connect(self._on_program_load_failed)
@@ -2493,13 +2508,13 @@ class ProgramEditorWindow(QMainWindow):
             # re-enable what this disables
             self._apply_s1000_gating(
                 hidden_widgets=[
-                    lfo2_section,
                     portamento_section,
                     modulation_section,
                     keygroup_modulation_section,
                     self.env2_graph,
                 ],
                 hidden_layouts=[
+                    lfo2_shape_sync_column,
                     lfo_shape_column,
                     bend_down_column,
                     resonance_column,
@@ -2508,10 +2523,21 @@ class ProgramEditorWindow(QMainWindow):
                 ],
                 env_sections=(env1_section, env2_section),
                 bend_up_column=bend_up_column,
+                pan_lfo=(
+                    lfo2_section,
+                    (lfo2_rate_column, lfo2_depth_column, lfo2_delay_column),
+                ),
+                page_layouts=(program_page_layout, detail_container_layout),
             )
 
     def _apply_s1000_gating(
-        self, hidden_widgets, hidden_layouts, env_sections, bend_up_column
+        self,
+        hidden_widgets,
+        hidden_layouts,
+        env_sections,
+        bend_up_column,
+        pan_lfo,
+        page_layouts,
     ):
         # one-way: removes/disables everything an S1000 doesn't have
         # (core/s1000_bridge.py reads those fields as neutral zeros and
@@ -2545,6 +2571,8 @@ class ProgramEditorWindow(QMainWindow):
             spinbox.setRange(24, 127)
 
         self._build_s1000_env2_adsr(*env_sections)
+        self._build_s1000_pan_lfo(*pan_lfo)
+        self._build_s1000_controller_cards(*page_layouts)
 
         # no Multi on an S1000 - hide the tab and drop its Window-menu
         # shortcut (removeAction, not setEnabled(False):
@@ -2555,6 +2583,168 @@ class ProgramEditorWindow(QMainWindow):
             if menu is not None and self._multi_tab_action in menu.actions():
                 menu.removeAction(self._multi_tab_action)
         self.setWindowTitle("AKAISDS - Program Editor (Akai S1000, experimental)")
+
+    def _build_s1000_pan_lfo(self, lfo2_section, rate_depth_delay_columns):
+        # The S1000 has a Pan LFO (PANRAT/PANDEP/PANDEL - the same three
+        # fields the S3000's "LFO2" card already edits, since that LFO is
+        # hardwired to Pan there too), but not the S3000's LFO2 shape/
+        # retrigger. So the card stays, retitled, minus those two combos
+        # (hidden by the caller) and with its knob labels shortened to
+        # match the new title.
+        lfo2_section.findChild(QLabel, "sectionHeader").setText("Pan LFO")
+        for column, label, tooltip, knob in zip(
+            rate_depth_delay_columns,
+            ("Rate", "Depth", "Delay"),
+            (tt.S1000_PAN_LFO_RATE, tt.S1000_PAN_LFO_DEPTH, tt.S1000_PAN_LFO_DELAY),
+            (self.lfo2_rate_knob, self.lfo2_depth_knob, self.lfo2_delay_knob),
+        ):
+            column.itemAt(0).widget().setText(label)
+            knob.setToolTip(tooltip)
+
+    def _build_s1000_controller_grid(self, region, column_headers, rows):
+        # One destination-by-source grid of controller-amount knobs. `rows`
+        # is [(row_label, row_tooltip, [cell, ...])] with one cell per
+        # column: either None (that source doesn't drive that destination
+        # on an S1000 - shown as a dash) or (field, minimum, maximum). Each
+        # knob is wired to write its own field and registered in
+        # self._s1000_controls so keygroups_loaded/detail_loaded can fill it
+        # (_load_s1000_controls). Program-region fields write to whichever
+        # program is selected; keygroup-region ones also follow the selected
+        # keygroup - same as every other knob on those two pages.
+        grid = QGridLayout()
+        grid.setHorizontalSpacing(14)
+        grid.setVerticalSpacing(6)
+        for column, header in enumerate(column_headers, start=1):
+            label = QLabel(header)
+            label.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+            grid.addWidget(label, 0, column, alignment=Qt.AlignmentFlag.AlignHCenter)
+        getter = self.keygroup_list.currentRow if region == "keygroup" else None
+        for row, (row_label, row_tooltip, cells) in enumerate(rows, start=1):
+            name = QLabel(row_label)
+            if row_tooltip:
+                name.setToolTip(row_tooltip)
+            grid.addWidget(name, row, 0)
+            for column, cell in enumerate(cells, start=1):
+                if cell is None:
+                    dash = QLabel("-")
+                    dash.setEnabled(False)
+                    grid.addWidget(
+                        dash, row, column, alignment=Qt.AlignmentFlag.AlignHCenter
+                    )
+                    continue
+                field, minimum, maximum = cell
+                knob = Knob()
+                knob.setRange(minimum, maximum)
+                knob.setDefaultValue(0)
+                knob.setFixedSize(28, 28)
+                knob.setToolTip(tt.S1000_CONTROLLER_TOOLTIPS[field])
+                knob.setEnabled(True)
+                cell_layout, value_label = self._build_knob_value_row(knob)
+                grid.addLayout(
+                    cell_layout, row, column, alignment=Qt.AlignmentFlag.AlignHCenter
+                )
+                self._wire_knob_write(
+                    knob, field, region, keygroup_index_getter=getter
+                )
+                self._s1000_controls.append((knob, value_label, field, region))
+        grid.setColumnStretch(len(column_headers) + 1, 1)
+        return grid
+
+    def _build_s1000_controller_cards(self, program_page_layout, keygroup_page_layout):
+        # The S1000's fixed controller routing - its equivalent of the
+        # S3000's assignable modulation matrix, whose cards are hidden on an
+        # S1000. These fields sit at the same offsets on both models but the
+        # S3000 spec calls most of them "not used", so the S2000/S3000
+        # editor never had controls for them (see core/s1000_bridge.py's
+        # _S1000_RANGE_OVERRIDES for the corrected ranges). V_LOUD isn't in
+        # the grid: it already has the Velocity knob in Volume, Pan &
+        # Velocity, and a second control for one field would need keeping in
+        # sync - the footnote points there instead.
+        pm50 = lambda field: (field, -50, 50)
+        program_grid = self._build_s1000_controller_grid(
+            "program",
+            ["Velocity", "Key", "Pressure", "Modwheel"],
+            [
+                (
+                    "Loudness",
+                    tt.S1000_LOUDNESS_VELOCITY_NOTE,
+                    [None, pm50("K_LOUD"), pm50("P_LOUD"), None],
+                ),
+                ("Pan", "", [None, pm50("K_PANP"), None, pm50("MW_PAN")]),
+                ("Pitch", "", [None, None, ("P_PTCH", -12, 12), None]),
+                (
+                    "LFO1 depth",
+                    "",
+                    [
+                        ("VELDEP", 0, 99),
+                        pm50("K_LDEP"),
+                        ("PRSDEP", 0, 99),
+                        ("MWLDEP", 0, 99),
+                    ],
+                ),
+                ("LFO1 rate", "", [None, pm50("K_LRAT"), None, None]),
+                ("LFO1 delay", "", [None, pm50("K_LDEL"), None, None]),
+            ],
+        )
+        program_note = QLabel(
+            "Velocity > Loudness is the Velocity knob in Volume, Pan & Velocity. "
+            "The pitch bend range is in the Pitch card."
+        )
+        program_note.setWordWrap(True)
+        program_note.setEnabled(False)
+        note_row = QVBoxLayout()
+        note_row.addWidget(program_note)
+        program_card = self._build_section_card("Controllers", program_grid, note_row)
+        program_page_layout.insertWidget(program_page_layout.count() - 1, program_card)
+
+        keygroup_grid = self._build_s1000_controller_grid(
+            "keygroup",
+            ["Velocity", "Pressure", "Envelope 2"],
+            [
+                (
+                    "Filter frequency",
+                    "",
+                    [pm50("V_FREQ"), pm50("P_FREQ"), pm50("E_FREQ")],
+                ),
+                ("Pitch", "", [None, None, pm50("E_PTCH")]),
+                ("Loudness", "", [pm50("KV_LO"), None, None]),
+                ("Envelope 2 level", "", [pm50("V_ENV2"), None, None]),
+            ],
+        )
+        envelope_grid = self._build_s1000_controller_grid(
+            "keygroup",
+            ["Vel > Attack", "Vel > Release", "Off vel > Release", "Key > Dec/Rel"],
+            [
+                (
+                    "Envelope 1 (amp)",
+                    "",
+                    [pm50("V_ATT1"), pm50("V_REL1"), pm50("O_REL1"), pm50("K_DAR1")],
+                ),
+                (
+                    "Envelope 2 (filter)",
+                    "",
+                    [pm50("V_ATT2"), pm50("V_REL2"), pm50("O_REL2"), pm50("K_DAR2")],
+                ),
+            ],
+        )
+        for title, grid in (
+            ("Controllers", keygroup_grid),
+            ("Envelope response", envelope_grid),
+        ):
+            card = self._build_section_card(title, grid)
+            keygroup_page_layout.insertWidget(keygroup_page_layout.count() - 1, card)
+
+    def _load_s1000_controls(self, region, values):
+        # blockSignals around every setValue, same reason as every other
+        # loaded-from-hardware set in this file: valueChanged schedules a
+        # write, which would echo the just-loaded value straight back
+        for knob, value_label, field, knob_region in self._s1000_controls:
+            if knob_region != region or field not in values:
+                continue
+            knob.blockSignals(True)
+            knob.setValue(values[field])
+            knob.blockSignals(False)
+            value_label.setText(str(values[field]))
 
     def _build_s1000_env2_adsr(self, env1_section, env2_section):
         # The S1000's ENV2 (its filter envelope) is a plain ADSR - ATTAK2/
@@ -3310,6 +3500,7 @@ class ProgramEditorWindow(QMainWindow):
         self.mono_legato_combo.blockSignals(True)
         self.mono_legato_combo.setCurrentIndex(program_values["LEGATO"])
         self.mono_legato_combo.blockSignals(False)
+        self._load_s1000_controls("program", program_values)
 
         # set by _refresh_from_hardware() and _on_keygroup_deleted() -
         # restores whatever the user was looking at before the reload (a
@@ -4462,6 +4653,7 @@ class ProgramEditorWindow(QMainWindow):
             values["RELSE2"],
             values["ENV2L4"],
         )
+        self._load_s1000_controls("keygroup", values)
         if self._is_s1000:
             for knob, label, field in zip(
                 self._env2_adsr_knobs,

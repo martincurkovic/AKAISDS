@@ -328,6 +328,38 @@ _SAMPLE_DETAIL_FIELDS = [
     # right is Hold).
 ]
 
+#: Extra fields read ONLY when the editor is talking to an S1000 (see
+#: BridgeWorker's `extra_*_fields`): its fixed controller routing - the
+#: S1000's equivalent of the S3000's assignable modulation matrix, whose
+#: fields the S3000 spec calls "not used" and so the S2000/S3000 editor has
+#: no controls for. Kept out of the base lists so an S2000/S3000 doesn't
+#: pay a SysEx round trip each for fields it never shows. See
+#: core/s1000_bridge.py's _S1000_RANGE_OVERRIDES for why several of them
+#: need a corrected range.
+S1000_PROGRAM_FIELDS = [
+    "K_LOUD",  # Key>Loudness
+    "P_LOUD",  # Pressure>Loudness
+    "K_PANP",  # Key>Pan position
+    "MW_PAN",  # Modwheel>Pan
+    "P_PTCH",  # Pressure>Pitch (+/-12 semitones)
+    "MWLDEP",  # Modwheel>LFO1 depth
+    "PRSDEP",  # Pressure>LFO1 depth
+    "VELDEP",  # Velocity>LFO1 depth
+    "K_LRAT",  # Key>LFO1 rate
+    "K_LDEP",  # Key>LFO1 depth
+    "K_LDEL",  # Key>LFO1 delay
+]
+S1000_KEYGROUP_FIELDS = [
+    "V_FREQ",  # Velocity>Filter frequency
+    "P_FREQ",  # Pressure>Filter frequency
+    "E_FREQ",  # Envelope 2>Filter frequency (the filter envelope's depth)
+    "V_ENV2",  # Velocity>Envelope 2 output level
+    "E_PTCH",  # Envelope 2>Pitch
+    "KV_LO",  # Velocity>Loudness offset
+    "V_ATT1", "V_REL1", "O_REL1", "K_DAR1",  # Envelope 1 (amp) response
+    "V_ATT2", "V_REL2", "O_REL2", "K_DAR2",  # Envelope 2 (filter) response
+]
+
 _PROGRAM_LEVEL_FIELDS = [
     "PRGNUM",  # the program's own assignable MIDI program number - see
     # program_editor_window.py's program_number_spinbox and AGENTS.md's
@@ -511,9 +543,14 @@ class BridgeWorker(QThread):
     # progress bar.
     busy_changed = Signal(bool)
 
-    def __init__(self, bridge):
+    def __init__(self, bridge, *, extra_program_fields=(), extra_keygroup_fields=()):
         super().__init__()
         self._bridge = bridge
+        # model-specific additions to what _handle_keygroups/_handle_detail
+        # read (S1000_PROGRAM_FIELDS/S1000_KEYGROUP_FIELDS for an S1000,
+        # none otherwise)
+        self._program_fields = _PROGRAM_LEVEL_FIELDS + list(extra_program_fields)
+        self._keygroup_fields = _KEYGROUP_DETAIL_FIELDS + list(extra_keygroup_fields)
         self._lock = threading.Lock()
         self._idle = threading.Condition(self._lock)
         self._queue = deque()
@@ -747,7 +784,7 @@ class BridgeWorker(QThread):
             # same list+loop shape _KEYGROUP_DETAIL_FIELDS already uses below
             program_values = {
                 field: self._bridge.get_parameter(p.lookup(field, "program"), program_index)
-                for field in _PROGRAM_LEVEL_FIELDS
+                for field in self._program_fields
             }
             # read the real keygroup count off the program header rather than
             # probing until an out-of-range read fails: the real bridge signals
@@ -777,7 +814,7 @@ class BridgeWorker(QThread):
     def _handle_detail(self, program_index, keygroup_index):
         values = {}
         try:
-            for field in _KEYGROUP_DETAIL_FIELDS:
+            for field in self._keygroup_fields:
                 values[field] = self._bridge.get_parameter(
                     p.lookup(field, "keygroup"),
                     program_index,

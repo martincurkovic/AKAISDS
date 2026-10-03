@@ -436,3 +436,40 @@ S1000_BEND_RANGE_COMBO = (
     "deflection. The S1000 has one bend range (0-12 semitones), unlike\n"
     "the S2000/S3000's separate up and down ranges."
 )
+
+# Akai S1000 controller-routing knobs (ProgramEditorWindow's S1000-only
+# "Controllers"/"Envelope response" cards) - keyed by the SysEx field each
+# one writes. All +/-50 unless noted: a negative amount inverts the effect.
+S1000_CONTROLLER_TOOLTIPS = {
+    # program
+    "K_LOUD": "How much the note's position on the keyboard changes its loudness (Key > Loudness). Negative values get quieter as notes go up.",
+    "P_LOUD": "How much channel pressure (aftertouch) changes loudness (Pressure > Loudness).",
+    "K_PANP": "How much the note's position on the keyboard moves its pan position (Key > Pan).",
+    "MW_PAN": "How much the modulation wheel moves the pan position (Modwheel > Pan).",
+    "P_PTCH": "How many semitones channel pressure (aftertouch) bends the pitch at full pressure (-12 to +12).",
+    "MWLDEP": "How much the modulation wheel adds to the LFO1 depth (0-99).",
+    "PRSDEP": "How much channel pressure (aftertouch) adds to the LFO1 depth (0-99).",
+    "VELDEP": "How much note-on velocity adds to the LFO1 depth (0-99).",
+    "K_LRAT": "How much the note's position on the keyboard changes the LFO1 rate.",
+    "K_LDEP": "How much the note's position on the keyboard changes the LFO1 depth.",
+    "K_LDEL": "How much the note's position on the keyboard changes the LFO1 delay.",
+    # keygroup
+    "V_FREQ": "How much note-on velocity moves the filter frequency (Velocity > Filter).",
+    "P_FREQ": "How much channel pressure (aftertouch) moves the filter frequency (Pressure > Filter).",
+    "E_FREQ": "How far Envelope 2 moves the filter frequency - the filter envelope's depth. 0 means Envelope 2 has no audible effect on the filter.",
+    "V_ENV2": "How much note-on velocity scales Envelope 2's output (Velocity > Envelope 2 level).",
+    "E_PTCH": "How far Envelope 2 moves the pitch (Envelope 2 > Pitch).",
+    "KV_LO": "A per-keygroup offset added to the program's Velocity > Loudness amount.",
+    "V_ATT1": "How much note-on velocity changes Envelope 1's (amp) attack time.",
+    "V_REL1": "How much note-on velocity changes Envelope 1's (amp) release time.",
+    "O_REL1": "How much note-off (release) velocity changes Envelope 1's (amp) release time.",
+    "K_DAR1": "How much the note's position on the keyboard changes Envelope 1's (amp) decay and release times.",
+    "V_ATT2": "How much note-on velocity changes Envelope 2's (filter) attack time.",
+    "V_REL2": "How much note-on velocity changes Envelope 2's (filter) release time.",
+    "O_REL2": "How much note-off (release) velocity changes Envelope 2's (filter) release time.",
+    "K_DAR2": "How much the note's position on the keyboard changes Envelope 2's (filter) decay and release times.",
+}
+S1000_LOUDNESS_VELOCITY_NOTE = "Velocity > Loudness is the Velocity knob in Volume, Pan & Velocity above."
+S1000_PAN_LFO_RATE = "Speed of the Pan LFO - the S1000's automatic left/right panning."
+S1000_PAN_LFO_DEPTH = "How far the Pan LFO swings the sound left and right."
+S1000_PAN_LFO_DELAY = "How long after a note starts before the Pan LFO fades in."

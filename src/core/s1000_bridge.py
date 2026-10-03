@@ -42,6 +42,7 @@ Untested against real hardware as of writing - there was none available.
 See AGENTS.md's "Akai S1000 support" section.
 """
 
+import dataclasses
 import time
 
 import s3k.messages as m
@@ -80,6 +81,38 @@ _WRITE = _REPLY
 #: hardware; program_list()/sample_list() (called by every Refresh) also
 #: invalidate it explicitly.
 _CACHE_TTL_SECONDS = 1.5
+
+
+#: Fields `s3k.params` declares "Not used - fixed value in the specification"
+#: (range 0..0) because the S3000 documents it that way, but that the S1000
+#: spec lists as real controller-routing parameters, each "+/-50" - the
+#: S1000's fixed equivalent of the S3000's assignable modulation matrix
+#: (K_LOUD "Key>Loudness", P_LOUD "Pressure>Loudness", K_PANP "Key>Pan
+#: position", MW_PAN "Modwheel pan amount", K_LRAT/K_LDEP/K_LDEL "Key>LFO
+#: rate/depth/delay"; keygroup: V_FREQ/P_FREQ/E_FREQ "Velocity/Pressure/
+#: Envelope>Filter freq", E_PTCH "Envelope>Pitch", KV_LO "Velocity>Loudness
+#: offset"). Left alone, s3k's own range check would refuse every non-zero
+#: write, and decode_field (which sign-extends only a field whose DECLARED
+#: range goes negative) would read a stored -20 back as 236 - so the
+#: corrected range has to be applied to BOTH directions, which is why this
+#: lives in the adapter (applied to whatever Parameter the caller hands in,
+#: by name) rather than in each caller. Only ever applied on an S1000 -
+#: s3k.params itself is untouched (AGENTS.md: don't edit the dependency).
+_S1000_RANGE_OVERRIDES = {
+    (name, region): {"minimum": -50, "maximum": 50}
+    for region, names in (
+        ("program", ("K_LOUD", "P_LOUD", "K_PANP", "MW_PAN", "K_LRAT", "K_LDEP", "K_LDEL")),
+        ("keygroup", ("V_FREQ", "P_FREQ", "E_FREQ", "E_PTCH", "KV_LO")),
+    )
+    for name in names
+}
+
+
+def s1000_param(param):
+    """*param* as the S1000 defines it - a corrected copy where `s3k.params`
+    declares an S3000-only meaning, otherwise the same object."""
+    override = _S1000_RANGE_OVERRIDES.get((param.name, param.region))
+    return dataclasses.replace(param, **override) if override else param
 
 
 def supports(param):
@@ -274,7 +307,9 @@ class S1000Bridge:
     def get_parameter(
         self, param, index, *, keygroup=0, region=None, timeout=None, _bounds=True
     ):
-        param = param if isinstance(param, p.Parameter) else p.lookup(param, region)
+        param = s1000_param(
+            param if isinstance(param, p.Parameter) else p.lookup(param, region)
+        )
         if not supports(param):
             # not an S1000 field - a neutral value rather than an error so
             # the editor's fixed field lists load unmodified (its widgets
@@ -304,7 +339,9 @@ class S1000Bridge:
         confirm=True,
         timeout=None,
     ):
-        param = param if isinstance(param, p.Parameter) else p.lookup(param, region)
+        param = s1000_param(
+            param if isinstance(param, p.Parameter) else p.lookup(param, region)
+        )
         if not supports(param):
             raise ValueError(f"{param.name} doesn't exist on an S1000")
         if not param.writable:
@@ -324,7 +361,7 @@ class S1000Bridge:
             region, index, self._selector(region, keygroup), timeout=timeout
         )
         return {
-            x.name: p.decode_field(x, bytes(block[x.offset : x.end]))
+            x.name: p.decode_field(s1000_param(x), bytes(block[x.offset : x.end]))
             for x in p.region_params(region)
             if supports(x) and x.end <= len(block)
         }

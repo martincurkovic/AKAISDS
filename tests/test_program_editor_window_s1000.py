@@ -122,7 +122,6 @@ def test_s3000_only_cards_are_hidden(editor):
     # isVisibleTo, not isHidden, for widgets inside a card - it's the CARD
     # that was hidden, which only hides its children transitively
     for widget in (
-        editor.lfo2_rate_knob,
         editor.portamento_enable_combo,
         editor.mono_legato_combo,
         editor.mod_pan1_combo,
@@ -333,3 +332,177 @@ def test_the_two_visible_tabs_span_the_full_width(editor, qapp):
     assert sum(widths) == editor.main_tabs.width()
     assert abs(widths[0] - widths[1]) <= 1
     editor.hide()
+
+
+# --- S1000 controller routing cards + Pan LFO ---------------------------------------------------
+
+
+def _find_control(editor, field, region):
+    for knob, label, f, r in editor._s1000_controls:
+        if f == field and r == region:
+            return knob, label
+    raise AssertionError(f"no S1000 controller knob for {region}/{field}")
+
+
+def _poke(fake, region, name, value, keygroup=0):
+    # change a field on the fake sampler behind the adapter's back, the way
+    # a front-panel edit would, using the S1000's own (corrected) range
+    from core.s1000_bridge import s1000_param
+
+    param = s1000_param(p.lookup(name, region))
+    target = (
+        fake.programs[0]["block"]
+        if region == "program"
+        else fake.programs[0]["keygroups"][keygroup]
+    )
+    target[param.offset : param.end] = p.encode_field(param, value)
+
+
+def _flush_all_writes(editor, qapp):
+    for key in list(editor._pending_writes):
+        editor._flush_write(key)
+    editor._worker.wait_until_idle()
+    for _ in range(10):
+        qapp.processEvents()
+
+
+def _raw(fake, region, name, keygroup=0):
+    offset = p.lookup(name, region).offset
+    if region == "program":
+        return fake.programs[0]["block"][offset]
+    return fake.programs[0]["keygroups"][keygroup][offset]
+
+
+def test_pan_lfo_card_replaces_lfo2_on_an_s1000(editor):
+    # the S1000 has a Pan LFO (PANRAT/PANDEP/PANDEL - the same three fields
+    # the S3000's LFO2 card edits) but not LFO2's shape/retrigger
+    for knob in (editor.lfo2_rate_knob, editor.lfo2_depth_knob, editor.lfo2_delay_knob):
+        assert knob.isVisibleTo(editor)
+    assert not editor.lfo2_shape_combo.isVisibleTo(editor)
+    assert not editor.lfo2_trig_combo.isVisibleTo(editor)
+    card = _section_card(editor.lfo2_rate_knob)
+    assert card.findChild(QLabel, "sectionHeader").text() == "Pan LFO"
+    texts = {l.text() for l in card.findChildren(QLabel)}
+    assert {"Rate", "Depth", "Delay"} <= texts
+    assert "LFO2 rate" not in texts
+
+
+def test_pan_lfo_loads_and_writes_the_pan_lfo_fields(editor, qapp):
+    editor._fake.programs[0]["block"][p.lookup("PANRAT", "program").offset] = 41
+    editor._bridge.invalidate()
+    editor._refresh_from_hardware()  # reloads program-level values
+    editor._worker.wait_until_idle()
+    _pump_until(qapp, lambda: editor.lfo2_rate_knob.value() == 41)
+
+    editor.lfo2_depth_knob.setValue(66)
+    _flush_all_writes(editor, qapp)
+    assert _raw(editor._fake, "program", "PANDEP") == 66
+
+
+def test_program_controller_knobs_have_the_s1000_ranges(editor):
+    ranges = {
+        field: (knob.minimum(), knob.maximum())
+        for knob, _label, field, region in editor._s1000_controls
+        if region == "program"
+    }
+    assert ranges == {
+        "K_LOUD": (-50, 50), "P_LOUD": (-50, 50),
+        "K_PANP": (-50, 50), "MW_PAN": (-50, 50),
+        "P_PTCH": (-12, 12),
+        "VELDEP": (0, 99), "PRSDEP": (0, 99), "MWLDEP": (0, 99),
+        "K_LRAT": (-50, 50), "K_LDEP": (-50, 50), "K_LDEL": (-50, 50),
+    }
+
+
+def test_program_controller_knobs_load_signed_values_from_the_sampler(
+    qapp, fake
+):
+    _poke(fake, "program", "K_LOUD", -20)
+    _poke(fake, "program", "P_PTCH", -7)
+    _poke(fake, "program", "MWLDEP", 88)
+    _poke(fake, "program", "K_LDEL", 33)
+    bridge = LoggingBridge(S1000Bridge(fake.bridge(timeout=0.3)))
+    editor = _make_editor(qapp, "akai_s1000", bridge)
+    try:
+        for field, expected in (("K_LOUD", -20), ("P_PTCH", -7),
+                                ("MWLDEP", 88), ("K_LDEL", 33), ("MW_PAN", 0)):
+            knob, label = _find_control(editor, field, "program")
+            assert knob.value() == expected, field
+            assert label.text() == str(expected), field
+    finally:
+        editor._worker.stop()
+        editor._worker.wait()
+
+
+def test_editing_a_program_controller_writes_only_that_field(editor, qapp):
+    before = bytes(editor._fake.programs[0]["block"])
+    knob, _label = _find_control(editor, "K_PANP", "program")
+    knob.setValue(-12)
+    _flush_all_writes(editor, qapp)
+
+    after = bytes(editor._fake.programs[0]["block"])
+    offset = p.lookup("K_PANP", "program").offset
+    assert after[offset] == (-12) & 0xFF
+    assert after[:offset] + after[offset + 1 :] == before[:offset] + before[offset + 1 :]
+    assert editor._fake.ignored_ops == []
+
+
+def test_keygroup_controller_knobs_load_for_the_selected_keygroup(editor, qapp):
+    _poke(editor._fake, "keygroup", "E_FREQ", 31, keygroup=1)
+    _poke(editor._fake, "keygroup", "V_ATT2", -15, keygroup=1)
+    _poke(editor._fake, "keygroup", "K_DAR1", 9, keygroup=1)
+    _poke(editor._fake, "keygroup", "E_FREQ", -44, keygroup=0)
+    editor._bridge.invalidate()
+
+    editor.detail_stack.setCurrentIndex(1)
+    _select_keygroup(editor, qapp, 1, expect_lo=60)
+    for field, expected in (("E_FREQ", 31), ("V_ATT2", -15), ("K_DAR1", 9)):
+        assert _find_control(editor, field, "keygroup")[0].value() == expected, field
+
+    editor._bridge.invalidate()
+    _select_keygroup(editor, qapp, 0, expect_lo=24)
+    assert _find_control(editor, "E_FREQ", "keygroup")[0].value() == -44
+
+
+def test_editing_a_keygroup_controller_writes_to_the_selected_keygroup(editor, qapp):
+    editor.detail_stack.setCurrentIndex(1)
+    _select_keygroup(editor, qapp, 1, expect_lo=60)
+    knob, _label = _find_control(editor, "V_REL2", "keygroup")
+    knob.setValue(-30)
+    _flush_all_writes(editor, qapp)
+
+    assert _raw(editor._fake, "keygroup", "V_REL2", keygroup=1) == (-30) & 0xFF
+    assert _raw(editor._fake, "keygroup", "V_REL2", keygroup=0) == 0
+    assert editor._fake.ignored_ops == []
+
+
+def test_loading_controller_values_does_not_echo_writes_back(editor, qapp):
+    # valueChanged schedules a debounced write - a load must set the knobs
+    # with signals blocked, or every selection would rewrite what it just read
+    editor.detail_stack.setCurrentIndex(1)
+    _poke(editor._fake, "keygroup", "E_FREQ", 12, keygroup=1)
+    editor._bridge.invalidate()
+    writes_before = editor._fake.writes
+    _select_keygroup(editor, qapp, 1, expect_lo=60)
+    editor._worker.wait_until_idle()
+    for _ in range(10):
+        qapp.processEvents()
+    assert not getattr(editor, "_pending_writes", {})
+    assert editor._fake.writes == writes_before
+
+
+def test_s2000_s3000_window_has_no_s1000_controller_cards(qapp):
+    from s3ked.demo import DemoBridge
+
+    editor = _make_editor(qapp, "akai_s2000_s3000", DemoBridge())
+    try:
+        assert editor._s1000_controls == []
+        # and doesn't pay for reading their fields
+        assert "K_LOUD" not in editor._worker._program_fields
+        assert "E_FREQ" not in editor._worker._keygroup_fields
+        card = _section_card(editor.lfo2_rate_knob)
+        assert card.findChild(QLabel, "sectionHeader").text() == "LFO2"
+        assert editor.lfo2_shape_combo.isVisibleTo(editor)
+    finally:
+        editor._worker.stop()
+        editor._worker.wait()
