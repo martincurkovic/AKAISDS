@@ -2,6 +2,7 @@ from PySide6.QtGui import QFontMetrics, QPixmap, QPainter, QColor
 from PySide6.QtCore import Qt, QRectF, QEvent
 from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import (
+    QFormLayout,
     QLabel,
     QScrollArea,
     QSizePolicy,
@@ -58,6 +59,30 @@ class FullWidthTabBar(QTabBar):
             width = base + (1 if position >= count - remainder else 0)
             size.setWidth(width)
         return size
+
+
+def align_form_label_columns(*forms):
+    # every QFormLayout sizes its OWN label column to its own widest label,
+    # so a page of several section cards (one form each) ends up with the
+    # entry fields starting at a different x in every card - "Theme:" is
+    # short, "Device ID (SysEx ch. 0-127):" is not. Giving every label in
+    # every form the width of the widest one lines the field columns up
+    # across the whole page. Rows with no label (a note spanning the full
+    # width) are skipped. Call after every row has been added, and before
+    # anything reads the page's sizeHint (the dialog measures it for its
+    # minimum width).
+    labels = []
+    for form in forms:
+        for row in range(form.rowCount()):
+            item = form.itemAt(row, QFormLayout.ItemRole.LabelRole)
+            widget = item.widget() if item is not None else None
+            if isinstance(widget, QLabel):
+                labels.append(widget)
+    if not labels:
+        return
+    width = max(label.sizeHint().width() for label in labels)
+    for label in labels:
+        label.setMinimumWidth(width)
 
 
 def widen_popup_to_fit_items(combo):

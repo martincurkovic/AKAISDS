@@ -16,12 +16,13 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Qt
 from core import app_config, audio_preview, debug_log, midi_identity, sampler_models
 from ui.qt_helpers import (
+    align_form_label_columns,
     FullWidthTabBar,
     build_scroll_area,
     build_section_card,
     widen_popup_to_fit_items,
 )
-from ui import tooltips
+from ui import theme, tooltips
 import time
 import mido
 
@@ -81,10 +82,11 @@ def _minimum_width_for_pages(pages, minimum=_MINIMUM_DIALOG_WIDTH):
 class MidiSettingsDialog(QDialog):
     # Two tabs, each a couple of section cards (same look/sizing rules as
     # ui.qt_helpers.build_section_card - originally Program Editor-only,
-    # moved out to be shared once this dialog needed it too): "Audio/MIDI"
-    # (MIDI Input/Output + Audio Output, the two things you set up once and
-    # rarely touch again) and "Troubleshooting" (Hardware Test + Interface
-    # Test, the two things you only reach for when something's not working).
+    # moved out to be shared once this dialog needed it too): "Settings"
+    # (MIDI Input/Output, Audio Output and Appearance - the things you set up
+    # once and rarely touch again; was called "Audio/MIDI" until Appearance
+    # joined it) and "Troubleshooting" (Hardware Test + Interface Test, the
+    # two things you only reach for when something's not working).
     # Used to be 4 flat tabs (MIDI Settings/MIDI Hardware Test/MIDI
     # Interface Test/Audio Preview, the last added alongside the Slice
     # Editor's click-to-preview feature) - collapsed at the user's own
@@ -115,9 +117,9 @@ class MidiSettingsDialog(QDialog):
         # comboboxes, which can end up considerably wider than a flat
         # constant once real, possibly long, device/port names are loaded)
         # needs to avoid a horizontal scrollbar
-        audio_midi_page = self._build_audio_midi_page()
+        settings_page = self._build_settings_page()
         troubleshooting_page = self._build_troubleshooting_page()
-        tabs.addTab(build_scroll_area(audio_midi_page), "Audio/MIDI")
+        tabs.addTab(build_scroll_area(settings_page), "Settings")
         tabs.addTab(build_scroll_area(troubleshooting_page), "Troubleshooting")
 
         buttons = QDialogButtonBox(
@@ -138,12 +140,12 @@ class MidiSettingsDialog(QDialog):
         # case (see _minimum_width_for_pages's own comment) - e.g. no
         # ports/devices found at all, nothing to size against.
         self.setMinimumWidth(
-            _minimum_width_for_pages([audio_midi_page, troubleshooting_page])
+            _minimum_width_for_pages([settings_page, troubleshooting_page])
         )
 
-    # --- Audio/MIDI tab ------------------------------------------------------
+    # --- Settings tab ----------------------------------------------------------
 
-    def _build_audio_midi_page(self):
+    def _build_settings_page(self):
         midi_form = QFormLayout()
 
         self.combo_input = QComboBox()
@@ -165,9 +167,7 @@ class MidiSettingsDialog(QDialog):
         self.spin_channel.setRange(0, 127)
         self.spin_channel.setValue(self.sampler_controller.channel)
         self.spin_channel.setToolTip(tooltips.DEVICE_ID_CHANNEL)
-        midi_form.addRow(
-            QLabel("Device ID (SysEx channel 0-127):"), self.spin_channel
-        )
+        midi_form.addRow(QLabel("Device ID (SysEx ch. 0-127):"), self.spin_channel)
 
         # sampler device type - determines which protocol family gets used for each step
         # (send, receive, list, delete, rename etc)
@@ -190,7 +190,7 @@ class MidiSettingsDialog(QDialog):
         audio_form = QFormLayout()
 
         audio_note = QLabel(
-            "Used by the Slice Editor's click-to-preview playback. "
+            "Used by the Sample/Slice Editor's click-to-preview playback. "
             "Doesn't affect MIDI/SysEx transfers to the sampler."
         )
         audio_note.setWordWrap(True)
@@ -223,14 +223,39 @@ class MidiSettingsDialog(QDialog):
         self.combo_audio_buffer.setToolTip(tooltips.AUDIO_PREVIEW_BUFFER_SIZE)
         audio_form.addRow(QLabel("Buffer Size:"), self.combo_audio_buffer)
 
-        audio_card = build_section_card(
-            "Audio Output (Slice Editor Preview)", audio_form
-        )
+        audio_card = build_section_card("Audio Output", audio_form)
+
+        # Appearance: how the app itself looks, unrelated to MIDI or audio.
+        # "System" (the default) follows the OS light/dark setting live, as
+        # the app always has; Light/Dark pin it. Unlike every other setting
+        # here this takes effect the moment an option is PICKED (see
+        # _on_theme_chosen), not on OK - so the change is visible while the
+        # dialog is still open, and Cancel doesn't undo it.
+        appearance_form = QFormLayout()
+        self.combo_theme = QComboBox()
+        for label, value in theme.CHOICES:
+            self.combo_theme.addItem(label, value)
+        idx = self.combo_theme.findData(app_config.get_saved_theme())
+        self.combo_theme.setCurrentIndex(idx if idx >= 0 else 0)
+        self.combo_theme.setToolTip(tooltips.THEME)
+        # `activated`, not currentIndexChanged: it fires only for a choice
+        # the USER makes, never for the setCurrentIndex() above restoring the
+        # saved value (QComboBox has no editingFinished - that's QLineEdit/
+        # QSpinBox - and activated is its "the user finished choosing")
+        self.combo_theme.activated.connect(self._on_theme_chosen)
+        appearance_form.addRow(QLabel("Theme:"), self.combo_theme)
+        appearance_card = build_section_card("Appearance", appearance_form)
+
+        # one shared label-column width across all three cards, so every
+        # entry field starts at the same x (each form would otherwise size
+        # its own label column to its own widest label)
+        align_form_label_columns(midi_form, audio_form, appearance_form)
 
         page = QWidget()
         page_layout = QVBoxLayout(page)
         page_layout.addWidget(midi_card)
         page_layout.addWidget(audio_card)
+        page_layout.addWidget(appearance_card)
         page_layout.addStretch()
         return page
 
@@ -242,7 +267,7 @@ class MidiSettingsDialog(QDialog):
         hardware_test_note = QLabel(
             "To test your MIDI hardware setup, "
             "connect your MIDI device to both your interface's MIDI IN and OUT ports. "
-            "Select the ports on the Audio/MIDI tab, then run the test below."
+            "Select the ports on the Settings tab, then run the test below."
         )
         hardware_test_note.setWordWrap(True)
         hardware_test_note.setAlignment(
@@ -271,7 +296,7 @@ class MidiSettingsDialog(QDialog):
         loopback_note = QLabel(
             "To test a MIDI interface's SysEx reliability, "
             "connect a cable from its MIDI OUT port back into its own MIDI IN port. "
-            "Select the ports on the Audio/MIDI tab, then run the test below (may take 5-20 seconds to complete)."
+            "Select the ports on the Settings tab, then run the test below (may take 5-20 seconds to complete)."
         )
         loopback_note.setWordWrap(True)
         loopback_note.setAlignment(
@@ -370,6 +395,13 @@ class MidiSettingsDialog(QDialog):
         app_config.save_audio_buffer_samples(self.combo_audio_buffer.currentData())
 
         self.accept()
+
+    def _on_theme_chosen(self, index):
+        # saved and applied the moment the user picks an option - every open
+        # window restyles live (ui.theme.set_theme_preference)
+        selected_theme = self.combo_theme.itemData(index)
+        app_config.save_theme(selected_theme)
+        theme.set_theme_preference(selected_theme)
 
     def _selected_protocol_family(self):
         # the combo holds the full model selection (S1000 / S2000/S3000 /
