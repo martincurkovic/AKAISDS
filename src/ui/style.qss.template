@@ -46,6 +46,13 @@ QLabel {
     color: ${text};
 }
 
+/* secondary/"muted" text (a label whose own widget code used to bake the
+   disabled-text color in with setStyleSheet, which couldn't follow a live
+   theme switch - an app-level rule restyles with everything else) */
+QLabel#mutedLabel {
+    color: ${text_disabled};
+}
+
 /* Qt's tooltip (QToolTip) is internally a QLabel too, so without its own
    rule here it inherits the QLabel rule above - "background: transparent"
    on a real top-level popup window, with nothing underneath for the

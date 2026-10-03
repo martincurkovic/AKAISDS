@@ -19,6 +19,10 @@ import os
 import sys
 from string import Template
 
+from PySide6.QtCore import QObject, Qt, Signal
+
+from core import app_config
+
 DARK_PALETTE = {
     "bg": "#1e1e24",
     "bg_panel": "#202028",
@@ -142,6 +146,10 @@ def _icon_path(filename):
 
 
 def _write_colored_chevron(direction, color, filename):
+    # filename gets the color baked in (see render_stylesheet) so a given
+    # file's contents NEVER change - Qt's stylesheet engine caches images
+    # by path, so rewriting the same "down_arrow.svg" with a different
+    # color on a live theme switch could keep serving the old one
     # generate a chevron svg with the color theme baked in and write it to disk
     # this is the arrow for the dropdown menus/combo boxes
     if direction == "down":
@@ -171,14 +179,16 @@ def render_stylesheet(palette):
     """
     values = dict(palette)
     values["checkmark_icon"] = _icon_path("checkmark.svg")
+    text_hex = palette["text"].lstrip("#")
+    disabled_hex = palette["text_disabled"].lstrip("#")
     values["down_arrow_icon"] = _write_colored_chevron(
-        "down", palette["text"], "down_arrow.svg"
+        "down", palette["text"], f"down_arrow_{text_hex}.svg"
     )
     values["down_arrow_icon_disabled"] = _write_colored_chevron(
-        "down", palette["text_disabled"], "down_arrow_disabled.svg"
+        "down", palette["text_disabled"], f"down_arrow_disabled_{disabled_hex}.svg"
     )
     values["up_arrow_icon"] = _write_colored_chevron(
-        "up", palette["text"], "up_arrow.svg"
+        "up", palette["text"], f"up_arrow_{text_hex}.svg"
     )
 
     with open(_TEMPLATE_PATH, "r") as f:
@@ -192,13 +202,57 @@ def render_stylesheet(palette):
         ) from e
 
 
-_active_palette = None  # set by apply_to_app() - see current_palette() below
+_active_palette = None  # set by _render_for_current_scheme() - see current_palette()
+_app = None  # the QApplication apply_to_app() was given
+_preference = app_config.THEME_SYSTEM
+_connected_app = None  # whose colorSchemeChanged apply_to_app() already hooked
+
+#: (label, value) in the order the Settings > Appearance combo shows them
+CHOICES = [
+    ("System", app_config.THEME_SYSTEM),
+    ("Light", app_config.THEME_LIGHT),
+    ("Dark", app_config.THEME_DARK),
+]
+
+
+class _ThemeNotifier(QObject):
+    # emitted after every real theme change (OS scheme change under "System",
+    # or a new preference) - for widgets that bake a palette color into
+    # themselves when they're BUILT (an inline setStyleSheet, a list-row
+    # swatch) rather than reading current_palette() at paint time, and so
+    # would otherwise keep the previous theme's color until rebuilt
+    changed = Signal()
+
+
+notifier = _ThemeNotifier()
 
 
 def _palette_for_scheme(scheme):
-    from PySide6.QtCore import Qt
-
     return LIGHT_PALETTE if scheme == Qt.ColorScheme.Light else DARK_PALETTE
+
+
+def _effective_scheme():
+    """The color scheme the app is actually showing right now.
+
+    A pinned theme is answered from the preference itself, NOT by asking Qt
+    what scheme it reports after set_theme_preference() overrode it: that
+    override is only honored where the platform supports it (Qt older than
+    6.8 has none, and the offscreen/test platform ignores it - colorScheme()
+    just keeps reporting Unknown), and the palette must follow the user's
+    choice everywhere. Only "System" asks the OS.
+    """
+    from PySide6.QtGui import QGuiApplication
+
+    if _preference == app_config.THEME_LIGHT:
+        return Qt.ColorScheme.Light
+    if _preference == app_config.THEME_DARK:
+        return Qt.ColorScheme.Dark
+    return QGuiApplication.styleHints().colorScheme()
+
+
+def current_preference():
+    """The theme choice in effect: "system", "light" or "dark"."""
+    return _preference
 
 
 def current_palette():
@@ -208,52 +262,103 @@ def current_palette():
     they can never disagree with the stylesheet.
 
     Deliberately doesn't re-derive this from the OS color scheme on every
-    call - apply_to_app() records the palette it actually rendered into
-    _active_palette, and this just echoes that back. Two independent "ask
-    the OS what scheme we're in" queries (one for the stylesheet, one for
-    each custom-painted widget) can disagree - wrong Qt/platform version,
-    a stylesheet applied by hand for a preview/test, a live scheme change
-    caught mid-flight - so there is exactly one place that decides, and
-    everything else just reads its answer.
+    call - _render_for_current_scheme() records the palette it actually
+    rendered into _active_palette, and this just echoes that back. Two
+    independent "ask the OS what scheme we're in" queries (one for the
+    stylesheet, one for each custom-painted widget) can disagree - wrong
+    Qt/platform version, a stylesheet applied by hand for a preview/test, a
+    live scheme change caught mid-flight - so there is exactly one place
+    that decides, and everything else just reads its answer.
     """
     if _active_palette is not None:
         return _active_palette
     # apply_to_app() hasn't run (e.g. a widget previewed standalone without
-    # going through it) - fall back to asking the OS directly
-    from PySide6.QtGui import QGuiApplication
-
-    return _palette_for_scheme(QGuiApplication.styleHints().colorScheme())
+    # going through it) - fall back to asking directly
+    return _palette_for_scheme(_effective_scheme())
 
 
-def apply_to_app(app):
-    """Sets the Fusion style and this app's stylesheet, live-matched to the
-    OS color scheme. Shared by every entry point (main.py, and any window
-    launched standalone for dev work) so they always look the same.
+def _render_for_current_scheme():
+    # re-renders the stylesheet if (and only if) the palette the app should
+    # now be using differs from the one it already has - so the OS firing
+    # colorSchemeChanged for a scheme we already show, or choosing "Dark"
+    # while the OS is already dark, does no redundant app-wide restyle
+    global _active_palette
+    palette = _palette_for_scheme(_effective_scheme())
+    if palette is _active_palette:
+        return
+    _active_palette = palette
+    try:
+        _app.setStyleSheet(render_stylesheet(palette))
+    except (OSError, KeyError) as e:
+        # runs on every launch and every live theme change, in a packaged
+        # GUI app with no attached console - print() alone would be
+        # invisible exactly like core/debug_log.py's own docstring
+        # describes for every other unhandled failure here
+        from core import debug_log
+
+        debug_log.get_logger().error(
+            "theme: couldn't apply stylesheet", exc_info=True
+        )
+        print(
+            f"[WARN] Couldn't apply theme ({e}) - continuing with "
+            f"whatever's currently set"
+        )
+    notifier.changed.emit()
+
+
+def set_theme_preference(preference):
+    """Switches the live app to "system", "light" or "dark".
+
+    Also sets Qt's own app-wide color scheme override where it exists
+    (6.8+), so native chrome (a macOS title bar, native dialogs) follows
+    too, not just this app's stylesheet; "system" removes the override and
+    hands control back to the OS. That override is best-effort only - the
+    palette itself comes from _effective_scheme(), and the stylesheet is
+    re-rendered here directly rather than waiting on colorSchemeChanged,
+    which isn't guaranteed to fire for every platform/Qt combination.
     """
     from PySide6.QtGui import QGuiApplication
 
-    def apply(scheme):
-        global _active_palette
-        _active_palette = _palette_for_scheme(scheme)
-        try:
-            app.setStyleSheet(render_stylesheet(_active_palette))
-        except (OSError, KeyError) as e:
-            # runs on every launch and every live OS theme change, in a
-            # packaged GUI app with no attached console - print() alone
-            # would be invisible exactly like core/debug_log.py's own
-            # docstring describes for every other unhandled failure here
-            from core import debug_log
-
-            debug_log.get_logger().error(
-                "theme.apply_to_app: couldn't apply stylesheet", exc_info=True
+    global _preference
+    _preference = (
+        preference if preference in app_config.THEME_VALUES else app_config.THEME_SYSTEM
+    )
+    hints = QGuiApplication.styleHints()
+    if hasattr(hints, "setColorScheme"):
+        if _preference == app_config.THEME_SYSTEM:
+            hints.unsetColorScheme()
+        else:
+            hints.setColorScheme(
+                Qt.ColorScheme.Light
+                if _preference == app_config.THEME_LIGHT
+                else Qt.ColorScheme.Dark
             )
-            print(
-                f"[WARN] Couldn't apply theme ({e}) - continuing with "
-                f"whatever's currently set"
-            )
+    if _app is not None:
+        _render_for_current_scheme()
 
+
+def apply_to_app(app, preference=None):
+    """Sets the Fusion style and this app's stylesheet for the saved theme
+    choice (or `preference`, if given), live-matched to the OS color scheme
+    while that choice is "System". Shared by every entry point (main.py, and
+    any window launched standalone for dev work) so they always look the
+    same.
+    """
+    from PySide6.QtGui import QGuiApplication
+
+    global _app, _connected_app
+    _app = app
     app.setStyle("Fusion")
-    style_hints = QGuiApplication.styleHints()
-    apply(style_hints.colorScheme())
-    # live switch if user changes their system theme while app is running
-    style_hints.colorSchemeChanged.connect(apply)
+    if preference is None:
+        preference = app_config.get_saved_theme()
+    set_theme_preference(preference)
+    _render_for_current_scheme()  # also covers the very first apply
+    # live switch if the user changes their system theme while the app is
+    # running - harmless under a pinned theme: Qt keeps reporting the pinned
+    # scheme, so the palette comparison in _render_for_current_scheme()
+    # finds nothing to do
+    if _connected_app is not app:
+        QGuiApplication.styleHints().colorSchemeChanged.connect(
+            lambda _scheme: _render_for_current_scheme()
+        )
+        _connected_app = app
