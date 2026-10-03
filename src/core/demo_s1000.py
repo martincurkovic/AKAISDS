@@ -18,6 +18,14 @@ RPLIST, RSLIST, RPDATA/PDATA, RKDATA/KDATA, RSDATA/SDATA, DELP, DELK, DELS.
 Not supported (answered with silence, like anything else unknown): sample
 data packets, drum/misc data, SETEX.
 
+It also models the spec's name rule: a PDATA/SDATA whose name matches a
+DIFFERENT resident program/sample deletes that one first ("If the program
+name in data is the same as that of any existing program, that program will
+be deleted first" - likewise samples). Re-sending an item under its OWN name
+is treated as a plain in-place replace; the spec doesn't say that outright,
+and the editor's every edit depends on it (see AGENTS.md's S1000 section) -
+the first thing a real S1000 will confirm or refute.
+
 `block_size` is each block's real length on the wire. The spec only says
 "about 150 bytes"; bytes past the spec's own fields are filled with a
 non-zero junk pattern so any code that wrongly treats them as fields (or
@@ -162,6 +170,9 @@ class FakeS1000:
         self.received = []
         #: how many whole-block writes (PDATA/KDATA/SDATA) were accepted
         self.writes = 0
+        #: ("program"|"sample", index) of everything a write deleted because
+        #: it carried the same name as another item - see the module docstring
+        self.deleted_by_name_clash = []
 
         if programs is None and samples is None:
             self._populate_default()
@@ -297,9 +308,27 @@ class FakeS1000:
             [*payload[:2], *m.encode_nibbles(entry["block"])],
         )
 
+    def _name_of(self, block, name_param):
+        return bytes(block[name_param.offset : name_param.offset + 12])
+
     def _pdata(self, payload):
         index = m.decode_u14(payload[0], payload[1])
         block = bytearray(m.decode_nibbles(payload[2:]))
+        # the spec's name rule: a clashing name deletes the OTHER program
+        # first - which can shift this one's own index down by one
+        name_param = p.lookup("PRNAME", "program")
+        clashing = [
+            i
+            for i, other in enumerate(self.programs)
+            if i != index
+            and self._name_of(other["block"], name_param)
+            == self._name_of(block, name_param)
+        ]
+        for i in sorted(clashing, reverse=True):
+            del self.programs[i]
+            self.deleted_by_name_clash.append(("program", i))
+            if i < index:
+                index -= 1
         entry = self._program(index)
         if entry is None:
             # creating a program: needs `GROUPS` dummy keygroups to follow
@@ -362,6 +391,20 @@ class FakeS1000:
         block = bytearray(m.decode_nibbles(payload[2:]))
         if not 0 <= index < len(self.samples):
             return self._reply_ok(False)
+        name_param = p.lookup("SHNAME", "sample")
+        for i in sorted(
+            (
+                i
+                for i, other in enumerate(self.samples)
+                if i != index
+                and self._name_of(other, name_param) == self._name_of(block, name_param)
+            ),
+            reverse=True,
+        ):
+            del self.samples[i]
+            self.deleted_by_name_clash.append(("sample", i))
+            if i < index:
+                index -= 1
         self.samples[index] = block
         self.writes += 1
         self._reply_ok()
