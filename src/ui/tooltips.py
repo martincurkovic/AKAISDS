@@ -63,6 +63,13 @@ SAMPLER_TYPE = (
     "to browse, rename or delete what's on the device."
 )
 
+THEME = (
+    "System follows your computer's light/dark setting and switches\n"
+    "live when it changes. Light and Dark keep the app on that look\n"
+    "regardless of your system setting. Takes effect as soon as you\n"
+    "pick one."
+)
+
 AUDIO_PREVIEW_BUFFER_SIZE = (
     "How much audio is buffered ahead during preview playback.\n"
     "Lower values react faster but may click/pop on a slower\n"
