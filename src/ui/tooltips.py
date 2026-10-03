@@ -429,3 +429,10 @@ S1000_ENV2_ATTACK_KNOB = "Envelope 2 (filter) attack time - how long the filter 
 S1000_ENV2_DECAY_KNOB = "Envelope 2 (filter) decay time - how long the filter takes to fall from its attack peak down to the sustain level."
 S1000_ENV2_SUSTAIN_KNOB = "Envelope 2 (filter) sustain level - where the filter stays for as long as the key is held, after attack and decay finish."
 S1000_ENV2_RELEASE_KNOB = "Envelope 2 (filter) release time - how long the filter takes to close after the key is released."
+
+# the S1000's single pitch-bend field (see ProgramEditorWindow._apply_s1000_gating)
+S1000_BEND_RANGE_COMBO = (
+    "How many semitones the pitch bend wheel moves the pitch at full\n"
+    "deflection. The S1000 has one bend range (0-12 semitones), unlike\n"
+    "the S2000/S3000's separate up and down ranges."
+)

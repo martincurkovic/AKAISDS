@@ -2507,9 +2507,12 @@ class ProgramEditorWindow(QMainWindow):
                     env2_graph_row,
                 ],
                 env_sections=(env1_section, env2_section),
+                bend_up_column=bend_up_column,
             )
 
-    def _apply_s1000_gating(self, hidden_widgets, hidden_layouts, env_sections):
+    def _apply_s1000_gating(
+        self, hidden_widgets, hidden_layouts, env_sections, bend_up_column
+    ):
         # one-way: removes/disables everything an S1000 doesn't have
         # (core/s1000_bridge.py reads those fields as neutral zeros and
         # refuses to write them, so nothing here is a safety net - it just
@@ -2519,9 +2522,27 @@ class ProgramEditorWindow(QMainWindow):
         for layout in hidden_layouts:
             self._set_layout_visible(layout, False)
 
-        # the S1000's bend-up range is 0-12 semitones (the S3000's is 0-24)
+        # the S1000 has ONE bend field, B_PTCH, 0-12 semitones (the S3000
+        # splits it into B_PTCH "increase", 0-24, and B_PTCHD "decrease"
+        # at an offset past the S1000's block) - so it's a plain range, not
+        # a direction: relabelled, and trimmed to the S1000's 12
         while self.bend_up_combo.count() > 13:
             self.bend_up_combo.removeItem(self.bend_up_combo.count() - 1)
+        bend_up_column.itemAt(0).widget().setText("Bend range")
+        self.bend_up_combo.setToolTip(tt.S1000_BEND_RANGE_COMBO)
+
+        # value ranges narrower on an S1000 than the S3000 defaults the
+        # widgets were built with (S1000 spec: POLYPH 1-16, and every note
+        # field 24-127 = C0-G8; the S3000's are 1-32 and 21-127) - an
+        # out-of-range write is at best clamped by the sampler
+        while self.polyph_combo.count() > 16:
+            self.polyph_combo.removeItem(self.polyph_combo.count() - 1)
+        for spinbox in (
+            self.note_lo_spinbox,
+            self.note_hi_spinbox,
+            self.sample_root_note_spinbox,
+        ):
+            spinbox.setRange(24, 127)
 
         self._build_s1000_env2_adsr(*env_sections)
 

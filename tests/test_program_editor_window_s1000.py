@@ -16,7 +16,7 @@ from types import SimpleNamespace
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
-from PySide6.QtWidgets import QApplication, QWidget
+from PySide6.QtWidgets import QApplication, QLabel, QWidget
 
 import s3k.params as p
 
@@ -154,9 +154,33 @@ def test_s3000_only_individual_controls_are_hidden(editor):
     assert not editor.lfo1_sync_combo.isHidden()
 
 
-def test_bend_up_is_limited_to_the_s1000s_12_semitones(editor):
+def _label_above(editor, widget):
+    # the QLabel in the same column layout as `widget`
+    for label in widget.parentWidget().findChildren(QLabel):
+        if label.text() in ("Bend up", "Bend range"):
+            return label
+    raise AssertionError("no bend label found")
+
+
+def test_bend_is_one_range_not_a_direction_on_an_s1000(editor):
+    # the S1000 has a single B_PTCH field, 0-12 semitones - no separate
+    # up/down like the S3000's B_PTCH/B_PTCHD
     assert editor.bend_up_combo.count() == 13
     assert editor.bend_up_combo.itemText(12) == "12 st"
+    assert _label_above(editor, editor.bend_up_combo).text() == "Bend range"
+    assert "S1000" in editor.bend_up_combo.toolTip()
+
+
+def test_value_ranges_match_the_s1000s_narrower_ones(editor):
+    # POLYPH 1-16 (S3000: 1-32); note fields 24-127 = C0-G8 (S3000: 21-127)
+    assert editor.polyph_combo.count() == 16
+    assert editor.polyph_combo.itemData(15) == 16
+    for spinbox in (
+        editor.note_lo_spinbox,
+        editor.note_hi_spinbox,
+        editor.sample_root_note_spinbox,
+    ):
+        assert spinbox.minimum() == 24 and spinbox.maximum() == 127
 
 
 def _set_env2(fake, keygroup, **fields):
@@ -276,6 +300,9 @@ def test_s2000_s3000_window_keeps_every_card(qapp):
         editor.detail_stack.setCurrentIndex(1)
         assert editor.mod_filt1_source_mirror.isVisibleTo(editor)
         assert editor.bend_up_combo.count() == 25
+        assert editor.polyph_combo.count() == 32
+        assert editor.sample_root_note_spinbox.minimum() == 21
+        assert _label_above(editor, editor.bend_up_combo).text() == "Bend up"
         assert all(k.isEnabled() for k in editor._env2_rate_knobs)
         assert editor.windowTitle() == "AKAISDS - Program Editor"
     finally:
