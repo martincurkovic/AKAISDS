@@ -474,6 +474,7 @@ class ProgramEditorWindow(QMainWindow):
             )
         )
         self._is_s1000 = sampler_models.is_s1000(self._sampler_model)
+        self._program_name_on_sampler = None
         # (knob, value_label, field, region) for every S1000-only controller
         # knob built by _build_s1000_controller_grid - loaded from
         # keygroups_loaded/detail_loaded by _load_s1000_controls
@@ -532,6 +533,10 @@ class ProgramEditorWindow(QMainWindow):
         # (that one's scoped to the Slice Editor dialog's own lifetime);
         # this one lives as long as the editor window itself does.
         self._sample_preview_player = SlicePreviewPlayer(self)
+
+        # recolor the palette-colored swatches when the theme changes (see
+        # _refresh_themed_swatches) - disconnected again in closeEvent
+        theme.notifier.changed.connect(self._refresh_themed_swatches)
 
         self._worker = BridgeWorker(
             self._bridge,
@@ -2584,6 +2589,40 @@ class ProgramEditorWindow(QMainWindow):
                 menu.removeAction(self._multi_tab_action)
         self.setWindowTitle("AKAISDS - Program Editor (Akai S1000, experimental)")
 
+    # -- theme-following colored swatches ----------------------------------------
+    #
+    # The little colored squares (keygroup list rows, the Samples tab's marker
+    # legend) are QLabels whose color comes from the palette, so they can't
+    # use a QSS rule the way plain text does - the color depends on which
+    # keygroup/marker they stand for. Each carries a "swatchKind" property
+    # and _refresh_swatch() works out its current color from that, so the
+    # same code colors one when it's built AND recolors every one when the
+    # theme changes (theme.notifier.changed -> _refresh_themed_swatches).
+
+    def _swatch_color(self, swatch):
+        palette = theme.current_palette()
+        kind = swatch.property("swatchKind")
+        if kind == "keygroup":
+            return keygroup_color(swatch.property("keygroupIndex")).name()
+        if kind == "marker_boundary":
+            return palette["text_disabled"]
+        # a marker_loop swatch greys out with its loop (SPTYPE with no loop)
+        return (
+            palette["keygroup_color_3"]
+            if self._loop_markers_enabled
+            else palette["text_disabled"]
+        )
+
+    def _refresh_swatch(self, swatch):
+        swatch.setStyleSheet(
+            f"background-color: {self._swatch_color(swatch)}; border-radius: 2px;"
+        )
+
+    def _refresh_themed_swatches(self):
+        for label in self.findChildren(QLabel):
+            if label.property("swatchKind"):
+                self._refresh_swatch(label)
+
     def _build_s1000_pan_lfo(self, lfo2_section, rate_depth_delay_columns):
         # The S1000 has a Pan LFO (PANRAT/PANDEP/PANDEL - the same three
         # fields the S3000's "LFO2" card already edits, since that LFO is
@@ -3349,6 +3388,10 @@ class ProgramEditorWindow(QMainWindow):
         # no separate hardware round-trip the way every other program field
         # does via program_values in _on_keygroups_loaded below
         self.program_name_edit.setText(current.text())
+        # the name as it stands on the sampler, for _commit_program_name -
+        # the list item's own text is overwritten live while typing (see
+        # _on_program_name_typed), so it can't be used to tell what changed
+        self._program_name_on_sampler = current.text()
         program_index = self.program_list.currentRow()
         self._worker.submit_keygroups(program_index)
 
@@ -3629,6 +3672,35 @@ class ProgramEditorWindow(QMainWindow):
     def _prompt_sample_name(self, current_name):
         return self._prompt_akai_name("Rename Sample", "Sample name:", current_name)
 
+    # -- S1000: a rename must not land on another item's name -----------------
+    #
+    # The S1000 spec says a PDATA/SDATA whose name matches an existing
+    # resident program/sample DELETES that one first ("If the program name in
+    # data is the same as that of any existing program, that program will be
+    # deleted first" - and the same for samples), where an S2000/S3000 header
+    # write just changes a field. _confirm_duplicate_program/_sample already
+    # refuse a clashing name for exactly this reason; renaming goes through
+    # the same whole-block writes, so on an S1000 it needs the same guard or
+    # it could silently destroy a different program/sample. Not applied on an
+    # S2000/S3000, where a duplicate name is merely ambiguous, not destructive.
+
+    def _warn_name_in_use(self, kind, name):
+        QMessageBox.warning(
+            self,
+            f"Rename {kind}",
+            f'"{name}" is already used by another {kind.lower()} on the '
+            f"sampler.\n\nOn an Akai S1000, writing a {kind.lower()} with a name "
+            f"that's already in use deletes the existing one - so this rename "
+            f"was cancelled. Pick a different name.",
+        )
+
+    def _program_name_taken(self, program_index, name):
+        return any(
+            self.program_list.item(i).text() == name
+            for i in range(self.program_list.count())
+            if i != program_index
+        )
+
     def _confirm_rename_program(self):
         item = self.program_list.currentItem()
         if item is None:
@@ -3638,6 +3710,10 @@ class ProgramEditorWindow(QMainWindow):
         new_name = self._prompt_program_name(current_name)
         if new_name is None or new_name == current_name:
             return
+        if self._is_s1000 and self._program_name_taken(program_index, new_name):
+            self._warn_name_in_use("Program", new_name)
+            return
+        self._program_name_on_sampler = new_name
         item.setText(new_name)
         self._update_multi_program_combo_names(program_index, new_name)
         # keeps the controls page's own name field in step, same reasoning
@@ -3799,6 +3875,13 @@ class ProgramEditorWindow(QMainWindow):
         current_name = self._sample_name_at_row(sample_index)
         new_name = self._prompt_sample_name(current_name)
         if new_name is None or new_name == current_name:
+            return
+        if self._is_s1000 and any(
+            other == new_name
+            for i, other in enumerate(self._sample_list)
+            if i != sample_index
+        ):
+            self._warn_name_in_use("Sample", new_name)
             return
         self._sample_list[sample_index] = new_name
         entry = self._sample_row_labels.get(sample_index)
@@ -4783,6 +4866,10 @@ class ProgramEditorWindow(QMainWindow):
         # a check that was still running on it finishes
         self._update_runner.wait()
 
+        try:
+            theme.notifier.changed.disconnect(self._refresh_themed_swatches)
+        except (RuntimeError, TypeError):
+            pass  # already disconnected
         self._main_window.show()
         event.accept()
 
@@ -5047,7 +5134,7 @@ class ProgramEditorWindow(QMainWindow):
         # read-only row rather than ordinary page text.
         label = QLabel(text)
         label.setFixedWidth(130)
-        label.setStyleSheet(f"color: {theme.current_palette()['text_disabled']};")
+        label.setObjectName("mutedLabel")  # style.qss.template: text_disabled
         return label
 
     def _build_mod_amount_column_with_source_mirror(
@@ -5413,17 +5500,13 @@ class ProgramEditorWindow(QMainWindow):
             # - start/end share the neutral "boundary" tone, loop start/end
             # share the loop region's teal, since they're one region's two
             # edges rather than two independent things
-            palette = theme.current_palette()
-            swatch_color = (
-                palette["text_disabled"]
-                if name in ("start", "end")
-                else palette["keygroup_color_3"]
-            )
             swatch = QLabel()
             swatch.setFixedSize(10, 10)
-            swatch.setStyleSheet(
-                f"background-color: {swatch_color}; border-radius: 2px;"
+            swatch.setProperty(
+                "swatchKind",
+                "marker_boundary" if name in ("start", "end") else "marker_loop",
             )
+            self._refresh_swatch(swatch)
             # Knob, not QSpinBox - start/loop_start/loop_end/end commonly
             # sit right on top of each other at the same frame (a short or
             # non-looping sample), which a row of identical-looking number
@@ -5926,9 +6009,7 @@ class ProgramEditorWindow(QMainWindow):
         row_layout.addWidget(name_label, stretch=1)
 
         duration_label = QLabel("")
-        duration_label.setStyleSheet(
-            f"color: {theme.current_palette()['text_disabled']};"
-        )
+        duration_label.setObjectName("mutedLabel")  # style.qss.template
         row_layout.addWidget(duration_label)
 
         return row_widget, name_label, duration_label
@@ -5956,9 +6037,9 @@ class ProgramEditorWindow(QMainWindow):
 
         swatch = QLabel()
         swatch.setFixedSize(10, 10)
-        swatch.setStyleSheet(
-            f"background-color: {keygroup_color(index).name()}; border-radius: 2px;"
-        )
+        swatch.setProperty("swatchKind", "keygroup")
+        swatch.setProperty("keygroupIndex", index)
+        self._refresh_swatch(swatch)
         row_layout.addWidget(swatch)
 
         label = QLabel(
@@ -6244,6 +6325,24 @@ class ProgramEditorWindow(QMainWindow):
         # show rather than differing only until the next refresh
         name = self.program_name_edit.text().rstrip()
         self.program_name_edit.setText(name)
+        if self._is_s1000:
+            original = self._program_name_on_sampler
+            if original is not None and name == original:
+                # editingFinished also fires on a plain click-away with
+                # nothing changed - on an S1000 that would rewrite the whole
+                # program block for no reason, so don't
+                return
+            if self._program_name_taken(program_index, name):
+                # restore what the live-typing handler overwrote
+                self._warn_name_in_use("Program", name)
+                if original is not None:
+                    self.program_name_edit.setText(original)
+                    item = self.program_list.currentItem()
+                    if item is not None:
+                        item.setText(original)
+                    self._update_multi_program_combo_names(program_index, original)
+                return
+            self._program_name_on_sampler = name
         item = self.program_list.currentItem()
         if item is not None:
             item.setText(name)
@@ -6875,15 +6974,9 @@ class ProgramEditorWindow(QMainWindow):
         # non-interactive spinbox for a marker that no longer even draws on
         # the canvas would read as a UI inconsistency, so these follow the
         # same enabled state
-        palette = theme.current_palette()
-        loop_swatch_color = (
-            palette["keygroup_color_3"] if enabled else palette["text_disabled"]
-        )
         for name in ("loop_start", "loop_end"):
             swatch, _spinbox, _value_label = self._marker_spinboxes[name]
-            swatch.setStyleSheet(
-                f"background-color: {loop_swatch_color}; border-radius: 2px;"
-            )
+            self._refresh_swatch(swatch)  # reads self._loop_markers_enabled
         if old_markers is not None and sample_index >= 0:
             new_markers = self.waveform_view.markers()
             entry = self._sample_waveform_cache.get(sample_index)
