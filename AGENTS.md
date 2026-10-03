@@ -82,6 +82,86 @@ thread + `wait_until_idle()`. Any test constructing `ProgramEditorWindow`
 directly must call `editor._worker.stop(); editor._worker.wait()` in
 teardown or hit `QThread: Destroyed while thread is still running`.
 
+## Akai S1000 support (`core/s1000_bridge.py`) - written without hardware
+
+The Settings "Sampler Type" combo has three entries (`core/sampler_models.py`,
+alphabetical): "Akai S1000" (`akai_s1000`), "Akai S2000/S3000"
+(`akai_s2000_s3000`), "Generic SDS" (`generic`). Before the S1000 existed the
+S2000/S3000 was persisted as plain `"akai"`; that legacy value is still accepted
+everywhere (`sampler_models.normalize`) and `app_config.ensure_defaults_saved()`
+rewrites it in `config.json` at startup so the file names the real hardware
+(only that exact legacy string - an unrecognised value from a newer version is
+left alone). Note `"akai"` also remains the PROTOCOL FAMILY name below - a
+different thing from the saved selection. All three Akai families answer a MIDI identity/status request
+identically, so the model can only be a user setting, never detected.
+`SamplerController.device_type` is still the PROTOCOL FAMILY (`akai`/`generic`)
+every transfer path branches on (an S1000's SDS/RSTAT/list traffic is the same
+as an S2000/S3000's); the full choice is `SamplerController.sampler_model`.
+Only the Program Editor cares about the S1000/S2000+ split.
+
+**Why a separate bridge**: `S3kBridge.get_parameter`/`set_parameter` use the
+S3000-only byte-addressable header ops (0x27-0x38). The S1000 doesn't implement
+them and stays silent - a real S1000 user's log showed lists working (base ops)
+and every `get_parameter` timing out at 2.0s. The S1000 only has whole-block
+RPDATA/RKDATA/RSDATA + PDATA/KDATA/SDATA (0x06-0x0B, nibbled), so
+`S1000Bridge` is a wrapper that does read-modify-write of whole blocks while
+exposing the same duck-typed surface (`program_editor_bridge.connect(
+midi_manager, sampler_model)` picks it). The S3000 header layout is a superset
+of the S1000's at the same offsets (program 0-71, keygroup 0-148, sample 0-140,
+checked against the S1000 spec), so `s3k.params` is reused as-is for those
+fields (`_S1000_BLOCK_SIZES`); anything past them reads as a neutral zero and
+refuses writes, so `BridgeWorker`'s fixed field lists work unmodified.
+
+**Never assume the block length** (the spec says "about 150 bytes", no exact
+figure): the adapter caches whatever length the device sent, patches in place,
+writes back that same length, and logs every raw block (hex) at DEBUG - ask a
+real S1000 user for `~/.akaisds/akaisds.log` to learn the real sizes. Blocks are
+cached 1.5s (reading ~50 fields = one fetch) and invalidated by every
+`program_list`/`sample_list`/`delete_*`.
+
+**UI gating** (`ProgramEditorWindow._apply_s1000_gating`, one-way at construction -
+a model change in Settings while the editor is open closes it): hides
+Modulation (both tabs), LFO2, Portamento, LFO1 shape, Bend down, Resonance and the
+S3000's 4-stage ENV2 grid/graph; bend up limited to 0-12; Multi tab hidden/never
+loaded. **ENV2 on an S1000 is a plain ADSR** (`ATTAK2`/`DECAY2`/`SUSTN2`/`RELSE2`,
+in the same KDATA block as ENV1's four - the S1000 spec lists both), so the
+Envelope 2 card gets an ENV1-style graph + 4 knobs (`_build_s1000_env2_adsr`,
+loaded in `_on_detail_loaded`) instead. Gotcha found building that: hiding widgets
+in a not-yet-shown window leaves nested layouts' cached size hints stale, so the
+swapped card stayed pinned 406px tall (vs 225) until its layout was
+`invalidate()`d/`activate()`d before `_equalize_card_heights` re-measured.
+**Duplicate Program/Keygroup and "create program from slices" are ENABLED** (same
+`PDATA`/`KDATA` clone flows as the S2000/S3000, `BridgeWorker._handle_create_*`),
+specifically so the first S1000 tester can find out whether they work - the spec's
+"GROUPS must be correct" wording suggests the existing order (KDATA for the new
+keygroup first, THEN PDATA with `GROUPS+1`) is consistent with it (the KDATA
+creates the keygroup, so the count already matches by the time the PDATA lands),
+but that's reading, not measurement. Clones are sent at the block's real length
+(`build_pdata_request`'s "192 bytes" docstring is S3000-specific; it nibbles
+whatever it's given). Raw frames passed through `S1000Bridge.send_and_receive`
+invalidate the block cache, or the reload after a duplicate shows the old
+`GROUPS`. `TransferDashboard.open_program_editor` shows a one-time experimental
+warning.
+
+**Known/untested, flagged for the first real-S1000 report**: whether re-sending a
+program/sample block with its own unchanged name behaves as an in-place replace
+(the spec: a duplicate name "should be avoided"; it's read as meaning a name that
+collides with a DIFFERENT item); whether `LOOPAT1`/`LLNGTH1`/`STUNO`/`SBANDW` have
+the same semantics as the S2000 notes above; the sample edit actions
+(Trim/Reverse/...) write 8 header fields back through this adapter; the editor's
+SDATA/PDATA/KDATA replies also reach `SamplerController` on the shared port
+(logs "unexpected SDATA"/"unrecognised Akai message" - noise, not a bug, unless
+a Samples-tab audio receive happens to be mid-flight).
+
+**`core/demo_s1000.py`'s `FakeS1000`** fakes the MIDI PORTS (not the bridge's
+Python surface, unlike s3ked's `DemoBridge`): real `S3kBridge` + real adapter run
+on top of it, and it ignores 0x20+ ops like the real machine (so a stray S3000
+op times out and lands in `ignored_ops`). `AKAISDS_DEMO_SAMPLER=1` with the S1000
+model selected uses it. Its blocks are 150 bytes with `0xA5` junk past the spec
+fields (tests also try 72..192) specifically so wrongly-read or dropped trailing
+bytes are caught. Also: **`PRGNUM`'s +1 display offset applies on the S1000 too**
+(unverified there - same `s3k.params` entry).
+
 ## Update checker
 
 `core/update_checker.py`/`ui/update_helper.py` polls GitHub's
