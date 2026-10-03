@@ -136,19 +136,33 @@ combo is relabelled "Bend range" there. Other S1000-narrower ranges applied in
 gating: polyphony 1-16 (S3000 1-32), keygroup note range and sample root note 24-127
 (S3000 21-127).
 
-**Known S1000 editor gaps (audited against the S1000 spec, 2026-10-03)** - fields
-that exist on an S1000 at the same offsets, the adapter can read/write fine, but no
-control exists: the S1000's fixed controller routing, which is its equivalent of
-the S3000's mod matrix (program: `MWLDEP`/`PRSDEP`/`VELDEP` controller>LFO depth,
-`K_LOUD`, `P_LOUD`, `K_PANP`, `MW_PAN`, `P_PTCH`, `K_LRAT`/`K_LDEP`/`K_LDEL`, and the
-Pan LFO `PANRAT`/`PANDEP`/`PANDEL`; keygroup: `V_FREQ`, `P_FREQ`, `E_FREQ` (filter
-envelope depth!), `V_ENV2`, `E_PTCH`, `V_ATT*`/`V_REL*`/`O_REL*`/`K_DAR*`, `KV_LO`).
-Those are "obsolete" on an S3000 (hence absent from its UI) but live on an S1000.
-Also not in either model's UI: `OUTPUT`/`STEREO`, `PLAYLO`/`PLAYHI`, `OSHIFT`,
-`TEMPER`, `KXFADE`/`VXFADE`, `KGTUNO`, per-zone `VZOUT`/`VSS`/`VFREQ`. The Samples
-tab edits loop 1 only; the S1000 has 8 loops and `SALOOP` ("first active loop") says
-which one plays - loop 1 isn't guaranteed to be it. Drum-trigger (`DDATA`) and
-misc/MIDI-channel (`MDATA`) blocks exist on an S1000 and have no UI at all.
+**S1000 controller routing is now editable** (the S1000's fixed equivalent of the S3000's
+mod matrix - `ProgramEditorWindow._build_s1000_controller_cards`): a program-tab
+"Controllers" grid (Loudness/Pan/Pitch/LFO1 depth/rate/delay x Velocity/Key/Pressure/
+Modwheel), keygroup-tab "Controllers" (Filter freq, Pitch, Loudness, Env 2 level x
+Velocity/Pressure/Envelope 2 - `E_FREQ` is the filter envelope's depth) and "Envelope
+response" (V_ATT/V_REL/O_REL/K_DAR for both envelopes) cards, and the hidden LFO2 card is
+reused as the **Pan LFO** (`PANRAT`/`PANDEP`/`PANDEL` - same three fields, minus LFO2's
+shape/retrigger). **Gotcha that nearly broke all of it**: `s3k.params` declares most
+of these fields "Not used - fixed value in the specification", range **0..0**, because
+the S3000 spec says so. The S1000 spec lists each as "+/-50". Left alone,
+`encode_field` refuses every non-zero write AND `decode_field` (which sign-extends
+only when the DECLARED range goes negative) reads a stored -20 back as 236.
+`S1000Bridge` therefore applies `_S1000_RANGE_OVERRIDES` (corrected copies via
+`s1000_param`, by name+region, to whatever `Parameter` the caller passes - never
+editing the dependency) on every read, write and `get_header`. Don't add a new
+S1000-only field to the UI without checking its declared range in `s3k.params` first.
+These fields are only READ when the model is an S1000 (`BridgeWorker`'s
+`extra_program_fields`/`extra_keygroup_fields`) - an S2000/S3000 never pays the round
+trips. `V_LOUD` deliberately has no grid cell (it already has the Velocity knob in
+Volume, Pan & Velocity - two controls for one field would need syncing).
+
+**Remaining S1000 gaps (audited against the S1000 spec, 2026-10-03)**: not in either
+model's UI - `OUTPUT`/`STEREO`, `PLAYLO`/`PLAYHI`, `OSHIFT`, `TEMPER`, `KXFADE`/
+`VXFADE`, `KGTUNO`, per-zone `VZOUT`/`VSS`/`VFREQ`. The Samples tab edits loop 1 only;
+the S1000 has 8 loops and `SALOOP` ("first active loop") says which one plays - loop 1
+isn't guaranteed to be it. Drum-trigger (`DDATA`) and misc/MIDI-channel (`MDATA`)
+blocks exist on an S1000 and have no UI at all.
 
 **Duplicate Program/Keygroup and "create program from slices" are ENABLED** (same
 `PDATA`/`KDATA` clone flows as the S2000/S3000, `BridgeWorker._handle_create_*`),
