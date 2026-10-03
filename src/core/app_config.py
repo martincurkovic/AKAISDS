@@ -182,6 +182,29 @@ def save_skipped_update_version(version):
     save_config(config)
 
 
+# the Settings > Appearance theme choice: "system" follows the OS light/dark
+# setting (the original behaviour, and the default), "light"/"dark" pin it.
+# The valid set lives here rather than in ui/theme.py so this module stays
+# free of any ui import (ui.theme imports THESE).
+THEME_SYSTEM = "system"
+THEME_LIGHT = "light"
+THEME_DARK = "dark"
+THEME_VALUES = (THEME_SYSTEM, THEME_LIGHT, THEME_DARK)
+
+
+def get_saved_theme():
+    # anything unrecognised (a hand-edited or newer config.json) is treated
+    # as "system" rather than crashing or pinning an unknown theme
+    theme = load_config().get("theme", THEME_SYSTEM)
+    return theme if theme in THEME_VALUES else THEME_SYSTEM
+
+
+def save_theme(theme):
+    config = load_config()
+    config["theme"] = theme if theme in THEME_VALUES else THEME_SYSTEM
+    save_config(config)
+
+
 # keys with a real default value worth persisting to disk, so a hand-edited
 # or version-upgraded config.json that's missing one of them gets it filled
 # back in rather than only ever defaulting implicitly in the getter above
@@ -195,6 +218,7 @@ def save_skipped_update_version(version):
 _DEFAULTS = {
     "midi_channel": 0,
     "device_type": sampler_models.AKAI_S2000_S3000,
+    "theme": THEME_SYSTEM,
     "shared_midi_transport": _DEFAULT_SHARED_MIDI_TRANSPORT,
     "audio_buffer_samples": _DEFAULT_AUDIO_BUFFER_SAMPLES,
 }
