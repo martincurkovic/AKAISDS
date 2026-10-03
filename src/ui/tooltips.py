@@ -32,7 +32,7 @@ OPEN_EDITOR_NEEDS_MIDI_PORTS = (
     "Select both a MIDI Input and MIDI Output in Settings first"
 )
 OPEN_EDITOR_NEEDS_AKAI_DEVICE_TYPE = (
-    'Set Sampler Type to "Akai Sampler" in Settings first'
+    'Set Sampler Type to Akai S1000 or Akai S2000/S3000 in Settings first'
 )
 # shown on both btn_open_editor and btn_settings (and mirrored onto their
 # menu actions - see TransferDashboard._sync_menu_actions) while a transfer
@@ -54,8 +54,10 @@ DEVICE_ID_CHANNEL = (
 )
 
 SAMPLER_TYPE = (
-    "Akai Sampler unlocks browsing/renaming/deleting samples on\n"
-    "the hardware (Akai-specific extension to the SDS standard).\n"
+    "Akai S1000 and Akai S2000/S3000 unlock browsing/renaming/\n"
+    "deleting samples on the hardware (Akai-specific extension to\n"
+    "the SDS standard). Pick the one that matches your sampler:\n"
+    "the Program Editor speaks a different protocol to each.\n"
     "Generic SDS uses only the universal standard - sending and\n"
     "receiving still work, but by sample number only, with no way\n"
     "to browse, rename or delete what's on the device."
@@ -420,3 +422,10 @@ LOOP_END_KNOB = (
     "and Loop End for as long as a note is held."
 )
 SAMPLE_END_KNOB = "Where sample playback ends. Audio after this point is ignored."
+
+# Envelope 2 on an Akai S1000 is a plain ADSR filter envelope (see
+# ProgramEditorWindow._build_s1000_env2_adsr), not the S3000's 4-stage one
+S1000_ENV2_ATTACK_KNOB = "Envelope 2 (filter) attack time - how long the filter takes to open after a key is pressed."
+S1000_ENV2_DECAY_KNOB = "Envelope 2 (filter) decay time - how long the filter takes to fall from its attack peak down to the sustain level."
+S1000_ENV2_SUSTAIN_KNOB = "Envelope 2 (filter) sustain level - where the filter stays for as long as the key is held, after attack and decay finish."
+S1000_ENV2_RELEASE_KNOB = "Envelope 2 (filter) release time - how long the filter takes to close after the key is released."
