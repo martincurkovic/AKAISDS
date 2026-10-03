@@ -506,3 +506,69 @@ def test_s2000_s3000_window_has_no_s1000_controller_cards(qapp):
     finally:
         editor._worker.stop()
         editor._worker.wait()
+
+
+# --- controller grids are styled like the S2000/S3000 mod matrix -----------------------------------
+
+
+def _s1000_matrices(editor):
+    # the S3000's (hidden) mod matrices are _ModMatrixGrid too - these are the
+    # ones that actually hold S1000 controller knobs
+    from ui.program_editor_window import _ModMatrixGrid
+
+    return [
+        matrix
+        for matrix in editor.findChildren(_ModMatrixGrid)
+        if any(matrix.isAncestorOf(knob) for knob, *_ in editor._s1000_controls)
+    ]
+
+
+def test_each_controller_grid_is_a_zebra_striped_mod_matrix(editor):
+    matrices = _s1000_matrices(editor)
+    # program Controllers, keygroup Controllers, keygroup Envelope response
+    assert len(matrices) == 3
+    assert sorted(m._data_row_count for m in matrices) == [2, 4, 6]
+    for matrix in matrices:
+        assert matrix._header_row_count == 1
+        # a separator between the label column and every data column
+        columns = len(matrix._column_boundaries)
+        assert matrix._column_boundaries == [(c, c + 1) for c in range(columns)]
+
+
+def test_controller_columns_share_the_width_and_the_label_column_does_not(editor):
+    for matrix in _s1000_matrices(editor):
+        grid = matrix._grid
+        assert grid.columnStretch(0) == 0
+        data_columns = len(matrix._column_boundaries)
+        assert [grid.columnStretch(c) for c in range(1, data_columns + 1)] == [1] * data_columns
+        # fixed label column: sized to its longest label, not stretched
+        label = grid.itemAtPosition(1, 0).widget()
+        assert label.minimumWidth() == label.maximumWidth() > 0
+
+
+def test_controller_columns_widen_with_the_window(editor, qapp):
+    editor.resize(1250, 900)
+    editor.show()
+    qapp.processEvents()
+    matrix = next(m for m in _s1000_matrices(editor) if m._data_row_count == 6)
+    editor.detail_stack.setCurrentIndex(0)
+    qapp.processEvents()
+
+    def column_width():
+        return matrix._grid.cellRect(0, 2).width()
+
+    narrow = column_width()
+    editor.resize(1750, 900)
+    qapp.processEvents()
+    assert column_width() > narrow + 50
+    editor.hide()
+
+
+def test_label_column_is_sized_per_grid(editor):
+    # the keygroup tab's two grids have very different label lengths ("Pitch"
+    # vs "Envelope 2 (filter)") - one shared width would leave a gap in one
+    widths = {
+        matrix._data_row_count: matrix._grid.itemAtPosition(1, 0).widget().maximumWidth()
+        for matrix in _s1000_matrices(editor)
+    }
+    assert widths[2] > widths[4]  # envelope response labels are longer

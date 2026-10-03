@@ -2611,26 +2611,38 @@ class ProgramEditorWindow(QMainWindow):
         # (_load_s1000_controls). Program-region fields write to whichever
         # program is selected; keygroup-region ones also follow the selected
         # keygroup - same as every other knob on those two pages.
+        #
+        # Styled like the S2000/S3000 Modulation cards: wrapped in a
+        # _ModMatrixGrid, which paints zebra striping on alternate rows and
+        # a separator between every column behind the widgets. Unlike those
+        # (whose columns hug their content), every DATA column has stretch 1
+        # so the columns share the card's width evenly and track a window
+        # resize; the label column keeps a fixed width sized to its longest
+        # label. Returns a layout (what _build_section_card takes) holding
+        # that wrapper.
         grid = QGridLayout()
         grid.setHorizontalSpacing(14)
-        grid.setVerticalSpacing(6)
+        grid.setVerticalSpacing(10)
         for column, header in enumerate(column_headers, start=1):
             label = QLabel(header)
             label.setAlignment(Qt.AlignmentFlag.AlignHCenter)
-            grid.addWidget(label, 0, column, alignment=Qt.AlignmentFlag.AlignHCenter)
+            grid.addWidget(label, 0, column, Qt.AlignmentFlag.AlignHCenter)
+            grid.setColumnStretch(column, 1)
+
         getter = self.keygroup_list.currentRow if region == "keygroup" else None
+        centered = Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignHCenter
+        row_labels = []
         for row, (row_label, row_tooltip, cells) in enumerate(rows, start=1):
             name = QLabel(row_label)
             if row_tooltip:
                 name.setToolTip(row_tooltip)
-            grid.addWidget(name, row, 0)
+            row_labels.append(name)
+            grid.addWidget(name, row, 0, Qt.AlignmentFlag.AlignVCenter)
             for column, cell in enumerate(cells, start=1):
                 if cell is None:
                     dash = QLabel("-")
                     dash.setEnabled(False)
-                    grid.addWidget(
-                        dash, row, column, alignment=Qt.AlignmentFlag.AlignHCenter
-                    )
+                    grid.addWidget(dash, row, column, centered)
                     continue
                 field, minimum, maximum = cell
                 knob = Knob()
@@ -2640,15 +2652,29 @@ class ProgramEditorWindow(QMainWindow):
                 knob.setToolTip(tt.S1000_CONTROLLER_TOOLTIPS[field])
                 knob.setEnabled(True)
                 cell_layout, value_label = self._build_knob_value_row(knob)
-                grid.addLayout(
-                    cell_layout, row, column, alignment=Qt.AlignmentFlag.AlignHCenter
-                )
+                grid.addLayout(cell_layout, row, column, centered)
                 self._wire_knob_write(
                     knob, field, region, keygroup_index_getter=getter
                 )
                 self._s1000_controls.append((knob, value_label, field, region))
-        grid.setColumnStretch(len(column_headers) + 1, 1)
-        return grid
+
+        # sized to the longest label in THIS grid, not a shared constant -
+        # the two keygroup grids' labels are very different lengths, and a
+        # column sized for the widest would leave a gap in the other
+        label_width = max(
+            label.fontMetrics().horizontalAdvance(label.text()) for label in row_labels
+        )
+        for label in row_labels:
+            label.setFixedWidth(label_width + 8)
+
+        count = len(column_headers)
+        matrix = _ModMatrixGrid(
+            grid, 1, len(rows), [(column, column + 1) for column in range(count)]
+        )
+        wrapper = QVBoxLayout()
+        wrapper.setContentsMargins(0, 0, 0, 0)
+        wrapper.addWidget(matrix)
+        return wrapper
 
     def _build_s1000_controller_cards(self, program_page_layout, keygroup_page_layout):
         # The S1000's fixed controller routing - its equivalent of the
