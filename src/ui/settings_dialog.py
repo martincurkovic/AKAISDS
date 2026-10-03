@@ -14,7 +14,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 from PySide6.QtCore import Qt
-from core import app_config, audio_preview, debug_log, midi_identity
+from core import app_config, audio_preview, debug_log, midi_identity, sampler_models
 from ui.qt_helpers import (
     FullWidthTabBar,
     build_scroll_area,
@@ -172,9 +172,9 @@ class MidiSettingsDialog(QDialog):
         # sampler device type - determines which protocol family gets used for each step
         # (send, receive, list, delete, rename etc)
         self.combo_device_type = QComboBox()
-        self.combo_device_type.addItem("Akai Sampler", "akai")
-        self.combo_device_type.addItem("Generic SDS", "generic")
-        idx = self.combo_device_type.findData(self.sampler_controller.device_type)
+        for label, selection in sampler_models.CHOICES:
+            self.combo_device_type.addItem(label, selection)
+        idx = self.combo_device_type.findData(self.sampler_controller.sampler_model)
         if idx >= 0:
             self.combo_device_type.setCurrentIndex(idx)
         self.combo_device_type.setToolTip(tooltips.SAMPLER_TYPE)
@@ -371,6 +371,11 @@ class MidiSettingsDialog(QDialog):
 
         self.accept()
 
+    def _selected_protocol_family(self):
+        # the combo holds the full model selection (S1000 / S2000/S3000 /
+        # Generic); the hardware test only cares which protocol to speak
+        return sampler_models.protocol_family(self.combo_device_type.currentData())
+
     def _run_identity_request(self):
         input_name = self.combo_input.currentData()
         output_name = self.combo_output.currentData()
@@ -405,7 +410,7 @@ class MidiSettingsDialog(QDialog):
                     midi_id_input, midi_id_output
                 )
                 if success:
-                    device_type = self.combo_device_type.currentData()
+                    device_type = self._selected_protocol_family()
                     if device_type == "akai":
                         self.id_results_label.setText(
                             self._format_stat_result(id_response)
@@ -447,7 +452,7 @@ class MidiSettingsDialog(QDialog):
         while input_port.poll() is not None:
             pass  # drain any stale bytes in the buffer
 
-        device_type = self.combo_device_type.currentData()
+        device_type = self._selected_protocol_family()
 
         if device_type == "akai":
             output_port.send(

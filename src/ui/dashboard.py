@@ -17,7 +17,15 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QFont, QFontMetrics
-from core import dropped_files, sample_slicing, sds_encoder, program_editor_bridge, debug_log
+from core import (
+    app_config,
+    dropped_files,
+    sample_slicing,
+    sds_encoder,
+    program_editor_bridge,
+    debug_log,
+    sampler_models,
+)
 from ui.qt_helpers import load_colored_pixmap
 from ui.settings_dialog import MidiSettingsDialog
 from ui.drop_list_widget import DropListWidget
@@ -330,8 +338,32 @@ class TransferDashboard(QWidget):
             )
             return
         main_window = self.window()
+        sampler_model = self.sampler_controller.sampler_model
+        if sampler_models.is_s1000(
+            sampler_model
+        ) and not app_config.get_s1000_editor_warning_acknowledged():
+            # S1000 editing was written from Akai's spec alone, with no
+            # S1000 on hand to test against - every edit rewrites the whole
+            # program/keygroup/sample block (the S1000 has no per-field
+            # write), so say so before the first one, once
+            answer = QMessageBox.warning(
+                self,
+                "Akai S1000 - experimental",
+                "Program Editor support for the Akai S1000 is experimental.\n\n"
+                "The S1000 can only be edited a whole program, keygroup or "
+                "sample header at a time, so every change you make rewrites "
+                "that entire block on the sampler. It was written from "
+                "Akai's documentation without an S1000 to test against.\n\n"
+                "Save anything you can't afford to lose to disk first, and "
+                "please report problems along with ~/.akaisds/akaisds.log.",
+                QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Cancel,
+            )
+            if answer != QMessageBox.StandardButton.Ok:
+                return
+            app_config.save_s1000_editor_warning_acknowledged(True)
         try:
-            bridge = program_editor_bridge.connect(self.midi_manager)
+            bridge = program_editor_bridge.connect(self.midi_manager, sampler_model)
         except Exception as e:
             # connect() failures happen before LoggingBridge ever wraps
             # anything, so without this they're invisible to

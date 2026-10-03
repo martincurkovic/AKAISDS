@@ -4,12 +4,13 @@ import threading
 import time
 from collections import deque
 
-from core import akai_sysex, app_config, debug_log
+from core import akai_sysex, app_config, debug_log, sampler_models
 from core import midi_manager as midi_manager_module
 from s3k.bridge import DeviceError, S3kBridge, ThrottledOut
 from PySide6.QtCore import QThread, Signal
 import s3k.messages as m
 import s3k.params as p
+from core.s1000_bridge import S1000Bridge
 
 # the sampler holds exactly one resident multi (no list of multis to choose
 # between) with a fixed 16 "multipart" slots
@@ -150,11 +151,25 @@ for _name in LoggingBridge._WRAPPED_METHODS:
 del _name
 
 
-def connect(midi_manager=None):
+def connect(midi_manager=None, sampler_model=None):
+    # sampler_model is one of core/sampler_models.py's three selections
+    # (None = the S2000/S3000 default). Only the S1000 differs here: it
+    # doesn't implement the byte-addressable header SysEx S3kBridge's
+    # get_parameter/set_parameter use, so its connection is wrapped in
+    # core/s1000_bridge.py's block-based adapter - see that module.
+    s1000 = sampler_models.is_s1000(sampler_model)
     # lets the editor be developed away from the hardware sampler - same
     # dummy sampler s3ked itself ships for its --demo flag, duck-typing the
     # slice of S3kBridge this module's loaders/writers actually call
     logger = debug_log.get_logger()
+    if os.environ.get("AKAISDS_DEMO_SAMPLER") and s1000:
+        # an S1000 demo is a fake that speaks real S1000 SysEx on fake
+        # ports (core/demo_s1000.py), not s3ked's DemoBridge - that one
+        # answers S3000-style header reads an S1000 never would
+        from core.demo_s1000 import FakeS1000
+
+        logger.info("program_editor_bridge.connect(): demo S1000")
+        return LoggingBridge(S1000Bridge(FakeS1000().bridge()))
     if os.environ.get("AKAISDS_DEMO_SAMPLER"):
         from s3ked.demo import DemoBridge
 
@@ -202,6 +217,9 @@ def connect(midi_manager=None):
             f"program_editor_bridge.connect(): standard connection ({output_name!r})"
         )
         bridge = S3kBridge.standard(output_name)  # type: ignore
+    if s1000:
+        logger.info("program_editor_bridge.connect(): S1000 block adapter")
+        bridge = S1000Bridge(bridge)
     return LoggingBridge(bridge)
 
 

@@ -70,6 +70,7 @@ from core.akai_sysex import baseline_semitones_for_bandwidth
 from core import midi_manager as midi_manager_module
 from core import program_editor_bridge
 from core import root_note_detection
+from core import sampler_models
 from core import sample_editing
 from core import sds_encoder
 from core.midi_notes import midi_note_to_name
@@ -454,6 +455,20 @@ class ProgramEditorWindow(QMainWindow):
 
         self._main_window = main_window
         self._bridge = bridge
+        # which sampler family this window was BUILT for. The S1000 has
+        # none of the S3000's modulation matrix/LFO2/portamento/ENV3/Multi
+        # (and a different wire protocol - see core/s1000_bridge.py), and
+        # _apply_s1000_gating() below removes those widgets once, at
+        # construction - so a model change in Settings while this window
+        # is open closes it instead (see _open_settings_dialog)
+        self._sampler_model = sampler_models.normalize(
+            getattr(
+                getattr(main_window, "sampler_controller", None),
+                "sampler_model",
+                None,
+            )
+        )
+        self._is_s1000 = sampler_models.is_s1000(self._sampler_model)
 
         # a single persistent worker thread owns every call to the bridge
         # for this window's whole lifetime, taking requests off a queue and
@@ -2473,6 +2488,141 @@ class ProgramEditorWindow(QMainWindow):
         ):
             knob.setEnabled(True)
 
+        if self._is_s1000:
+            # after every setEnabled(True) above, which would otherwise
+            # re-enable what this disables
+            self._apply_s1000_gating(
+                hidden_widgets=[
+                    lfo2_section,
+                    portamento_section,
+                    modulation_section,
+                    keygroup_modulation_section,
+                    self.env2_graph,
+                ],
+                hidden_layouts=[
+                    lfo_shape_column,
+                    bend_down_column,
+                    resonance_column,
+                    env2_grid,
+                    env2_graph_row,
+                ],
+                env_sections=(env1_section, env2_section),
+            )
+
+    def _apply_s1000_gating(self, hidden_widgets, hidden_layouts, env_sections):
+        # one-way: removes/disables everything an S1000 doesn't have
+        # (core/s1000_bridge.py reads those fields as neutral zeros and
+        # refuses to write them, so nothing here is a safety net - it just
+        # stops the UI offering controls that can't do anything)
+        for widget in hidden_widgets:
+            widget.setVisible(False)
+        for layout in hidden_layouts:
+            self._set_layout_visible(layout, False)
+
+        # the S1000's bend-up range is 0-12 semitones (the S3000's is 0-24)
+        while self.bend_up_combo.count() > 13:
+            self.bend_up_combo.removeItem(self.bend_up_combo.count() - 1)
+
+        self._build_s1000_env2_adsr(*env_sections)
+
+        # no Multi on an S1000 - hide the tab and drop its Window-menu
+        # shortcut (removeAction, not setEnabled(False):
+        # _set_hardware_busy_ui re-enables every tab action)
+        self.main_tabs.setTabVisible(0, False)
+        for menu_action in self.menuBar().actions():
+            menu = menu_action.menu()
+            if menu is not None and self._multi_tab_action in menu.actions():
+                menu.removeAction(self._multi_tab_action)
+        self.setWindowTitle("AKAISDS - Program Editor (Akai S1000, experimental)")
+
+    def _build_s1000_env2_adsr(self, env1_section, env2_section):
+        # The S1000's ENV2 (its filter envelope) is a plain ADSR - ATTAK2/
+        # DECAY2/SUSTN2/RELSE2 sit in the same KDATA block as ENV1's four
+        # (the S1000 spec lists both) - not the S3000's 4-stage rate/level
+        # generator the Envelope 2 card is normally built around. So on an
+        # S1000 that card's grid/graph are hidden (see the caller) and an
+        # ENV1-style ADSR graph + four knobs take their place.
+        self.env2_adsr_graph = ADSREnvelopeGraph()
+        self.env2_adsr_graph.setFixedSize(200, 90)
+
+        # (attr, label, field, default, tooltip) - the defaults are ENV2's
+        # own Akai factory-preset values, same as the 4-stage knobs it
+        # replaces (rate1=0, rate3=50, level3=99, rate4=45)
+        specs = [
+            ("attack2_knob", "Attack", "ATTAK2", 0, tt.S1000_ENV2_ATTACK_KNOB),
+            ("decay2_knob", "Decay", "DECAY2", 50, tt.S1000_ENV2_DECAY_KNOB),
+            ("sustain2_knob", "Sustain", "SUSTN2", 99, tt.S1000_ENV2_SUSTAIN_KNOB),
+            ("release2_knob", "Release", "RELSE2", 45, tt.S1000_ENV2_RELEASE_KNOB),
+        ]
+        controls_row = QHBoxLayout()
+        controls_row.setSpacing(10)
+        self._env2_adsr_knobs = []
+        self._env2_adsr_value_labels = []
+        for attr, label, field, default, tooltip in specs:
+            knob = Knob()
+            knob.setRange(0, 99)
+            knob.setDefaultValue(default)
+            knob.setFixedSize(40, 40)
+            knob.setToolTip(tooltip)
+            knob.setEnabled(True)
+            column, value_label = self._build_knob_column(label, knob)
+            controls_row.addLayout(column)
+            setattr(self, attr, knob)
+            self._env2_adsr_knobs.append(knob)
+            self._env2_adsr_value_labels.append(value_label)
+            knob.valueChanged.connect(self._on_env2_adsr_knob_changed)
+            self._wire_knob_write(
+                knob,
+                field,
+                "keygroup",
+                keygroup_index_getter=self.keygroup_list.currentRow,
+            )
+
+        graph_row = QHBoxLayout()
+        graph_row.addStretch()
+        graph_row.addWidget(self.env2_adsr_graph)
+        graph_row.addStretch()
+        # same row order as Envelope 1's card (graph, then knobs), slotted
+        # in ahead of the card's trailing stretch
+        card_layout = env2_section.layout()
+        card_layout.insertLayout(card_layout.count() - 1, graph_row)
+        card_layout.insertLayout(card_layout.count() - 1, controls_row)
+
+        # both cards were pinned to the old 4-stage grid's height at
+        # construction (_equalize_card_heights) - unpin and re-measure now
+        # that Envelope 2 has the same shape as Envelope 1
+        # hiding widgets in a window that hasn't been shown yet doesn't
+        # invalidate the nested layouts' cached size hints, so the hidden
+        # 4-stage grid/graph rows would still be counted by sizeHint() below
+        # (measured: the card stayed 406px tall instead of ~225px)
+        env2_section.layout().invalidate()
+        env2_section.layout().activate()
+        for card in (env1_section, env2_section):
+            card.setMinimumHeight(0)
+            card.setMaximumHeight(16777215)  # QWIDGETSIZE_MAX
+        self._equalize_card_heights(env1_section, env2_section)
+
+    def _on_env2_adsr_knob_changed(self):
+        # same live-redraw as _on_env1_knob_changed
+        self.env2_adsr_graph.set_values(
+            self.attack2_knob.value(),
+            self.decay2_knob.value(),
+            self.sustain2_knob.value(),
+            self.release2_knob.value(),
+        )
+
+    @staticmethod
+    def _set_layout_visible(layout, visible):
+        # QLayout has no setVisible - hide/show every widget it holds,
+        # recursing into nested layouts
+        for i in range(layout.count()):
+            item = layout.itemAt(i)
+            widget = item.widget()
+            if widget is not None:
+                widget.setVisible(visible)
+            elif item.layout() is not None:
+                ProgramEditorWindow._set_layout_visible(item.layout(), visible)
+
     def _on_programs_loaded(self, programs):
         # also reached on every Refresh (see _refresh_from_hardware), not
         # just the initial load - is_refresh distinguishes the two so a
@@ -2596,6 +2746,8 @@ class ProgramEditorWindow(QMainWindow):
         self._loading_progress.setVisible(False)
 
     def _refresh_multi_parts(self, *, show_confirmation=False):
+        if self._is_s1000:
+            return  # no Multi on an S1000 (and no SysEx for it)
         self._multi_refresh_in_progress = show_confirmation
         self._worker.submit_multi_parts()
 
@@ -2791,6 +2943,21 @@ class ProgramEditorWindow(QMainWindow):
         # or the close()-back-to-Dashboard fallback).
         self._reconnect_shared_bridge()
         self._settings_dialog_active = False
+        if sampler_models.normalize(sampler_controller.sampler_model) != self._sampler_model:
+            # this window's controls were built for the OLD model (see
+            # _is_s1000 in __init__) - going back to the Dashboard is the
+            # one way to get a correctly-built editor for the new one
+            logger.info(
+                "ProgramEditorWindow: sampler type changed in Settings "
+                f"({self._sampler_model!r} -> {sampler_controller.sampler_model!r}) "
+                "- closing the editor"
+            )
+            dashboard = getattr(self._main_window, "dashboard_view", None)
+            if dashboard is not None:
+                dashboard.status_bar.showMessage(
+                    "Sampler type changed - reopen the Program Editor", 8000
+                )
+            self.close()
         logger.debug("ProgramEditorWindow._open_settings_dialog: finished")
 
     def _reconnect_shared_bridge(self):
@@ -2904,7 +3071,14 @@ class ProgramEditorWindow(QMainWindow):
             "program_editor_bridge.connect()"
         )
         try:
-            new_bridge = program_editor_bridge.connect(midi_manager)
+            new_bridge = program_editor_bridge.connect(
+                midi_manager,
+                getattr(
+                    getattr(self._main_window, "sampler_controller", None),
+                    "sampler_model",
+                    None,
+                ),
+            )
         except Exception:
             logger.error(
                 "ProgramEditorWindow: couldn't rebuild the bridge after "
@@ -3164,7 +3338,6 @@ class ProgramEditorWindow(QMainWindow):
         # here rather than faking a local-only simulation that can't really
         # round-trip through anything
         demo_mode = bool(os.environ.get("AKAISDS_DEMO_SAMPLER"))
-
         has_program = self.program_list.currentRow() >= 0
         self._rename_program_action.setEnabled(has_program)
         self._duplicate_program_action.setEnabled(has_program and not demo_mode)
@@ -4268,6 +4441,19 @@ class ProgramEditorWindow(QMainWindow):
             values["RELSE2"],
             values["ENV2L4"],
         )
+        if self._is_s1000:
+            for knob, label, field in zip(
+                self._env2_adsr_knobs,
+                self._env2_adsr_value_labels,
+                ("ATTAK2", "DECAY2", "SUSTN2", "RELSE2"),
+            ):
+                knob.blockSignals(True)
+                knob.setValue(values[field])
+                knob.blockSignals(False)
+                label.setText(str(values[field]))
+            self.env2_adsr_graph.set_values(
+                values["ATTAK2"], values["DECAY2"], values["SUSTN2"], values["RELSE2"]
+            )
         self._update_zone_panels(values)
 
     def _on_detail_load_failed(self, program_index, keygroup_index, error_message):

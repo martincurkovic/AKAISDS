@@ -1,5 +1,5 @@
 from PySide6.QtCore import QObject, Signal, QTimer
-from core import akai_sysex, sds_encoder, midi_identity, debug_log
+from core import akai_sysex, sds_encoder, midi_identity, debug_log, sampler_models
 import os
 import time
 
@@ -36,7 +36,12 @@ class SamplerController(QObject):
         # global SysEx device ID/channel (0-127) - NOT THE SAME AS MIDI CHANNELS (1-16)!!!
         # defaults to 0, otherwise it can be set manually for a daisy-chained setup
         self.channel = 0
+        # device_type is the PROTOCOL FAMILY ("akai"/"generic") every transfer
+        # path below branches on; sampler_model is the full Settings choice
+        # (core/sampler_models.py) - only the Program Editor cares about the
+        # S1000 vs S2000/S3000 split, which transfers don't
         self.device_type = "akai"
+        self.sampler_model = sampler_models.AKAI_S2000_S3000
 
         self._open_loop_delay_ms = 40  # pacing for open loop sending
         self._handshake_timeout_ms = 500  # how long to wait for a reponse before switching to open-loop transmission
@@ -125,8 +130,11 @@ class SamplerController(QObject):
     def set_channel(self, channel):
         self.channel = channel & 0x7F
 
-    def set_device_type(self, device_type):
-        self.device_type = device_type
+    def set_device_type(self, selection):
+        # takes any of core/sampler_models.py's three selections, not just
+        # a protocol family
+        self.sampler_model = sampler_models.normalize(selection)
+        self.device_type = sampler_models.protocol_family(self.sampler_model)
 
     def refresh_sample_list(self, silent=False):
         if self.device_type == "generic":
