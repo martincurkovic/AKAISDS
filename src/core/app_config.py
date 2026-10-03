@@ -1,7 +1,7 @@
 import json
 from pathlib import Path
 
-from core import debug_log
+from core import debug_log, sampler_models
 
 CONFIG_PATH = Path.home() / ".akaisds/config.json"
 
@@ -78,15 +78,34 @@ def save_channel(channel):
 
 
 def get_saved_device_type():
-    # returns the saved sampler device type (eg, akai, generic, etc)
-    # defaults to akai if nothing has been saved yet
+    # returns the saved sampler type selection - one of
+    # core/sampler_models.py's three ("akai_s2000_s3000", "akai_s1000",
+    # "generic"). a legacy plain "akai" (what this file held for the
+    # S2000/S3000 before the S1000 existed) is returned as its modern
+    # equivalent; so is anything unrecognised (hand-edited/newer config),
+    # and so is nothing having been saved yet
     config = load_config()
-    return config.get("device_type", "akai")
+    return sampler_models.normalize(
+        config.get("device_type", sampler_models.AKAI_S2000_S3000)
+    )
 
 
 def save_device_type(device_type):
     config = load_config()
     config["device_type"] = device_type
+    save_config(config)
+
+
+def get_s1000_editor_warning_acknowledged():
+    # whether the user has already clicked through the one-time "S1000
+    # editing is experimental" warning (shown by the Dashboard before the
+    # Program Editor first opens in S1000 mode)
+    return bool(load_config().get("s1000_editor_warning_acknowledged", False))
+
+
+def save_s1000_editor_warning_acknowledged(acknowledged=True):
+    config = load_config()
+    config["s1000_editor_warning_acknowledged"] = bool(acknowledged)
     save_config(config)
 
 
@@ -175,7 +194,7 @@ def save_skipped_update_version(version):
 # out would just be noise, not a real default being filled in.
 _DEFAULTS = {
     "midi_channel": 0,
-    "device_type": "akai",
+    "device_type": sampler_models.AKAI_S2000_S3000,
     "shared_midi_transport": _DEFAULT_SHARED_MIDI_TRANSPORT,
     "audio_buffer_samples": _DEFAULT_AUDIO_BUFFER_SAMPLES,
 }
@@ -190,7 +209,17 @@ def ensure_defaults_saved():
     # anything reads the live config - see ui/main_window.py's own call
     # site.
     config = load_config()
+    changed = False
     missing = {key: value for key, value in _DEFAULTS.items() if key not in config}
     if missing:
         config.update(missing)
+        changed = True
+    # a config.json from before the S1000 existed saved the S2000/S3000 as
+    # plain "akai" - rewrite it so someone reading the file sees the
+    # hardware it actually means (get_saved_device_type already accepts
+    # either spelling, so this is purely about the file being accurate)
+    if config.get("device_type") == sampler_models.LEGACY_AKAI:
+        config["device_type"] = sampler_models.AKAI_S2000_S3000
+        changed = True
+    if changed:
         save_config(config)
