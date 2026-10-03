@@ -130,6 +130,26 @@ loaded in `_on_detail_loaded`) instead. Gotcha found building that: hiding widge
 in a not-yet-shown window leaves nested layouts' cached size hints stale, so the
 swapped card stayed pinned 406px tall (vs 225) until its layout was
 `invalidate()`d/`activate()`d before `_equalize_card_heights` re-measured.
+**The S1000 has ONE bend field** (`B_PTCH`, 0-12 st; the S3000 splits it into `B_PTCH`
+"increase" 0-24 + `B_PTCHD` "decrease" at offset 73, past the S1000's block), so the
+combo is relabelled "Bend range" there. Other S1000-narrower ranges applied in
+gating: polyphony 1-16 (S3000 1-32), keygroup note range and sample root note 24-127
+(S3000 21-127).
+
+**Known S1000 editor gaps (audited against the S1000 spec, 2026-10-03)** - fields
+that exist on an S1000 at the same offsets, the adapter can read/write fine, but no
+control exists: the S1000's fixed controller routing, which is its equivalent of
+the S3000's mod matrix (program: `MWLDEP`/`PRSDEP`/`VELDEP` controller>LFO depth,
+`K_LOUD`, `P_LOUD`, `K_PANP`, `MW_PAN`, `P_PTCH`, `K_LRAT`/`K_LDEP`/`K_LDEL`, and the
+Pan LFO `PANRAT`/`PANDEP`/`PANDEL`; keygroup: `V_FREQ`, `P_FREQ`, `E_FREQ` (filter
+envelope depth!), `V_ENV2`, `E_PTCH`, `V_ATT*`/`V_REL*`/`O_REL*`/`K_DAR*`, `KV_LO`).
+Those are "obsolete" on an S3000 (hence absent from its UI) but live on an S1000.
+Also not in either model's UI: `OUTPUT`/`STEREO`, `PLAYLO`/`PLAYHI`, `OSHIFT`,
+`TEMPER`, `KXFADE`/`VXFADE`, `KGTUNO`, per-zone `VZOUT`/`VSS`/`VFREQ`. The Samples
+tab edits loop 1 only; the S1000 has 8 loops and `SALOOP` ("first active loop") says
+which one plays - loop 1 isn't guaranteed to be it. Drum-trigger (`DDATA`) and
+misc/MIDI-channel (`MDATA`) blocks exist on an S1000 and have no UI at all.
+
 **Duplicate Program/Keygroup and "create program from slices" are ENABLED** (same
 `PDATA`/`KDATA` clone flows as the S2000/S3000, `BridgeWorker._handle_create_*`),
 specifically so the first S1000 tester can find out whether they work - the spec's
