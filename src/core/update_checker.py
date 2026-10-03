@@ -33,6 +33,7 @@ class UpdateInfo:
     tag: str  # e.g. "v1.1.0"
     name: str  # release title, may be blank
     html_url: str  # GitHub release page to send the user to
+    notes: str = ""  # release notes, as the Markdown they were written in
 
 
 def _parse_version(version_string):
@@ -76,6 +77,8 @@ def check_for_update(current_version=APP_VERSION):
         tag=tag,
         name=payload.get("name") or tag,
         html_url=payload.get("html_url", f"https://github.com/{REPO}/releases"),
+        # "body" is null for a release with no description
+        notes=payload.get("body") or "",
     )
 
 

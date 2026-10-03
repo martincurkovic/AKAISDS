@@ -66,6 +66,7 @@ def test_returns_update_info_when_a_newer_release_exists(monkeypatch):
                 "tag_name": "v1.2.0",
                 "name": "AKAISDS 1.2.0",
                 "html_url": "https://github.com/martincurkovic/AKAISDS/releases/tag/v1.2.0",
+                "body": "## What's new\n\n- Something",
             }
         ),
     )
@@ -77,7 +78,21 @@ def test_returns_update_info_when_a_newer_release_exists(monkeypatch):
         tag="v1.2.0",
         name="AKAISDS 1.2.0",
         html_url="https://github.com/martincurkovic/AKAISDS/releases/tag/v1.2.0",
+        notes="## What's new\n\n- Something",
     )
+
+
+def test_release_with_no_description_has_empty_notes(monkeypatch):
+    # GitHub sends "body": null for a release with no description - and
+    # older payloads/fakes may omit the key entirely
+    for payload in (
+        {"tag_name": "v1.2.0", "html_url": "x", "body": None},
+        {"tag_name": "v1.2.0", "html_url": "x"},
+    ):
+        monkeypatch.setattr(
+            update_checker.urllib.request, "urlopen", _fake_urlopen(payload)
+        )
+        assert check_for_update(current_version="1.0.0").notes == ""
 
 
 def test_returns_none_when_already_on_latest(monkeypatch):

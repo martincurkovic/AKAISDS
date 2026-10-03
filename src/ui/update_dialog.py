@@ -2,9 +2,18 @@ import shutil
 import subprocess
 import sys
 
-from PySide6.QtWidgets import QDialog, QHBoxLayout, QLabel, QLayout, QPushButton, QVBoxLayout
+from PySide6.QtWidgets import (
+    QDialog,
+    QHBoxLayout,
+    QLabel,
+    QPushButton,
+    QTextBrowser,
+    QVBoxLayout,
+)
 from PySide6.QtCore import Qt, QUrl
-from PySide6.QtGui import QDesktopServices
+from PySide6.QtGui import QColor, QDesktopServices, QTextCharFormat, QTextCursor
+
+from ui import theme
 
 try:
     from ui._version import APP_VERSION
@@ -35,6 +44,28 @@ def _open_url(url):
         except OSError:
             pass  # fall through to QDesktopServices below
     QDesktopServices.openUrl(QUrl(url))
+
+
+def _recolor_links(document, color):
+    # walks every text fragment in the document and gives each link run
+    # (anchor) the same foreground color
+    cursor = QTextCursor(document)
+    block = document.begin()
+    while block.isValid():
+        iterator = block.begin()
+        while not iterator.atEnd():
+            fragment = iterator.fragment()
+            if fragment.isValid() and fragment.charFormat().isAnchor():
+                cursor.setPosition(fragment.position())
+                cursor.setPosition(
+                    fragment.position() + fragment.length(),
+                    QTextCursor.MoveMode.KeepAnchor,
+                )
+                link_format = QTextCharFormat()
+                link_format.setForeground(color)
+                cursor.mergeCharFormat(link_format)
+            iterator += 1
+        block = block.next()
 
 
 class UpdateAvailableDialog(QDialog):
@@ -75,6 +106,32 @@ class UpdateAvailableDialog(QDialog):
         link_label.linkActivated.connect(_open_url)
         layout.addWidget(link_label)
 
+        # the release's own notes, rendered from the Markdown they were
+        # written in on GitHub (QTextBrowser.setMarkdown understands
+        # CommonMark/GFM headings, lists, links, code). Left out entirely
+        # for a release with no description, rather than an empty box.
+        # Links open in the system browser, never inside this widget
+        # (setOpenLinks(False) + anchorClicked) - and only web links, since
+        # release notes are text from the network, not something that
+        # should be able to launch an arbitrary file:// or custom-scheme URL
+        self.notes_view = None
+        if update_info.notes.strip():
+            self.notes_view = QTextBrowser()
+            self.notes_view.setOpenLinks(False)
+            self.notes_view.setOpenExternalLinks(False)
+            self.notes_view.anchorClicked.connect(self._open_notes_link)
+            self.notes_view.setMarkdown(update_info.notes)
+            # links come out in a default dark blue that's close to
+            # unreadable on the dark theme. Setting QPalette.Link on the
+            # view was tried first and had no effect on Markdown anchors, so
+            # the rendered link runs themselves are recolored with the
+            # theme's own accent (readable on both of its schemes)
+            _recolor_links(
+                self.notes_view.document(), QColor(theme.current_palette()["accent"])
+            )
+            self.notes_view.setMinimumHeight(180)
+            layout.addWidget(self.notes_view, stretch=1)
+
         button_row = QHBoxLayout()
 
         skip_button = QPushButton("Skip This Version")
@@ -91,7 +148,15 @@ class UpdateAvailableDialog(QDialog):
         button_row.addWidget(view_button)
 
         layout.addLayout(button_row)
-        layout.setSizeConstraint(QLayout.SizeConstraint.SetFixedSize)
+        # was SetFixedSize (just a few short labels); with release notes in
+        # it the dialog needs to be resizable, and a sensible width up front
+        self.setMinimumWidth(520)
+        if self.notes_view is not None:
+            self.resize(560, 460)
+
+    def _open_notes_link(self, url):
+        if url.scheme() in ("http", "https"):
+            _open_url(url.toString())
 
     def _open_release_page(self):
         _open_url(self.update_info.html_url)
