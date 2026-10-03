@@ -152,6 +152,14 @@ only when the DECLARED range goes negative) reads a stored -20 back as 236.
 `s1000_param`, by name+region, to whatever `Parameter` the caller passes - never
 editing the dependency) on every read, write and `get_header`. Don't add a new
 S1000-only field to the UI without checking its declared range in `s3k.params` first.
+The controller grids reuse `_ModMatrixGrid` (zebra rows + column separators painted
+behind a `QGridLayout`) like the S3000 mod cards, but with stretch-1 data columns so
+they track window width (the S3000 cards' columns hug their content), and a label
+column sized per grid from its longest label. They must be built AFTER the stylesheet
+fonts exist only in the sense that `fontMetrics()` is read at construction - it is,
+since `apply_to_app` runs before any window is made. (Screenshot gotcha: a preview
+script that skips `theme.apply_to_app` renders the dark-palette zebra stripes on a
+light window - they look black.)
 These fields are only READ when the model is an S1000 (`BridgeWorker`'s
 `extra_program_fields`/`extra_keygroup_fields`) - an S2000/S3000 never pays the round
 trips. `V_LOUD` deliberately has no grid cell (it already has the Velocity knob in
