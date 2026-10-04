@@ -1068,6 +1068,107 @@ def test_duplicate_data_packet_is_acked_but_not_appended_twice(controller):
     assert controller.midi_manager.sent[-1][2] == sds_encoder.ACK
 
 
+def _start_fake_akai_receive(controller, expected_packets=5):
+    controller._receiving = True
+    controller._receive_channel = 0
+    controller._receive_sample_number = 1
+    controller._receive_header_info = {
+        "bit_depth": 16,
+        "sample_length": 500,
+        "sample_number": 1,
+        "sample_rate": 44100,
+        "name": "TEST",
+    }
+    controller._receive_expected_packets = expected_packets
+    controller._receive_packets = []
+    controller._reset_receive_diagnostics()
+
+
+def test_cancel_from_sampler_during_receive_fails_fast(controller, caplog):
+    import logging
+    from core import sds_encoder
+
+    statuses = _statuses(controller)
+    finished = []
+    controller.receive_finished.connect(finished.append)
+    _start_fake_akai_receive(controller)
+    with caplog.at_level(logging.WARNING, logger="akaisds"):
+        controller.on_sysex_received([0x7E, 0x00, sds_encoder.CANCEL, 0x02])
+    assert controller._receiving is False
+    assert finished == [False]
+    assert any("cancelled the transfer" in s for s in statuses)
+    assert any("sent CANCEL during receive" in r.message for r in caplog.records)
+
+
+def test_stray_ack_nak_wait_during_receive_are_logged_not_acted_on(controller, caplog):
+    import logging
+    from core import sds_encoder
+
+    _start_fake_akai_receive(controller)
+    sent_before = len(controller.midi_manager.sent)
+    with caplog.at_level(logging.WARNING, logger="akaisds"):
+        for sub_id in (sds_encoder.ACK, sds_encoder.NAK, sds_encoder.WAIT):
+            controller.on_sysex_received([0x7E, 0x00, sub_id, 0x01])
+    assert controller._receiving is True
+    assert len(controller.midi_manager.sent) == sent_before
+    assert controller._receive_stray_handshakes == 3
+    for name in ("ACK", "NAK", "WAIT"):
+        assert any(f"unexpected {name} from the sampler" in r.message for r in caplog.records)
+
+
+def test_stray_handshake_logging_is_capped(controller, caplog):
+    import logging
+    from core import sds_encoder
+
+    _start_fake_akai_receive(controller)
+    with caplog.at_level(logging.WARNING, logger="akaisds"):
+        for _ in range(50):
+            controller.on_sysex_received([0x7E, 0x00, sds_encoder.ACK, 0x01])
+    logged = [r for r in caplog.records if "unexpected ACK" in r.message]
+    assert len(logged) == controller._RECEIVE_LOG_MAX_STRAY_HANDSHAKES
+    assert controller._receive_stray_handshakes == 50
+
+
+def test_handshake_during_a_send_still_reaches_the_send_logic(controller):
+    from core import sds_encoder
+
+    controller._receiving = True  # stale flag must not steal a send's ACKs
+    controller._send_queue = [b"a", b"b"]
+    controller._send_index = 0
+    sent = []
+    controller._send_current_packet = lambda: sent.append(controller._send_index)
+    controller.on_sysex_received([0x7E, 0x00, sds_encoder.ACK, 0x00])
+    assert controller._send_index == 1
+    assert sent == [1]
+
+
+def test_stall_error_log_includes_receive_diagnostics(controller, caplog):
+    import logging
+
+    _start_fake_akai_receive(controller)
+    controller._receive_packet_retries = controller._receive_packet_max_retries
+    controller._arm_reply_timeout("next data packet", 3000)
+    with caplog.at_level(logging.ERROR, logger="akaisds"):
+        controller._on_reply_timeout(controller._reply_generation)
+    assert any(
+        "no data packet received yet" in r.message
+        and "unexpected handshake message(s)" in r.message
+        for r in caplog.records
+    )
+
+
+def test_data_packet_timing_is_logged_for_the_first_packets(controller, caplog):
+    import logging
+    from core import sds_encoder
+
+    _start_fake_akai_receive(controller)
+    packet = sds_encoder.build_data_packets([1, 2, 3], channel=0, bit_depth=16)[0]
+    with caplog.at_level(logging.DEBUG, logger="akaisds"):
+        controller.on_sysex_received(list(packet[1:-1]))
+    assert any("receive data packet #1" in r.message for r in caplog.records)
+    assert controller._receive_last_packet_at is not None
+
+
 def test_sample_info_timeout_clears_the_busy_flag(controller):
     controller.request_sample_info(0)
     assert controller.is_transfer_busy() is True

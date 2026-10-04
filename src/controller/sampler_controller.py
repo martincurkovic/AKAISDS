@@ -64,6 +64,12 @@ class SamplerController(QObject):
         self._receive_packet_retries = 0
         self._receive_last_packet_num = None
         self._receive_checksum_errors = 0
+        # receive diagnostics (see _reset_receive_diagnostics) - the receive
+        # path used to log nothing between the header and the final
+        # error, so a stall at packet N left no clue what the sampler did
+        self._receive_started_at = 0.0
+        self._receive_last_packet_at = None
+        self._receive_stray_handshakes = 0
 
         # per-unit send diagnostics, logged once when the unit ends (never per packet,
         # so a big sample can't flood the debug log)
@@ -232,6 +238,78 @@ class SamplerController(QObject):
         self._reply_generation += 1  # invalidates the pending timer
         self._reply_wait_label = None
 
+    # how many packets get their own log line at the start of a receive, and
+    # then how often after that - enough to see the S1000's real packet
+    # timing without flooding the rotating log on a big sample
+    _RECEIVE_LOG_FIRST_PACKETS = 8
+    _RECEIVE_LOG_EVERY_NTH_PACKET = 50
+    _RECEIVE_LOG_MAX_STRAY_HANDSHAKES = 5
+
+    def _reset_receive_diagnostics(self):
+        self._receive_started_at = time.monotonic()
+        self._receive_last_packet_at = None
+        self._receive_stray_handshakes = 0
+
+    def _receive_diagnostics_summary(self):
+        # one line for every stall/failure log: how long since the sampler
+        # last said anything useful, and whether it said anything we ignored
+        now = time.monotonic()
+        if self._receive_last_packet_at is None:
+            since = "no data packet received yet"
+        else:
+            since = f"last data packet {(now - self._receive_last_packet_at) * 1000:.0f}ms ago"
+        return (
+            f"{since}, {(now - self._receive_started_at) * 1000:.0f}ms into the receive, "
+            f"{self._receive_stray_handshakes} unexpected handshake message(s) from the sampler"
+        )
+
+    def _log_receive_packet(self, packet_num, payload_len):
+        # per-packet timing, sampled (see _RECEIVE_LOG_FIRST_PACKETS); always
+        # called after the packet was ACKed, never before
+        now = time.monotonic()
+        gap_ms = (
+            (now - self._receive_started_at) * 1000
+            if self._receive_last_packet_at is None
+            else (now - self._receive_last_packet_at) * 1000
+        )
+        self._receive_last_packet_at = now
+        count = len(self._receive_packets)
+        if (
+            count <= self._RECEIVE_LOG_FIRST_PACKETS
+            or count % self._RECEIVE_LOG_EVERY_NTH_PACKET == 0
+        ):
+            debug_log.get_logger().debug(
+                f"SamplerController: receive data packet #{count} (number {packet_num}, "
+                f"{payload_len} payload bytes) {gap_ms:.0f}ms after the "
+                f"{'RSPACK' if count == 1 else 'previous packet'}, ACK sent"
+            )
+
+    def _on_receive_handshake_message(self, kind, data_bytes):
+        # ACK/NAK/WAIT/CANCEL arriving WHILE we are the receiver. A dump
+        # sender (the sampler) isn't supposed to send any of these, so each
+        # one is worth knowing about - they used to be dropped without a
+        # trace (_on_handshake_message ignores everything outside a send)
+        self._receive_stray_handshakes += 1
+        raw = bytes(data_bytes).hex(" ")
+        if kind == "cancel":
+            debug_log.get_logger().error(
+                f"SamplerController: sampler sent CANCEL during receive ({raw}) - "
+                f"{self._receive_diagnostics_summary()}"
+            )
+            info = self._receive_header_info
+            expected = self._receive_expected_packets if info else "?"
+            self._recover_from_error(
+                f"The sampler cancelled the transfer after "
+                f"{len(self._receive_packets)}/{expected} packets"
+            )
+            return
+        if self._receive_stray_handshakes <= self._RECEIVE_LOG_MAX_STRAY_HANDSHAKES:
+            debug_log.get_logger().warning(
+                f"SamplerController: unexpected {kind.upper()} from the sampler during "
+                f"receive ({raw}) at {len(self._receive_packets)} packet(s) - ignored "
+                f"({self._receive_diagnostics_summary()})"
+            )
+
     def _nudge_stalled_receive(self):
         # alternate between re-ACKing the last packet (our ACK may have been lost)
         # and NAKing the one we expect next (the packet itself may have been lost) -
@@ -247,7 +325,7 @@ class SamplerController(QObject):
             f"SamplerController: receive stalled at {len(self._receive_packets)}/"
             f"{self._receive_expected_packets} - retry {self._receive_packet_retries}/"
             f"{self._receive_packet_max_retries} ({'ACK' if kind == sds_encoder.ACK else 'NAK'} "
-            f"packet {packet_num})"
+            f"packet {packet_num}) - {self._receive_diagnostics_summary()}"
         )
         self.midi_manager.send_sysex(
             [0x7E, self._receive_channel & 0x7F, kind, packet_num]
@@ -293,7 +371,8 @@ class SamplerController(QObject):
             debug_log.get_logger().error(
                 f"SamplerController: receive stalled waiting for {label} - sample "
                 f"{self._receive_sample_number}, packets {len(self._receive_packets)}/{expected}, "
-                f"checksum errors={self._receive_checksum_errors}"
+                f"checksum errors={self._receive_checksum_errors} - "
+                f"{self._receive_diagnostics_summary()}"
             )
             self._recover_from_error(message)
         elif self._awaiting_sample_info:
@@ -477,6 +556,11 @@ class SamplerController(QObject):
             if self._receiving and sub_id == 0x02:
                 self._on_receive_data_packet(data_bytes)
                 return
+            if self._receiving and not self._send_queue:
+                handshake = sds_encoder.classify_response(data_bytes)
+                if handshake is not None:
+                    self._on_receive_handshake_message(handshake, data_bytes)
+                    return
 
         handshake = sds_encoder.classify_response(data_bytes)
         if handshake is not None:
@@ -992,6 +1076,7 @@ class SamplerController(QObject):
         self._receive_packets = []
 
         self._receive_checksum_errors = 0
+        self._reset_receive_diagnostics()
         debug_log.get_logger().info(
             f"SamplerController: receive start (generic SDS) slot={sample_number} channel={channel}"
         )
@@ -1041,6 +1126,7 @@ class SamplerController(QObject):
         self._receive_packets = []
 
         self._receive_checksum_errors = 0
+        self._reset_receive_diagnostics()
         debug_log.get_logger().info(
             f"SamplerController: receive start (Akai) slot={sample_number} "
             f"channel={self._receive_channel} ({current_index}/{self._receive_queue_total}) "
@@ -1081,6 +1167,11 @@ class SamplerController(QObject):
             interval=1,
             function=0,
             channel=self._receive_channel,
+        )
+        debug_log.get_logger().info(
+            f"SamplerController: sample header '{info['name']}': {info['sample_length']} "
+            f"samples at {info['sample_rate']}Hz, {self._receive_expected_packets} packets "
+            f"expected - sending RSPACK {bytes(request).hex(' ')}"
         )
         self.midi_manager.send_sysex(request)
         self._arm_reply_timeout("audio data (RSPACK)", self._receive_timeout_ms)
@@ -1139,6 +1230,10 @@ class SamplerController(QObject):
 
         if packet_num == self._receive_last_packet_num and self._receive_packets:
             # duplicate (a resend after a retry nudge) - ACK again, don't append twice
+            debug_log.get_logger().warning(
+                f"SamplerController: duplicate data packet {packet_num} received - "
+                f"re-ACKed, not appended"
+            )
             self.midi_manager.send_sysex(
                 [0x7E, self._receive_channel & 0x7F, sds_encoder.ACK, packet_num]
             )
@@ -1151,6 +1246,7 @@ class SamplerController(QObject):
         self.midi_manager.send_sysex(
             [0x7E, self._receive_channel & 0x7F, sds_encoder.ACK, packet_num]
         )
+        self._log_receive_packet(packet_num, len(payload))
 
         info = self._receive_header_info
         bytes_per_word = (info["bit_depth"] + 6) // 7
