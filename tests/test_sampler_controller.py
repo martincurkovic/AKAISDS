@@ -1169,6 +1169,172 @@ def test_data_packet_timing_is_logged_for_the_first_packets(controller, caplog):
     assert controller._receive_last_packet_at is not None
 
 
+def _start_akai_receive_of(controller, samples, tmp_path):
+    # drives the real RSDATA -> SDATA -> RSPACK exchange, returns the packets
+    # the sampler would send and the save path
+    from core import akai_sysex, sds_encoder
+
+    save_path = str(tmp_path / "resumed.wav")
+    controller.receive_samples([(3, save_path)], channel=0)
+    sdata_msg = akai_sysex.build_sdata_message(
+        name="AKAI SAMP",
+        sample_length=len(samples),
+        sample_rate=44100,
+        sample_number=3,
+        channel=0,
+    )
+    controller.on_sysex_received(list(sdata_msg[1:-1]))
+    return save_path, sds_encoder.build_data_packets(samples, channel=0, bit_depth=16)
+
+
+def _rspack_fields(message):
+    # [0x47, cc, 0x0C, 0x48, ss, ss, o*4, n*4, ii, ff]
+    def _value(b):
+        return b[0] | (b[1] << 7) | (b[2] << 14) | (b[3] << 21)
+
+    return _value(message[6:10]), _value(message[10:14])
+
+
+def _timeout(controller, times=1):
+    for _ in range(times):
+        controller._on_reply_timeout(controller._reply_generation)
+
+
+def test_akai_stall_resumes_with_a_new_rspack_from_the_received_offset(
+    controller, tmp_path
+):
+    from core import sds_encoder
+
+    samples = list(range(1, 121))  # 3 packets of 40 words
+    save_path, packets = _start_akai_receive_of(controller, samples, tmp_path)
+    for packet in packets[:2]:
+        controller.on_sysex_received(list(packet[1:-1]))
+
+    # three ACK/NAK nudges first, exactly as before
+    sent_before = len(controller.midi_manager.sent)
+    _timeout(controller, 3)
+    assert len(controller.midi_manager.sent) == sent_before + 3
+    assert controller._receive_resume_attempts == 0
+
+    # the fourth stall resumes: CANCEL, then a new RSPACK from word 80
+    _timeout(controller)
+    assert controller._receiving is True
+    assert controller._receive_resume_attempts == 1
+    cancel, rspack = controller.midi_manager.sent[-2:]
+    assert list(cancel[2:3]) == [sds_encoder.CANCEL]
+    assert rspack[2] == 0x0C
+    assert _rspack_fields(rspack) == (80, 40)
+
+    # the resumed stream restarts at packet 0 - its words finish the sample
+    resumed = sds_encoder.build_data_packets(samples[80:], channel=0, bit_depth=16)
+    finished = []
+    controller.receive_finished.connect(finished.append)
+    controller.on_sysex_received(list(resumed[0][1:-1]))
+
+    assert finished == [True]
+    read_back, _ = sds_encoder.read_wav_samples(save_path)
+    assert list(read_back) == samples
+
+
+def test_resume_skips_the_nudges_after_the_first_resume(controller, tmp_path):
+    samples = list(range(1, 241))
+    _, packets = _start_akai_receive_of(controller, samples, tmp_path)
+    controller.on_sysex_received(list(packets[0][1:-1]))
+    _timeout(controller, 3)  # nudges
+    _timeout(controller)  # resume 1
+    sent = len(controller.midi_manager.sent)
+    _timeout(controller)  # next stall: straight to resume 2, no ACK/NAK nudge
+    assert controller._receive_resume_attempts == 2
+    assert controller.midi_manager.sent[sent][2] == 0x7D  # CANCEL
+
+
+def test_stalled_receive_gives_up_after_the_resume_cap_and_cancels(
+    controller, tmp_path
+):
+    from core import sds_encoder
+
+    statuses = _statuses(controller)
+    finished = []
+    controller.receive_finished.connect(finished.append)
+    samples = list(range(1, 241))
+    _, packets = _start_akai_receive_of(controller, samples, tmp_path)
+    controller.on_sysex_received(list(packets[0][1:-1]))
+    _timeout(controller, 3 + controller._receive_max_resumes)
+    assert controller._receiving is True
+    sent_before = len(controller.midi_manager.sent)
+    _timeout(controller)  # cap reached
+    assert controller._receiving is False
+    assert finished == [False]
+    assert any("No reply from the sampler" in s for s in statuses)
+    assert list(controller.midi_manager.sent[sent_before][2:3]) == [sds_encoder.CANCEL]
+
+
+def test_generic_receive_stall_is_not_resumed_but_still_cancels(controller):
+    # only the Akai RSPACK path has an offset to resume from
+    from core import sds_encoder
+
+    finished = []
+    controller.receive_finished.connect(finished.append)
+    controller._receiving = True
+    controller._receive_channel = 0
+    controller._receive_header_info = {
+        "bit_depth": 16,
+        "sample_length": 500,
+        "sample_number": 1,
+        "sample_rate": 44100,
+    }
+    controller._receive_expected_packets = 5
+    controller._receive_packets = [b"x"] * 2
+    controller._receive_packet_retries = controller._receive_packet_max_retries
+    controller._arm_reply_timeout("next data packet", 3000)
+    controller._on_reply_timeout(controller._reply_generation)
+    assert controller._receive_resume_attempts == 0
+    assert controller._receiving is False
+    assert finished == [False]
+    assert controller.midi_manager.sent[-1][2] == sds_encoder.CANCEL
+
+
+def test_dump_header_answering_a_resume_does_not_wipe_received_packets(
+    controller, tmp_path
+):
+    from core import sds_encoder
+
+    samples = list(range(1, 121))
+    _, packets = _start_akai_receive_of(controller, samples, tmp_path)
+    for packet in packets[:2]:
+        controller.on_sysex_received(list(packet[1:-1]))
+    _timeout(controller, 4)  # nudges, then the resume
+    assert controller._receive_resuming is True
+
+    header = sds_encoder.build_dump_header(
+        samples[80:], 44100, sample_number=3, channel=0, bit_depth=16
+    )
+    controller.on_sysex_received(list(header[1:-1]))
+    assert len(controller._receive_packets) == 2
+    assert list(controller.midi_manager.sent[-1][2:]) == [sds_encoder.ACK, 0]
+
+
+def test_resume_does_not_fire_if_the_receive_ended_during_the_delay(
+    controller, controller_module, monkeypatch, tmp_path
+):
+    samples = list(range(1, 241))
+    _, packets = _start_akai_receive_of(controller, samples, tmp_path)
+    controller.on_sysex_received(list(packets[0][1:-1]))
+    _timeout(controller, 3)
+
+    # hold the delayed RSPACK instead of firing it immediately
+    delayed = []
+    monkeypatch.setattr(
+        controller_module.QTimer, "singleShot", staticmethod(lambda _ms, fn: delayed.append(fn))
+    )
+    _timeout(controller)  # resume: CANCEL goes out now, RSPACK is delayed
+    assert len(delayed) == 1
+    controller.cancel_transfer()  # the user cancels during the delay
+    sent_before = len(controller.midi_manager.sent)
+    delayed[0]()
+    assert len(controller.midi_manager.sent) == sent_before  # no stray RSPACK
+
+
 def test_sample_info_timeout_clears_the_busy_flag(controller):
     controller.request_sample_info(0)
     assert controller.is_transfer_busy() is True

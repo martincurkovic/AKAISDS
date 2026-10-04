@@ -70,6 +70,13 @@ class SamplerController(QObject):
         self._receive_started_at = 0.0
         self._receive_last_packet_at = None
         self._receive_stray_handshakes = 0
+        # last resort after the ACK/NAK nudges fail (see _resume_stalled_receive):
+        # re-request the rest of the sample with a fresh RSPACK
+        self._receive_max_resumes = 3
+        self._receive_resume_delay_ms = 250  # gap between our CANCEL and the new RSPACK
+        self._receive_resume_attempts = 0
+        self._receive_resuming = False  # a resume RSPACK is out, no packet back yet
+        self._receive_is_akai = False  # RSPACK path (resumable), not generic SDS
 
         # per-unit send diagnostics, logged once when the unit ends (never per packet,
         # so a big sample can't flood the debug log)
@@ -249,6 +256,9 @@ class SamplerController(QObject):
         self._receive_started_at = time.monotonic()
         self._receive_last_packet_at = None
         self._receive_stray_handshakes = 0
+        self._receive_resume_attempts = 0
+        self._receive_resuming = False
+        self._receive_is_akai = False
 
     def _receive_diagnostics_summary(self):
         # one line for every stall/failure log: how long since the sampler
@@ -310,6 +320,77 @@ class SamplerController(QObject):
                 f"({self._receive_diagnostics_summary()})"
             )
 
+    def _send_receive_cancel(self, reason):
+        # tell the sampler to abandon whatever dump it may still think it is
+        # in - a stalled receive only reset OUR state before, which could
+        # leave a real sampler wedged mid-dump for the next attempt. Never
+        # raises: this runs on failure paths that must still finish cleaning up
+        last = self._receive_last_packet_num
+        packet_num = 0 if last is None else (last + 1) & 0x7F
+        debug_log.get_logger().warning(
+            f"SamplerController: sending CANCEL to the sampler ({reason})"
+        )
+        try:
+            self.midi_manager.send_sysex(
+                [0x7E, self._receive_channel & 0x7F, sds_encoder.CANCEL, packet_num]
+            )
+        except Exception:
+            debug_log.get_logger().error(
+                "SamplerController: couldn't send CANCEL", exc_info=True
+            )
+
+    def _resume_stalled_receive(self):
+        # the sampler went quiet and neither re-ACKing nor NAKing woke it.
+        # RSPACK takes an offset, so start a fresh packet stream from
+        # wherever we got to instead of failing the whole sample. A CANCEL
+        # first clears whatever dump the sampler thinks is still running.
+        # Packet numbering restarts at 0 in the new stream, and
+        # _receive_resuming tells _on_receive_header not to wipe the
+        # packets already received if the sampler opens it with a header.
+        info = self._receive_header_info
+        bytes_per_word = (info["bit_depth"] + 6) // 7
+        words_per_packet = sds_encoder.DATA_BYTES_PER_PACKET // bytes_per_word
+        words_received = len(self._receive_packets) * words_per_packet
+        remaining = info["sample_length"] - words_received
+        self._receive_resume_attempts += 1
+        debug_log.get_logger().warning(
+            f"SamplerController: resuming receive (attempt {self._receive_resume_attempts}/"
+            f"{self._receive_max_resumes}) from word {words_received}, {remaining} words "
+            f"left - {self._receive_diagnostics_summary()}"
+        )
+        self.status_changed.emit(
+            f"Sampler stopped sending - asking it to resume from word {words_received}..."
+        )
+        self._send_receive_cancel("before resuming with a new RSPACK")
+        self._receive_last_packet_num = None
+        self._receive_packet_retries = 0
+        self._receive_resuming = True
+        self._arm_reply_timeout(
+            "next data packet",
+            self._receive_packet_retry_ms + self._receive_resume_delay_ms,
+        )
+        generation = self._reply_generation
+        sample_number = self._receive_sample_number
+        channel = self._receive_channel
+
+        def _send_rspack():
+            if not self._receiving or generation != self._reply_generation:
+                return  # the receive ended or moved on during the delay
+            request = akai_sysex.build_rspack_request(
+                sample_number,
+                offset=words_received,
+                num_samples=remaining,
+                interval=1,
+                function=0,
+                channel=channel,
+            )
+            debug_log.get_logger().info(
+                f"SamplerController: resume RSPACK {bytes(request).hex(' ')}"
+            )
+            self.midi_manager.send_sysex(request)
+
+        QTimer.singleShot(self._receive_resume_delay_ms, _send_rspack)
+
     def _nudge_stalled_receive(self):
         # alternate between re-ACKing the last packet (our ACK may have been lost)
         # and NAKing the one we expect next (the packet itself may have been lost) -
@@ -362,9 +443,20 @@ class SamplerController(QObject):
         elif (
             label == "next data packet"
             and self._receiving
+            and self._receive_resume_attempts == 0
             and self._receive_packet_retries < self._receive_packet_max_retries
         ):
             self._nudge_stalled_receive()
+        elif (
+            label == "next data packet"
+            and self._receiving
+            and self._receive_is_akai
+            and self._receive_header_info is not None
+            and self._receive_resume_attempts < self._receive_max_resumes
+        ):
+            # nudges are only tried before the first resume - after one, a
+            # further stall goes straight to the next resume
+            self._resume_stalled_receive()
         elif self._receiving or self._receive_queue:
             info = self._receive_header_info
             expected = self._receive_expected_packets if info else "?"
@@ -374,6 +466,8 @@ class SamplerController(QObject):
                 f"checksum errors={self._receive_checksum_errors} - "
                 f"{self._receive_diagnostics_summary()}"
             )
+            if self._receiving:
+                self._send_receive_cancel("receive failed")
             self._recover_from_error(message)
         elif self._awaiting_sample_info:
             self._awaiting_sample_info = False
@@ -1148,6 +1242,7 @@ class SamplerController(QObject):
         self._receive_packets = []
         self._receive_packet_retries = 0
         self._receive_last_packet_num = None
+        self._receive_is_akai = True  # the RSPACK path below - resumable
 
         bytes_per_word = (info["bit_depth"] + 6) // 7
         words_per_packet = sds_encoder.DATA_BYTES_PER_PACKET // bytes_per_word
@@ -1178,6 +1273,19 @@ class SamplerController(QObject):
 
     def _on_receive_header(self, data_bytes):
         self._disarm_reply_timeout()
+        if self._receive_resuming and self._receive_packets:
+            # the sampler opened our resume RSPACK with a standard dump
+            # header: just accept it - the packets already received stay
+            debug_log.get_logger().info(
+                "SamplerController: sampler sent a dump header for the resumed "
+                f"stream ({bytes(data_bytes).hex(' ')}) - ACKing, keeping "
+                f"{len(self._receive_packets)} packet(s)"
+            )
+            self.midi_manager.send_sysex(
+                [0x7E, self._receive_channel & 0x7F, sds_encoder.ACK, 0]
+            )
+            self._arm_reply_timeout("next data packet", self._receive_timeout_ms)
+            return
         info = sds_encoder.parse_dump_header(data_bytes)
         self._receive_header_info = info
         self._receive_packets = []
@@ -1240,6 +1348,12 @@ class SamplerController(QObject):
             self._arm_reply_timeout("next data packet", self._receive_timeout_ms)
             return
 
+        if self._receive_resuming:
+            self._receive_resuming = False
+            debug_log.get_logger().info(
+                f"SamplerController: resume worked - packet {packet_num} arrived, "
+                f"continuing from {len(self._receive_packets)} packet(s)"
+            )
         self._receive_packets.append(bytes(payload))
         self._receive_last_packet_num = packet_num
         self._receive_packet_retries = 0
