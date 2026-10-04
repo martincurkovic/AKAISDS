@@ -1586,6 +1586,110 @@ def test_load_sample_waveform_progressively_fills_the_envelope_in_demo_mode(
     assert editor.waveform_view.has_waveform() is True
 
 
+class _FakeReceivingController(QObject):
+    # just the surface _fetch_sample_audio_blocking touches. receive_samples
+    # delivers its packets from the event loop (QTimer.singleShot), the way a
+    # real MIDI callback would - a synchronous emit inside start() would fire
+    # before _wait_for_any_signal's loop.exec() and be lost
+    receive_progress = Signal(int, int)
+    sample_chunk_received = Signal(list)
+    sample_received = Signal(str)
+    receive_finished = Signal(bool)
+
+    def __init__(self, chunks, packet_gap_ms=0):
+        super().__init__()
+        self._chunks = chunks
+        self._gap_ms = packet_gap_ms
+
+    def receive_samples(self, requests):
+        import wave
+
+        _, path = requests[0]
+
+        def _deliver(i):
+            if i < len(self._chunks):
+                self.sample_chunk_received.emit(self._chunks[i])
+                QTimer.singleShot(self._gap_ms, lambda: _deliver(i + 1))
+                return
+            with wave.open(path, "wb") as wav:
+                wav.setnchannels(1)
+                wav.setsampwidth(2)
+                wav.setframerate(44100)
+                wav.writeframes(b"\x00\x00" * sum(len(c) for c in self._chunks))
+            self.sample_received.emit(path)
+
+        QTimer.singleShot(0, lambda: _deliver(0))
+
+
+def test_real_receive_buffers_packets_instead_of_redrawing_per_packet(
+    editor, qapp, monkeypatch
+):
+    # every packet's drawing work used to sit on the GUI thread that ACKs the
+    # sampler's NEXT packet - see _on_sample_chunk_received
+    chunks = [[i] * 40 for i in range(30)]
+    controller = _FakeReceivingController(chunks)
+
+    calls = []
+    real_append = editor.waveform_view.append_live_samples
+
+    def _recording_append(chunk):
+        calls.append(list(chunk))
+        real_append(chunk)
+
+    monkeypatch.setattr(editor.waveform_view, "append_live_samples", _recording_append)
+
+    samples, framerate = editor._fetch_sample_audio_blocking(controller, 0)
+
+    assert samples is not None and framerate == 44100
+    assert len(calls) < len(chunks)
+    # nothing lost or reordered by the batching
+    assert [s for c in calls for s in c] == [s for c in chunks for s in c]
+
+
+def test_real_receive_flushes_buffered_packets_while_still_in_flight(
+    editor, qapp, monkeypatch
+):
+    # a long receive must still visibly fill in (not wait for the end)
+    import ui.program_editor_window as pew
+
+    monkeypatch.setattr(pew, "_LIVE_CHUNK_FLUSH_MS", 10)
+    chunks = [[i] * 40 for i in range(12)]
+    controller = _FakeReceivingController(chunks, packet_gap_ms=15)
+
+    calls = []
+    real_append = editor.waveform_view.append_live_samples
+    monkeypatch.setattr(
+        editor.waveform_view,
+        "append_live_samples",
+        lambda chunk: (calls.append(list(chunk)), real_append(chunk)),
+    )
+
+    editor._fetch_sample_audio_blocking(controller, 0)
+
+    assert len(calls) >= 3  # ticks mid-transfer, not only the final flush
+    assert [s for c in calls for s in c] == [s for c in chunks for s in c]
+
+
+def test_failed_receive_still_flushes_whatever_arrived(editor, qapp, monkeypatch):
+    chunks = [[7] * 40, [8] * 40]
+    controller = _FakeReceivingController(chunks)
+    calls = []
+    monkeypatch.setattr(
+        editor.waveform_view, "append_live_samples", lambda c: calls.append(list(c))
+    )
+
+    def _fail(requests):
+        QTimer.singleShot(0, lambda: controller.sample_chunk_received.emit(chunks[0]))
+        QTimer.singleShot(0, lambda: controller.receive_finished.emit(False))
+
+    controller.receive_samples = _fail
+    samples, _ = editor._fetch_sample_audio_blocking(controller, 0)
+
+    assert samples is None
+    assert [s for c in calls for s in c] == chunks[0]
+    assert editor._live_chunk_buffer == []
+
+
 def test_akaisds_demo_instant_skips_the_pacing_loop_entirely(editor, qapp, monkeypatch):
     # AKAISDS_DEMO_INSTANT opts out of the realistic-transfer-speed pacing
     # above entirely - for someone actually iterating on UI work (the

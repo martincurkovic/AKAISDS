@@ -293,6 +293,11 @@ _DEMO_TEST_AUDIO_PATH = os.path.normpath(
 # nothing here talks to a real connection at any bit rate.
 _DEMO_MS_PER_WORD = 1.02
 
+# how often a real receive's buffered packets are pushed into the waveform
+# (see _on_sample_chunk_received) - a repaint per SDS packet (one every
+# ~40ms on a real sampler) isn't needed for a smooth-looking fill
+_LIVE_CHUNK_FLUSH_MS = 100
+
 
 def _synthesized_demo_frame_count(sample_index):
     # split out of _synthesize_demo_sample_audio so
@@ -439,6 +444,9 @@ class ProgramEditorWindow(QMainWindow):
         # (_on_samples_loaded) - a resident sample's own index can start
         # meaning something else after that.
         self._sample_waveform_cache = {}
+        # packets decoded during a real receive, waiting for the next
+        # _flush_live_chunks - see _on_sample_chunk_received
+        self._live_chunk_buffer = []
         # name/duration labels per row (index -> (generation, name_label,
         # duration_label)), rebuilt every _on_samples_loaded, plus a
         # generation counter bumped there too - sample_length_loaded
@@ -7227,6 +7235,15 @@ class ProgramEditorWindow(QMainWindow):
         chunk_connection = sampler_controller.sample_chunk_received.connect(
             self._on_sample_chunk_received
         )
+        # per-packet work on the GUI thread (envelope rebuild + repaint) delays
+        # handling the NEXT packet's ACK, which a real sampler's dump
+        # handshake can be sensitive to - so packets only get buffered as
+        # they arrive and a short timer flushes them to the waveform in
+        # batches (see _on_sample_chunk_received)
+        self._live_chunk_buffer = []
+        flush_timer = QTimer(self)
+        flush_timer.timeout.connect(self._flush_live_chunks)
+        flush_timer.start(_LIVE_CHUNK_FLUSH_MS)
         try:
             which, args = self._wait_for_any_signal(
                 [
@@ -7249,6 +7266,11 @@ class ProgramEditorWindow(QMainWindow):
         finally:
             sampler_controller.receive_progress.disconnect(progress_connection)
             sampler_controller.sample_chunk_received.disconnect(chunk_connection)
+            flush_timer.stop()
+            flush_timer.deleteLater()
+            # whatever arrived since the last tick - so a receive that ends
+            # (or fails) between ticks never leaves the tail unpainted
+            self._flush_live_chunks()
             try:
                 os.remove(temp_path)
             except OSError:
@@ -7294,7 +7316,18 @@ class ProgramEditorWindow(QMainWindow):
         # _fetch_sample_audio_blocking's own comment on why this is
         # connected there. Already 16-bit-scaled by the controller, same
         # range WaveformView.paintEvent divides by everywhere else.
-        self.waveform_view.append_live_samples(chunk)
+        #
+        # Only BUFFERS here - _flush_live_chunks (on a timer) does the
+        # actual envelope rebuild/repaint. This runs on the same GUI thread
+        # that ACKs the sampler's next packet, so per-packet drawing work
+        # sat directly in the handshake's critical path.
+        self._live_chunk_buffer.extend(chunk)
+
+    def _flush_live_chunks(self):
+        if not self._live_chunk_buffer:
+            return
+        buffered, self._live_chunk_buffer = self._live_chunk_buffer, []
+        self.waveform_view.append_live_samples(buffered)
 
     def _fetch_demo_sample_audio(self, sample_index):
         # AKAISDS_DEMO_SAMPLER has no equivalent on the audio side -
