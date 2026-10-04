@@ -1321,7 +1321,11 @@ class WaveformView(QWidget):
     def wheelEvent(self, event):
         # frame_count, not samples - zoom/pan are useful in header-only
         # mode too (more precise dragging), same as set_zoom/set_view_start
+        # every early return below that doesn't act on the event ignores it,
+        # so a plain vertical scroll over the waveform reaches the Samples
+        # tab's scroll area instead of being swallowed here
         if self._frame_count == 0:
+            event.ignore()
             return
         angle = event.angleDelta()
 
@@ -1371,6 +1375,7 @@ class WaveformView(QWidget):
         elif event.modifiers() & Qt.KeyboardModifier.ShiftModifier and angle.y() != 0:
             delta = angle.y()
         else:
+            event.ignore()
             return
 
         # a fixed fraction of the current view per notch, so panning stays

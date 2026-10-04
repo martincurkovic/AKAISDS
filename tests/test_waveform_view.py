@@ -312,6 +312,7 @@ class _FakeWheelEvent:
         if ctrl:
             mods |= Qt.KeyboardModifier.ControlModifier
         self._mods = mods
+        self.ignored = False
 
     def angleDelta(self):
         return self._angle
@@ -324,6 +325,9 @@ class _FakeWheelEvent:
 
     def accept(self):
         pass
+
+    def ignore(self):
+        self.ignored = True
 
 
 def _loaded_waveform_view():
@@ -344,13 +348,23 @@ def test_wheel_horizontal_delta_always_pans_no_modifier_needed(qapp):
 
 
 def test_wheel_vertical_delta_alone_does_nothing(qapp):
-    # deliberate: there's no vertical content to scroll, and repurposing
-    # unmodified vertical wheel/scroll for pan was the source of every
-    # axis-guessing bug this section's own comment describes
+    # deliberate: repurposing unmodified vertical wheel/scroll for pan was
+    # the source of every axis-guessing bug this section's own comment
+    # describes. The event is IGNORED (not swallowed) so it bubbles up to
+    # the Samples tab's scroll area and scrolls the page instead
     view = _loaded_waveform_view()
     before = view._view_start
-    view.wheelEvent(_FakeWheelEvent(ax=0, ay=120))
+    event = _FakeWheelEvent(ax=0, ay=120)
+    view.wheelEvent(event)
     assert view._view_start == before
+    assert event.ignored is True
+
+
+def test_wheel_before_any_header_is_ignored_so_the_page_can_scroll(qapp):
+    view = WaveformView()
+    event = _FakeWheelEvent(ax=0, ay=120)
+    view.wheelEvent(event)
+    assert event.ignored is True
 
 
 def test_wheel_shift_plus_vertical_delta_pans(qapp):

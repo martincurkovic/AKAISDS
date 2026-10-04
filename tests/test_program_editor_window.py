@@ -1690,6 +1690,40 @@ def test_failed_receive_still_flushes_whatever_arrived(editor, qapp, monkeypatch
     assert editor._live_chunk_buffer == []
 
 
+def test_samples_and_multi_tabs_scroll_instead_of_squeezing_when_short(editor, qapp):
+    # an explicit window setMinimumSize overrides the layout's own minimum, so
+    # a window shorter than the Samples cards' combined height used to
+    # squeeze them until the Start/End knob row drew over the waveform
+    from PySide6.QtWidgets import QScrollArea
+
+    samples_page = editor.main_tabs.widget(editor._samples_tab_index)
+    multi_page = editor.main_tabs.widget(0)
+    assert isinstance(multi_page, QScrollArea)
+
+    # the sample list stays put; only the cards beside it scroll
+    scroll = samples_page.findChild(QScrollArea)
+    assert scroll is not None
+    assert not scroll.isAncestorOf(editor.sample_list_widget)
+    assert scroll.isAncestorOf(editor.waveform_view)
+    assert scroll.isAncestorOf(editor.sample_tune_spinbox)
+
+    editor.setMinimumSize(1250, 400)
+    editor.main_tabs.setCurrentIndex(editor._samples_tab_index)
+    editor.resize(1300, 450)
+    editor.show()
+    try:
+        _pump_until(qapp, lambda: scroll.verticalScrollBar().maximum() > 0)
+        # cards keep their natural height: the legend row's knobs sit below
+        # the waveform rather than on top of it
+        view = editor.waveform_view
+        _, knob, _ = editor._marker_spinboxes["start"]
+        view_bottom = view.mapTo(editor, view.rect().bottomLeft()).y()
+        knob_top = knob.mapTo(editor, knob.rect().topLeft()).y()
+        assert knob_top >= view_bottom
+    finally:
+        editor.hide()
+
+
 def test_akaisds_demo_instant_skips_the_pacing_loop_entirely(editor, qapp, monkeypatch):
     # AKAISDS_DEMO_INSTANT opts out of the realistic-transfer-speed pacing
     # above entirely - for someone actually iterating on UI work (the

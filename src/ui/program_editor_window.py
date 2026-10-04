@@ -5814,8 +5814,9 @@ class ProgramEditorWindow(QMainWindow):
 
         tune_card = self._build_section_card("Root Note & Tune", tune_meta_row)
 
+        # right margin leaves a gap between the cards and the scrollbar below
         waveform_column = QVBoxLayout()
-        waveform_column.setContentsMargins(0, 0, 0, 0)
+        waveform_column.setContentsMargins(0, 0, 8, 0)
         waveform_column.setSpacing(10)
         waveform_column.addWidget(loop_controls_card)
         waveform_column.addWidget(loop_preview_card)
@@ -5825,10 +5826,19 @@ class ProgramEditorWindow(QMainWindow):
         waveform_container.setLayout(waveform_column)
         self._update_marker_spinboxes(None, None, None, None)
 
+        # the cards scroll (like the Programs tab's - see _build_scroll_area),
+        # the sample list beside them doesn't, so it stays in view while
+        # scrolling. Without this, a window shorter than the cards' combined
+        # height (a higher DPI scale/bigger fonts than the setMinimumSize
+        # above was tuned on) had the layout squeezed BELOW its own minimum -
+        # an explicit setMinimumSize overrides the layout-derived one - so the
+        # Start/End/Loop knob row drew on top of the waveform.
+        waveform_scroll = self._build_scroll_area(waveform_container)
+
         content_layout = QHBoxLayout()
         content_layout.setContentsMargins(14, 14, 14, 14)
         content_layout.addWidget(samples_container)
-        content_layout.addWidget(waveform_container, stretch=1)
+        content_layout.addWidget(waveform_scroll, stretch=1)
         page = QWidget()
         page.setLayout(content_layout)
         return page
@@ -5969,7 +5979,10 @@ class ProgramEditorWindow(QMainWindow):
             )
 
         layout.addStretch()
-        return page
+        # same wrap as the Programs tab's pages - see _build_samples_tab's own
+        # comment on why (an explicit window setMinimumSize means a layout
+        # can be squeezed below its own minimum instead of forcing a scroll)
+        return self._build_scroll_area(page)
 
     def _on_multi_part_channel_changed(self, part_index):
         channel = self._multi_channel_combos[part_index].currentData()
