@@ -244,7 +244,7 @@ fields (tests also try 72..192) specifically so wrongly-read or dropped trailing
 bytes are caught. Also: **`PRGNUM`'s +1 display offset applies on the S1000 too**
 (unverified there - same `s3k.params` entry).
 
-## Akai S900/S950 support (Stages 1-4 done, written without hardware)
+## Akai S900/S950 support (Stages 1-5 done, written without hardware)
 
 A DIFFERENT protocol from every other Akai entry, not a variant of the S1000
 family: device byte `0x40` (not `0x48`), function codes 0-11, every 8-bit value as
@@ -294,22 +294,47 @@ behaviours were hardware-verified; `dxzl/akai-s950` has NO licence, so don't cop
 - The Dashboard needs a MIDI INPUT for everything S950 (the unit answers on it - no open-loop
   send), has no memory bar (no RSTAT), shows sparse slot numbers via `sample_slots_updated`
   (list index != sample number there, unlike `sample_list_updated`), can't delete, and shows a
-  one-time experimental warning before the first Send. Editing stays unavailable (Stage 5).
-- **Program viewer (Stage 4, read-only)** - `ui/s950_program_viewer.py`'s `S950ProgramViewerWindow`,
-  opened by the Dashboard's Open Editor button (`open_program_editor` branches to it for the S950; the
-  button needs both ports, and `open_program_editor` refuses with no MIDI input). A deliberately
-  separate small window, NOT `ProgramEditorWindow` (that one is built on `s3k.params`). It shares the
-  Dashboard's `SamplerController` - same connection, no `S3kBridge`/`BridgeWorker`, no second
-  thread. Reads go through `S950Transfers.request_program(slot)` (op `"program"`, in `_BUSY_OPS`, so
-  `is_transfer_busy()` covers it) and come back on `SamplerController.s950_program_received(slot,
-  Program | None)` - **`None` on ANY failure** (timeout, busy, no input, cancel, unparseable) so a
-  waiting window never hangs; every catalog read now also emits `program_slots_updated`. A catalog
-  read is NOT "busy" to `is_transfer_busy()` (the Dashboard stays usable), so the viewer waits on the
-  stricter `is_s950_idle()` before asking. The window keeps only the latest wanted slot (the user
-  clicks faster than the unit answers) and a failed slot is marked shown so it never retries in a
-  loop - Refresh clears that. It flags a keygroup sample name missing from the catalog ("not on
-  sampler"), the one useful thing a read-only viewer can say about by-name references. It writes
-  nothing (`test_it_never_writes_to_the_sampler`). Real-hardware steps: `tests/s950_test_plan.md`.
+  one-time experimental warning before the first Send. Program editing is Stage 5, below.
+- **Program editor (Stages 4-5)** - `ui/s950_program_editor.py`'s `S950ProgramEditorWindow` (was the
+  read-only "viewer" for a while; the old name may linger in old notes), opened by the Dashboard's
+  Open Editor button (`open_program_editor` branches to it for the S950; the button needs both ports,
+  and `open_program_editor` refuses with no MIDI input). A deliberately separate small window, NOT
+  `ProgramEditorWindow` (built on `s3k.params`). It shares the Dashboard's `SamplerController` - same
+  connection, no `S3kBridge`/`BridgeWorker`, no second thread.
+  - **Reads**: `S950Transfers.request_program(slot)` (op `"program"`) -> `SamplerController.
+    s950_program_received(slot, Program | None)` - **`None` on ANY failure** so a waiting window never
+    hangs. Every catalog read also emits `program_slots_updated`. A catalog read is NOT "busy" to
+    `is_transfer_busy()`, so the window waits on the stricter `is_s950_idle()`. Only the latest wanted
+    slot is read; a failed slot is marked shown so it never retries in a loop (Refresh clears that).
+  - **Writes are STAGED, not live** (s950tools live-syncs every 400 ms; we send once, on "Write to
+    Sampler"). The window edits a deep copy (`_working`) of what the unit holds (`_baseline`).
+    `core/s950_params.py` is the foundation: `diff_programs(baseline, edited)` -> `Change`s (only the
+    fields the editor offers - NOT `control_bits`, whose meaning is inferred), `validate_changes`
+    (limits are s950tools' documented ones, unverified; the +-24 st transpose limit is OURS; only
+    CHANGED fields are range-checked so a value the unit already holds out of range survives),
+    `apply_changes`. `S950Transfers.write_program(slot, baseline, edited)` (op `"program_write"`, in
+    `_BUSY_OPS`): fresh RPRGM -> **refuse unless a `.syx` backup of that reply saved** to
+    `~/.akaisds/s950_backups` (`backup_dir` attribute; tests point it at tmp_path) -> apply ONLY the
+    changes onto the FRESH copy (so a front-panel edit made since loading survives, and unmodelled raw
+    bytes pass through) -> PRGM -> wire time + 500 ms NAK window (NAK = fail, names the backup) + 200 ms
+    settle -> RPRGM read-back -> compare. Reports `s950_program_written(slot, verified, Program|None,
+    message)`; on a mismatch the Program is what the unit reports and the window shows IT (and a
+    warning), keeping nothing stale. It never creates a program (a pre-read of an empty slot just
+    times out - the fake stays silent for one; that is itself a guess), never changes the keygroup
+    count, and a no-change write is allowed on purpose (Hardware menu > "Write Program Back Unchanged
+    (test)" - the first thing a tester should try).
+  - **`Keygroup.to_bytes`/`Program.to_payload` now re-encode a field only if it no longer matches what
+    `raw` already holds** - without that, a name the unit padded with NULs would silently come back
+    space-padded on every write even if untouched. Don't go back to unconditional re-encoding.
+  - Also: "Restore Previous" (writes back the pre-write baseline, session only), a one-time experimental
+    warning before the first write (`app_config.get_s950_program_write_warning_acknowledged`), a refusal
+    to give a program another program's name (what the unit does is unknown), discard-confirmation on
+    switching program/refresh/close, controls locked while a write is in flight, and the old program is
+    dropped (`_working = None`) the moment the next read starts so nothing can be written to it.
+  - **Not done**: create/duplicate/delete program (no delete opcode; create needs slot picking), adding/
+    removing keygroups, and **renaming a sample does not rewrite the programs that use it** (the
+    Dashboard rename warns nobody - say so in the UI if that bites).
+  - Everything unverified and every guess is listed in `tests/s950_test_plan.md` ("What is a guess").
 - **Known unmeasured risk**: a receive is ONE message of up to ~1 MB. macOS CoreMIDI assembles
   it; backends that split long SysEx would lose it, because `MidiManager._on_raw_message` drops
   any fragment not starting with F0. A timeout there says so; ask for `~/.akaisds/akaisds.log`.
