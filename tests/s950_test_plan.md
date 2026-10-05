@@ -37,11 +37,12 @@ nothing here writes.
 
 - [ ] The Programs list matches the sampler's own program list (names and order are
       guesses - note any difference).
-- [ ] Click a program: the Program card shows its name, MIDI program number and keygroup count.
-- [ ] The keygroup table and the range bar match the sampler's own key ranges. Note names use
+- [ ] Click a program: the Program page shows its name and MIDI program number, and the Keygroups
+      column lists its keygroups (the count is under the list).
+- [ ] The keygroup list and the range bar match the sampler's own key ranges. Note names use
       the S3000XL convention (middle C = C3) - say which octave your sampler's panel uses.
-- [ ] For each keygroup, the soft/loud sample names are right. A name flagged
-      "(not on sampler)" really isn't in the sample list (programs find samples by NAME).
+- [ ] For each keygroup (click it, then the Zone card's Soft sample / Loud sample buttons), the
+      sample names are right. A name flagged "Not on the sampler" really isn't in the sample list (programs find samples by NAME).
 - [ ] Envelope values (attack/decay/sustain/release, amplitude and filter), velocity switch,
       filter key tracking, LFO and mod wheel/aftertouch values match the sampler's screen.
       **Any value that reads as nonsense is more likely a wrong byte offset in
@@ -79,8 +80,8 @@ Every write: (1) re-reads the program, (2) saves that original as a `.syx` in
       guess 5 below). Note whether you needed to re-select the program on the sampler (ENT) to
       hear it.
 - [ ] **D3 - restore.** Press **Restore Previous**: the value returns and verifies.
-- [ ] **D4 - more fields**, one card at a time, checking the sampler each time: filter envelope,
-      velocity switch, key range (lowest/highest key), soft/loud sample transpose/filter/loudness,
+- [ ] **D4 - more fields**, one card at a time, checking the sampler each time: Filter, Filter Envelope,
+      velocity switch and note range (Range card), soft/loud sample transpose/filter/loudness,
       LFO and mod wheel/aftertouch, pitch warp, output, MIDI channel offset.
 - [ ] **D5 - sample assignment.** Pick a different sample from a keygroup's Sample list, write,
       play it.

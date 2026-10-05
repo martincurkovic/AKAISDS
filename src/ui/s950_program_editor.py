@@ -23,13 +23,12 @@ import copy
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QAction
 from PySide6.QtWidgets import (
-    QAbstractItemView,
+    QButtonGroup,
     QCheckBox,
     QComboBox,
+    QDial,
     QDoubleSpinBox,
-    QGridLayout,
     QHBoxLayout,
-    QHeaderView,
     QLabel,
     QLineEdit,
     QListWidget,
@@ -37,12 +36,9 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QMessageBox,
     QPushButton,
-    QSizePolicy,
     QSpinBox,
-    QSplitter,
+    QStackedWidget,
     QStatusBar,
-    QTableWidget,
-    QTableWidgetItem,
     QVBoxLayout,
     QWidget,
 )
@@ -50,15 +46,16 @@ from PySide6.QtWidgets import (
 from core import app_config, s950_params
 from core.midi_notes import midi_note_to_name
 from core.s950_sysex import NAME_LENGTH
-from ui import tooltips as tt
+from core.s950_program import Keygroup, Program
+from ui import theme, tooltips as tt
 from ui.envelope_graph import ADSREnvelopeGraph
-from ui.keygroup_range_bar import KeygroupRangeBar
+from ui.keygroup_range_bar import KeygroupRangeBar, keygroup_color
+from ui.knob import Knob
 from ui.note_spinbox import NoteSpinBox
 from ui.qt_helpers import build_scroll_area, build_section_card
 
 # velocity_switch value meaning "no switch - the soft sample plays at every velocity"
 NO_VELOCITY_SWITCH = 128
-_MAX_VISIBLE_KEYGROUP_ROWS = 8
 # s950tools: "0.375 dB per unit"
 _LOUDNESS_DB_PER_UNIT = 0.375
 
@@ -74,6 +71,21 @@ _CONTROL_BIT_LABELS = (
 )
 
 _RANGE_TIP = "{lo} to {hi} (s950tools' documented range - not verified on a unit)"
+
+# fields shown as knobs (the rest are spinboxes/combos/checkboxes) - the same split the
+# S1000/S2000/S3000 editor makes: 0..99 amounts and +-50 offsets are knobs
+_KNOB_ATTRS = frozenset(
+    {
+        "key_tilt",
+        "attack", "decay", "sustain", "release",
+        "filter_attack", "filter_decay", "filter_sustain", "filter_release",
+        "filter_vel", "filter_key_track", "adsr_to_vcf",
+        "attack_vel", "release_vel", "loudness_vel",
+        "pitch_warp_vel", "pitch_warp_offset", "pitch_warp_recovery",
+        "aftertouch_depth", "modwheel_depth", "lfo_build", "lfo_rate", "lfo_depth",
+        "soft_filter", "soft_loudness", "loud_filter", "loud_loudness",
+    }
+)  # fmt: skip
 
 _ENVELOPE_ATTRS = {
     "amp": ("attack", "decay", "sustain", "release"),
@@ -141,7 +153,7 @@ class S950ProgramEditorWindow(QMainWindow):
         self._main_window = main_window
         self._controller = sampler_controller
         self.setWindowTitle("AKAISDS - Akai S900/S950 Program Editor")
-        self.setMinimumSize(1000, 640)
+        self.setMinimumSize(1150, 720)
 
         self._programs = []  # [(slot, name)]
         self._sample_names = []  # names of the samples on the unit, in catalog order
@@ -174,6 +186,7 @@ class S950ProgramEditorWindow(QMainWindow):
         c.s950_program_received.connect(self._on_program_received)
         c.s950_program_written.connect(self._on_program_written)
         c.status_changed.connect(self._on_controller_status)
+        theme.notifier.changed.connect(self._refresh_themed_swatches)
 
         self._busy_timer = QTimer(self)
         self._busy_timer.timeout.connect(self._update_buttons)
@@ -184,32 +197,74 @@ class S950ProgramEditorWindow(QMainWindow):
         QTimer.singleShot(0, self._refresh)
 
     # -- construction -------------------------------------------------------------------
+    #
+    # The layout follows the S1000/S2000/S3000 editor (ProgramEditorWindow's Programs
+    # tab) so the two feel like one app: a Programs column, a Keygroups column (range bar
+    # + colored rows), and section cards on the right - a program page and a keygroup
+    # page, knobs for the 0..99/+-50 amounts, an ADSR graph over its four knobs, a Zone
+    # card with one button per sample (Soft/Loud here, Zone 1-4 there), and a bottom bar
+    # with Refresh on the left and Close on the right.
 
     def _build_ui(self):
         self.program_list = QListWidget()
         self.program_list.setObjectName("programList")
+        self.program_list.setFixedWidth(160)
         self.program_list.currentItemChanged.connect(self._on_program_selected)
+        self.program_list.itemClicked.connect(lambda _item: self.detail_stack.setCurrentIndex(0))
 
-        self.refresh_button = QPushButton("Refresh")
-        self.refresh_button.setToolTip("Re-read the program and sample lists from the sampler")
-        self.refresh_button.clicked.connect(self._refresh)
+        self.keygroup_list = QListWidget()
+        self.keygroup_list.setObjectName("keygroupList")
+        self.keygroup_list.setFixedWidth(190)  # fits "Keygroup 12: C#1 - D#7"
+        self.keygroup_list.currentRowChanged.connect(self._show_keygroup)
+        self.keygroup_list.itemClicked.connect(lambda _item: self.detail_stack.setCurrentIndex(1))
+        self.keygroup_range_bar = KeygroupRangeBar()
+        self.keygroup_note = QLabel()
+        self.keygroup_note.setObjectName("mutedLabel")
+        self.keygroup_note.setWordWrap(True)
 
-        left = QVBoxLayout()
-        left.addWidget(QLabel("Programs"))
-        left.addWidget(self.program_list, 1)
-        left.addWidget(self.refresh_button)
-        left_widget = QWidget()
-        left_widget.setLayout(left)
+        programs_column = QVBoxLayout()
+        programs_column.setContentsMargins(0, 0, 0, 0)
+        programs_column.setSpacing(6)
+        programs_column.addWidget(QLabel("<b>Programs</b>"))
+        programs_column.addWidget(self.program_list)
+        programs_container = QWidget()
+        programs_container.setLayout(programs_column)
 
-        # right-hand side: a placeholder OR the detail pages + the write bar
+        keygroups_column = QVBoxLayout()
+        keygroups_column.setContentsMargins(0, 0, 0, 0)
+        keygroups_column.setSpacing(6)
+        keygroups_column.addWidget(QLabel("<b>Keygroups</b>"))
+        keygroups_column.addWidget(self.keygroup_range_bar)
+        keygroups_column.addWidget(self.keygroup_list)
+        keygroups_column.addWidget(self.keygroup_note)
+        keygroups_container = QWidget()
+        keygroups_container.setLayout(keygroups_column)
+
+        # right-hand side: a placeholder OR the detail pages
         self.placeholder = QLabel()
         self.placeholder.setObjectName("emptyQueueLabel")
         self.placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.placeholder.setWordWrap(True)
 
-        self.detail_page = self._build_detail_page()
-        self.detail_scroll = build_scroll_area(self.detail_page)
+        self.detail_stack = QStackedWidget()
+        self.detail_stack.addWidget(build_scroll_area(self._build_program_page()))
+        self.detail_stack.addWidget(build_scroll_area(self._build_keygroup_page()))
 
+        right_column = QVBoxLayout()
+        right_column.setContentsMargins(0, 0, 0, 0)
+        right_column.addWidget(self.placeholder, 1)
+        right_column.addWidget(self.detail_stack, 1)
+        right_container = QWidget()
+        right_container.setLayout(right_column)
+
+        content_layout = QHBoxLayout()
+        content_layout.addWidget(programs_container)
+        content_layout.addWidget(keygroups_container)
+        content_layout.addWidget(right_container, stretch=1)
+
+        self.refresh_button = QPushButton("Refresh")
+        self.refresh_button.setToolTip("Re-read the program and sample lists from the sampler")
+        self.refresh_button.clicked.connect(self._refresh)
         self.dirty_label = QLabel()
         self.dirty_label.setObjectName("mutedLabel")
         self.discard_button = QPushButton("Discard Changes")
@@ -221,33 +276,26 @@ class S950ProgramEditorWindow(QMainWindow):
         )
         self.restore_button.clicked.connect(self._restore_previous)
         self.write_button = QPushButton("Write to Sampler")
-        self.write_button.setDefault(True)
         self.write_button.clicked.connect(self._write)
-        bar = QHBoxLayout()
-        bar.setContentsMargins(12, 0, 12, 8)
-        bar.addWidget(self.dirty_label)
-        bar.addStretch()
-        bar.addWidget(self.discard_button)
-        bar.addWidget(self.restore_button)
-        bar.addWidget(self.write_button)
-        self.write_bar = QWidget()
-        self.write_bar.setLayout(bar)
+        close_button = QPushButton("Close")
+        close_button.clicked.connect(self.close)
 
-        right = QVBoxLayout()
-        right.setContentsMargins(0, 0, 0, 0)
-        right.addWidget(self.placeholder, 1)
-        right.addWidget(self.detail_scroll, 1)
-        right.addWidget(self.write_bar)
-        right_widget = QWidget()
-        right_widget.setLayout(right)
+        bottom_row = QHBoxLayout()
+        bottom_row.addWidget(self.refresh_button)
+        bottom_row.addWidget(self.dirty_label)
+        bottom_row.addStretch()
+        bottom_row.addWidget(self.discard_button)
+        bottom_row.addWidget(self.restore_button)
+        bottom_row.addWidget(self.write_button)
+        bottom_row.addSpacing(12)
+        bottom_row.addWidget(close_button)
 
-        splitter = QSplitter(Qt.Orientation.Horizontal)
-        splitter.addWidget(left_widget)
-        splitter.addWidget(right_widget)
-        splitter.setStretchFactor(0, 0)
-        splitter.setStretchFactor(1, 1)
-        splitter.setSizes([260, 740])
-        self.setCentralWidget(splitter)
+        main_layout = QVBoxLayout()
+        main_layout.addLayout(content_layout, stretch=1)
+        main_layout.addLayout(bottom_row)
+        container = QWidget()
+        container.setLayout(main_layout)
+        self.setCentralWidget(container)
 
         self.status_bar = QStatusBar()
         self.status_bar.setSizeGripEnabled(False)
@@ -256,8 +304,11 @@ class S950ProgramEditorWindow(QMainWindow):
         experimental.setObjectName("mutedLabel")
         self.status_bar.addPermanentWidget(experimental)
 
+    # -- field widgets ------------------------------------------------------------------------
+
     def _editor(self, scope, attr):
         """The input widget for one field, built from what the field is."""
+        defaults = Program() if scope == "program" else Keygroup()
         if attr == "name":
             w = QLineEdit()
             w.setMaxLength(NAME_LENGTH)
@@ -295,194 +346,262 @@ class S950ProgramEditorWindow(QMainWindow):
             lo, hi = (
                 s950_params.PROGRAM_RANGES if scope == "program" else s950_params.KEYGROUP_RANGES
             )[attr]
-            w = QSpinBox()
-            w.setRange(lo, hi)
-            w.setToolTip(_RANGE_TIP.format(lo=lo, hi=hi))
-            if lo < 0:
-                w.setPrefix("")
+            if attr in _KNOB_ATTRS:
+                w = Knob()
+                w.setRange(lo, hi)
+                w.setDefaultValue(getattr(defaults, attr))
+                w.setEnabled(True)  # Knob starts read-only
+                w.setToolTip(_RANGE_TIP.format(lo=lo, hi=hi))
+            else:
+                w = QSpinBox()
+                w.setRange(lo, hi)
+                w.setToolTip(_RANGE_TIP.format(lo=lo, hi=hi))
             w.valueChanged.connect(lambda v: self._on_edit(scope, attr, int(v)))
         self._editors[(scope, attr)] = w
         return w
 
-    def _field_grid(self, scope, rows):
-        # rows: [(attr, label text)] -> a label/input grid
-        grid = QGridLayout()
-        grid.setHorizontalSpacing(16)
-        grid.setVerticalSpacing(4)
-        for r, (attr, text) in enumerate(rows):
-            label = QLabel(text)
-            label.setObjectName("mutedLabel")
-            if attr == "control_bits":
-                widget = QLabel("-")  # read-only on purpose: the bit meanings are inferred
-                widget.setToolTip("Shown, never written: what the bits mean is not verified")
-                self._readonly[attr] = widget
-            else:
-                widget = self._editor(scope, attr)
-            grid.addWidget(label, r, 0, Qt.AlignmentFlag.AlignTop)
-            grid.addWidget(widget, r, 1)
-        grid.setColumnStretch(1, 1)
-        return grid
+    def _knob_column(self, scope, attr, text, size=40, *, bold=False):
+        # label above, knob, live value below - the S3000 editor's _build_knob_column
+        knob = self._editor(scope, attr)
+        knob.setFixedSize(size, size)
+        name_label = QLabel(f"<b>{text}</b>" if bold else text)
+        name_label.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+        value_label = QLabel("-")
+        value_label.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+        knob.valueChanged.connect(lambda v: value_label.setText(str(v)))
+        # setValue(0) on a fresh knob emits nothing, so _set_widget fills the readout itself
+        knob.setProperty("valueReadout", value_label)
+        column = QVBoxLayout()
+        column.setSpacing(4)
+        column.addWidget(name_label, alignment=Qt.AlignmentFlag.AlignHCenter)
+        column.addWidget(knob, alignment=Qt.AlignmentFlag.AlignHCenter)
+        column.addWidget(value_label)
+        return column
 
-    def _build_detail_page(self):
-        def card(title, scope, rows, extra=None):
-            grid = self._field_grid(scope, rows)
-            layouts = [grid] if extra is None else [extra, grid]
-            return build_section_card(title, *layouts)
+    def _knob_row(self, scope, specs, size=40, spacing=10):
+        row = QHBoxLayout()
+        row.setSpacing(spacing)
+        for attr, text in specs:
+            row.addLayout(self._knob_column(scope, attr, text, size))
+        return row
 
-        self.program_card = card(
-            "Program",
-            "program",
-            [
-                ("name", "Name"),
-                ("midi_program_number", "MIDI program"),
-                ("enable_midi_program", "Respond to program change"),
-                ("key_tilt", "Key tilt (loudness by key)"),
-                ("positional_xfade", "Positional crossfade"),
-            ],
-        )
-        self.keygroup_count_label = QLabel()
-        self.keygroup_count_label.setObjectName("mutedLabel")
-
-        self.range_bar = KeygroupRangeBar()
-        self.keygroup_table = QTableWidget(0, 5)
-        self.keygroup_table.setHorizontalHeaderLabels(
-            ["#", "Range", "Soft sample", "Loud sample", "Velocity switch"]
-        )
-        self.keygroup_table.verticalHeader().setVisible(False)
-        self.keygroup_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
-        self.keygroup_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
-        self.keygroup_table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
-        header = self.keygroup_table.horizontalHeader()
-        header.setStretchLastSection(True)
-        header.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
-        header.setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
-        self.keygroup_table.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        self.keygroup_table.currentCellChanged.connect(
-            lambda row, _col, _prow, _pcol: self._show_keygroup(row)
-        )
-        kg_layout = QVBoxLayout()
-        kg_layout.setSpacing(6)
-        kg_layout.addWidget(self.keygroup_count_label)
-        kg_layout.addWidget(self.range_bar)
-        kg_layout.addWidget(self.keygroup_table)
-        self.keygroups_card = build_section_card("Keygroups", kg_layout)
-
-        self.zone_card = card(
-            "Zone",
-            "kg",
-            [
-                ("lower_key", "Lowest key"),
-                ("upper_key", "Highest key"),
-                ("velocity_switch", f"Velocity switch ({NO_VELOCITY_SWITCH} = off)"),
-                ("voice_out", "Output"),
-                ("midi_offset", "MIDI channel offset"),
-                ("control_bits", "Options (read-only)"),
-            ],
-        )
-        self.soft_card = card(
-            "Soft sample",
-            "kg",
-            [
-                ("soft_sample", "Sample"),
-                ("soft_transpose", "Transpose"),
-                ("soft_filter", "Filter"),
-                ("soft_loudness", "Loudness"),
-            ],
-        )
-        self.loud_card = card(
-            "Loud sample",
-            "kg",
-            [
-                ("loud_sample", "Sample"),
-                ("loud_transpose", "Transpose"),
-                ("loud_filter", "Filter"),
-                ("loud_loudness", "Loudness"),
-            ],
-        )
-
-        self.amp_graph = ADSREnvelopeGraph()
-        self.amp_graph.setFixedHeight(90)
-        self.amp_card = card(
-            "Amplitude envelope",
-            "kg",
-            [
-                ("attack", "Attack"),
-                ("decay", "Decay"),
-                ("sustain", "Sustain"),
-                ("release", "Release"),
-                ("attack_vel", "Attack by velocity"),
-                ("release_vel", "Release by velocity"),
-                ("loudness_vel", "Loudness by velocity"),
-            ],
-            extra=self._wrap(self.amp_graph),
-        )
-        self.filter_graph = ADSREnvelopeGraph()
-        self.filter_graph.setFixedHeight(90)
-        self.filter_card = card(
-            "Filter envelope",
-            "kg",
-            [
-                ("filter_attack", "Attack"),
-                ("filter_decay", "Decay"),
-                ("filter_sustain", "Sustain"),
-                ("filter_release", "Release"),
-                ("adsr_to_vcf", "Envelope to filter"),
-                ("filter_vel", "Filter by velocity"),
-                ("filter_key_track", "Filter key tracking"),
-            ],
-            extra=self._wrap(self.filter_graph),
-        )
-        self.lfo_card = card(
-            "LFO and controllers",
-            "kg",
-            [
-                ("lfo_rate", "LFO rate"),
-                ("lfo_depth", "LFO depth"),
-                ("lfo_build", "LFO build-up"),
-                ("aftertouch_depth", "Aftertouch to LFO depth"),
-                ("modwheel_depth", "Mod wheel to LFO depth"),
-            ],
-        )
-        self.pitch_card = card(
-            "Pitch warp",
-            "kg",
-            [
-                ("pitch_warp_vel", "Warp by velocity"),
-                ("pitch_warp_offset", "Warp offset"),
-                ("pitch_warp_recovery", "Recovery"),
-            ],
-        )
-
-        self.keygroup_title = QLabel()
-        self.keygroup_title.setObjectName("sectionHeader")
-
-        def row(*cards):
-            layout = QHBoxLayout()
-            layout.setSpacing(12)
-            for c in cards:
-                layout.addWidget(c, 1, Qt.AlignmentFlag.AlignTop)
-            return layout
-
-        page_layout = QVBoxLayout()
-        page_layout.setContentsMargins(12, 12, 12, 12)
-        page_layout.setSpacing(12)
-        page_layout.addWidget(self.program_card)
-        page_layout.addWidget(self.keygroups_card)
-        page_layout.addWidget(self.keygroup_title)
-        page_layout.addLayout(row(self.zone_card, self.soft_card, self.loud_card))
-        page_layout.addLayout(row(self.amp_card, self.filter_card))
-        page_layout.addLayout(row(self.lfo_card, self.pitch_card))
-        page_layout.addStretch()
-        page = QWidget()
-        page.setLayout(page_layout)
-        return page
+    def _labeled_row(self, scope, attr, text, label_width=110):
+        # "Label  [widget]" on one line, like the S3000 editor's Note Range / Tune rows
+        row = QHBoxLayout()
+        label = QLabel(text)
+        label.setFixedWidth(label_width)
+        row.addWidget(label)
+        row.addWidget(self._editor(scope, attr))
+        row.addStretch()
+        return row
 
     @staticmethod
-    def _wrap(widget):
+    def _centered(widget):
+        row = QHBoxLayout()
+        row.addStretch()
+        row.addWidget(widget)
+        row.addStretch()
+        return row
+
+    @staticmethod
+    def _equalize(*cards):
+        # paired cards read oddly at different heights (same helper as the S3000 editor)
+        height = max(card.sizeHint().height() for card in cards)
+        for card in cards:
+            card.setFixedHeight(height)
+
+    @staticmethod
+    def _paired(left, right):
+        row = QHBoxLayout()
+        row.addWidget(left, stretch=1)
+        row.addWidget(right, stretch=1)
+        return row
+
+    # -- pages ----------------------------------------------------------------------------------
+
+    def _build_program_page(self):
+        name_row = self._labeled_row("program", "name", "Name")
+        midi_row = self._labeled_row("program", "midi_program_number", "MIDI Program")
+        respond_row = self._labeled_row("program", "enable_midi_program", "Program Change")
+        respond_row.itemAt(1).widget().setText("Respond to MIDI program change")
+        program_card = build_section_card("Program", name_row, midi_row, respond_row)
+
+        tilt_row = self._knob_row("program", [("key_tilt", "Key Tilt")], size=56)
+        tilt_row.addStretch()
+        xfade_row = self._labeled_row("program", "positional_xfade", "Crossfade")
+        xfade_row.itemAt(1).widget().setText("Positional crossfade")
+        keyboard_card = build_section_card("Keyboard", tilt_row, xfade_row)
+        self._equalize(program_card, keyboard_card)
+
         layout = QVBoxLayout()
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.addWidget(widget)
-        return layout
+        layout.addLayout(self._paired(program_card, keyboard_card))
+        layout.addStretch()
+        page = QWidget()
+        page.setLayout(layout)
+        return page
+
+    def _build_keygroup_page(self):
+        # Range + Filter
+        note_row = QHBoxLayout()
+        note_label = QLabel("Note Range")
+        note_label.setFixedWidth(80)
+        note_row.addWidget(note_label)
+        note_row.addWidget(self._editor("kg", "lower_key"))
+        note_row.addWidget(QLabel("-"))
+        note_row.addWidget(self._editor("kg", "upper_key"))
+        note_row.addStretch()
+        switch_row = self._labeled_row("kg", "velocity_switch", "Velocity Switch", 100)
+        switch_hint = QLabel(f"{NO_VELOCITY_SWITCH} = off (soft sample only)")
+        switch_hint.setObjectName("mutedLabel")
+        switch_row.insertWidget(switch_row.count() - 1, switch_hint)
+        range_card = build_section_card("Range", note_row, switch_row)
+        filter_card = build_section_card(
+            "Filter",
+            self._knob_row(
+                "kg",
+                [("filter_key_track", "Key Track"), ("filter_vel", "Velocity"), ("adsr_to_vcf", "Env Amount")],
+                size=56,
+                spacing=24,
+            ),
+        )
+        self._equalize(range_card, filter_card)
+
+        # Envelopes
+        self.amp_graph = ADSREnvelopeGraph()
+        self.amp_graph.setFixedSize(200, 90)
+        self.filter_graph = ADSREnvelopeGraph()
+        self.filter_graph.setFixedSize(200, 90)
+        amp_card = build_section_card(
+            "Amplitude Envelope",
+            self._centered(self.amp_graph),
+            self._knob_row(
+                "kg",
+                [("attack", "Attack"), ("decay", "Decay"), ("sustain", "Sustain"), ("release", "Release")],
+            ),
+        )
+        env_filter_card = build_section_card(
+            "Filter Envelope",
+            self._centered(self.filter_graph),
+            self._knob_row(
+                "kg",
+                [
+                    ("filter_attack", "Attack"),
+                    ("filter_decay", "Decay"),
+                    ("filter_sustain", "Sustain"),
+                    ("filter_release", "Release"),
+                ],
+            ),
+        )
+        self._equalize(amp_card, env_filter_card)
+
+        # Zone: Soft / Loud, the way the S3000 editor has Zone 1-4
+        zone_header = QLabel("Zone")
+        zone_header.setObjectName("sectionHeader")
+        self._zone_buttons = QButtonGroup(self)
+        self._zone_buttons.setExclusive(True)
+        selector_row = QHBoxLayout()
+        self._zone_stack = QStackedWidget()
+        self._zone_stack.setObjectName("transparentContainer")
+        self._sample_warnings = {}
+        for index, (prefix, title) in enumerate((("soft", "Soft"), ("loud", "Loud"))):
+            button = QPushButton(f"{title} sample")
+            button.setCheckable(True)
+            button.setChecked(index == 0)
+            button.setToolTip(
+                "The sample played below the velocity switch"
+                if prefix == "soft"
+                else "The sample played above the velocity switch"
+            )
+            self._zone_buttons.addButton(button, index)
+            selector_row.addWidget(button)
+
+            page_layout = QVBoxLayout()
+            page_layout.setSpacing(6)
+            combo = self._editor("kg", f"{prefix}_sample")
+            sample_column = QVBoxLayout()
+            sample_column.setSpacing(4)
+            sample_column.addWidget(QLabel("<b>Sample</b>"))
+            sample_column.addWidget(combo)
+            top_row = QHBoxLayout()
+            top_row.addLayout(sample_column, stretch=1)
+            top_row.addLayout(self._knob_column("kg", f"{prefix}_filter", "Filter", 28, bold=True))
+            top_row.addLayout(self._knob_column("kg", f"{prefix}_loudness", "Loud", 28, bold=True))
+            page_layout.addLayout(top_row)
+            warning = QLabel()
+            warning.setObjectName("mutedLabel")
+            self._sample_warnings[prefix] = warning
+            page_layout.addWidget(warning)
+            page_layout.addLayout(self._labeled_row("kg", f"{prefix}_transpose", "Tune", 80))
+            page = QWidget()
+            page.setObjectName("transparentContainer")
+            page.setLayout(page_layout)
+            self._zone_stack.addWidget(page)
+        self._zone_buttons.idClicked.connect(self._zone_stack.setCurrentIndex)
+        zone_section = QVBoxLayout()
+        zone_section.setContentsMargins(12, 10, 12, 12)
+        zone_section.setSpacing(10)
+        zone_section.addWidget(zone_header)
+        zone_section.addLayout(selector_row)
+        zone_section.addWidget(self._zone_stack)
+        zone_card = QWidget()
+        zone_card.setObjectName("zoneCard")
+        zone_card.setLayout(zone_section)
+
+        # Velocity + LFO
+        velocity_card = build_section_card(
+            "Velocity",
+            self._knob_row(
+                "kg",
+                [("attack_vel", "Attack"), ("release_vel", "Release"), ("loudness_vel", "Loudness")],
+            ),
+        )
+        lfo_card = build_section_card(
+            "LFO",
+            self._knob_row(
+                "kg",
+                [("lfo_rate", "Rate"), ("lfo_depth", "Depth"), ("lfo_build", "Build-up")],
+            ),
+            self._knob_row(
+                "kg",
+                [("aftertouch_depth", "Aftertouch"), ("modwheel_depth", "Mod Wheel")],
+            ),
+        )
+        self._equalize(velocity_card, lfo_card)
+
+        # Pitch warp + Output
+        pitch_card = build_section_card(
+            "Pitch Warp",
+            self._knob_row(
+                "kg",
+                [("pitch_warp_vel", "Velocity"), ("pitch_warp_offset", "Offset"), ("pitch_warp_recovery", "Recovery")],
+            ),
+        )
+        options = QLabel("-")
+        options.setToolTip("Shown, never written: what the bits mean is not verified")
+        self._readonly["control_bits"] = options
+        options_row = QHBoxLayout()
+        options_label = QLabel("Options")
+        options_label.setFixedWidth(110)
+        options_row.addWidget(options_label)
+        options_row.addWidget(options, stretch=1)
+        output_card = build_section_card(
+            "Output",
+            self._labeled_row("kg", "voice_out", "Output"),
+            self._labeled_row("kg", "midi_offset", "MIDI Offset"),
+            options_row,
+        )
+        self._equalize(pitch_card, output_card)
+
+        layout = QVBoxLayout()
+        layout.addLayout(self._paired(range_card, filter_card))
+        layout.addLayout(self._paired(amp_card, env_filter_card))
+        layout.addWidget(zone_card)
+        layout.addLayout(self._paired(velocity_card, lfo_card))
+        layout.addLayout(self._paired(pitch_card, output_card))
+        layout.addStretch()
+        page = QWidget()
+        page.setLayout(layout)
+        return page
 
     def _build_menus(self):
         hardware_menu = self.menuBar().addMenu("&Hardware")
@@ -542,10 +661,9 @@ class S950ProgramEditorWindow(QMainWindow):
         self._write_unchanged_action.setEnabled(loaded and idle and not changes)
         self.discard_button.setEnabled(loaded and not self._writing and bool(changes))
         self.restore_button.setEnabled(idle and self._restore is not None)
-        self.write_bar.setVisible(loaded)
         n = len(changes)
         self.dirty_label.setText(f"{n} unsaved change{'' if n == 1 else 's'}" if n else "")
-        self.detail_page.setEnabled(not self._writing)
+        self.detail_stack.setEnabled(not self._writing)
         self._dashboard_action.setEnabled(not busy and not self._writing)
         self._dashboard_action.setToolTip(tt.BUSY_BLOCKS_OTHER_WINDOWS if busy else "")
 
@@ -568,12 +686,14 @@ class S950ProgramEditorWindow(QMainWindow):
     def _show_placeholder(self, text):
         self.placeholder.setText(text)
         self.placeholder.setVisible(True)
-        self.detail_scroll.setVisible(False)
-        self.write_bar.setVisible(False)
+        self.detail_stack.setVisible(False)
+        self.keygroup_list.clear()
+        self.keygroup_range_bar.set_ranges([])
+        self.keygroup_note.setText("")
 
     def _show_details(self):
         self.placeholder.setVisible(False)
-        self.detail_scroll.setVisible(True)
+        self.detail_stack.setVisible(True)
 
     def _refresh(self):
         # re-read the catalog, then the program on screen (a stale one is the
@@ -686,8 +806,9 @@ class S950ProgramEditorWindow(QMainWindow):
         self._working = copy.deepcopy(program)
         self._kg_row = 0
         self._show_details()
+        self.detail_stack.setCurrentIndex(0)  # the program page, as in the S3000 editor
         self._fill_program_widgets()
-        self._fill_keygroup_table()
+        self._fill_keygroup_list()
         self._show_keygroup(0)
         self._update_buttons()
 
@@ -696,12 +817,15 @@ class S950ProgramEditorWindow(QMainWindow):
     def _set_widget(self, widget, value):
         # set an input without it counting as an edit; widen a range so a value the unit
         # already holds is shown truthfully rather than clamped
-        if isinstance(widget, (QSpinBox, QDoubleSpinBox)):
+        if isinstance(widget, (QSpinBox, QDoubleSpinBox, QDial)):
             if value < widget.minimum():
                 widget.setMinimum(value)
             if value > widget.maximum():
                 widget.setMaximum(value)
             widget.setValue(value)
+            readout = widget.property("valueReadout")
+            if readout is not None:
+                readout.setText(str(widget.value()))
         elif isinstance(widget, QCheckBox):
             widget.setChecked(bool(value))
         elif isinstance(widget, QLineEdit):
@@ -721,40 +845,66 @@ class S950ProgramEditorWindow(QMainWindow):
         finally:
             self._loading = False
 
-    def _fill_keygroup_table(self):
+    def _fill_keygroup_list(self):
         program = self._working
-        self.keygroup_count_label.setText(
-            f"{program.num_keygroups} keygroup{'' if program.num_keygroups == 1 else 's'} "
-            "(adding or removing keygroups isn't supported)"
-        )
-        table = self.keygroup_table
-        table.blockSignals(True)
-        table.setRowCount(program.num_keygroups)
-        for row in range(program.num_keygroups):
-            self._fill_table_row(row)
-        table.blockSignals(False)
-        # sized to its rows (up to a cap, then it scrolls) so a 2-keygroup program
-        # doesn't leave a tall empty box
-        rows = min(program.num_keygroups, _MAX_VISIBLE_KEYGROUP_ROWS)
-        table.setFixedHeight(
-            table.horizontalHeader().height()
-            + rows * table.verticalHeader().defaultSectionSize()
-            + 4
-        )
-        self.range_bar.set_ranges([(kg.lower_key, kg.upper_key) for kg in program.keygroups])
-        table.selectRow(0)
+        n = program.num_keygroups
+        self.keygroup_note.setText(f"{n} keygroup{'' if n == 1 else 's'} - can't add or remove")
+        self.keygroup_list.blockSignals(True)
+        self.keygroup_list.clear()
+        for index, kg in enumerate(program.keygroups):
+            self._add_keygroup_row(index, kg.lower_key, kg.upper_key)
+        self.keygroup_list.setCurrentRow(0)
+        self.keygroup_list.blockSignals(False)
+        self.keygroup_range_bar.set_ranges([(kg.lower_key, kg.upper_key) for kg in program.keygroups])
 
-    def _fill_table_row(self, row):
+    # colored swatch + range text, the S3000 editor's row (see ProgramEditorWindow.
+    # _add_keygroup_row): a row widget, so the ITEM gets no text of its own (AGENTS.md: both
+    # would double-paint). The swatch color comes from the palette, so it can't be a QSS
+    # rule; it carries a swatchKind property and is recolored when the theme changes.
+    def _add_keygroup_row(self, index, lo, hi):
+        item = QListWidgetItem(self.keygroup_list)
+        row_widget = QWidget()
+        row_widget.setObjectName("transparentContainer")
+        row_layout = QHBoxLayout(row_widget)
+        row_layout.setContentsMargins(8, 6, 8, 6)
+        row_layout.setSpacing(8)
+        swatch = QLabel()
+        swatch.setFixedSize(10, 10)
+        swatch.setProperty("swatchKind", "keygroup")
+        swatch.setProperty("keygroupIndex", index)
+        self._refresh_swatch(swatch)
+        row_layout.addWidget(swatch)
+        label = QLabel(self._keygroup_row_text(index, lo, hi))
+        label.setObjectName("keygroupRangeLabel")
+        row_layout.addWidget(label, stretch=1)
+        item.setSizeHint(row_widget.sizeHint())
+        self.keygroup_list.setItemWidget(item, row_widget)
+
+    @staticmethod
+    def _keygroup_row_text(index, lo, hi):
+        return f"Keygroup {index + 1}: {midi_note_to_name(lo)} - {midi_note_to_name(hi)}"
+
+    def keygroup_row_text(self, row):
+        # what the list shows for a row (tests and the status line read it)
+        widget = self.keygroup_list.itemWidget(self.keygroup_list.item(row))
+        return widget.findChild(QLabel, "keygroupRangeLabel").text() if widget else ""
+
+    def _update_keygroup_row(self, row):
         kg = self._working.keygroups[row]
-        cells = (
-            str(row + 1),
-            format_key_range(kg.lower_key, kg.upper_key),
-            sample_label(kg.soft_sample) + self._missing_suffix(kg.soft_sample, "  (not on sampler)"),
-            sample_label(kg.loud_sample) + self._missing_suffix(kg.loud_sample, "  (not on sampler)"),
-            format_velocity_switch(kg.velocity_switch),
-        )
-        for col, text in enumerate(cells):
-            self.keygroup_table.setItem(row, col, QTableWidgetItem(text))
+        widget = self.keygroup_list.itemWidget(self.keygroup_list.item(row))
+        if widget is not None:
+            widget.findChild(QLabel, "keygroupRangeLabel").setText(
+                self._keygroup_row_text(row, kg.lower_key, kg.upper_key)
+            )
+
+    def _refresh_swatch(self, swatch):
+        color = keygroup_color(swatch.property("keygroupIndex")).name()
+        swatch.setStyleSheet(f"background-color: {color}; border-radius: 2px;")
+
+    def _refresh_themed_swatches(self):
+        for label in self.keygroup_list.findChildren(QLabel):
+            if label.property("swatchKind"):
+                self._refresh_swatch(label)
 
     def _show_keygroup(self, row):
         program = self._working
@@ -762,12 +912,12 @@ class S950ProgramEditorWindow(QMainWindow):
             return
         self._kg_row = row
         kg = program.keygroups[row]
-        self.keygroup_title.setText(f"Keygroup {row + 1} of {program.num_keygroups}")
         self._loading = True
         try:
             for attr in s950_params.KEYGROUP_FIELDS:
                 if attr in ("soft_sample", "loud_sample"):
                     self._fill_sample_combo(attr, getattr(kg, attr))
+                    self._update_sample_warning(attr, getattr(kg, attr))
                 elif attr.endswith("_transpose"):
                     self._set_widget(self._editors[("kg", attr)], getattr(kg, attr) / 16)
                 else:
@@ -806,23 +956,27 @@ class S950ProgramEditorWindow(QMainWindow):
         # the catalog changed: the sample pickers and the "not on sampler" flags follow it
         if self._working is None:
             return
-        for row in range(self._working.num_keygroups):
-            self._fill_table_row(row)
         self._loading = True
         try:
             kg = self._working.keygroups[min(self._kg_row, self._working.num_keygroups - 1)]
-            self._fill_sample_combo("soft_sample", kg.soft_sample)
-            self._fill_sample_combo("loud_sample", kg.loud_sample)
+            for attr in ("soft_sample", "loud_sample"):
+                self._fill_sample_combo(attr, getattr(kg, attr))
+                self._update_sample_warning(attr, getattr(kg, attr))
         finally:
             self._loading = False
 
-    def _missing_suffix(self, name, text):
+    def _is_missing(self, name):
         # programs find samples BY NAME; a name the unit's catalog doesn't have is the most
         # useful thing the editor can point out. An empty name is "no sample" (normal for an
         # unused loud sample), and without a catalog there's nothing to compare against.
         known = {normalise_name(n) for n in self._sample_names}
-        missing = bool(name.strip()) and self._have_catalog and normalise_name(name) not in known
-        return text if missing else ""
+        return bool(name.strip()) and self._have_catalog and normalise_name(name) not in known
+
+    def _update_sample_warning(self, attr, name):
+        label = self._sample_warnings[attr.removesuffix("_sample")]
+        label.setText(
+            "Not on the sampler - programs find samples by name" if self._is_missing(name) else ""
+        )
 
     # -- editing --------------------------------------------------------------------------------
 
@@ -842,11 +996,13 @@ class S950ProgramEditorWindow(QMainWindow):
         else:
             kg = self._working.keygroups[self._kg_row]
             setattr(kg, attr, value)
-            self._fill_table_row(self._kg_row)
             if attr in ("lower_key", "upper_key"):
-                self.range_bar.set_ranges(
+                self._update_keygroup_row(self._kg_row)
+                self.keygroup_range_bar.set_ranges(
                     [(k.lower_key, k.upper_key) for k in self._working.keygroups]
                 )
+            if attr in ("soft_sample", "loud_sample"):
+                self._update_sample_warning(attr, value)
             if attr in _ENVELOPE_ATTRS["amp"] + _ENVELOPE_ATTRS["filter"]:
                 self._refresh_graphs(kg)
         self._update_buttons()
@@ -1016,5 +1172,9 @@ class S950ProgramEditorWindow(QMainWindow):
                 signal.disconnect(slot)
             except (RuntimeError, TypeError):
                 pass
+        try:
+            theme.notifier.changed.disconnect(self._refresh_themed_swatches)
+        except (RuntimeError, TypeError):
+            pass
         self._main_window.show()
         super().closeEvent(event)

@@ -301,6 +301,19 @@ behaviours were hardware-verified; `dxzl/akai-s950` has NO licence, so don't cop
   and `open_program_editor` refuses with no MIDI input). A deliberately separate small window, NOT
   `ProgramEditorWindow` (built on `s3k.params`). It shares the Dashboard's `SamplerController` - same
   connection, no `S3kBridge`/`BridgeWorker`, no second thread.
+  - **Layout deliberately mirrors the S1000/S2000/S3000 editor's Programs tab** (consistency was a user
+    request): Programs column | Keygroups column (`KeygroupRangeBar` + `keygroupList` rows with colored
+    swatches, recolored on `theme.notifier.changed`, item with NO text because it has a row widget) |
+    `detail_stack` of a program page and a keygroup page (program click -> page 0, keygroup click ->
+    page 1), section cards via `build_section_card` (Range, Filter, Amplitude/Filter Envelope =
+    `ADSREnvelopeGraph` over four `Knob`s, a `zoneCard` with Soft/Loud buttons where the S3000 has
+    Zone 1-4, Velocity, LFO, Pitch Warp, Output), and a bottom bar with Refresh left / Close right plus
+    the write buttons. Knobs are used for the same kind of field the S3000 editor uses them for
+    (`_KNOB_ATTRS`: 0..99 amounts and +-50 offsets); spinboxes for note range/velocity switch/MIDI
+    offset/program number, combos for samples/output. **A fresh `Knob.setValue(0)` emits nothing**, so
+    its value readout is filled explicitly in `_set_widget` (a knob at 0 once showed "-"). The one
+    deliberate difference: no Multi/Programs/Samples tab bar (there is only one page - a one-tab bar
+    would be noise); if an S950 Samples tab is ever built, add `FullWidthTabBar` then.
   - **Reads**: `S950Transfers.request_program(slot)` (op `"program"`) -> `SamplerController.
     s950_program_received(slot, Program | None)` - **`None` on ANY failure** so a waiting window never
     hangs. Every catalog read also emits `program_slots_updated`. A catalog read is NOT "busy" to

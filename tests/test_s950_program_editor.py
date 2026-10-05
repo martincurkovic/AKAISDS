@@ -16,7 +16,7 @@ from PySide6.QtWidgets import QMainWindow
 
 from core import s950_program as prog
 from core.demo_s950 import FakeS950
-from PySide6.QtWidgets import QMessageBox
+from PySide6.QtWidgets import QLabel, QMessageBox
 
 from ui import s950_program_editor as viewer
 from ui.s950_program_editor import S950ProgramEditorWindow
@@ -132,16 +132,17 @@ def test_it_lists_the_programs_on_construction(win):
     assert [win.program_list.item(i).data(Qt.ItemDataRole.UserRole) for i in range(2)] == [0, 1]
     assert "DRUMS" in win.program_list.item(0).text()
     assert win.placeholder.isHidden() is False  # nothing selected yet
-    assert win.write_bar.isHidden()
+    assert win.detail_stack.isHidden()
 
 
 def test_selecting_a_program_shows_it(win):
     _show(win, 0)
-    assert win.detail_scroll.isHidden() is False
+    assert win.detail_stack.isHidden() is False
+    assert win.detail_stack.currentIndex() == 0  # the program page first, as in the S3000 editor
     assert win._editors[("program", "name")].text() == "DRUMS"
-    assert win.keygroup_table.rowCount() == 2
-    assert win.keygroup_table.item(0, 1).text() == viewer.format_key_range(24, 59)
-    assert win.keygroup_table.item(1, 2).text() == "SNARE"
+    assert win.keygroup_list.count() == 2
+    assert win.keygroup_row_text(0) == "Keygroup 1: C0 - B2"
+    assert win.keygroup_row_text(1) == "Keygroup 2: C3 - G8"
     assert _kg(win, "lower_key").value() == 24
     assert _kg(win, "soft_sample").currentData() == "KICK"
     assert win.is_dirty() is False
@@ -149,10 +150,32 @@ def test_selecting_a_program_shows_it(win):
 
 def test_selecting_a_keygroup_updates_the_detail(win):
     _show(win, 0)
-    win.keygroup_table.selectRow(1)
+    win.keygroup_list.setCurrentRow(1)
     assert _kg(win, "lower_key").value() == 60
     assert _kg(win, "soft_sample").currentData() == "SNARE"
-    assert "Keygroup 2 of 2" in win.keygroup_title.text()
+
+
+def test_clicking_a_keygroup_opens_the_keygroup_page_and_a_program_the_program_page(win):
+    _show(win, 0)
+    win.keygroup_list.itemClicked.emit(win.keygroup_list.item(1))
+    assert win.detail_stack.currentIndex() == 1
+    win.program_list.itemClicked.emit(win.program_list.item(0))
+    assert win.detail_stack.currentIndex() == 0
+
+
+def test_keygroup_rows_have_colored_swatches_like_the_s3000_editor(win):
+    _show(win, 0)
+    swatches = [l for l in win.keygroup_list.findChildren(QLabel) if l.property("swatchKind")]
+    assert [s.property("keygroupIndex") for s in swatches] == [0, 1]
+    assert "background-color" in swatches[0].styleSheet()
+    assert swatches[0].styleSheet() != swatches[1].styleSheet()
+
+
+def test_the_zone_card_switches_between_the_soft_and_loud_sample(win):
+    _show(win, 0)
+    assert win._zone_stack.currentIndex() == 0
+    win._zone_buttons.button(1).click()
+    assert win._zone_stack.currentIndex() == 1
 
 
 def test_the_sample_picker_offers_the_units_samples_and_none(win):
@@ -170,13 +193,13 @@ def test_a_sample_the_unit_does_not_have_is_kept_and_flagged(win):
     _show(win, 1)
     combo = _kg(win, "soft_sample")
     assert combo.currentData() == "NOPE" and "not on sampler" in combo.currentText()
-    assert "not on sampler" in win.keygroup_table.item(0, 2).text()
-    assert "not on sampler" not in win.keygroup_table.item(0, 3).text()  # PAD exists
+    assert "Not on the sampler" in win._sample_warnings["soft"].text()
+    assert win._sample_warnings["loud"].text() == ""  # PAD exists
 
 
 def test_the_range_bar_and_graphs_follow_the_program(win):
     _show(win, 0)
-    assert win.range_bar._ranges == [(24, 59), (60, 127)]
+    assert win.keygroup_range_bar._ranges == [(24, 59), (60, 127)]
     kg = win._working.keygroups[0]
     assert win.amp_graph._attack == kg.attack
     assert win.filter_graph._release == kg.filter_release
@@ -204,7 +227,8 @@ def test_a_failed_read_shows_a_message_and_does_not_retry_forever(win):
     win.program_list.setCurrentRow(1)
     assert wait_until(lambda: win._shown_slot == 1)
     assert "Couldn't read program 1" in win.placeholder.text()
-    assert win.write_bar.isHidden()
+    assert win.detail_stack.isHidden() and win.keygroup_list.count() == 0
+    assert not win.write_button.isEnabled()
     sent = len(win.rig.midi.sent)
     QCoreApplication.processEvents()
     assert len(win.rig.midi.sent) == sent  # no retry loop
@@ -233,7 +257,7 @@ def test_clicking_faster_than_the_unit_answers_ends_on_the_last_choice(win):
 
 def test_reading_alone_never_writes(win):
     _show(win, 0)
-    win.keygroup_table.selectRow(1)
+    win.keygroup_list.setCurrentRow(1)
     from core import s950_sysex as s
 
     functions = {m[2] for m in win.rig.midi.sent}
@@ -248,7 +272,7 @@ def test_the_old_program_cannot_be_written_while_the_next_one_loads(win):
     win.rig.fake.programs.pop(1)
     win.program_list.setCurrentRow(1)  # discard confirmed (stubbed), then reading
     assert win._working is None
-    assert win.write_bar.isHidden()
+    assert not win.write_button.isEnabled() and win.detail_stack.isHidden()
 
 
 # --- editing -----------------------------------------------------------------------------------
@@ -268,17 +292,17 @@ def test_editing_a_field_stages_it_without_writing(win):
 
 def test_edits_apply_to_the_selected_keygroup_only(win):
     _show(win, 0)
-    win.keygroup_table.selectRow(1)
+    win.keygroup_list.setCurrentRow(1)
     _kg(win, "decay").setValue(7)
     assert win._working.keygroups[1].decay == 7
     assert win._working.keygroups[0].decay != 7
 
 
-def test_editing_the_note_range_updates_the_table_and_range_bar(win):
+def test_editing_the_note_range_updates_the_list_row_and_range_bar(win):
     _show(win, 0)
     _kg(win, "upper_key").setValue(48)
-    assert win.keygroup_table.item(0, 1).text() == viewer.format_key_range(24, 48)
-    assert win.range_bar._ranges[0] == (24, 48)
+    assert win.keygroup_row_text(0) == "Keygroup 1: C0 - C2"
+    assert win.keygroup_range_bar._ranges[0] == (24, 48)
 
 
 def test_transpose_is_edited_in_semitones_and_stored_in_sixteenths(win):
@@ -293,7 +317,7 @@ def test_picking_a_sample_by_name(win):
     combo.setCurrentIndex(combo.findData("PAD"))
     combo.activated.emit(combo.currentIndex())
     assert win._working.keygroups[0].soft_sample == "PAD"
-    assert "PAD" in win.keygroup_table.item(0, 2).text()
+    assert win._sample_warnings["soft"].text() == ""
 
 
 def test_program_name_is_uppercased_and_stripped(win):
@@ -435,11 +459,11 @@ def test_controls_are_locked_while_a_write_is_in_flight(win):
     _kg(win, "attack").setValue(40)
     win.write_button.click()
     assert win._writing
-    assert win.detail_page.isEnabled() is False
+    assert win.detail_stack.isEnabled() is False
     assert win.write_button.isEnabled() is False
     assert win._dashboard_action.isEnabled() is False
     assert wait_until(lambda: not win._writing)
-    assert win.detail_page.isEnabled()
+    assert win.detail_stack.isEnabled()
 
 
 def test_restore_previous_writes_back_what_the_program_held(win, monkeypatch):
@@ -507,3 +531,32 @@ def test_closing_disconnects_from_the_controller(win):
     win.program_list.clear()
     win.rig.controller.program_slots_updated.emit([(0, "X")])
     assert win.program_list.count() == 0
+
+
+def test_the_amounts_are_knobs_like_the_s3000_editor_and_the_rest_are_not(win):
+    from ui.knob import Knob
+
+    _show(win, 0)
+    for attr in ("attack", "release", "filter_vel", "adsr_to_vcf", "lfo_rate", "soft_loudness"):
+        assert isinstance(_kg(win, attr), Knob), attr
+    for attr in ("lower_key", "velocity_switch", "midi_offset"):
+        assert not isinstance(_kg(win, attr), Knob), attr
+    assert isinstance(win._editors[("program", "key_tilt")], Knob)
+
+
+def test_a_knob_at_zero_still_shows_its_value(win):
+    _show(win, 0)
+    readout = _kg(win, "attack").property("valueReadout")
+    assert readout.text() == "0"  # setValue(0) on a fresh knob emits nothing
+
+
+def test_editing_through_a_knob_stages_the_change(win):
+    _show(win, 0)
+    _kg(win, "decay").setValue(12)
+    assert win._working.keygroups[0].decay == 12 and win.is_dirty()
+
+
+def test_the_bottom_bar_has_refresh_on_the_left_and_close_on_the_right(win):
+    buttons = [b for b in win.centralWidget().findChildren(type(win.refresh_button))]
+    texts = [b.text() for b in buttons if b.parent() is win.centralWidget()]
+    assert texts[0] == "Refresh" and texts[-1] == "Close"
