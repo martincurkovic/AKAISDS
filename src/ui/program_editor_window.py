@@ -1820,7 +1820,7 @@ class ProgramEditorWindow(QMainWindow):
         lfo2_row.addStretch()
         lfo2_section = self._build_section_card("LFO2", lfo2_row)
         # same reasoning as Range/Filter and Envelope 1/2 on the Keygroup
-        # tab - see _equalize_card_heights' own comment. Already equal in
+        # tab - see ui.editor_layout.equalize_card_heights' own comment. Already equal in
         # practice (LFO1/LFO2 are symmetric), but pin it explicitly rather
         # than leaving it an accident of current content - a future layout
         # tweak to just one of the two shouldn't silently throw this off.
@@ -1834,7 +1834,7 @@ class ProgramEditorWindow(QMainWindow):
         pitch_row.addStretch()
         pitch_section = self._build_section_card("Pitch", pitch_row)
         # same reasoning as Range/Filter and Envelope 1/2 on the Keygroup
-        # tab - see _equalize_card_heights' own comment
+        # tab - see ui.editor_layout.equalize_card_heights' own comment
         equalize_card_heights(volume_section, pitch_section)
 
         # Voice & MIDI - how the program responds to incoming MIDI and
@@ -1856,7 +1856,7 @@ class ProgramEditorWindow(QMainWindow):
         portamento_row.addStretch()
         portamento_section = self._build_section_card("Portamento", portamento_row)
         # same reasoning as Range/Filter and Envelope 1/2 on the Keygroup
-        # tab - see _equalize_card_heights' own comment
+        # tab - see ui.editor_layout.equalize_card_heights' own comment
         equalize_card_heights(voice_section, portamento_section)
 
         # Modulation - the assignable modulation matrix (MODS*/MODV*
@@ -2854,7 +2854,7 @@ class ProgramEditorWindow(QMainWindow):
         card_layout.insertLayout(card_layout.count() - 1, controls_row)
 
         # both cards were pinned to the old 4-stage grid's height at
-        # construction (_equalize_card_heights) - unpin and re-measure now
+        # construction (equalize_card_heights) - unpin and re-measure now
         # that Envelope 2 has the same shape as Envelope 1
         # hiding widgets in a window that hasn't been shown yet doesn't
         # invalidate the nested layouts' cached size hints, so the hidden
