@@ -270,12 +270,40 @@ behaviours were hardware-verified; `dxzl/akai-s950` has NO licence, so don't cop
 - Sampler Type "Akai S900/S950" (`akai_s900_s950`) has its OWN protocol family, `"s950"`
   (`sampler_models.FAMILY_S950`) - not "akai", not "generic". **Nothing may fall through to
   the akai/generic branches for it** (they'd put S1000-family or standard-SDS bytes on the
-  wire). Until the transfers exist (Stage 3), every public send/receive/list/delete/rename
-  entry point in `SamplerController` refuses via `_s950_not_supported_yet`, incoming SysEx is
-  not parsed, and the Dashboard greys out the hardware side, Send, and the Program Editor
-  (with tooltips). **When you implement a transfer, replace the matching guard - don't add a
-  parallel path beside it.** The only thing that works is Settings > Run Hardware Test, which
-  sends RCAT and reports the program/sample counts.
+  wire). `SamplerController` delegates the S950 entry points (refresh, send_file_queue,
+  receive_samples, rename, sample info, cancel, incoming SysEx) to
+  `controller/s950_transfers.py`'s `S950Transfers` (built lazily, reports through the
+  controller's own signals) and REFUSES the rest via `_s950_not_supported` (delete - there's
+  no opcode - and the legacy per-file / by-number senders). Add a new S950 path by delegating,
+  never by letting it reach the Akai code.
+- `S950Transfers` rules (from s950tools' hardware-verified comments; none run on a real unit by
+  this project): ONE operation at a time; an RCAT reply is the "device ready" barrier before every
+  upload (a stale ACK from the last dump satisfies "any reply" and green-lit a second dump
+  mid-bookkeeping); uploads are open loop - one SysEx, wait out the wire time (3125 B/s + 10%),
+  listen for NAKs, and ALWAYS go to an EMPTY slot (overwriting triggers a NAK storm; the boot
+  "TONE" placeholder counts as empty), then the sample is named by SPRM read-modify-write; a
+  receive streams a 4-byte ACK every 50 ms from just after the RSD (the unit stalls between
+  blocks and `sysex_received` only surfaces whole messages) and ignores a header-only message
+  the unit sometimes flushes first. Names are uppercased, 10 chars, made unique (zones find
+  samples by name). The Transmission Settings' bit depth is ignored (always 12-bit); stereo is
+  averaged to mono (left only with "mono"); the rate is clamped to the dump header's 2-65.5 kHz,
+  not what the hardware plays (S950 7.5-48 kHz, S900 40 kHz - unconfirmed which a given unit
+  honours). Received rate prefers SPRM's exact Hz over the header's whole-nanosecond period
+  (44100 would come back 44099). Root note/detune are shown as unavailable: SNOMP's direction
+  is only inferred.
+- The Dashboard needs a MIDI INPUT for everything S950 (the unit answers on it - no open-loop
+  send), has no memory bar (no RSTAT), shows sparse slot numbers via `sample_slots_updated`
+  (list index != sample number there, unlike `sample_list_updated`), can't delete, and shows a
+  one-time experimental warning before the first Send. The Program Editor stays unavailable.
+- **Known unmeasured risk**: a receive is ONE message of up to ~1 MB. macOS CoreMIDI assembles
+  it; backends that split long SysEx would lose it, because `MidiManager._on_raw_message` drops
+  any fragment not starting with F0. A timeout there says so; ask for `~/.akaisds/akaisds.log`.
+- `test_scripts/s950_demo.py` opens the real Dashboard on a `FakeS950` (no hardware; Settings
+  doesn't work in it). `tests/test_s950_transfers.py` drives the real engine + controller
+  against the fake over a fake MidiManager that delivers replies asynchronously. **Tests that
+  repopulate the hardware list must flush deferred deletes** (the `dashboard` fixture does):
+  `QListWidget.clear()` defers deleting row widgets, which otherwise fire inside another test's
+  nested event loop (`_wait_for_any_signal`) and segfault (confirmed from a crash report).
 - Byte-for-byte collision to remember: a standard SDS ACK on channel 0 (`F0 7E 00 pp F7`...)
   looks like the S950's own request-sample-dump (`F0 7E 00 nn 00 F7`). Generic SDS mode against
   an S950 gives nonsense, not a clean failure.
