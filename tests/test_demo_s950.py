@@ -291,3 +291,12 @@ def test_what_the_fake_sends_it_can_also_receive_back(fake):
     other = FakeS950(samples={})
     send(other, dump)
     assert other.samples[2]["words"] == fake.samples[2]["words"]
+
+
+def test_the_header_can_arrive_as_a_message_of_its_own_first():
+    fake = FakeS950(dump_acks_required=0, split_header_envelope=True)
+    first, second = send(fake, s.build_request_sample_dump(1))
+    assert len(first) == s.DUMP_HEADER_SIZE  # header only
+    assert s.SampleDumpHeader.from_bytes(first).total_words == 4000
+    assert len(second) > s.DUMP_HEADER_SIZE
+    assert s.parse_sample_dump(second, expected_slot=1)[1] == fake.samples[1]["words"]

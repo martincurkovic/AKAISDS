@@ -18,7 +18,7 @@ from pathlib import Path
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QCoreApplication, QEvent, Qt
 from PySide6.QtWidgets import QApplication, QLineEdit
 
 from core import dropped_files, sample_slicing, sds_encoder
@@ -48,7 +48,16 @@ def _isolated_dropped_files_base_dir(tmp_path, monkeypatch):
 def dashboard(qapp):
     midi_manager = MidiManager()
     sampler_controller = SamplerController(midi_manager)
-    return TransferDashboard(sampler_controller, midi_manager)
+    dash = TransferDashboard(sampler_controller, midi_manager)
+    yield dash
+    # QListWidget.clear() (any test that repopulates the hardware list)
+    # schedules its row widgets for deferred deletion. Left pending, that
+    # delete fires later - inside some OTHER test's nested event loop
+    # (test_program_editor_window's _wait_for_any_signal) - after this
+    # dashboard has been garbage-collected, and segfaults in
+    # QWidget::destroy (confirmed from a macOS crash report). Flush them now,
+    # while everything is still alive.
+    QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete.value)
 
 
 # --- Open Editor button: only enabled with both ports set AND Akai --------
@@ -706,7 +715,7 @@ def test_open_editor_is_enabled_for_the_s1000_too(dashboard):
     assert dashboard.btn_open_editor.isEnabled() is True
 
 
-# --- Akai S900/S950: selectable, but no transfers or editor yet --------------
+# --- Akai S900/S950 ------------------------------------------------------------
 
 
 @pytest.fixture
@@ -719,14 +728,32 @@ def s950_dashboard(dashboard):
     return dashboard
 
 
-def test_s950_makes_the_hardware_side_inert_and_says_why(s950_dashboard):
+def test_s950_with_an_input_enables_browsing_but_has_no_memory_bar(s950_dashboard):
     d = s950_dashboard
-    assert not d.list_hardware.isEnabled()
-    for button in (d.btn_refresh, d.btn_receive, d.btn_select_all, d.btn_delete_selected):
-        assert not button.isEnabled()
-    assert d.memory_avail_prog_bar.isHidden()
-    assert not d.empty_hardware_label.isHidden()
-    assert "S900/S950" in d.empty_hardware_label.text()
+    assert d.list_hardware.isEnabled()
+    assert d.btn_refresh.isEnabled()
+    assert d.btn_delete_selected.isEnabled() is False
+    assert d.memory_avail_prog_bar.isHidden()  # no RSTAT equivalent
+
+
+def test_s950_without_an_input_cant_refresh_receive_or_send(dashboard):
+    dashboard.midi_manager.input_name = None
+    dashboard.sampler_controller.set_device_type("akai_s900_s950")
+    dashboard.list_local.addItem("kick.wav")
+    dashboard._update_device_type_ui()
+    assert dashboard.btn_refresh.isEnabled() is False
+    assert dashboard.btn_receive.isEnabled() is False
+    assert dashboard.btn_send.isEnabled() is False
+    assert "MIDI input" in dashboard.btn_send.toolTip()
+    assert "MIDI input" in dashboard.empty_hardware_label.text()
+
+
+def test_s950_send_is_enabled_with_files_and_an_input(s950_dashboard):
+    d = s950_dashboard
+    d.list_local.addItem("kick.wav")
+    d._update_queue_buttons_state()
+    assert d.btn_send.isEnabled() is True
+    assert d.btn_send.toolTip() == ""
 
 
 def test_s950_disables_the_editor_with_an_s950_specific_tooltip(s950_dashboard):
@@ -735,24 +762,62 @@ def test_s950_disables_the_editor_with_an_s950_specific_tooltip(s950_dashboard):
     assert "S900/S950" in s950_dashboard.btn_open_editor.toolTip()
 
 
-def test_s950_disables_send_even_with_files_queued(s950_dashboard):
+def test_s950_slot_list_uses_the_real_slot_numbers_and_cant_delete(s950_dashboard):
+    from PySide6.QtWidgets import QPushButton
+
     d = s950_dashboard
-    d.list_local.addItem("kick.wav")
-    d._update_queue_buttons_state()
-    assert d.btn_send.isEnabled() is False
-    assert "S900/S950" in d.btn_send.toolTip()
+    # sparse: slots 3 and 40, not 0 and 1
+    d.sampler_controller.sample_slots_updated.emit([(3, "KICK"), (40, "SNARE")])
+    assert d.list_hardware.count() == 2
+    numbers = [
+        d.list_hardware.item(i).data(Qt.ItemDataRole.UserRole) for i in range(2)
+    ]
+    assert numbers == [3, 40]
+    for i in range(2):
+        buttons = {
+            b.text(): b
+            for b in d.list_hardware.itemWidget(d.list_hardware.item(i)).findChildren(
+                QPushButton
+            )
+        }
+        assert buttons["Delete"].isEnabled() is False
+        assert "front panel" in buttons["Delete"].toolTip()
+        assert buttons["Edit"].isEnabled() is True
 
 
-def test_leaving_s950_re_enables_send_without_a_queue_change(s950_dashboard):
+def test_s950_delete_selected_stays_disabled_with_a_row_checked(s950_dashboard):
+    from PySide6.QtWidgets import QCheckBox
+
     d = s950_dashboard
+    d.sampler_controller.sample_slots_updated.emit([(3, "KICK")])
+    d.list_hardware.itemWidget(d.list_hardware.item(0)).findChild(QCheckBox).setChecked(True)
+    assert d.btn_delete_selected.isEnabled() is False
+
+
+def test_akai_list_is_dropped_when_switching_to_s950_but_not_when_settings_just_closes(
+    dashboard,
+):
+    dashboard.midi_manager.input_name = "Fake In"
+    dashboard.sampler_controller.sample_list_updated.emit(["A", "B"])
+    assert dashboard.list_hardware.count() == 2
+    dashboard._update_device_type_ui()  # Settings closed, nothing changed
+    assert dashboard.list_hardware.count() == 2
+    dashboard.sampler_controller.set_device_type("akai_s900_s950")
+    dashboard._update_device_type_ui()
+    assert dashboard.list_hardware.count() == 0
+
+
+def test_leaving_s950_keeps_send_available_without_a_queue_change(s950_dashboard):
+    d = s950_dashboard
+    d.midi_manager.input_name = None
     d.list_local.addItem("kick.wav")
-    d._update_queue_buttons_state()
+    d._update_device_type_ui()
     assert d.btn_send.isEnabled() is False
     d.sampler_controller.set_device_type("akai_s2000_s3000")
     d._update_device_type_ui()
+    # an Akai sampler can be sent to open loop, so Send comes back
     assert d.btn_send.isEnabled() is True
     assert d.btn_send.toolTip() == ""
-    assert d.list_hardware.isEnabled()
 
 
 def test_open_program_editor_refuses_on_s950_without_touching_the_bridge(
@@ -766,3 +831,58 @@ def test_open_program_editor_refuses_on_s950_without_touching_the_bridge(
     monkeypatch.setattr(program_editor_bridge, "connect", _must_not_connect)
     s950_dashboard.open_program_editor()
     assert "S900/S950" in s950_dashboard.status_bar.currentMessage()
+
+
+def test_s950_experimental_warning_is_shown_once_then_remembered(
+    s950_dashboard, monkeypatch
+):
+    from PySide6.QtWidgets import QMessageBox
+
+    from core import app_config
+
+    state = {"acknowledged": False, "asked": 0}
+    monkeypatch.setattr(
+        app_config,
+        "get_s950_transfer_warning_acknowledged",
+        lambda: state["acknowledged"],
+    )
+    monkeypatch.setattr(
+        app_config,
+        "save_s950_transfer_warning_acknowledged",
+        lambda value=True: state.update(acknowledged=value),
+    )
+
+    def _warning(*_a, **_k):
+        state["asked"] += 1
+        return QMessageBox.StandardButton.Ok
+
+    monkeypatch.setattr(QMessageBox, "warning", _warning)
+    assert s950_dashboard._confirm_s950_experimental() is True
+    assert s950_dashboard._confirm_s950_experimental() is True
+    assert state == {"acknowledged": True, "asked": 1}
+
+
+def test_s950_experimental_warning_cancel_blocks_the_send(s950_dashboard, monkeypatch):
+    from PySide6.QtWidgets import QMessageBox
+
+    from core import app_config
+
+    saved = []
+    monkeypatch.setattr(app_config, "get_s950_transfer_warning_acknowledged", lambda: False)
+    monkeypatch.setattr(
+        app_config, "save_s950_transfer_warning_acknowledged", lambda v=True: saved.append(v)
+    )
+    monkeypatch.setattr(
+        QMessageBox, "warning", lambda *a, **k: QMessageBox.StandardButton.Cancel
+    )
+    assert s950_dashboard._confirm_s950_experimental() is False
+    assert saved == []
+
+
+def test_other_sampler_types_never_see_the_s950_warning(dashboard, monkeypatch):
+    from PySide6.QtWidgets import QMessageBox
+
+    monkeypatch.setattr(
+        QMessageBox, "warning", lambda *a, **k: pytest.fail("warned a non-S950 user")
+    )
+    assert dashboard._confirm_s950_experimental() is True

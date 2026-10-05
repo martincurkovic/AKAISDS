@@ -59,6 +59,9 @@ class TransferDashboard(QWidget):
         self.midi_manager = midi_manager
         self.sampler_controller = sampler_controller
         self.sampler_controller.sample_list_updated.connect(self.on_sample_list_updated)
+        self.sampler_controller.sample_slots_updated.connect(
+            self.on_sample_slots_updated
+        )
         self.sampler_controller.transfer_progress.connect(self.on_transfer_progress)
         self.sampler_controller.unit_progress.connect(self.on_unit_progress)
         self.sampler_controller.transfer_finished.connect(self.on_transfer_finished)
@@ -409,12 +412,22 @@ class TransferDashboard(QWidget):
         self.status_bar.showMessage(message, 5000)
 
     def on_sample_list_updated(self, names):
+        # Akai family: a sample's number is its position in the list
+        self._populate_hardware_rows(list(enumerate(names)))
+
+    def on_sample_slots_updated(self, entries):
+        # S900/S950: slots are sparse, so the controller says which is which
+        self._populate_hardware_rows(entries)
+
+    def _populate_hardware_rows(self, entries):
+        # entries: [(sample_number, name)]
         self.list_hardware.clear()
-        for sample_number, name in enumerate(names):
+        for sample_number, name in entries:
             self.create_hardware_row(name, sample_number)
         self.btn_select_all.setText("Select All")
+        self._hardware_list_family = self.sampler_controller.device_type
         self._update_empty_hardware_placeholder()
-        has_samples = len(names) > 0
+        has_samples = len(entries) > 0
         self.btn_select_all.setEnabled(has_samples)
         self.btn_receive.setEnabled(
             not self.sampler_controller.is_open_loop() and has_samples
@@ -448,7 +461,7 @@ class TransferDashboard(QWidget):
         self.empty_queue_label.setVisible(self.list_local.count() == 0)
 
     def _update_empty_hardware_placeholder(self):
-        if self.sampler_controller.device_type == "akai":
+        if self.sampler_controller.device_type in ("akai", sampler_models.FAMILY_S950):
             if self.sampler_controller.is_open_loop():
                 self.empty_hardware_label.setText(
                     "No MIDI Input selected - can't refresh or receive samples\n"
@@ -511,20 +524,32 @@ class TransferDashboard(QWidget):
         is_generic = self.sampler_controller.device_type == "generic"  # True or False
         is_s950 = self.sampler_controller.device_type == sampler_models.FAMILY_S950
         is_open_loop = self.sampler_controller.is_open_loop()
+        # the rows on show belong to whichever Sampler Type produced them (an
+        # Akai list's numbering means nothing to an S900/S950) - drop them
+        # when that changes, but not just because Settings was opened
+        if getattr(self, "_hardware_list_family", None) not in (
+            None,
+            self.sampler_controller.device_type,
+        ):
+            self.list_hardware.clear()
+            self._hardware_list_family = None
         has_samples = self.list_hardware.count() > 0
 
         if is_s950:
-            # S900/S950: no transfer path is wired up yet (SamplerController
-            # refuses them too) - the whole hardware side is inert
-            self.list_hardware.clear()
-            self.list_hardware.setEnabled(False)
-            self.btn_select_all.setEnabled(False)
+            # S900/S950: browsing/receiving/sending work like the Akai family,
+            # but they need a MIDI input (the unit answers on it), there's no
+            # memory-status request (hence no bar) and nothing can be deleted
+            self.list_hardware.setEnabled(True)
+            self.btn_select_all.setEnabled(has_samples)
+            self.btn_refresh.setEnabled(not is_open_loop)
+            self.btn_receive.setEnabled(not is_open_loop and has_samples)
             self.btn_delete_selected.setEnabled(False)
-            self.btn_refresh.setEnabled(False)
-            self.btn_receive.setEnabled(False)
             self.memory_avail_prog_bar.setVisible(False)
-            self.empty_hardware_label.setText(tooltips.S950_TRANSFERS_NOT_READY)
-            self.empty_hardware_label.setVisible(True)
+            if is_open_loop:
+                self.empty_hardware_label.setText(tooltips.S950_NEEDS_MIDI_INPUT)
+                self.empty_hardware_label.setVisible(self.list_hardware.count() == 0)
+            else:
+                self._update_empty_hardware_placeholder()
             self._update_queue_buttons_state()
             return
 
@@ -953,6 +978,9 @@ class TransferDashboard(QWidget):
             )
             return
 
+        if not self._confirm_s950_experimental():
+            return
+
         started = self.sampler_controller.send_file_queue(
             entries, starting_sample_number=self._global_starting_sample_number
         )
@@ -985,6 +1013,32 @@ class TransferDashboard(QWidget):
             total_units += units
 
         self.progress_bar_overall.setVisible(total_units > 1)
+
+    def _confirm_s950_experimental(self):
+        # S900/S950 transfers were written from s950tools' notes and the
+        # protocol's own documentation with no S900/S950 on hand (see
+        # controller/s950_transfers.py) - say so before the first write, once
+        if self.sampler_controller.device_type != sampler_models.FAMILY_S950:
+            return True
+        if app_config.get_s950_transfer_warning_acknowledged():
+            return True
+        answer = QMessageBox.warning(
+            self,
+            "Akai S900/S950 - experimental",
+            "Sending samples to the Akai S900/S950 is experimental.\n\n"
+            "It was written from another project's notes and the protocol "
+            "documentation, without an S900/S950 to test against. Samples go to "
+            "the first empty slot (nothing is overwritten) and can't be deleted "
+            "over MIDI, only from the front panel.\n\n"
+            "Save anything you can't afford to lose first, and please report "
+            "problems along with ~/.akaisds/akaisds.log.",
+            QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Cancel,
+        )
+        if answer != QMessageBox.StandardButton.Ok:
+            return False
+        app_config.save_s950_transfer_warning_acknowledged(True)
+        return True
 
     def cancel_transfer(self):
         self.sampler_controller.cancel_transfer()
@@ -1402,15 +1456,15 @@ class TransferDashboard(QWidget):
         has_files = self.list_local.count() > 0
         self.btn_clear_queue.setEnabled(has_files)
         self.btn_global_settings.setEnabled(has_files)
-        can_send = (
-            has_files
-            and self.sampler_controller.device_type != sampler_models.FAMILY_S950
+        # the S900/S950 answers on the MIDI input (slot choice, readiness check
+        # and naming all read replies), so it can't be sent to open loop
+        needs_input = (
+            self.sampler_controller.device_type == sampler_models.FAMILY_S950
+            and self.sampler_controller.is_open_loop()
         )
-        self.btn_send.setEnabled(can_send)
+        self.btn_send.setEnabled(has_files and not needs_input)
         self.btn_send.setToolTip(
-            tooltips.S950_TRANSFERS_NOT_READY
-            if has_files and not can_send
-            else ""
+            tooltips.S950_NEEDS_MIDI_INPUT if has_files and needs_input else ""
         )
 
     def _update_delete_selected_button_state(self):
@@ -1423,7 +1477,11 @@ class TransferDashboard(QWidget):
             if checkbox and checkbox.isChecked():
                 any_checked = True
                 break
-        self.btn_delete_selected.setEnabled(any_checked)
+        # nothing is ever deletable on an S900/S950 (no such opcode)
+        self.btn_delete_selected.setEnabled(
+            any_checked
+            and self.sampler_controller.device_type != sampler_models.FAMILY_S950
+        )
 
     def create_hardware_row(self, filename, sample_number):
         # build read only, fized row with leading checkbox and trailing action buttons
@@ -1456,6 +1514,10 @@ class TransferDashboard(QWidget):
                 self.sampler_controller.request_sample_info(num)
             )
         )
+
+        if self.sampler_controller.device_type == sampler_models.FAMILY_S950:
+            btn_del.setEnabled(False)
+            btn_del.setToolTip(tooltips.S950_CANT_DELETE)
 
         # assemble row layout horizontally
         row_layout.addWidget(checkbox, stretch=1)

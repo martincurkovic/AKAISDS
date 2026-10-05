@@ -109,6 +109,19 @@ def save_s1000_editor_warning_acknowledged(acknowledged=True):
     save_config(config)
 
 
+def get_s950_transfer_warning_acknowledged():
+    # whether the user has already clicked through the one-time "S900/S950
+    # transfers are experimental" warning (shown by the Dashboard before the
+    # first Send in S900/S950 mode)
+    return bool(load_config().get("s950_transfer_warning_acknowledged", False))
+
+
+def save_s950_transfer_warning_acknowledged(acknowledged=True):
+    config = load_config()
+    config["s950_transfer_warning_acknowledged"] = bool(acknowledged)
+    save_config(config)
+
+
 # default as of the shared MIDI transport (core/midi_transport.py) becoming
 # the default connection mode - see core/midi_manager.py's own
 # shared_transport_enabled(). Manual-edit-only by design: there's

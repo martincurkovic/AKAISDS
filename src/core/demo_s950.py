@@ -102,6 +102,7 @@ class FakeS950:
         channel=0,
         dump_acks_required=None,
         stale_params_on_overwrite=True,
+        split_header_envelope=False,
     ):
         self.channel = channel
         #: ACK handshakes needed before a requested dump is released. None =
@@ -111,6 +112,10 @@ class FakeS950:
         #: s950tools: overwriting a slot via a dump "sometimes leaves"
         #: SSTART/SEND/SLOOP stale, so a sender must write SPRM afterwards
         self.stale_params_on_overwrite = stale_params_on_overwrite
+        #: s950tools: the unit "sometimes flushes the header as its own
+        #: envelope" before the dump proper, so a receiver must skip a
+        #: header-only message and keep waiting
+        self.split_header_envelope = split_header_envelope
         #: slot -> {"params": SampleParams, "words": [int]}
         self.samples = {}
         #: slot -> Program
@@ -293,10 +298,15 @@ class FakeS950:
         if acks is None:
             acks = s.num_blocks(len(sample["words"]))
         if acks <= 0:
-            self._outbox.append(frame)
+            self._release_dump(frame)
             self._pending_dump = None
         else:
             self._pending_dump = {"frame": frame, "acks_left": acks}
+
+    def _release_dump(self, frame):
+        if self.split_header_envelope:
+            self._outbox.append(frame[: 1 + s.DUMP_HEADER_SIZE] + [EOX])
+        self._outbox.append(frame)
 
     def _on_ack(self):
         self.acks_received += 1
@@ -305,7 +315,7 @@ class FakeS950:
             return
         pending["acks_left"] -= 1
         if pending["acks_left"] <= 0:
-            self._outbox.append(pending["frame"])
+            self._release_dump(pending["frame"])
             self._pending_dump = None
 
     def _receive_dump(self, data):

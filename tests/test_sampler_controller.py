@@ -1400,52 +1400,112 @@ def test_set_device_type_s900_s950_is_its_own_family(controller):
     assert controller.sampler_model == "akai_s900_s950"
 
 
+class _StubS950Engine:
+    # stands in for controller/s950_transfers.S950Transfers - which needs real
+    # Qt timers, so it's tested on its own (test_s950_transfers.py); this file
+    # runs under a fake QtCore and only checks the controller's DELEGATION
+    def __init__(self):
+        self.calls = []
+        self.busy = False
+        self.cancel_result = False
+
+    def refresh_catalog(self, silent=False):
+        self.calls.append(("refresh_catalog", silent))
+
+    def send_file_queue(self, entries):
+        self.calls.append(("send_file_queue", entries))
+        return True
+
+    def receive_samples(self, requests):
+        self.calls.append(("receive_samples", requests))
+
+    def rename_sample(self, slot, name):
+        self.calls.append(("rename_sample", slot, name))
+
+    def request_sample_info(self, slot):
+        self.calls.append(("request_sample_info", slot))
+
+    def handle_sysex(self, data):
+        self.calls.append(("handle_sysex", bytes(data)))
+
+    def cancel(self):
+        self.calls.append(("cancel",))
+        return self.cancel_result
+
+
 @pytest.fixture
 def s950_controller(controller):
     controller.set_device_type("akai_s900_s950")
+    controller._s950_engine = _StubS950Engine()
     statuses = []
     controller.status_changed.connect(statuses.append)
     controller.statuses = statuses
     return controller
 
 
-def test_s950_refresh_sends_nothing(s950_controller):
-    s950_controller.refresh_sample_list()
-    assert s950_controller.midi_manager.sent == []
-    assert s950_controller._awaiting_memory_status is False
+def test_s950_entry_points_delegate_to_the_engine(s950_controller):
+    c = s950_controller
+    c.refresh_sample_list(silent=True)
+    assert c.send_file_queue([{"filepath": "a.wav"}], starting_sample_number=5) is True
+    c.receive_samples([(1, "x.wav")])
+    c.rename_sample(4, "NEW")
+    c.request_sample_info(4)
+    assert c._s950_engine.calls == [
+        ("refresh_catalog", True),
+        ("send_file_queue", [{"filepath": "a.wav"}]),
+        ("receive_samples", [(1, "x.wav")]),
+        ("rename_sample", 4, "NEW"),
+        ("request_sample_info", 4),
+    ]
+    # none of it went through the Akai/generic paths
+    assert c.midi_manager.sent == []
 
 
-def test_s950_refuses_every_public_transfer_entry_point(s950_controller, tmp_path):
-    # nothing an S900/S950 would misread (S1000-family or standard SDS bytes)
-    # may ever go out while the real S950 transfers don't exist
+def test_s950_sysex_goes_to_the_engine_not_the_akai_parser(s950_controller):
+    c = s950_controller
+    updates = []
+    c.sample_list_updated.connect(updates.append)
+    # function 0x05 is SLIST to the S1000 family
+    c.on_sysex_received([0x47, 0x00, 0x05, 0x40, 0x00, 0x00, 0x00])
+    assert updates == []
+    assert c._s950_engine.calls == [("handle_sysex", bytes([0x47, 0, 5, 0x40, 0, 0, 0]))]
+
+
+def test_s950_refuses_what_it_has_no_protocol_for(s950_controller, tmp_path):
+    # delete has no S900/S950 opcode, and the legacy per-file / by-number
+    # entry points are Akai-family and generic-SDS only: none may put bytes
+    # on the wire for an S900/S950
     c = s950_controller
     wav = str(tmp_path / "x.wav")
     c.delete_sample(1)
-    c.rename_sample(1, "NEW")
-    c.request_sample_info(1)
     c.send_sample_file(wav)
     c.send_stereo_sample_file(wav, 0, 1)
     c.send_sample_file_generic(wav)
     c.send_sample_file_generic_and_rename(wav, "NEW")
-    assert c.send_file_queue([{"filepath": wav}], starting_sample_number=0) is False
     c.receive_sample_generic(1, wav)
-    c.receive_samples([(1, wav)])
     assert c.midi_manager.sent == []
     assert not c._receiving and not c._file_queue and not c._receive_queue
-    assert len(c.statuses) == 10
+    assert len(c.statuses) == 6
     assert all("S900/S950" in s for s in c.statuses)
+    assert c._s950_engine.calls == []
 
 
-def test_s950_sysex_is_not_run_through_the_akai_parser(s950_controller):
+def test_cancel_and_busy_include_the_s950_engine(s950_controller):
     c = s950_controller
-    updates = []
-    c.sample_list_updated.connect(updates.append)
-    # an S900/S950 CAT reply - function 0x0B means SDATA to the S1000 family
-    c.on_sysex_received([0x47, 0x00, 0x0B, 0x40, 0x00, 0x00, 0x00])
-    # ...and one whose byte 2 (0x05) is the S1000 family's SLIST
-    c.on_sysex_received([0x47, 0x00, 0x05, 0x40, 0x00, 0x00, 0x00])
-    assert updates == []
-    assert c.statuses == []
+    assert c.is_transfer_busy() is False
+    c._s950_engine.busy = True
+    assert c.is_transfer_busy() is True
+    c._s950_engine.cancel_result = True
+    c.cancel_transfer()
+    assert c._s950_engine.calls == [("cancel",)]
+
+
+def test_the_s950_engine_is_not_built_for_other_sampler_types(controller):
+    controller.refresh_sample_list()
+    controller.set_device_type("generic")
+    controller.cancel_transfer()
+    assert controller.is_transfer_busy() is False
+    assert controller._s950_engine is None
 
 
 def test_leaving_the_s950_family_restores_normal_behaviour(s950_controller):
