@@ -340,7 +340,13 @@ behaviours were hardware-verified; `dxzl/akai-s950` has NO licence, so don't cop
     page 1), section cards via `build_section_card` (Range, Filter, Amplitude/Filter Envelope =
     `ADSREnvelopeGraph` over four `Knob`s, a `zoneCard` with Soft/Loud buttons where the S3000 has
     Zone 1-4, Velocity, LFO, Pitch Warp, Output), and a bottom bar with Refresh left / Close right plus
-    the write buttons. Knobs are used for the same kind of field the S3000 editor uses them for
+    the write buttons. The Zone card's Sample combo/Filter/Loud row uses the S3000 editor's shape (`build_labeled_combo_column` +
+    `build_labeled_knob_value_column`: bold label above each, value readout to the RIGHT of the knob), and the LFO
+    card is Rate/Depth (52px, `_centered_knob_row`) over Build-up/Aftertouch/Mod Wheel (40px). The per-sample
+    **Filter** knob (`soft_filter`/`loud_filter`, 0..99, 99 brightest) is the only cutoff-like control the keygroup
+    block holds - the Filter card is key track/velocity/envelope amount/filter envelope. Tune shows 4 decimals on
+    purpose: the raw unit is 1/16 semitone (0.0625), which 2 decimals would round; the unit itself is s950tools',
+    unverified. Knobs are used for the same kind of field the S3000 editor uses them for
     (`_KNOB_ATTRS`: 0..99 amounts and +-50 offsets); spinboxes for note range/velocity switch/MIDI
     offset/program number, combos for samples/output. **A fresh `Knob.setValue(0)` emits nothing**, so
     its value readout is filled explicitly in `_set_widget` (a knob at 0 once showed "-").
