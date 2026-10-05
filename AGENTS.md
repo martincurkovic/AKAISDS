@@ -18,6 +18,9 @@ swapped via a `&Window` menu action (only one ever shown at a time):
   `core/program_editor_bridge.py`) - edits a program/keygroup/multi's
   *parameters* on an S3000-series sampler over SysEx. Opened via the
   Dashboard's Window menu. Most of this file is about this window.
+- **S900/S950 Program Editor** (`ui/s950_program_editor.py`, `ui/s950_samples_tab.py`) - a separate,
+  smaller window for the Akai S900/S950, opened by the same Open Editor button when that Sampler Type
+  is selected. See "Akai S900/S950 support".
 
 ## Third-party deps - read the notes, don't edit in place
 
@@ -84,15 +87,16 @@ teardown or hit `QThread: Destroyed while thread is still running`.
 
 ## Akai S1000 support (`core/s1000_bridge.py`) - written without hardware
 
-The Settings "Sampler Type" combo has three entries (`core/sampler_models.py`,
+The Settings "Sampler Type" combo has four entries (`core/sampler_models.py`,
 alphabetical): "Akai S1000" (`akai_s1000`), "Akai S2000/S3000"
-(`akai_s2000_s3000`), "Generic SDS" (`generic`). Before the S1000 existed the
+(`akai_s2000_s3000`), "Akai S900/S950 (experimental)" (`akai_s900_s950` - a different
+protocol, see its own section), "Generic SDS" (`generic`). Before the S1000 existed the
 S2000/S3000 was persisted as plain `"akai"`; that legacy value is still accepted
 everywhere (`sampler_models.normalize`) and `app_config.ensure_defaults_saved()`
 rewrites it in `config.json` at startup so the file names the real hardware
 (only that exact legacy string - an unrecognised value from a newer version is
 left alone). Note `"akai"` also remains the PROTOCOL FAMILY name below - a
-different thing from the saved selection. All three Akai families answer a MIDI identity/status request
+different thing from the saved selection. The S1000, S2000 and S3000 all answer a MIDI identity/status request
 identically, so the model can only be a user setting, never detected.
 `SamplerController.device_type` is still the PROTOCOL FAMILY (`akai`/`generic`)
 every transfer path branches on (an S1000's SDS/RSTAT/list traffic is the same
@@ -129,7 +133,7 @@ Envelope 2 card gets an ENV1-style graph + 4 knobs (`_build_s1000_env2_adsr`,
 loaded in `_on_detail_loaded`) instead. Gotcha found building that: hiding widgets
 in a not-yet-shown window leaves nested layouts' cached size hints stale, so the
 swapped card stayed pinned 406px tall (vs 225) until its layout was
-`invalidate()`d/`activate()`d before `_equalize_card_heights` re-measured.
+`invalidate()`d/`activate()`d before `equalize_card_heights` re-measured.
 **The S1000 has ONE bend field** (`B_PTCH`, 0-12 st; the S3000 splits it into `B_PTCH`
 "increase" 0-24 + `B_PTCHD` "decrease" at offset 73, past the S1000's block), so the
 combo is relabelled "Bend range" there. Other S1000-narrower ranges applied in
@@ -244,7 +248,7 @@ fields (tests also try 72..192) specifically so wrongly-read or dropped trailing
 bytes are caught. Also: **`PRGNUM`'s +1 display offset applies on the S1000 too**
 (unverified there - same `s3k.params` entry).
 
-## Akai S900/S950 support (Stages 1-5 done, written without hardware)
+## Akai S900/S950 support (written without hardware)
 
 A DIFFERENT protocol from every other Akai entry, not a variant of the S1000
 family: device byte `0x40` (not `0x48`), function codes 0-11, every 8-bit value as
@@ -267,7 +271,7 @@ behaviours were hardware-verified; `dxzl/akai-s950` has NO licence, so don't cop
 - `core/demo_s950.py` - `FakeS950`, a fake on rtmidi-style ports (like `FakeS1000`). Its
   docstring separates what comes from s950tools' hardware notes from what is GUESSED
   (catalog order, default name of an uploaded sample, ACK count per dump, NAK behaviour...).
-- Sampler Type "Akai S900/S950" (`akai_s900_s950`) has its OWN protocol family, `"s950"`
+- Sampler Type "Akai S900/S950 (experimental)" (`akai_s900_s950`) has its OWN protocol family, `"s950"`
   (`sampler_models.FAMILY_S950`) - not "akai", not "generic". **Nothing may fall through to
   the akai/generic branches for it** (they'd put S1000-family or standard-SDS bytes on the
   wire). `SamplerController` delegates the S950 entry points (refresh, send_file_queue,
@@ -294,15 +298,14 @@ behaviours were hardware-verified; `dxzl/akai-s950` has NO licence, so don't cop
 - The Dashboard needs a MIDI INPUT for everything S950 (the unit answers on it - no open-loop
   send), has no memory bar (no RSTAT), shows sparse slot numbers via `sample_slots_updated`
   (list index != sample number there, unlike `sample_list_updated`), can't delete, and shows a
-  one-time experimental warning before the first Send. Program editing is Stage 5, below.
-- **Program editor (Stages 4-5)** - `ui/s950_program_editor.py`'s `S950ProgramEditorWindow` (was the
-  read-only "viewer" for a while; the old name may linger in old notes), opened by the Dashboard's
+  one-time experimental warning before the first Send. Its Program Editor is described below.
+- **Program editor** - `ui/s950_program_editor.py`'s `S950ProgramEditorWindow`, opened by the Dashboard's
   Open Editor button (`open_program_editor` branches to it for the S950; the button needs both ports,
   and `open_program_editor` refuses with no MIDI input). A deliberately separate small window, NOT
   `ProgramEditorWindow` (built on `s3k.params`). It shares the Dashboard's `SamplerController` - same
   connection, no `S3kBridge`/`BridgeWorker`, no second thread.
-  - **Layout deliberately mirrors the S1000/S2000/S3000 editor's Programs tab** (consistency was a user
-    request): Programs column | Keygroups column (`KeygroupRangeBar` + `keygroupList` rows with colored
+  - **Layout deliberately mirrors the S1000/S2000/S3000 editor's Programs tab** (the user asked for
+    consistency; keep them in step through `editor_layout`): Programs column | Keygroups column (`KeygroupRangeBar` + `keygroupList` rows with colored
     swatches, recolored on `theme.notifier.changed`, item with NO text because it has a row widget) |
     `detail_stack` of a program page and a keygroup page (program click -> page 0, keygroup click ->
     page 1), section cards via `build_section_card` (Range, Filter, Amplitude/Filter Envelope =
@@ -311,9 +314,7 @@ behaviours were hardware-verified; `dxzl/akai-s950` has NO licence, so don't cop
     the write buttons. Knobs are used for the same kind of field the S3000 editor uses them for
     (`_KNOB_ATTRS`: 0..99 amounts and +-50 offsets); spinboxes for note range/velocity switch/MIDI
     offset/program number, combos for samples/output. **A fresh `Knob.setValue(0)` emits nothing**, so
-    its value readout is filled explicitly in `_set_widget` (a knob at 0 once showed "-"). The one
-    deliberate difference: no Multi/Programs/Samples tab bar (there is only one page - a one-tab bar
-    would be noise); if an S950 Samples tab is ever built, add `FullWidthTabBar` then.
+    its value readout is filled explicitly in `_set_widget` (a knob at 0 once showed "-").
   - **Tabs, like the S3000 editor (Programs | Samples; no Multi)**, Ctrl+2/Ctrl+3. The program-write buttons are
     hidden on the Samples tab. **The first program is auto-selected** when the editor opens (and whenever the chosen
     one vanishes from the catalog) - the placeholder before the catalog arrives says "Reading the program list...",
@@ -432,8 +433,9 @@ don't `.wait()` it before closing.
 ## Transfer Dashboard
 
 **Open Editor gating**: `btn_open_editor` (+ its mirrored menu action)
-only enables with both MIDI ports selected AND `device_type == "akai"`
-(the Program Editor needs Akai-only SysEx extensions Generic SDS lacks).
+only enables with both MIDI ports selected AND `device_type` is `"akai"`
+or the S900/S950 family (the Program Editor needs Akai-only SysEx extensions Generic SDS lacks;
+for the S900/S950 it opens its own editor instead - see that section).
 `_update_open_editor_enabled` recomputes at construction and after
 Settings closes.
 
@@ -531,8 +533,8 @@ build from the SAME helpers in `ui/editor_layout.py` (plus `ui/qt_helpers.py`'s 
 columns, `equalize_card_heights`, `build_paired_row`/`build_centered_row`, the Zone card shell
 (`build_zone_card`), the Programs | Keygroups | detail skeleton (`build_list_column`, `build_content_row`)
 and the keygroup list row with its colored swatch (`add_keygroup_row`). They are plain functions - no `self`,
-no hardware knowledge - moved out of `ProgramEditorWindow` unchanged (its old `_build_knob_column` etc.
-methods are gone; call the functions). **Change a measurement there and BOTH editors change - re-check
+no hardware knowledge - moved out of `ProgramEditorWindow` unchanged (call the functions; its old
+private methods are gone). **Change a measurement there and BOTH editors change - re-check
 both.** Moving them was verified by rendering the S3000 editor from the old and new code (Programs program
 page, Programs keygroup page, Multi, Samples) and comparing pixel by pixel: identical.
 
@@ -564,7 +566,7 @@ ratios between paired cards are measured via `sizeHint()`, not guessed
 card` pins each card `setSizePolicy(Preferred, Fixed)` vertically - a bare
 `QWidget` otherwise grows past its own `sizeHint()` into any layout
 surplus (an `addStretch()` with the default stretch factor 0 doesn't
-outrank this). `_equalize_card_heights()` pins paired cards' heights equal
+outrank this). `equalize_card_heights()` (`ui/editor_layout.py`) pins paired cards' heights equal
 too - call it for any new paired row.
 
 `BridgeWorker.busy_changed` drives the Refresh progress bar, debounced
@@ -585,9 +587,9 @@ row widget via `setItemWidget` renders BOTH the item's own default text
 AND the widget's own label, overlapping/offset, looking like stray
 strikethrough garbage rather than two legible copies. The fix is to
 construct the item with no text at all (`QListWidgetItem()`) - same
-convention `_add_keygroup_row` already used, for this exact reason - and
+convention `add_keygroup_row` (`ui/editor_layout.py`) uses, for this exact reason - and
 keep whatever the row actually needs to display in the widget alone. The
-Samples tab's list (`_on_samples_loaded`/`_build_sample_list_row_widget`,
+Samples tab's list (`_on_samples_loaded`/`build_sample_list_row_widget`,
 added to show each sample's duration) hit this: `_sample_name_at_row`
 (backed by `self._sample_list`) is the real source of truth for a row's
 name everywhere in the file now, not `item.text()`, which is always
