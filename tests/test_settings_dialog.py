@@ -151,7 +151,7 @@ def test_sampler_type_combo_lists_the_four_models_alphabetically(qapp):
     assert labels == [
         "Akai S1000",
         "Akai S2000/S3000",
-        "Akai S900/S950",
+        "Akai S900/S950 (experimental)",
         "Generic SDS",
     ]
     assert labels == sorted(labels)
