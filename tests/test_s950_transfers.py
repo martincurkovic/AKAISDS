@@ -887,3 +887,68 @@ def test_writing_needs_a_midi_input(qapp, monkeypatch, tmp_path):
     r.controller.write_program(0, original, _edit(original, attack=1))
     assert rec.results[0][1:3] == (False, None)
     assert r.midi.sent == []
+
+
+# --- sample parameter read (Samples tab) ---------------------------------------------------------
+
+
+class _SampleParamsRecorder:
+    def __init__(self, controller):
+        self.received = []
+        controller.s950_sample_params_received.connect(lambda slot, p: self.received.append((slot, p)))
+
+
+def test_request_sample_params_reads_a_samples_sprm(rig):
+    rec = _SampleParamsRecorder(rig.controller)
+    rig.controller.request_sample_params(1)
+    assert rig.controller.is_transfer_busy() is True
+    assert wait_until(lambda: rec.received)
+    slot, params = rec.received[0]
+    assert slot == 1 and params.name == "SNARE"
+    assert params.sample_rate_hz == 22050 and params.total_words == 4000
+    assert rig.midi.sent[-1][2] == s.FUNC_RSPRM
+    assert rig.engine.idle
+    assert rig.rec.statuses == []  # a background read says nothing
+
+
+def test_request_sample_params_for_an_empty_slot_times_out_with_none(rig):
+    rec = _SampleParamsRecorder(rig.controller)
+    rig.engine.reply_timeout_ms = 30
+    rig.controller.request_sample_params(60)
+    assert wait_until(lambda: rec.received)
+    assert rec.received == [(60, None)]
+    assert rig.engine.idle
+
+
+def test_request_sample_params_while_busy_answers_none_and_leaves_the_op_alone(rig):
+    rec = _SampleParamsRecorder(rig.controller)
+    rig.controller.refresh_sample_list()
+    rig.controller.request_sample_params(0)
+    assert rec.received == [(0, None)]
+    assert rig.engine._op == "catalog"
+    assert wait_until(lambda: rig.rec.slots)
+
+
+def test_request_sample_params_without_an_input_answers_none(qapp, monkeypatch):
+    r = _build(qapp, monkeypatch, FakeS950(), input_name=None)
+    rec = _SampleParamsRecorder(r.controller)
+    r.controller.request_sample_params(0)
+    assert rec.received == [(0, None)]
+    assert r.midi.sent == []
+
+
+def test_cancelling_a_sample_params_read_answers_none(rig):
+    rec = _SampleParamsRecorder(rig.controller)
+    rig.controller.request_sample_params(0)
+    assert rig.engine.cancel() is True
+    assert rec.received == [(0, None)]
+    assert rig.engine.idle
+
+
+def test_an_unreadable_sprm_answers_none(rig, monkeypatch):
+    rec = _SampleParamsRecorder(rig.controller)
+    monkeypatch.setattr(type(rig.fake.samples[0]["params"]), "to_payload", lambda self: b"\x00" * 10)
+    rig.controller.request_sample_params(0)
+    assert wait_until(lambda: rec.received)
+    assert rec.received == [(0, None)]
+    assert rig.engine.idle

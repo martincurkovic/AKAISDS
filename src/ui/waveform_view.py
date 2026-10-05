@@ -325,6 +325,10 @@ class WaveformView(QWidget):
         # waveform's loop-region tint, and excludes loop_start/loop_end from
         # hit-testing so they can't be dragged, when False.
         self._loop_enabled = True
+        # read-only display (the Akai S900/S950 Samples tab): markers still draw, but can't
+        # be grabbed, hovered or dragged - see set_markers_locked
+        self._markers_locked = False
+        self._placeholder_text = _PLACEHOLDER_TEXT
         # click-to-preview visual feedback (set_playhead/clear_playhead) -
         # None whenever nothing is currently sounding
         self._playhead_frame = None
@@ -435,6 +439,25 @@ class WaveformView(QWidget):
 
     def set_loading(self, loading):
         self._loading = loading
+        self.update()
+
+    def set_placeholder_text(self, text):
+        # the centered text shown while nothing at all is known about a sample - the default
+        # (S1000/S2000/S3000) promises a slow, interface-freezing load, which isn't true of
+        # every caller
+        self._placeholder_text = text
+        self.update()
+
+    def set_markers_locked(self, locked):
+        # markers stay visible but can't be grabbed/dragged (and so never emit
+        # marker_committed) - for a view of a sample whose markers aren't editable.
+        # Zoom, pan and double-click-to-load are unaffected.
+        self._markers_locked = bool(locked)
+        if locked:
+            self._dragging = None
+            self._hover_marker = None
+            self._press_cycle_candidates = []
+            self._press_cycle_index = 0
         self.update()
 
     def set_loop_enabled(self, enabled):
@@ -871,7 +894,7 @@ class WaveformView(QWidget):
             painter.drawText(
                 self.rect(),
                 Qt.AlignmentFlag.AlignCenter | Qt.TextFlag.TextWordWrap,
-                _LOADING_TEXT if self._loading else _PLACEHOLDER_TEXT,
+                _LOADING_TEXT if self._loading else self._placeholder_text,
             )
             return
 
@@ -1026,6 +1049,8 @@ class WaveformView(QWidget):
         # to win ties - otherwise, once several markers land on the same
         # frame (a push cascade can do this - see push_marker), only the
         # frontmost one could ever be grabbed again.
+        if self._markers_locked:
+            return []
         view_start = self._view_start
         view_length = self._view_length()
         candidates = []

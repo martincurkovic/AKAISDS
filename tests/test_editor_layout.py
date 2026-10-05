@@ -110,3 +110,40 @@ def test_a_card_page_has_no_left_margin_so_the_gap_to_its_list_is_the_spacing_al
     m = layout.contentsMargins()
     assert (m.left(), m.top(), m.right(), m.bottom()) == (0, 0, 8, 0)
     assert layout.spacing() == el.CARD_SPACING
+
+
+def test_sample_list_row_has_a_name_and_a_muted_blank_duration(qapp):
+    row, name, duration = el.build_sample_list_row_widget("KICK")
+    assert name.text() == "KICK" and duration.text() == ""
+    assert duration.objectName() == "mutedLabel"
+    assert row.layout().contentsMargins().left() == 8  # matches QListWidget#sampleList::item
+
+
+def test_samples_page_puts_the_list_left_and_the_cards_taking_the_rest(qapp):
+    left, right = QWidget(), QWidget()
+    page = el.build_samples_page(left, right)
+    layout = page.layout()
+    assert layout.itemAt(0).widget() is left and layout.itemAt(1).widget() is right
+    assert layout.stretch(1) == 1
+    m = layout.contentsMargins()
+    assert (m.left(), m.top(), m.right(), m.bottom()) == (14, 14, 14, 14)
+
+
+def test_waveform_scrollbar_reserves_its_height_and_hides_when_fully_zoomed_out(qapp):
+    container, bar = el.build_waveform_scrollbar()
+    assert container.height() == bar.sizeHint().height() or container.minimumHeight() == bar.sizeHint().height()
+    el.sync_waveform_scrollbar(bar, 0, 100, 100)  # fully zoomed out
+    assert bar.isHidden()
+    el.sync_waveform_scrollbar(bar, 50, 100, 1000)
+    assert not bar.isHidden() or bar.maximum() == 900
+    assert (bar.minimum(), bar.maximum(), bar.pageStep(), bar.value()) == (0, 900, 100, 50)
+    el.sync_waveform_scrollbar(bar, 0, 0, 0)  # nothing loaded
+    assert bar.isHidden() and bar.maximum() == 0
+
+
+def test_syncing_the_scrollbar_does_not_echo_back(qapp):
+    _, bar = el.build_waveform_scrollbar()
+    moved = []
+    bar.valueChanged.connect(moved.append)
+    el.sync_waveform_scrollbar(bar, 50, 100, 1000)
+    assert moved == []

@@ -47,10 +47,34 @@ nothing here writes.
       filter key tracking, LFO and mod wheel/aftertouch values match the sampler's screen.
       **Any value that reads as nonsense is more likely a wrong byte offset in
       `core/s950_program.py` than a fault in the sampler** - send the log.
+- [ ] The first program is selected and shown by itself when the editor opens (no "select a
+      program" prompt).
 - [ ] A program with MANY keygroups (up to 31) reads and lists them all.
 - [ ] Refresh keeps the selected program and re-reads it.
 - [ ] Switching to the Dashboard (Ctrl+T) and back works; closing is refused while a read is
       in flight.
+
+### B2. Samples tab (read-only)
+
+The editor's **Samples** tab (Ctrl+3) mirrors the S1000/S2000/S3000 editor's, but only *shows*
+things - it can't change a sample. Rename a sample from the Dashboard.
+
+- [ ] The sample list matches the sampler's own sample list, and each sample's **duration** appears
+      beside its name a moment after the tab opens (one parameter read per sample, in the
+      background, only while this tab is showing). Compare a few against the sampler's screen.
+- [ ] Click a sample: **Length, Sample rate, Replay mode, Direction, Start, End, Loop length** match
+      what the sampler shows. Note anything that doesn't - especially Replay mode and the three
+      position fields (see guesses 15-16 below).
+- [ ] The waveform shows the sample's start/end markers (and loop markers for a looping sample) before
+      any audio is loaded. Do they sit where the sampler says the loop is?
+- [ ] **Double-click the waveform** to load the audio. The window stays usable while it transfers (the
+      status bar shows a percentage); a small sample should arrive in a second or two. The waveform
+      should look like the sound, at the right length.
+- [ ] A large sample (several seconds): does it arrive at all? A timeout on a *small* sample, but not a
+      large one, would point at the MIDI backend splitting long SysEx messages (guess 12).
+- [ ] Switching to the Programs tab and back works; nothing on the Samples tab ever writes (the unit's
+      screen should never change because of it).
+- [ ] With ~20+ samples on the unit: the durations all fill in without errors, and Refresh re-reads them.
 
 ## C. Sample writes (SCRATCH sample slot only)
 
@@ -154,6 +178,24 @@ behaviour is the only evidence - they describe a real unit but were not reproduc
     warning, not a failure).
 12. **Messages up to ~4.4 KB** (31 keygroups) are assumed to be delivered whole by the MIDI backend
     both ways (the sample-receive risk, but 200x smaller).
+
+### The Samples tab
+15. **What the SPRM position fields mean.** The tab shows Start, End and Loop length straight from the
+    sample parameters, and draws markers from them: start = Start, end = End, and a looping sample
+    loops over the last *Loop length* words before the end (the S3000-family convention). The real
+    S900/S950 behaviour is only inferred from s950tools - a loop that appears in the wrong place on
+    the waveform means this mapping is wrong, not necessarily the unit.
+16. **Replay mode** is read as the letter in the sample parameters: `O` one-shot, `L` loop, `A`
+    alternating. **Direction** is `R` = reversed. Anything else is shown as "unknown (n)".
+17. **Duration** = length in words / sample rate. The sampler may play at a different rate than the
+    rate stored in its parameters.
+18. **Nominal pitch** is shown as the raw number with "unverified units" - its unit and direction are
+    inferred (1/16 semitone, C3 = 960), so no root note is shown.
+19. **One parameter read per sample** are issued back to back while the tab is open. The sampler may
+    not like ~100 of them in a row; each is a small request, but it is not measured.
+20. **Loading audio is a real sample dump**, the same transfer the Dashboard's Receive uses, so every
+    transfer guess above applies (one long SysEx, the unit stalling until ACKed, the "NAK/empty slot"
+    behaviour).
 
 ### The safety net
 13. **The backup `.syx` restores a program.** It is the unit's own PRGM reply, byte for byte, so it

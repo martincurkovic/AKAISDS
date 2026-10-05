@@ -36,7 +36,6 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QMessageBox,
     QPushButton,
-    QScrollBar,
     QSizePolicy,
     QVBoxLayout,
     QComboBox,
@@ -62,9 +61,13 @@ from ui.editor_layout import (
     build_labeled_knob_value_column,
     build_list_column,
     build_paired_row,
+    build_sample_list_row_widget,
+    build_samples_page,
+    build_waveform_scrollbar,
     build_zone_card,
     equalize_card_heights,
     style_card_page_layout,
+    sync_waveform_scrollbar,
 )
 from ui.qt_helpers import FullWidthTabBar, build_scroll_area, build_section_card
 from ui.envelope_graph import ADSREnvelopeGraph, Envelope2Graph
@@ -5289,13 +5292,7 @@ class ProgramEditorWindow(QMainWindow):
         self._delete_sample_action.setEnabled(False)
         self.sample_list_widget.addAction(self._delete_sample_action)
 
-        samples_column = QVBoxLayout()
-        samples_column.setContentsMargins(0, 0, 0, 0)
-        samples_column.setSpacing(6)
-        samples_column.addWidget(QLabel("<b>Samples</b>"))
-        samples_column.addWidget(self.sample_list_widget)
-        samples_container = QWidget()
-        samples_container.setLayout(samples_column)
+        samples_container = build_list_column("Samples", self.sample_list_widget)
 
         self.waveform_view = WaveformView()
 
@@ -5355,27 +5352,9 @@ class ProgramEditorWindow(QMainWindow):
         zoom_row.addWidget(self.sample_edit_progress)
         zoom_row.addStretch()
 
-        self.waveform_scrollbar = QScrollBar(Qt.Orientation.Horizontal)
-        self.waveform_scrollbar.setVisible(False)
-        # a plain setVisible(False) on the scrollbar directly collapses it
-        # to zero height in the layout, so the spinbox row below jumps up
-        # to fill the gap and then jumps back down the moment zooming in
-        # makes the bar reappear - a fixed-height container reserves that
-        # space permanently regardless of whether the bar inside it is
-        # currently shown, so the spinboxes never move
-        scrollbar_container = QWidget()
-        scrollbar_container.setFixedHeight(self.waveform_scrollbar.sizeHint().height())
-        # otherwise this bare QWidget picks up the global `QWidget {
-        # background-color: ${bg} }` rule (style.qss.template) - the
-        # page's own background - rather than blending into the
-        # QWidget#sectionCard (${bg_panel}, a different shade) it
-        # actually sits in here, so the reserved space read as a visible
-        # colored bar even while the real scrollbar inside was hidden.
-        # Same fix as _build_multi_part_knob's own widget above.
-        scrollbar_container.setObjectName("transparentContainer")
-        scrollbar_container_layout = QVBoxLayout(scrollbar_container)
-        scrollbar_container_layout.setContentsMargins(0, 0, 0, 0)
-        scrollbar_container_layout.addWidget(self.waveform_scrollbar)
+        # (the fixed-height container reserves the bar's height so nothing below jumps when
+        # zooming in makes the bar appear - see ui.editor_layout.build_waveform_scrollbar)
+        scrollbar_container, self.waveform_scrollbar = build_waveform_scrollbar()
 
         # the canvas has no room for per-marker text without labels
         # overlapping once two markers are close together (start/loop_start/
@@ -5728,13 +5707,7 @@ class ProgramEditorWindow(QMainWindow):
         # Start/End/Loop knob row drew on top of the waveform.
         waveform_scroll = self._build_scroll_area(waveform_container)
 
-        content_layout = QHBoxLayout()
-        content_layout.setContentsMargins(14, 14, 14, 14)
-        content_layout.addWidget(samples_container)
-        content_layout.addWidget(waveform_scroll, stretch=1)
-        page = QWidget()
-        page.setLayout(content_layout)
-        return page
+        return build_samples_page(samples_container, waveform_scroll)
 
     def _build_multis_tab(self):
         # the sampler holds exactly one resident multi - no list to choose
@@ -5899,34 +5872,6 @@ class ProgramEditorWindow(QMainWindow):
         self._worker.submit_program_change(
             part_index, program_index, program_name, channel
         )
-
-    def _build_sample_list_row_widget(self, name):
-        # name on the left, duration on the right in the theme's muted
-        # "secondary info" grey (same token/pattern as
-        # _build_mod_fixed_source_label) so it reads as supplementary to
-        # the name rather than part of it. Duration starts blank - it's
-        # filled in asynchronously as sample_length_loaded results arrive,
-        # see _on_samples_loaded/_on_sample_length_loaded.
-        row_widget = QWidget()
-        row_widget.setObjectName("transparentContainer")
-        row_layout = QHBoxLayout(row_widget)
-        # matches QListWidget#sampleList::item's own "padding: 6px 8px"
-        # (style.qss.template) - a custom item widget's sizeHint() is used
-        # as-is for the row's height/width, it does NOT also pick up that
-        # padding the way a plain text item would, so skipping this margin
-        # here shrank every row and made the font look cramped/squashed
-        # against the row's own top/bottom edges
-        row_layout.setContentsMargins(8, 6, 8, 6)
-        row_layout.setSpacing(6)
-
-        name_label = QLabel(name)
-        row_layout.addWidget(name_label, stretch=1)
-
-        duration_label = QLabel("")
-        duration_label.setObjectName("mutedLabel")  # style.qss.template
-        row_layout.addWidget(duration_label)
-
-        return row_widget, name_label, duration_label
 
     def _sample_name_at_row(self, row):
         # the sample list's own QListWidgetItems carry no text of their own
@@ -6289,7 +6234,7 @@ class ProgramEditorWindow(QMainWindow):
             item = QListWidgetItem()
             self.sample_list_widget.addItem(item)
             row_widget, name_label, duration_label = (
-                self._build_sample_list_row_widget(name)
+                build_sample_list_row_widget(name)
             )
             item.setSizeHint(row_widget.sizeHint())
             self.sample_list_widget.setItemWidget(item, row_widget)
@@ -8237,23 +8182,7 @@ class ProgramEditorWindow(QMainWindow):
         self._flush_write("LLNGTH1")
 
     def _on_waveform_view_changed(self, view_start, view_length, frame_count):
-        # keeps the pan scrollbar in step with WaveformView's own zoom/pan
-        # state, however it changed (wheel-zoom, wheel-pan, the Fit/+/-
-        # buttons, or a fresh sample loading) - blockSignals so this never
-        # bounces back through _on_waveform_scrollbar_moved
-        self.waveform_scrollbar.blockSignals(True)
-        if frame_count == 0 or view_length >= frame_count:
-            # nothing loaded, or fully zoomed out - there's nothing to
-            # scroll to, so the bar takes up space for no reason if it's
-            # merely disabled rather than hidden outright
-            self.waveform_scrollbar.setVisible(False)
-            self.waveform_scrollbar.setRange(0, 0)
-        else:
-            self.waveform_scrollbar.setVisible(True)
-            self.waveform_scrollbar.setPageStep(view_length)
-            self.waveform_scrollbar.setRange(0, frame_count - view_length)
-            self.waveform_scrollbar.setValue(view_start)
-        self.waveform_scrollbar.blockSignals(False)
+        sync_waveform_scrollbar(self.waveform_scrollbar, view_start, view_length, frame_count)
 
     def _on_waveform_scrollbar_moved(self, value):
         self.waveform_view.set_view_start(value)

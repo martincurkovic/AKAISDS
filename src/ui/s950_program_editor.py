@@ -39,6 +39,7 @@ from PySide6.QtWidgets import (
     QSpinBox,
     QStackedWidget,
     QStatusBar,
+    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -65,7 +66,8 @@ from ui.envelope_graph import ADSREnvelopeGraph
 from ui.keygroup_range_bar import KeygroupRangeBar, keygroup_color
 from ui.knob import Knob
 from ui.note_spinbox import NoteSpinBox
-from ui.qt_helpers import build_scroll_area, build_section_card
+from ui.qt_helpers import FullWidthTabBar, build_scroll_area, build_section_card
+from ui.s950_samples_tab import S950SamplesTab
 
 # velocity_switch value meaning "no switch - the soft sample plays at every velocity"
 NO_VELOCITY_SWITCH = 128
@@ -139,7 +141,9 @@ def format_voice_out(value):
 
 
 def format_control_bits(value):
-    active = [label for bit, label in enumerate(_CONTROL_BIT_LABELS) if value & (1 << bit)]
+    active = [
+        label for bit, label in enumerate(_CONTROL_BIT_LABELS) if value & (1 << bit)
+    ]
     return ", ".join(active) if active else "none"
 
 
@@ -172,20 +176,30 @@ class S950ProgramEditorWindow(QMainWindow):
         self._sample_names = []  # names of the samples on the unit, in catalog order
         self._have_catalog = False
         self._slot = None  # slot of the program being edited
-        self._baseline = None  # the program as the sampler holds it (as loaded / last verified)
+        self._baseline = (
+            None  # the program as the sampler holds it (as loaded / last verified)
+        )
         self._working = None  # the edited copy
-        self._restore = None  # the baseline before the last verified write (for Restore)
+        self._restore = (
+            None  # the baseline before the last verified write (for Restore)
+        )
         self._kg_row = 0
-        self._loading = False  # True while widgets are being filled (their signals are ignored)
+        self._loading = (
+            False  # True while widgets are being filled (their signals are ignored)
+        )
         self._writing = False
         self._reverting = False
         self._restoring = False  # the write in flight is a "Restore Previous"
-        self._pending_restore = None  # baseline to offer for Restore once the write verifies
+        self._pending_restore = (
+            None  # baseline to offer for Restore once the write verifies
+        )
         # reading is one request at a time; the user can click faster than the
         # unit answers, so only the LATEST wanted slot is ever read next
         self._wanted_slot = None
         self._inflight_slot = None
-        self._shown_slot = None  # last slot answered (success OR failure) - stops re-requesting
+        self._shown_slot = (
+            None  # last slot answered (success OR failure) - stops re-requesting
+        )
         self._editors = {}  # (scope, attr) -> widget
         self._readonly = {}  # attr -> QLabel
 
@@ -205,7 +219,7 @@ class S950ProgramEditorWindow(QMainWindow):
         self._busy_timer.timeout.connect(self._update_buttons)
         self._busy_timer.start(150)
 
-        self._show_placeholder("Select a program on the left.")
+        self._show_placeholder("Reading the program list...")
         self._update_buttons()
         QTimer.singleShot(0, self._refresh)
 
@@ -223,21 +237,22 @@ class S950ProgramEditorWindow(QMainWindow):
         self.program_list.setObjectName("programList")
         self.program_list.setFixedWidth(160)
         self.program_list.currentItemChanged.connect(self._on_program_selected)
-        self.program_list.itemClicked.connect(lambda _item: self.detail_stack.setCurrentIndex(0))
+        self.program_list.itemClicked.connect(
+            lambda _item: self.detail_stack.setCurrentIndex(0)
+        )
 
         self.keygroup_list = QListWidget()
         self.keygroup_list.setObjectName("keygroupList")
         self.keygroup_list.setFixedWidth(190)  # fits "Keygroup 12: C#1 - D#7"
         self.keygroup_list.currentRowChanged.connect(self._show_keygroup)
-        self.keygroup_list.itemClicked.connect(lambda _item: self.detail_stack.setCurrentIndex(1))
+        self.keygroup_list.itemClicked.connect(
+            lambda _item: self.detail_stack.setCurrentIndex(1)
+        )
         self.keygroup_range_bar = KeygroupRangeBar()
-        self.keygroup_note = QLabel()
-        self.keygroup_note.setObjectName("mutedLabel")
-        self.keygroup_note.setWordWrap(True)
 
         programs_container = build_list_column("Programs", self.program_list)
         keygroups_container = build_list_column(
-            "Keygroups", self.keygroup_range_bar, self.keygroup_list, self.keygroup_note
+            "Keygroups", self.keygroup_range_bar, self.keygroup_list
         )
 
         # right-hand side: a placeholder OR the detail pages
@@ -257,10 +272,14 @@ class S950ProgramEditorWindow(QMainWindow):
         right_container = QWidget()
         right_container.setLayout(right_column)
 
-        content_layout = build_content_row(programs_container, keygroups_container, right_container)
+        content_layout = build_content_row(
+            programs_container, keygroups_container, right_container
+        )
 
         self.refresh_button = QPushButton("Refresh")
-        self.refresh_button.setToolTip("Re-read the program and sample lists from the sampler")
+        self.refresh_button.setToolTip(
+            "Re-read the program and sample lists from the sampler"
+        )
         self.refresh_button.clicked.connect(self._refresh)
         self.dirty_label = QLabel()
         self.dirty_label.setObjectName("mutedLabel")
@@ -287,8 +306,22 @@ class S950ProgramEditorWindow(QMainWindow):
         bottom_row.addSpacing(12)
         bottom_row.addWidget(close_button)
 
+        # the same Programs / Samples tabs as the S1000/S2000/S3000 editor (there is no Multi)
+        programs_tab_page = QWidget()
+        programs_tab_page.setLayout(content_layout)
+        self.samples_tab = S950SamplesTab(self._controller)
+        self.samples_tab.status_message.connect(
+            lambda message: self.status_bar.showMessage(message, 8000)
+        )
+        self.main_tabs = QTabWidget()
+        # same full-width tab bar as the S3000 editor - installed before any tab is added
+        self.main_tabs.setTabBar(FullWidthTabBar(self.main_tabs))
+        self.main_tabs.addTab(programs_tab_page, "Programs")
+        self._samples_tab_index = self.main_tabs.addTab(self.samples_tab, "Samples")
+        self.main_tabs.currentChanged.connect(self._on_tab_changed)
+
         main_layout = QVBoxLayout()
-        main_layout.addLayout(content_layout, stretch=1)
+        main_layout.addWidget(self.main_tabs, stretch=1)
         main_layout.addLayout(bottom_row)
         container = QWidget()
         container.setLayout(main_layout)
@@ -309,15 +342,21 @@ class S950ProgramEditorWindow(QMainWindow):
         if attr == "name":
             w = QLineEdit()
             w.setMaxLength(NAME_LENGTH)
-            w.editingFinished.connect(lambda w=w: self._on_name_finished(scope, attr, w))
+            w.editingFinished.connect(
+                lambda w=w: self._on_name_finished(scope, attr, w)
+            )
         elif attr in ("soft_sample", "loud_sample"):
             w = QComboBox()
-            w.activated.connect(lambda _i, w=w: self._on_edit(scope, attr, w.currentData()))
+            w.activated.connect(
+                lambda _i, w=w: self._on_edit(scope, attr, w.currentData())
+            )
         elif attr == "voice_out":
             w = QComboBox()
             for value in s950_params.VOICE_OUT_VALUES:
                 w.addItem(format_voice_out(value).capitalize(), value)
-            w.activated.connect(lambda _i, w=w: self._on_edit(scope, attr, w.currentData()))
+            w.activated.connect(
+                lambda _i, w=w: self._on_edit(scope, attr, w.currentData())
+            )
         elif attr in ("positional_xfade", "enable_midi_program"):
             w = QCheckBox()
             w.toggled.connect(lambda v: self._on_edit(scope, attr, bool(v)))
@@ -325,7 +364,9 @@ class S950ProgramEditorWindow(QMainWindow):
             lo, hi = s950_params.KEYGROUP_RANGES[attr]
             w = NoteSpinBox()
             w.setRange(lo, hi)
-            w.setToolTip(_RANGE_TIP.format(lo=midi_note_to_name(lo), hi=midi_note_to_name(hi)))
+            w.setToolTip(
+                _RANGE_TIP.format(lo=midi_note_to_name(lo), hi=midi_note_to_name(hi))
+            )
             w.valueChanged.connect(lambda v: self._on_edit(scope, attr, int(v)))
         elif attr.endswith("_transpose"):
             limit = s950_params.TRANSPOSE_LIMIT_ST
@@ -341,7 +382,9 @@ class S950ProgramEditorWindow(QMainWindow):
             w.valueChanged.connect(lambda v: self._on_edit(scope, attr, round(v * 16)))
         else:
             lo, hi = (
-                s950_params.PROGRAM_RANGES if scope == "program" else s950_params.KEYGROUP_RANGES
+                s950_params.PROGRAM_RANGES
+                if scope == "program"
+                else s950_params.KEYGROUP_RANGES
             )[attr]
             if attr in _KNOB_ATTRS:
                 w = Knob()
@@ -360,7 +403,9 @@ class S950ProgramEditorWindow(QMainWindow):
     def _knob_column(self, scope, attr, text, size=40, *, bold=False):
         knob = self._editor(scope, attr)
         knob.setFixedSize(size, size)
-        column, value_label = build_knob_column(f"<b>{text}</b>" if bold else text, knob)
+        column, value_label = build_knob_column(
+            f"<b>{text}</b>" if bold else text, knob
+        )
         # setValue(0) on a fresh knob emits nothing, so _set_widget fills the readout itself
         knob.setProperty("valueReadout", value_label)
         return column
@@ -387,7 +432,9 @@ class S950ProgramEditorWindow(QMainWindow):
     def _build_program_page(self):
         name_row = self._labeled_row("program", "name", "Name")
         midi_row = self._labeled_row("program", "midi_program_number", "MIDI Program")
-        respond_row = self._labeled_row("program", "enable_midi_program", "Program Change")
+        respond_row = self._labeled_row(
+            "program", "enable_midi_program", "Program Change"
+        )
         respond_row.itemAt(1).widget().setText("Respond to MIDI program change")
         program_card = build_section_card("Program", name_row, midi_row, respond_row)
 
@@ -417,7 +464,7 @@ class S950ProgramEditorWindow(QMainWindow):
         note_row.addWidget(self._editor("kg", "upper_key"))
         note_row.addStretch()
         switch_row = self._labeled_row("kg", "velocity_switch", "Velocity Switch", 100)
-        switch_hint = QLabel(f"{NO_VELOCITY_SWITCH} = off (soft sample only)")
+        switch_hint = QLabel(f"{NO_VELOCITY_SWITCH} = off")
         switch_hint.setObjectName("mutedLabel")
         switch_row.insertWidget(switch_row.count() - 1, switch_hint)
         range_card = build_section_card("Range", note_row, switch_row)
@@ -425,7 +472,11 @@ class S950ProgramEditorWindow(QMainWindow):
             "Filter",
             self._knob_row(
                 "kg",
-                [("filter_key_track", "Key Track"), ("filter_vel", "Velocity"), ("adsr_to_vcf", "Env Amount")],
+                [
+                    ("filter_key_track", "Key Track"),
+                    ("filter_vel", "Velocity"),
+                    ("adsr_to_vcf", "Env Amount"),
+                ],
                 size=56,
                 spacing=24,
             ),
@@ -442,7 +493,12 @@ class S950ProgramEditorWindow(QMainWindow):
             build_centered_row(self.amp_graph),
             self._knob_row(
                 "kg",
-                [("attack", "Attack"), ("decay", "Decay"), ("sustain", "Sustain"), ("release", "Release")],
+                [
+                    ("attack", "Attack"),
+                    ("decay", "Decay"),
+                    ("sustain", "Sustain"),
+                    ("release", "Release"),
+                ],
             ),
         )
         env_filter_card = build_section_card(
@@ -488,14 +544,20 @@ class S950ProgramEditorWindow(QMainWindow):
             sample_column.addWidget(combo)
             top_row = QHBoxLayout()
             top_row.addLayout(sample_column, stretch=1)
-            top_row.addLayout(self._knob_column("kg", f"{prefix}_filter", "Filter", 28, bold=True))
-            top_row.addLayout(self._knob_column("kg", f"{prefix}_loudness", "Loud", 28, bold=True))
+            top_row.addLayout(
+                self._knob_column("kg", f"{prefix}_filter", "Filter", 28, bold=True)
+            )
+            top_row.addLayout(
+                self._knob_column("kg", f"{prefix}_loudness", "Loud", 28, bold=True)
+            )
             page_layout.addLayout(top_row)
             warning = QLabel()
             warning.setObjectName("mutedLabel")
             self._sample_warnings[prefix] = warning
             page_layout.addWidget(warning)
-            page_layout.addLayout(self._labeled_row("kg", f"{prefix}_transpose", "Tune", 80))
+            page_layout.addLayout(
+                self._labeled_row("kg", f"{prefix}_transpose", "Tune", 80)
+            )
             page = QWidget()
             page.setObjectName("transparentContainer")
             page.setLayout(page_layout)
@@ -508,14 +570,22 @@ class S950ProgramEditorWindow(QMainWindow):
             "Velocity",
             self._knob_row(
                 "kg",
-                [("attack_vel", "Attack"), ("release_vel", "Release"), ("loudness_vel", "Loudness")],
+                [
+                    ("attack_vel", "Attack"),
+                    ("release_vel", "Release"),
+                    ("loudness_vel", "Loudness"),
+                ],
             ),
         )
         lfo_card = build_section_card(
             "LFO",
             self._knob_row(
                 "kg",
-                [("lfo_rate", "Rate"), ("lfo_depth", "Depth"), ("lfo_build", "Build-up")],
+                [
+                    ("lfo_rate", "Rate"),
+                    ("lfo_depth", "Depth"),
+                    ("lfo_build", "Build-up"),
+                ],
             ),
             self._knob_row(
                 "kg",
@@ -529,7 +599,11 @@ class S950ProgramEditorWindow(QMainWindow):
             "Pitch Warp",
             self._knob_row(
                 "kg",
-                [("pitch_warp_vel", "Velocity"), ("pitch_warp_offset", "Offset"), ("pitch_warp_recovery", "Recovery")],
+                [
+                    ("pitch_warp_vel", "Velocity"),
+                    ("pitch_warp_offset", "Offset"),
+                    ("pitch_warp_recovery", "Recovery"),
+                ],
             ),
         )
         options = QLabel("-")
@@ -572,7 +646,9 @@ class S950ProgramEditorWindow(QMainWindow):
         self._write_action.triggered.connect(self._write)
         hardware_menu.addAction(self._write_action)
         # the safest possible first write: send the program back exactly as it is
-        self._write_unchanged_action = QAction("Write Program Back Unchanged (test)", self)
+        self._write_unchanged_action = QAction(
+            "Write Program Back Unchanged (test)", self
+        )
         self._write_unchanged_action.setToolTip(
             "Checks the write path without changing anything: the program is sent back as "
             "read, then read again and compared"
@@ -592,6 +668,31 @@ class S950ProgramEditorWindow(QMainWindow):
         editor_action.setShortcut("Ctrl+E")
         editor_action.setEnabled(False)  # this window IS it
         window_menu.addAction(editor_action)
+        window_menu.addSeparator()
+        # Ctrl+2/Ctrl+3, as in the S1000/S2000/S3000 editor (its Ctrl+1 is the Multi tab,
+        # which the S900/S950 doesn't have)
+        programs_tab_action = QAction("Programs Tab", self)
+        programs_tab_action.setShortcut("Ctrl+2")
+        programs_tab_action.triggered.connect(lambda: self.main_tabs.setCurrentIndex(0))
+        window_menu.addAction(programs_tab_action)
+        samples_tab_action = QAction("Samples Tab", self)
+        samples_tab_action.setShortcut("Ctrl+3")
+        samples_tab_action.triggered.connect(
+            lambda: self.main_tabs.setCurrentIndex(self._samples_tab_index)
+        )
+        window_menu.addAction(samples_tab_action)
+
+    def _on_tab_changed(self, index):
+        on_samples = index == self._samples_tab_index
+        # the program-writing buttons only mean something on the Programs tab
+        for widget in (
+            self.dirty_label,
+            self.discard_button,
+            self.restore_button,
+            self.write_button,
+        ):
+            widget.setVisible(not on_samples)
+        self.samples_tab.set_active(on_samples)
 
     # -- state ----------------------------------------------------------------------------------
 
@@ -619,7 +720,9 @@ class S950ProgramEditorWindow(QMainWindow):
         self.discard_button.setEnabled(loaded and not self._writing and bool(changes))
         self.restore_button.setEnabled(idle and self._restore is not None)
         n = len(changes)
-        self.dirty_label.setText(f"{n} unsaved change{'' if n == 1 else 's'}" if n else "")
+        self.dirty_label.setText(
+            f"{n} unsaved change{'' if n == 1 else 's'}" if n else ""
+        )
         self.detail_stack.setEnabled(not self._writing)
         self._dashboard_action.setEnabled(not busy and not self._writing)
         self._dashboard_action.setToolTip(tt.BUSY_BLOCKS_OTHER_WINDOWS if busy else "")
@@ -646,7 +749,6 @@ class S950ProgramEditorWindow(QMainWindow):
         self.detail_stack.setVisible(False)
         self.keygroup_list.clear()
         self.keygroup_range_bar.set_ranges([])
-        self.keygroup_note.setText("")
 
     def _show_details(self):
         self.placeholder.setVisible(False)
@@ -665,6 +767,7 @@ class S950ProgramEditorWindow(QMainWindow):
         self._shown_slot = None
         if self._slot is not None:
             self._wanted_slot = self._slot
+        self.samples_tab.refresh()  # what it read about the samples is about to be re-read
         self._controller.refresh_sample_list(silent=True)
         self.status_bar.showMessage("Reading the program list...", 0)
 
@@ -672,6 +775,11 @@ class S950ProgramEditorWindow(QMainWindow):
         self._have_catalog = True
         self._programs = list(entries)
         keep = self._wanted_slot if self._wanted_slot is not None else self._slot
+        if self._programs and keep not in {slot for slot, _ in self._programs}:
+            # nothing chosen yet (the window just opened), or the chosen program is gone:
+            # open the first one rather than asking the user to pick
+            keep = self._programs[0][0]
+            self._wanted_slot = keep
         self.program_list.blockSignals(True)
         self.program_list.clear()
         select_row = -1
@@ -691,12 +799,11 @@ class S950ProgramEditorWindow(QMainWindow):
             self._show_placeholder("The sampler reports no programs.")
             self.status_bar.showMessage("No programs on the sampler", 0)
         else:
-            self.status_bar.showMessage(f"{n} program{'' if n == 1 else 's'} on the sampler", 0)
-            if select_row < 0:
-                self._show_placeholder("Select a program on the left.")
-            else:
-                self._pump()
-                self._refresh_sample_widgets()
+            self.status_bar.showMessage(
+                f"{n} program{'' if n == 1 else 's'} on the sampler", 0
+            )
+            self._pump()
+            self._refresh_sample_widgets()
 
     def _on_samples_listed(self, entries):
         self._sample_names = [name for _slot, name in entries]
@@ -726,7 +833,12 @@ class S950ProgramEditorWindow(QMainWindow):
         self._inflight_slot = slot
         # whatever was on screen has been confirmed discarded (or was clean) - drop it so
         # nothing can be written to the OLD program while the new one loads
-        self._slot, self._baseline, self._working, self._restore = None, None, None, None
+        self._slot, self._baseline, self._working, self._restore = (
+            None,
+            None,
+            None,
+            None,
+        )
         self._show_placeholder(f"Reading program {slot}...")
         self._update_buttons()
         self._controller.request_program(slot)
@@ -742,7 +854,12 @@ class S950ProgramEditorWindow(QMainWindow):
             self._pump()
             return
         if program is None:
-            self._slot, self._baseline, self._working, self._restore = slot, None, None, None
+            self._slot, self._baseline, self._working, self._restore = (
+                slot,
+                None,
+                None,
+                None,
+            )
             self._show_placeholder(
                 f"Couldn't read program {slot}.\n\nCheck the status bar, then press "
                 "Refresh to try again. ~/.akaisds/akaisds.log has the details."
@@ -798,23 +915,29 @@ class S950ProgramEditorWindow(QMainWindow):
         self._loading = True
         try:
             for attr in s950_params.PROGRAM_FIELDS:
-                self._set_widget(self._editors[("program", attr)], getattr(self._working, attr))
+                self._set_widget(
+                    self._editors[("program", attr)], getattr(self._working, attr)
+                )
         finally:
             self._loading = False
 
     def _fill_keygroup_list(self):
         program = self._working
-        n = program.num_keygroups
-        self.keygroup_note.setText(f"{n} keygroup{'' if n == 1 else 's'} - can't add or remove")
         self.keygroup_list.blockSignals(True)
         self.keygroup_list.clear()
         for index, kg in enumerate(program.keygroups):
             add_keygroup_row(
-                self.keygroup_list, index, kg.lower_key, kg.upper_key, self._refresh_swatch
+                self.keygroup_list,
+                index,
+                kg.lower_key,
+                kg.upper_key,
+                self._refresh_swatch,
             )
         self.keygroup_list.setCurrentRow(0)
         self.keygroup_list.blockSignals(False)
-        self.keygroup_range_bar.set_ranges([(kg.lower_key, kg.upper_key) for kg in program.keygroups])
+        self.keygroup_range_bar.set_ranges(
+            [(kg.lower_key, kg.upper_key) for kg in program.keygroups]
+        )
 
     # The row itself is ui.editor_layout.add_keygroup_row, shared with the S3000 editor. The
     # swatch color comes from the palette, so it can't be a QSS rule: it carries a swatchKind
@@ -852,7 +975,9 @@ class S950ProgramEditorWindow(QMainWindow):
                     self._fill_sample_combo(attr, getattr(kg, attr))
                     self._update_sample_warning(attr, getattr(kg, attr))
                 elif attr.endswith("_transpose"):
-                    self._set_widget(self._editors[("kg", attr)], getattr(kg, attr) / 16)
+                    self._set_widget(
+                        self._editors[("kg", attr)], getattr(kg, attr) / 16
+                    )
                 else:
                     self._set_widget(self._editors[("kg", attr)], getattr(kg, attr))
         finally:
@@ -874,7 +999,11 @@ class S950ProgramEditorWindow(QMainWindow):
             # a name the unit's catalog doesn't have - show it (and flag it) rather than lose it
             combo.addItem(f"{current}  (not on sampler)", current)
         index = next(
-            (i for i in range(combo.count()) if normalise_name(combo.itemData(i)) == normalise_name(current)),
+            (
+                i
+                for i in range(combo.count())
+                if normalise_name(combo.itemData(i)) == normalise_name(current)
+            ),
             0,
         )
         combo.setCurrentIndex(index)
@@ -891,7 +1020,9 @@ class S950ProgramEditorWindow(QMainWindow):
             return
         self._loading = True
         try:
-            kg = self._working.keygroups[min(self._kg_row, self._working.num_keygroups - 1)]
+            kg = self._working.keygroups[
+                min(self._kg_row, self._working.num_keygroups - 1)
+            ]
             for attr in ("soft_sample", "loud_sample"):
                 self._fill_sample_combo(attr, getattr(kg, attr))
                 self._update_sample_warning(attr, getattr(kg, attr))
@@ -903,12 +1034,18 @@ class S950ProgramEditorWindow(QMainWindow):
         # useful thing the editor can point out. An empty name is "no sample" (normal for an
         # unused loud sample), and without a catalog there's nothing to compare against.
         known = {normalise_name(n) for n in self._sample_names}
-        return bool(name.strip()) and self._have_catalog and normalise_name(name) not in known
+        return (
+            bool(name.strip())
+            and self._have_catalog
+            and normalise_name(name) not in known
+        )
 
     def _update_sample_warning(self, attr, name):
         label = self._sample_warnings[attr.removesuffix("_sample")]
         label.setText(
-            "Not on the sampler - programs find samples by name" if self._is_missing(name) else ""
+            "Not on the sampler - programs find samples by name"
+            if self._is_missing(name)
+            else ""
         )
 
     # -- editing --------------------------------------------------------------------------------
@@ -985,7 +1122,9 @@ class S950ProgramEditorWindow(QMainWindow):
         problems += self._name_clash_problems(edited)
         if problems:
             QMessageBox.warning(
-                self, "Can't write this program", "Nothing was written:\n\n" + "\n".join(problems)
+                self,
+                "Can't write this program",
+                "Nothing was written:\n\n" + "\n".join(problems),
             )
             return
         if not self._confirm_first_write():
@@ -1006,10 +1145,13 @@ class S950ProgramEditorWindow(QMainWindow):
         clash = [
             slot
             for slot, name in self._programs
-            if slot != self._slot and normalise_name(name) == normalise_name(program.name)
+            if slot != self._slot
+            and normalise_name(name) == normalise_name(program.name)
         ]
         if program.name.strip() and clash:
-            return [f"Another program (slot {clash[0]}) is already called '{program.name.strip()}'."]
+            return [
+                f"Another program (slot {clash[0]}) is already called '{program.name.strip()}'."
+            ]
         return []
 
     def _confirm_first_write(self):
@@ -1057,7 +1199,9 @@ class S950ProgramEditorWindow(QMainWindow):
         self.status_bar.showMessage(message, 15000)
         if verified:
             # a renamed program changes the list
-            QTimer.singleShot(50, lambda: self._controller.refresh_sample_list(silent=True))
+            QTimer.singleShot(
+                50, lambda: self._controller.refresh_sample_list(silent=True)
+            )
         else:
             QMessageBox.warning(
                 self,
@@ -1109,5 +1253,6 @@ class S950ProgramEditorWindow(QMainWindow):
             theme.notifier.changed.disconnect(self._refresh_themed_swatches)
         except (RuntimeError, TypeError):
             pass
+        self.samples_tab.disconnect_controller()
         self._main_window.show()
         super().closeEvent(event)

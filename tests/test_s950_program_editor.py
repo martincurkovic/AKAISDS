@@ -127,12 +127,66 @@ def _write_and_wait(win):
 # --- viewing -----------------------------------------------------------------------------------
 
 
-def test_it_lists_the_programs_on_construction(win):
+def test_it_lists_the_programs_and_opens_the_first_one_on_construction(win):
     _wait_listed(win)
     assert [win.program_list.item(i).data(Qt.ItemDataRole.UserRole) for i in range(2)] == [0, 1]
     assert "DRUMS" in win.program_list.item(0).text()
-    assert win.placeholder.isHidden() is False  # nothing selected yet
-    assert win.detail_stack.isHidden()
+    # no "select a program" prompt: the first program is selected and shown by itself
+    assert win.program_list.currentRow() == 0
+    assert wait_until(lambda: win._working is not None and win._slot == 0)
+    assert win.placeholder.isHidden() and not win.detail_stack.isHidden()
+    assert win._editors[("program", "name")].text() == "DRUMS"
+
+
+def test_the_window_says_it_is_reading_rather_than_asking_for_a_selection(win):
+    assert "Reading" in win.placeholder.text()
+    assert "Select a program" not in win.placeholder.text()
+
+
+def test_an_empty_sampler_still_says_so(qapp, monkeypatch, tmp_path):
+    rig = _build(qapp, monkeypatch, FakeS950(samples={}, programs={}))
+    window = S950ProgramEditorWindow(_Main(), rig.controller)
+    assert wait_until(lambda: "no programs" in window.placeholder.text())
+    window._busy_timer.stop()
+    window.close()
+    window.deleteLater()
+
+
+def test_the_keygroup_column_has_no_count_note(win):
+    _show(win, 0)
+    assert not hasattr(win, "keygroup_note")
+
+
+def test_the_editor_has_programs_and_samples_tabs_like_the_s3000_editor(win):
+    assert [win.main_tabs.tabText(i) for i in range(win.main_tabs.count())] == ["Programs", "Samples"]
+    assert win.main_tabs.currentIndex() == 0
+
+
+def test_the_program_write_buttons_only_show_on_the_programs_tab(win):
+    _show(win, 0)
+    win.main_tabs.setCurrentIndex(win._samples_tab_index)
+    for w in (win.write_button, win.discard_button, win.restore_button, win.dirty_label):
+        assert w.isHidden()
+    assert not win.refresh_button.isHidden()
+    win.main_tabs.setCurrentIndex(0)
+    for w in (win.write_button, win.discard_button, win.restore_button):
+        assert not w.isHidden()
+
+
+def test_unsaved_program_edits_survive_a_visit_to_the_samples_tab(win):
+    _show(win, 0)
+    _kg(win, "attack").setValue(40)
+    win.main_tabs.setCurrentIndex(win._samples_tab_index)
+    win.main_tabs.setCurrentIndex(0)
+    assert win.is_dirty() and _kg(win, "attack").value() == 40
+
+
+def test_the_samples_tab_is_only_active_while_it_is_showing(win):
+    assert win.samples_tab._active is False
+    win.main_tabs.setCurrentIndex(win._samples_tab_index)
+    assert win.samples_tab._active is True
+    win.main_tabs.setCurrentIndex(0)
+    assert win.samples_tab._active is False
 
 
 def test_selecting_a_program_shows_it(win):

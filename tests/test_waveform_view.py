@@ -1335,3 +1335,64 @@ def test_set_playhead_and_clear_playhead(qapp):
     assert view._playhead_frame == 1234
     view.clear_playhead()
     assert view._playhead_frame is None
+
+
+# --- read-only display options (the S900/S950 Samples tab) ---------------------------------------
+
+
+def _view_with_header(qapp):
+    view = WaveformView()
+    view.resize(800, 180)
+    view.set_header(1000, 100, 400, 800, 900)
+    return view
+
+
+def test_markers_can_be_grabbed_by_default(qapp):
+    view = _view_with_header(qapp)
+    assert view._markers_within_hit_radius(view._x_for("start")) == ["start"]
+
+
+def test_locked_markers_cannot_be_grabbed_or_dragged(qapp):
+    view = _view_with_header(qapp)
+    view.set_markers_locked(True)
+    for name in _MARKER_ORDER:
+        assert view._markers_within_hit_radius(view._x_for(name)) == []
+    committed = []
+    view.marker_committed.connect(lambda *a: committed.append(a))
+    from PySide6.QtCore import QPointF
+    from PySide6.QtGui import QMouseEvent
+
+    x = view._x_for("loop_end")
+    for kind, buttons in (
+        (QMouseEvent.Type.MouseButtonPress, Qt.MouseButton.LeftButton),
+        (QMouseEvent.Type.MouseMove, Qt.MouseButton.LeftButton),
+        (QMouseEvent.Type.MouseButtonRelease, Qt.MouseButton.NoButton),
+    ):
+        pos = QPointF(x + (30 if kind == QMouseEvent.Type.MouseMove else 0), 50)
+        event = QMouseEvent(kind, pos, pos, Qt.MouseButton.LeftButton, buttons, Qt.KeyboardModifier.NoModifier)
+        getattr(view, {QMouseEvent.Type.MouseButtonPress: "mousePressEvent", QMouseEvent.Type.MouseMove: "mouseMoveEvent", QMouseEvent.Type.MouseButtonRelease: "mouseReleaseEvent"}[kind])(event)
+    assert view.markers() == {"start": 100, "loop_start": 400, "loop_end": 800, "end": 900}
+    assert committed == []
+
+
+def test_unlocking_makes_markers_grabbable_again(qapp):
+    view = _view_with_header(qapp)
+    view.set_markers_locked(True)
+    view.set_markers_locked(False)
+    assert view._markers_within_hit_radius(view._x_for("start")) == ["start"]
+
+
+def test_locking_drops_a_drag_in_progress_and_the_hover_highlight(qapp):
+    view = _view_with_header(qapp)
+    view._dragging = "start"
+    view._hover_marker = "end"
+    view.set_markers_locked(True)
+    assert view._dragging is None and view._hover_marker is None
+
+
+def test_the_placeholder_text_can_be_replaced(qapp):
+    view = WaveformView()
+    assert "freeze the interface" in view._placeholder_text  # the S1000/S2000/S3000 default
+    view.set_placeholder_text("Select a sample on the left")
+    assert view._placeholder_text == "Select a sample on the left"
+    view.grab()  # paints without error in the placeholder state

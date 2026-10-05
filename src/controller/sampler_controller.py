@@ -15,6 +15,9 @@ class SamplerController(QObject):
     # if the read failed, so a waiting window never hangs on a lost reply
     program_slots_updated = Signal(list)
     s950_program_received = Signal(int, object)
+    # S900/S950 only: one sample's parameters read by request_sample_params():
+    # (slot, core.s950_sysex.SampleParams) - or (slot, None) if the read failed
+    s950_sample_params_received = Signal(int, object)
     # write_program()'s outcome: (slot, verified, Program the sampler holds now | None,
     # message). verified means the read-back matched what was sent; False with a Program
     # means "written, but the sampler shows something different" (the Program is what it
@@ -211,6 +214,12 @@ class SamplerController(QObject):
         # self._send_rslist_request() # cant send this now, message collision if send them b2b
         if not silent:
             self.status_changed.emit("Requesting available memory...")
+
+    def request_sample_params(self, slot):
+        # S900/S950 only: read one sample's SPRM (length, rate, replay mode, loop, ...)
+        if not self._is_s950():
+            return
+        self._s950.request_sample_params(slot)
 
     def is_s950_idle(self):
         # True when nothing at all is on the S900/S950's wire (a catalog read

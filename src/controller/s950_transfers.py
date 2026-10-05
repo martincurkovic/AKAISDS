@@ -53,7 +53,7 @@ MIN_SAMPLE_RATE_HZ = round(1e9 / s.MAX_PERIOD_NS)  # 2 kHz - the dump header's l
 MAX_SAMPLE_RATE_HZ = round(1e9 / s.MIN_PERIOD_NS)  # not what the hardware plays
 MIDI_BYTES_PER_SECOND = 3125
 
-_BUSY_OPS = ("send", "receive", "info", "rename", "program", "program_write")
+_BUSY_OPS = ("send", "receive", "info", "rename", "program", "program_write", "sample_read")
 #: where the original of every program is saved before it is overwritten
 BACKUP_DIR = Path.home() / ".akaisds" / "s950_backups"
 
@@ -265,6 +265,22 @@ class S950Transfers(QObject):
             s.FUNC_RPRGM, slot, s.FUNC_PRGM, self._publish_program, f"program {slot}"
         )
 
+    def request_sample_params(self, slot):
+        """Read sample `slot`'s SPRM and report it on the controller's
+        `s950_sample_params_received` - `(slot, SampleParams)`, or `(slot, None)` on any
+        failure (busy, no input, timeout, unreadable, cancel)."""
+        if not self._begin("sample_read", "Reading a sample", silent=True):
+            self._c.s950_sample_params_received.emit(slot, None)
+            return
+        self._program_slot = slot  # the slot of whichever read is in flight
+        self._request(
+            s.FUNC_RSPRM,
+            slot,
+            s.FUNC_SPRM,
+            self._publish_sample_params,
+            f"sample {slot}'s parameters",
+        )
+
     def write_program(self, slot, baseline, edited):
         """Write the editable fields of `edited` that differ from `baseline` onto the
         program in `slot`; reports on the controller's `s950_program_written`.
@@ -334,6 +350,8 @@ class S950Transfers(QObject):
             self._c.status_changed.emit("Cancelled")
             if op == "program":
                 self._c.s950_program_received.emit(program_slot, None)
+            if op == "sample_read":
+                self._c.s950_sample_params_received.emit(program_slot, None)
             if op == "program_write":
                 self._c.s950_program_written.emit(
                     program_slot,
@@ -470,6 +488,8 @@ class S950Transfers(QObject):
             self._c.s950_program_received.emit(program_slot, None)
         if op == "program_write":
             self._c.s950_program_written.emit(program_slot, False, None, message)
+        if op == "sample_read":
+            self._c.s950_sample_params_received.emit(program_slot, None)
         if op == "send":
             self._c.transfer_finished.emit(False)
         elif op == "receive":
@@ -818,6 +838,19 @@ class S950Transfers(QObject):
         self._reset()
         self._c.s950_program_received.emit(slot, program)
         self._c.status_changed.emit(f"Read program {slot}: {program.name.strip()}")
+
+    def _publish_sample_params(self, message):
+        slot = message.num
+        try:
+            params = s.SampleParams.from_payload(message.payload)
+        except ValueError as e:
+            debug_log.get_logger().warning(
+                f"S950Transfers: unreadable SPRM for sample {slot} ({len(message.payload)} bytes): {e}"
+            )
+            self._fail(f"Couldn't read sample {slot}'s parameters: {e}")
+            return
+        self._reset()
+        self._c.s950_sample_params_received.emit(slot, params)
 
     # -- program write -----------------------------------------------------------------
 

@@ -314,6 +314,25 @@ behaviours were hardware-verified; `dxzl/akai-s950` has NO licence, so don't cop
     its value readout is filled explicitly in `_set_widget` (a knob at 0 once showed "-"). The one
     deliberate difference: no Multi/Programs/Samples tab bar (there is only one page - a one-tab bar
     would be noise); if an S950 Samples tab is ever built, add `FullWidthTabBar` then.
+  - **Tabs, like the S3000 editor (Programs | Samples; no Multi)**, Ctrl+2/Ctrl+3. The program-write buttons are
+    hidden on the Samples tab. **The first program is auto-selected** when the editor opens (and whenever the chosen
+    one vanishes from the catalog) - the placeholder before the catalog arrives says "Reading the program list...",
+    never "select a program". The "N keygroups" note under the keygroup list was removed at the user's request.
+  - **Samples tab = `ui/s950_samples_tab.py`'s `S950SamplesTab`, a self-contained widget, READ-ONLY** (list with
+    durations, a `WaveformView`, a details card). It is built from the same `editor_layout` pieces (sample list row,
+    `build_samples_page`, `build_waveform_scrollbar`/`sync_waveform_scrollbar`, now shared with the S3000 editor, which
+    was verified pixel-identical after moving them). It only ever READS: no sample-parameter write exists for the S950
+    because start/end/loop semantics are inferred and some SPRM changes sit in an "active edit buffer" (see the test
+    plan's guesses). Rename a sample from the Dashboard. Mechanics worth knowing: (1) per-sample SPRM reads
+    (`S950Transfers.request_sample_params` -> `s950_sample_params_received(slot, SampleParams | None)`, op
+    `"sample_read"`, in `_BUSY_OPS`) run one at a time, ONLY while the tab is active (`set_active`), selected sample
+    first, and a failed slot is remembered and never retried until `refresh()`; (2) audio is received ASYNCHRONOUSLY
+    through `receive_samples` into a temp WAV (the S3000 editor freezes the window for this; the S950 engine is
+    event-driven so nothing here blocks), shown only if its sample is still selected when it lands, temp file always
+    removed; the Dashboard's own receive handlers see the same signals and are harmless while it is hidden; (3) a load
+    or read that finds the wire busy RETRIES (`_RETRY_MS`) rather than failing; (4) a changed catalog name drops that
+    sample's cached SPRM/audio; (5) `WaveformView.set_markers_locked(True)` (new, opt-in) keeps the markers drawn but
+    un-grabbable, and `set_placeholder_text()` replaces the S3000 default that promises a freezing load.
   - **Reads**: `S950Transfers.request_program(slot)` (op `"program"`) -> `SamplerController.
     s950_program_received(slot, Program | None)` - **`None` on ANY failure** so a waiting window never
     hangs. Every catalog read also emits `program_slots_updated`. A catalog read is NOT "busy" to
