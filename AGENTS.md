@@ -527,6 +527,26 @@ the Program Editor - `sampler_controller.py`'s own unhandled-exception
 backstops log here too. Any new unhandled-exception backstop anywhere in
 this app should log here, not `print()`.
 
+**Bug-report plumbing (added 2026-10-05)** - what a user's `akaisds.log` now carries beyond per-operation lines:
+- `core/diagnostics.py`: `install_crash_handlers()` (called first thing in `main.py`) logs unhandled exceptions
+  (`sys.excepthook`, `threading.excepthook`) and every Qt warning/critical (`qInstallMessageHandler`, logged as `Qt: ...`)
+  at CRITICAL/WARNING, and enables `faulthandler` into `~/.akaisds/crash.log` for native crashes (only a signal
+  handler can write those, so they can't go in the main log; a crash in the previous session is flagged in the
+  log at next startup). `log_session_config(reason)` writes one `config (...)` line: Sampler Type, ports,
+  channel, shared transport, theme - at startup and after each Settings dialog closes (Dashboard AND editor).
+- `ui/diagnostics_ui.py`: `install_dialog_logging()` wraps the static `QMessageBox.warning/critical/information/
+  question` so every dialog's title/text and the button pressed is logged (`dialog [...]`). It does NOT see
+  `QMessageBox(...)` instances (none exist today - if you add one, log it yourself). Also the Help > Open Log
+  Folder action (and in the S950 editor's Hardware menu, which has no Help menu).
+- `SamplerController` logs every distinct `status_changed` message (`status: ...`) - the text users quote.
+- The S950 editor logs what the USER did (`S950Editor: ...`: open/close, tab, program selected, refresh, read
+  result, discard, write requested/refused/result); the wire side is `S950Transfers`. Per-keystroke edits are not
+  logged on purpose (the change list is logged when a write starts).
+- Send ACKs are NOT logged per packet any more (a long sample would be tens of thousands of lines and rotate the
+  evidence away): only the header's and first data packet's ACK numbers, plus warnings for stray/mismatched/slow
+  (>1 s) ACKs and the per-unit summary. Log rotation is 8 MB x 3 backups.
+- Not done: logging the sampler's identity/firmware at editor open, and the S1000 gating state at open.
+
 ## MIDI transport consolidation (`core/midi_transport.py`)
 
 Default as of real-hardware validation. The Dashboard
@@ -1027,7 +1047,9 @@ describes - don't add another).
 
 ## Testing
 
-See `TESTING.md`. `uv run pytest tests/ -v` runs everything in well under
+See `TESTING.md`. `tests/conftest.py` points `debug_log.LOG_PATH` at a temp dir for the whole run (removed at the end),
+so the suite never writes to the real `~/.akaisds/akaisds.log` - don't import-time-cache `LOG_PATH` somewhere
+that runs before conftest does. `uv run pytest tests/ -v` runs everything in well under
 10 seconds. Tests force `QT_QPA_PLATFORM=offscreen` via
 `tests/conftest.py`'s own unconditional assignment - NOT the per-file
 `os.environ.setdefault(...)` calls each test module also has, which are
