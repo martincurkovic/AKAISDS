@@ -504,6 +504,24 @@ elsewhere in the suite (a confirmed, bisection-proven instability from
 mixing raw OS threads with this suite's own Qt threading); mock-based +
 sequential tests replaced it.
 
+## Shared editor layout (`ui/editor_layout.py`)
+
+Both program editors - `ProgramEditorWindow` (S1000/S2000/S3000) and `S950ProgramEditorWindow` (S900/S950) -
+build from the SAME helpers in `ui/editor_layout.py` (plus `ui/qt_helpers.py`'s `build_section_card`/
+`build_scroll_area`): knob columns (`build_knob_column`, `build_knob_value_row`), the labeled combo/knob
+columns, `equalize_card_heights`, `build_paired_row`/`build_centered_row`, the Zone card shell
+(`build_zone_card`), the Programs | Keygroups | detail skeleton (`build_list_column`, `build_content_row`)
+and the keygroup list row with its colored swatch (`add_keygroup_row`). They are plain functions - no `self`,
+no hardware knowledge - moved out of `ProgramEditorWindow` unchanged (its old `_build_knob_column` etc.
+methods are gone; call the functions). **Change a measurement there and BOTH editors change - re-check
+both.** Moving them was verified by rendering the S3000 editor from the old and new code (Programs program
+page, Programs keygroup page, Multi, Samples) and comparing pixel by pixel: identical.
+
+The windows themselves stay separate classes on purpose - the S3000's edits write each field as it changes
+through `BridgeWorker`, the S950's are staged and written whole once (see the S900/S950 section). Swatch
+colouring (`_refresh_swatch`, recoloured on `theme.notifier.changed`) is still per-window, because the
+S3000's also covers its Samples-tab marker swatches; the row builder takes it as a callback.
+
 ## Program Editor UI: section cards, scroll areas, busy indicator
 
 Program/Keygroup tabs are built from `_build_section_card(title,
