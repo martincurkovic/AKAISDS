@@ -756,10 +756,41 @@ def test_s950_send_is_enabled_with_files_and_an_input(s950_dashboard):
     assert d.btn_send.toolTip() == ""
 
 
-def test_s950_disables_the_editor_with_an_s950_specific_tooltip(s950_dashboard):
-    # ports ARE set here, so only the model can be the reason
+def test_s950_enables_the_viewer_with_a_read_only_tooltip(s950_dashboard):
+    assert s950_dashboard.btn_open_editor.isEnabled() is True
+    assert "read-only" in s950_dashboard.btn_open_editor.toolTip()
+
+
+def test_s950_viewer_needs_both_ports(s950_dashboard):
+    s950_dashboard.midi_manager.input_name = None
+    s950_dashboard._update_open_editor_enabled()
     assert s950_dashboard.btn_open_editor.isEnabled() is False
-    assert "S900/S950" in s950_dashboard.btn_open_editor.toolTip()
+    assert "Settings" in s950_dashboard.btn_open_editor.toolTip()
+
+
+def test_s950_opens_the_viewer_on_the_shared_controller_not_a_bridge(
+    s950_dashboard, monkeypatch
+):
+    from ui import dashboard as dashboard_module
+
+    opened = []
+
+    class _StubViewer:
+        def __init__(self, main_window, controller):
+            opened.append((main_window, controller))
+
+        def show(self):
+            pass
+
+    monkeypatch.setattr(dashboard_module, "S950ProgramViewerWindow", _StubViewer)
+    monkeypatch.setattr(
+        dashboard_module.program_editor_bridge,
+        "connect",
+        lambda *a, **k: pytest.fail("the S900/S950 has no S3kBridge"),
+    )
+    s950_dashboard.open_program_editor()
+    assert len(opened) == 1
+    assert opened[0][1] is s950_dashboard.sampler_controller
 
 
 def test_s950_slot_list_uses_the_real_slot_numbers_and_cant_delete(s950_dashboard):
@@ -820,17 +851,24 @@ def test_leaving_s950_keeps_send_available_without_a_queue_change(s950_dashboard
     assert d.btn_send.toolTip() == ""
 
 
-def test_open_program_editor_refuses_on_s950_without_touching_the_bridge(
+def test_s950_viewer_refuses_without_a_midi_input_and_never_touches_a_bridge(
     s950_dashboard, monkeypatch
 ):
     from core import program_editor_bridge
+    from ui import dashboard as dashboard_module
 
     def _must_not_connect(*_a, **_k):
         raise AssertionError("connected a bridge for an S900/S950")
 
     monkeypatch.setattr(program_editor_bridge, "connect", _must_not_connect)
+    monkeypatch.setattr(
+        dashboard_module,
+        "S950ProgramViewerWindow",
+        lambda *a, **k: pytest.fail("opened a viewer with no MIDI input"),
+    )
+    s950_dashboard.midi_manager.input_name = None  # the unit answers on the input
     s950_dashboard.open_program_editor()
-    assert "S900/S950" in s950_dashboard.status_bar.currentMessage()
+    assert "MIDI input" in s950_dashboard.status_bar.currentMessage()
 
 
 def test_s950_experimental_warning_is_shown_once_then_remembered(

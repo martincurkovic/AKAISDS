@@ -9,6 +9,12 @@ class SamplerController(QObject):
     # S900/S950 only: [(slot, name)] - its slots are sparse, so the list-index
     # == sample number assumption sample_list_updated carries doesn't hold
     sample_slots_updated = Signal(list)
+    # S900/S950 only: the catalog's programs as [(slot, name)] (emitted with
+    # every catalog read, alongside sample_slots_updated), and one program read
+    # by request_program(): (slot, core.s950_program.Program) - or (slot, None)
+    # if the read failed, so a waiting window never hangs on a lost reply
+    program_slots_updated = Signal(list)
+    s950_program_received = Signal(int, object)
     status_changed = Signal(str)
     transfer_progress = Signal(int, int)  # (packets sent so far, total packets)
     unit_progress = Signal(float)
@@ -200,6 +206,18 @@ class SamplerController(QObject):
         # self._send_rslist_request() # cant send this now, message collision if send them b2b
         if not silent:
             self.status_changed.emit("Requesting available memory...")
+
+    def is_s950_idle(self):
+        # True when nothing at all is on the S900/S950's wire (a catalog read
+        # counts, unlike is_transfer_busy) - what the program viewer waits for
+        return self._s950_engine is None or self._s950_engine.idle
+
+    def request_program(self, slot):
+        # S900/S950 only (the Akai family's programs go through the Program
+        # Editor's own bridge): read one whole program + keygroups
+        if not self._is_s950():
+            return
+        self._s950.request_program(slot)
 
     def delete_sample(self, sample_number, channel=None):
         if self._s950_not_supported(

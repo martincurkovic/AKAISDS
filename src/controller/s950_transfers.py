@@ -40,7 +40,7 @@ import time
 
 from PySide6.QtCore import QObject, QTimer
 
-from core import debug_log, s950_sysex as s, sds_encoder
+from core import debug_log, s950_program, s950_sysex as s, sds_encoder
 
 #: sample numbers the S950 has (its catalog uses one byte, the dump header 14 bits)
 SLOT_COUNT = 100
@@ -50,7 +50,7 @@ MIN_SAMPLE_RATE_HZ = round(1e9 / s.MAX_PERIOD_NS)  # 2 kHz - the dump header's l
 MAX_SAMPLE_RATE_HZ = round(1e9 / s.MIN_PERIOD_NS)  # not what the hardware plays
 MIDI_BYTES_PER_SECOND = 3125
 
-_BUSY_OPS = ("send", "receive", "info", "rename")
+_BUSY_OPS = ("send", "receive", "info", "rename", "program")
 
 
 def clamp_sample_rate(hz):
@@ -162,6 +162,8 @@ class S950Transfers(QObject):
         self._progress_emit = None
         # info / rename
         self._rename_to = None
+        # program read
+        self._program_slot = None
 
         self._reply_timer = self._make_timer(self._on_reply_timeout)
         self._step_timer = self._make_timer(self._run_step)
@@ -180,6 +182,12 @@ class S950Transfers(QObject):
     @property
     def busy(self):
         return self._op in _BUSY_OPS
+
+    @property
+    def idle(self):
+        # stricter than `busy`: also false during a plain catalog read, which
+        # is not a "transfer" (the Dashboard stays usable) but still owns the wire
+        return self._op is None
 
     def refresh_catalog(self, silent=False):
         if not self._begin("catalog", "Refreshing the sample list", silent):
@@ -235,11 +243,25 @@ class S950Transfers(QObject):
             s.FUNC_RSPRM, slot, s.FUNC_SPRM, self._apply_rename, f"sample {slot}'s parameters"
         )
 
+    def request_program(self, slot):
+        """Read program `slot` (RPRGM -> PRGM) and report it on the controller's
+        `s950_program_received` - `(slot, Program)`, or `(slot, None)` on any failure."""
+        if not self._begin("program", "Reading a program"):
+            # busy (or no MIDI input): the caller is waiting for an answer
+            self._c.s950_program_received.emit(slot, None)
+            return
+        self._program_slot = slot
+        self._c.status_changed.emit(f"Reading program {slot}...")
+        self._request(
+            s.FUNC_RPRGM, slot, s.FUNC_PRGM, self._publish_program, f"program {slot}"
+        )
+
     def cancel(self):
         """Abort whatever is running. Returns True if something was."""
         if self._op is None:
             return False
         op, phase = self._op, self._phase
+        program_slot = self._program_slot
         if op == "receive" and phase == "dump":
             # tell the unit to stop streaming (the standard "abort dump")
             self._send_quietly(s.build_handshake(s.CODE_ASD))
@@ -260,6 +282,8 @@ class S950Transfers(QObject):
             self._c.receive_finished.emit(False)
         else:
             self._c.status_changed.emit("Cancelled")
+            if op == "program":
+                self._c.s950_program_received.emit(program_slot, None)
         return True
 
     def handle_sysex(self, data):
@@ -302,6 +326,7 @@ class S950Transfers(QObject):
         self._rx_path = None
         self._catalog_then = None
         self._rename_to = None
+        self._program_slot = None
         self._step_fn = None
 
     def _stop_timers(self):
@@ -373,11 +398,14 @@ class S950Transfers(QObject):
     def _fail(self, message):
         debug_log.get_logger().warning(f"S950Transfers: {self._op} failed: {message}")
         op = self._op
+        program_slot = self._program_slot
         self._stop_timers()
         self._pending = None
         self._queue = []
         self._reset()
         self._c.status_changed.emit(message)
+        if op == "program":
+            self._c.s950_program_received.emit(program_slot, None)
         if op == "send":
             self._c.transfer_finished.emit(False)
         elif op == "receive":
@@ -461,6 +489,7 @@ class S950Transfers(QObject):
         self._silent = False
         self._reset()
         self._c.sample_slots_updated.emit(list(self.samples))
+        self._c.program_slots_updated.emit(list(self.programs))
         if not silent:
             n = len(self.samples)
             self._c.status_changed.emit(f"{n} sample{'' if n == 1 else 's'} on the S900/S950")
@@ -704,6 +733,27 @@ class S950Transfers(QObject):
         self._c.sample_received.emit(path)
         self._phase = "between"
         self._after(300, self._next_receive)
+
+    # -- program read ----------------------------------------------------------------
+
+    def _publish_program(self, message):
+        slot = message.num
+        try:
+            program = s950_program.Program.from_payload(message.payload)
+        except ValueError as e:
+            debug_log.get_logger().warning(
+                f"S950Transfers: unreadable program {slot} ({len(message.payload)} bytes, "
+                f"{e}): {bytes(message.payload).hex(' ')}"
+            )
+            self._fail(f"Couldn't read program {slot}: {e}")
+            return
+        debug_log.get_logger().info(
+            f"S950Transfers: read program {slot} {program.name!r}: "
+            f"{program.num_keygroups} keygroup(s), {len(message.payload)} payload bytes"
+        )
+        self._reset()
+        self._c.s950_program_received.emit(slot, program)
+        self._c.status_changed.emit(f"Read program {slot}: {program.name.strip()}")
 
     # -- info / rename ---------------------------------------------------------------
 

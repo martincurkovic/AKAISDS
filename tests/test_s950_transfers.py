@@ -582,3 +582,96 @@ def test_delete_is_refused_on_the_wire(rig):
     rig.controller.delete_sample(1)
     assert rig.midi.sent == []
     assert rig.rec.status_has("front panel")
+
+
+# --- program read (Stage 4) ----------------------------------------------------------------------
+
+
+class _ProgramRecorder:
+    def __init__(self, controller):
+        self.received = []
+        self.listed = []
+        controller.s950_program_received.connect(lambda slot, p: self.received.append((slot, p)))
+        controller.program_slots_updated.connect(self.listed.append)
+
+
+def test_request_program_reads_a_whole_program(rig):
+    rec = _ProgramRecorder(rig.controller)
+    rig.controller.request_program(0)
+    assert rig.controller.is_transfer_busy() is True  # a read blocks other windows' MIDI use
+    assert wait_until(lambda: rec.received)
+    slot, program = rec.received[0]
+    assert slot == 0 and program.name == "DRUMS"
+    assert [(k.lower_key, k.upper_key, k.soft_sample) for k in program.keygroups] == [
+        (24, 59, "KICK"),
+        (60, 127, "SNARE"),
+    ]
+    assert rig.midi.sent[-1][2] == s.FUNC_RPRGM
+    assert rig.controller.is_transfer_busy() is False
+    assert rig.engine.idle
+
+
+def test_request_program_for_an_empty_slot_times_out_with_none(rig):
+    rec = _ProgramRecorder(rig.controller)
+    rig.engine.reply_timeout_ms = 30
+    rig.controller.request_program(9)  # the fake stays silent for an empty slot
+    assert wait_until(lambda: rec.received)
+    assert rec.received == [(9, None)]
+    assert rig.rec.status_has("No reply")
+    assert rig.rec.status_has("program 9")
+    assert rig.engine.idle
+
+
+def test_request_program_while_busy_answers_none_and_leaves_the_running_op_alone(rig):
+    rec = _ProgramRecorder(rig.controller)
+    rig.controller.refresh_sample_list()
+    assert rig.engine._op == "catalog"
+    rig.controller.request_program(0)
+    assert rec.received == [(0, None)]
+    assert rig.engine._op == "catalog"
+    assert wait_until(lambda: rig.rec.slots)  # the catalog read still completes
+
+
+def test_request_program_without_an_input_answers_none(qapp, monkeypatch):
+    r = _build(qapp, monkeypatch, FakeS950(), input_name=None)
+    rec = _ProgramRecorder(r.controller)
+    r.controller.request_program(0)
+    assert rec.received == [(0, None)]
+    assert r.midi.sent == []
+
+
+def test_an_unreadable_program_reports_none_and_logs_the_bytes(rig, monkeypatch):
+    rec = _ProgramRecorder(rig.controller)
+    rig.fake.programs[5] = rig.fake.programs[0]
+    monkeypatch.setattr(
+        type(rig.fake.programs[5]), "to_payload", lambda self: b"\x00" * 10
+    )
+    rig.controller.request_program(5)
+    assert wait_until(lambda: rec.received)
+    assert rec.received == [(5, None)]
+    assert rig.rec.status_has("Couldn't read program 5")
+    assert rig.engine.idle
+
+
+def test_cancelling_a_program_read_answers_none(rig):
+    rec = _ProgramRecorder(rig.controller)
+    rig.controller.request_program(0)
+    assert rig.engine.cancel() is True
+    assert rec.received == [(0, None)]
+    assert rig.engine.idle
+
+
+def test_catalog_refresh_also_publishes_the_programs(rig):
+    rec = _ProgramRecorder(rig.controller)
+    rig.controller.refresh_sample_list()
+    assert wait_until(lambda: rec.listed)
+    assert rec.listed[-1] == [(0, "DRUMS"), (1, "PAD PROG")]
+
+
+def test_is_s950_idle_is_stricter_than_is_transfer_busy(rig):
+    assert rig.controller.is_s950_idle()
+    rig.controller.refresh_sample_list()
+    assert rig.controller.is_transfer_busy() is False  # a catalog read isn't a "transfer"...
+    assert rig.controller.is_s950_idle() is False  # ...but it owns the wire
+    assert wait_until(lambda: rig.rec.slots)
+    assert rig.controller.is_s950_idle()

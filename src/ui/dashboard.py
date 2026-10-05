@@ -30,6 +30,7 @@ from ui.qt_helpers import load_colored_pixmap
 from ui.settings_dialog import MidiSettingsDialog
 from ui.drop_list_widget import DropListWidget
 from ui.program_editor_window import ProgramEditorWindow
+from ui.s950_program_viewer import S950ProgramViewerWindow
 from ui.sample_settings_dialog import SampleSettingsDialog
 from ui.sample_info_dialog import SampleInfoDialog
 from ui.slice_editor_window import SliceEditorWindow
@@ -343,9 +344,18 @@ class TransferDashboard(QWidget):
         main_window = self.window()
         sampler_model = self.sampler_controller.sampler_model
         if sampler_models.is_s950(sampler_model):
-            # belt-and-braces alongside btn_open_editor being disabled - the
-            # editor is built on s3k.params, which has nothing for this model
-            self.status_bar.showMessage(tooltips.OPEN_EDITOR_NOT_READY_S950)
+            # the S900/S950 has its own small read-only viewer (the Program
+            # Editor is built on s3k.params, which has nothing for this model).
+            # It shares this window's SamplerController - same connection, one
+            # operation at a time - so there is no bridge to open
+            if self.sampler_controller.is_open_loop():
+                self.status_bar.showMessage(tooltips.S950_NEEDS_MIDI_INPUT)
+                return
+            self.editor_window = S950ProgramViewerWindow(
+                main_window, self.sampler_controller
+            )
+            self.editor_window.show()
+            main_window.hide()
             return
         if sampler_models.is_s1000(
             sampler_model
@@ -506,7 +516,7 @@ class TransferDashboard(QWidget):
         self.btn_settings.setToolTip(
             tooltips.BUSY_BLOCKS_OTHER_WINDOWS if busy else ""
         )
-        self.btn_open_editor.setEnabled(has_ports and is_akai and not busy)
+        self.btn_open_editor.setEnabled(has_ports and (is_akai or is_s950) and not busy)
         if busy:
             self.btn_open_editor.setToolTip(tooltips.BUSY_BLOCKS_OTHER_WINDOWS)
         elif has_ports and is_akai:
@@ -514,7 +524,7 @@ class TransferDashboard(QWidget):
         elif not has_ports:
             self.btn_open_editor.setToolTip(tooltips.OPEN_EDITOR_NEEDS_MIDI_PORTS)
         elif is_s950:
-            self.btn_open_editor.setToolTip(tooltips.OPEN_EDITOR_NOT_READY_S950)
+            self.btn_open_editor.setToolTip(tooltips.OPEN_EDITOR_S950_VIEWER)
         else:
             self.btn_open_editor.setToolTip(
                 tooltips.OPEN_EDITOR_NEEDS_AKAI_DEVICE_TYPE
