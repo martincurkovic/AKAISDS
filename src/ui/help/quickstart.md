@@ -19,7 +19,7 @@ Connect your sampler to your MIDI interface. The MIDI output of your sampler sho
 
 **2. Configure MIDI Settings**
 
-Select your MIDI Input/Output ports and choose your sampler type (Akai S1000, Akai S2000/S3000 or Generic SDS). Select your SysEx channel (0 is the default for almost all MIDI hardware).
+Select your MIDI Input/Output ports and choose your sampler type (Akai S1000, Akai S2000/S3000, Akai S900/S950 (experimental) or Generic SDS). The S900/S950 uses its own protocol, needs both a MIDI input and output, and hasn't been tested on real hardware yet - back up your sampler first. Select your SysEx channel (0 is the default for almost all MIDI hardware).
 
 You can test your MIDI setup in the **Troubleshooting** tab. If you're having connectivity issues, check your MIDI connections to ensure they are not reversed. If you still don't see your sampler listed in the MIDI Hardware Test tab, see [MIDI Troubleshooting & Diagnostics](#midi-troubleshooting--diagnostics) for details.
 
@@ -49,6 +49,8 @@ You can set quality globally via the Transmission Settings button or individuall
 
 If you've never used MIDI sample dumps before, expect them to be slow. Very slow. Reducing bit depth or sample rate will help speed up the transfer, at the expense of sound quality.
 
+If the sampler stops replying part way through a send (for example, its MIDI cable comes unplugged), AKAISDS re-sends the packet it's stuck on a few times. If there's still no reply, it finishes sending the current sample without confirmation, tells you the sample is unverified (check it on the sampler), and cancels any other files still waiting in the queue.
+
 **Receiving Samples**
 
 In the right hand list of *Currently Loaded Samples*, select which samples you would like to receive from the sampler. Then click the *Receive Samples* button, which will then ask where you want to save the samples. Transmission will commence once you have selected a location to save the received samples.
@@ -77,6 +79,8 @@ These are theoretical best-case figures based on MIDI's fixed wire speed of 31,2
 The editor is powered under the hood by *s3ked*. It offers control over the most commonly used functions in an Akai S2000 and S3000 series samplers. Not all functions have controls (yet). The intention was to keep the interface as easy to understand as possible at first glance.
 
 The editor also supports the Akai S1000 (experimental) - set the Sampler Type to *Akai S1000* in Settings first. An S1000 has no Multi tab, modulation matrix, LFO2, portamento or Envelope 3, so those controls are hidden (its Envelope 2 is a plain ADSR).
+
+With the Sampler Type set to *Akai S900/S950 (experimental)*, the Open Editor button opens a separate, smaller editor for the S900/S950: programs and keygroups can be edited and written back to the sampler in one go (the previous values are backed up first), and its Samples tab is read-only.
 
 By default the editor opens up on the Programs page. It will take a second or two to load, especially if you have lots of Programs and Keygroups on your Akai sampler.
 
@@ -150,5 +154,9 @@ To use the loopback test, take a MIDI cable and connect one end to the MIDI inpu
 Loopback test results will be shown in a dialog box.
 
 ![MIDI Interface Test Results](screenshots/midi-interface-test-results.png)
+
+**Reporting a problem**
+
+Use **Help > Open Log Folder** (in the S900/S950 editor: **Hardware > Open Log Folder**) and send `akaisds.log` along with a description of what you were doing, which sampler you have and which MIDI interface you use. Send it straight after the problem happens, since older entries are eventually overwritten.
 
 There is a table in the README of the GitHub repository of interfaces that have been tested using this method. If your interface isn't listed there, I encourage you to help out the community by uploading your results (either by submitting a Pull Request or by getting in touch directly).
