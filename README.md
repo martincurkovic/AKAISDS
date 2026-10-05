@@ -11,6 +11,7 @@ A simple way to send and receive audio samples (WAV, AIFF, FLAC) to an Akai S100
 
 - Akai-native sample browsing & management (list, rename, delete) as well as universal generic SDS support for non-Akai hardware
 - Program, Keygroup and Sample editor for Akai S2000/S3000 series samplers, plus an experimental editor for the Akai S1000 (choose "Akai S1000" as the Sampler Type in Settings)
+- Experimental Akai S900/S950 support (choose "Akai S900/S950 (experimental)" as the Sampler Type): sample send/receive plus a program editor. It uses a different protocol from the other Akai models, was written without access to the hardware and has not been tested on a real unit yet, so back up your sampler first and please report what you find
 - ReCycle style sample slicing
   - Transient detection
   - Audio preview
@@ -21,7 +22,8 @@ A simple way to send and receive audio samples (WAV, AIFF, FLAC) to an Akai S100
 - Batch transmission queue for sending and receiving samples
 - Light, dark, or follow-the-system theme (Settings > Appearance), switching live
 - Sampler memory status bar to display how much RAM is free (Akai sampler specific only)
-- Open-loop fallback for one-way MIDI cable setups, including timeout detection if a cable is unplugged mid-transfer
+- Reliable sample sending: a packet the sampler doesn't acknowledge is re-sent, and if the sampler's replies stop mid-transfer (e.g. a cable comes unplugged) the current sample is finished without confirmation, flagged as unverified, and the rest of the queue is cancelled
+- Open-loop sending for one-way MIDI cable setups (no MIDI input selected)
 - Built in MIDI diagnostic tests
   - MIDI interface test to check if your interface can support MIDI SysEx traffic
   - Hardware connection test to check if your MIDI sampler is connected correctly
@@ -86,6 +88,10 @@ Note that some USB MIDI interfaces do not support MIDI SysEx messages. Please ch
 |   iCON MIDIPORT V1.01  |❌ |  ⚠️ |  ⚠️ |  Max SysEx 256 bytes |
 |  MIDIPLUS MIDI 2x2 |  ⚠️ |  ⚠️ |  ⚠️ |  Max SysEx 256 bytes |
 |   PreSonus Studio 26  |  ✅ |  ✅ |  ⚠️ (max 512 bytes) | Requires driver on Windows  |
+
+## Reporting Problems
+
+If something goes wrong, open **Help > Open Log Folder** (in the S900/S950 editor: **Hardware > Open Log Folder**) and attach `akaisds.log` to your bug report, along with which sampler and MIDI interface you're using. Send it straight after the problem happens - it rotates at 8 MB. If the app crashed outright, `crash.log` in the same folder is useful too.
 
 ## Building From Source
 
