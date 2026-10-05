@@ -49,6 +49,7 @@ from PySide6.QtWidgets import (
     QProgressBar,
 )
 from s3k.messages import AKAI_CHARSET, NAME_LENGTH
+from ui.diagnostics_ui import add_open_log_folder_action
 from ui.knob import Knob
 from ui.note_spinbox import NoteSpinBox
 from ui.editor_layout import (
@@ -82,7 +83,7 @@ from ui.about_dialog import AboutDialog
 from ui.quickstart_dialog import show_quickstart_dialog
 from ui.update_helper import UpdateCheckRunner
 from ui import tooltips as tt
-from core import debug_log
+from core import debug_log, diagnostics
 from core.akai_sysex import baseline_semitones_for_bandwidth
 from core import midi_manager as midi_manager_module
 from core import program_editor_bridge
@@ -2345,6 +2346,7 @@ class ProgramEditorWindow(QMainWindow):
         quickstart_action.triggered.connect(lambda: show_quickstart_dialog(self))
         help_menu.addAction(quickstart_action)
         help_menu.addSeparator()
+        add_open_log_folder_action(help_menu, self)
 
         about_action = QAction("About AKAISDS...", self)
         about_action.setMenuRole(QAction.MenuRole.AboutRole)
@@ -3194,6 +3196,7 @@ class ProgramEditorWindow(QMainWindow):
         logger.debug("ProgramEditorWindow._open_settings_dialog: opening MidiSettingsDialog")
         dialog = MidiSettingsDialog(midi_manager, sampler_controller, self)
         dialog.exec()
+        diagnostics.log_session_config("after Settings (editor)")
         logger.debug(
             "ProgramEditorWindow._open_settings_dialog: dialog.exec() returned, "
             "calling _reconnect_shared_bridge"

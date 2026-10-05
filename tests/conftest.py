@@ -29,3 +29,22 @@ sys.path.insert(0, os.path.abspath(SRC_DIR))
 # becomes a harmless no-op (already "offscreen") rather than the thing
 # actually deciding anything.
 os.environ["QT_QPA_PLATFORM"] = "offscreen"
+
+# Send the app's debug log to a throwaway directory for the whole run. Without this the
+# suite appended thousands of lines (fake sends, fake MIDI errors) to the developer's REAL
+# ~/.akaisds/akaisds.log - the very file a user is asked to send back, and one that rotates
+# at 8 MB, so a test run could push genuine hardware evidence out of it. LOG_PATH must be
+# replaced before anything calls debug_log.get_logger() (it opens the file lazily) and before
+# core.diagnostics derives CRASH_PATH from it; conftest.py is imported before any test module.
+import shutil
+import tempfile
+from pathlib import Path
+
+from core import debug_log
+
+_TEST_LOG_DIR = Path(tempfile.mkdtemp(prefix="akaisds-test-log-"))
+debug_log.LOG_PATH = _TEST_LOG_DIR / "akaisds.log"
+
+
+def pytest_sessionfinish(session, exitstatus):
+    shutil.rmtree(_TEST_LOG_DIR, ignore_errors=True)

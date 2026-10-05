@@ -607,6 +607,54 @@ def test_ack_resets_retries_and_timeout_grows_once_handshaking(controller):
     assert controller._current_packet_timeout_ms() >= controller._send_proven_timeout_ms
 
 
+def test_only_the_first_acks_are_logged_per_packet(controller):
+    import logging
+    from core import debug_log
+
+    lines = []
+
+    class H(logging.Handler):
+        def emit(self, record):
+            lines.append(record.getMessage())
+
+    handler = H()
+    debug_log.get_logger().addHandler(handler)
+    try:
+        controller._send_queue = [b"hdr"] + [b"d"] * 6
+        controller._send_index = 0
+        controller._send_current_packet = lambda: None
+        for n in range(6):
+            controller._on_handshake_message("ack", [0x7E, 0, 0x7F, (n - 1) & 0x7F if n else 0x55])
+    finally:
+        debug_log.get_logger().removeHandler(handler)
+
+    assert len([l for l in lines if "ACK pp=" in l]) == 2  # header + first data packet
+
+
+def test_status_messages_are_logged_once_each(controller):
+    import logging
+    from core import debug_log
+
+    lines = []
+
+    class H(logging.Handler):
+        def emit(self, record):
+            lines.append(record.getMessage())
+
+    handler = H()
+    debug_log.get_logger().addHandler(handler)
+    try:
+        for msg in ("Sending...", "Sending...", "Transfer complete"):
+            controller.status_changed.emit(msg)
+    finally:
+        debug_log.get_logger().removeHandler(handler)
+
+    assert [l for l in lines if l.startswith("status:")] == [
+        "status: Sending...",
+        "status: Transfer complete",
+    ]
+
+
 def test_ack_for_a_different_packet_is_ignored(controller):
     # the original ACK arriving after we already re-sent and advanced
     controller._send_queue = [b"hdr", b"d0", b"d1", b"d2"]

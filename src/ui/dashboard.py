@@ -24,6 +24,7 @@ from core import (
     sds_encoder,
     program_editor_bridge,
     debug_log,
+    diagnostics,
     sampler_models,
 )
 from ui.qt_helpers import load_colored_pixmap
@@ -411,6 +412,7 @@ class TransferDashboard(QWidget):
             return
         dialog = MidiSettingsDialog(self.midi_manager, self.sampler_controller, self)
         dialog.exec()
+        diagnostics.log_session_config("after Settings")
         self._update_device_type_ui()
         self._update_open_editor_enabled()
 

@@ -48,6 +48,9 @@ class SamplerController(QObject):
         super().__init__()
         self.midi_manager = midi_manager
         self.midi_manager.sysex_received.connect(self.on_sysex_received)
+        # the status text is what the user sees and quotes in a bug report
+        self._last_logged_status = None
+        self.status_changed.connect(self._log_status)
         self._refresh_is_silent = False
 
         # global SysEx device ID/channel (0-127) - NOT THE SAME AS MIDI CHANNELS (1-16)!!!
@@ -787,6 +790,11 @@ class SamplerController(QObject):
         shown = raw[:64].hex(" ") + (f" ... ({len(raw)} bytes)" if len(raw) > 64 else "")
         debug_log.get_logger().warning(f"SamplerController: received {what}: {shown}")
 
+    def _log_status(self, message):
+        if message != self._last_logged_status:  # a repeating status isn't news
+            self._last_logged_status = message
+            debug_log.get_logger().info(f"status: {message}")
+
     @staticmethod
     def _new_send_stats():
         return {
@@ -836,7 +844,9 @@ class SamplerController(QObject):
         if kind == "ack":
             acked = data_bytes[3] if data_bytes is not None and len(data_bytes) > 3 else None
             log = debug_log.get_logger()
-            if acked is not None:
+            if acked is not None and self._send_index <= 1:
+                # only the header's and the first data packet's numbers (one line per
+                # packet would swamp the log) - the header's numbering is the open question
                 log.debug(
                     f"SamplerController: ACK pp={acked} for queue index "
                     f"{self._send_index}/{len(self._send_queue)}"
@@ -857,6 +867,11 @@ class SamplerController(QObject):
                 return
             latency_ms = (time.monotonic() - self._send_packet_sent_at) * 1000
             self._send_slowest_ack_ms = max(self._send_slowest_ack_ms, latency_ms)
+            if latency_ms > 1000:
+                log.warning(
+                    f"SamplerController: slow ACK ({latency_ms:.0f}ms) for queue index "
+                    f"{self._send_index}/{len(self._send_queue)}"
+                )
             self._send_stats["acks"] += 1
             self._send_packet_retries = 0
             self._send_wait_started = None

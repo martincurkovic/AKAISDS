@@ -44,11 +44,12 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from core import app_config, s950_params
+from core import app_config, debug_log, s950_params
 from core.midi_notes import midi_note_to_name
 from core.s950_sysex import NAME_LENGTH
 from core.s950_program import Keygroup, Program
 from ui import theme, tooltips as tt
+from ui.diagnostics_ui import add_open_log_folder_action
 from ui.editor_layout import (
     add_keygroup_row,
     build_centered_row,
@@ -68,6 +69,12 @@ from ui.knob import Knob
 from ui.note_spinbox import NoteSpinBox
 from ui.qt_helpers import FullWidthTabBar, build_scroll_area, build_section_card
 from ui.s950_samples_tab import S950SamplesTab
+
+
+def _log(message):
+    # what the USER did in this window; the transfer engine (S950Transfers) logs what went on the wire
+    debug_log.get_logger().info(f"S950Editor: {message}")
+
 
 # velocity_switch value meaning "no switch - the soft sample plays at every velocity"
 NO_VELOCITY_SWITCH = 128
@@ -169,6 +176,7 @@ class S950ProgramEditorWindow(QMainWindow):
         super().__init__()
         self._main_window = main_window
         self._controller = sampler_controller
+        _log("opened")
         self.setWindowTitle("AKAISDS - Akai S900/S950 Program Editor")
         self.setMinimumSize(1150, 720)
 
@@ -655,6 +663,8 @@ class S950ProgramEditorWindow(QMainWindow):
         )
         self._write_unchanged_action.triggered.connect(self._write_unchanged)
         hardware_menu.addAction(self._write_unchanged_action)
+        hardware_menu.addSeparator()
+        add_open_log_folder_action(hardware_menu, self)
 
         # mirrors the Dashboard's &Window menu (main_window.py) so Ctrl+T/Ctrl+E
         # work from either window
@@ -684,6 +694,7 @@ class S950ProgramEditorWindow(QMainWindow):
 
     def _on_tab_changed(self, index):
         on_samples = index == self._samples_tab_index
+        _log(f"tab: {'Samples' if on_samples else 'Programs'}")
         # the program-writing buttons only mean something on the Programs tab
         for widget in (
             self.dirty_label,
@@ -758,12 +769,15 @@ class S950ProgramEditorWindow(QMainWindow):
         # re-read the catalog, then the program on screen (a stale one is the
         # likeliest thing the user is refreshing for)
         if not self._controller.is_s950_idle() or self._writing:
+            _log("refresh refused: a MIDI operation is already in progress")
             self.status_bar.showMessage(
                 "A MIDI operation is already in progress - try again in a moment", 5000
             )
             return
         if not self._confirm_discard():
+            _log("refresh cancelled at the discard prompt")
             return
+        _log(f"refresh (program on screen: {self._slot})")
         self._shown_slot = None
         if self._slot is not None:
             self._wanted_slot = self._slot
@@ -813,7 +827,9 @@ class S950ProgramEditorWindow(QMainWindow):
         if current is None or self._reverting:
             return
         slot = current.data(Qt.ItemDataRole.UserRole)
+        _log(f"program {slot} selected (was {self._slot})")
         if slot != self._slot and not self._confirm_discard():
+            _log(f"kept editing program {self._slot} (discard prompt declined)")
             # the user chose to keep editing: put the selection back
             self._reverting = True
             self.program_list.setCurrentItem(previous)
@@ -848,6 +864,7 @@ class S950ProgramEditorWindow(QMainWindow):
             return  # not a read this window asked for
         self._inflight_slot = None
         self._shown_slot = slot
+        _log(f"program {slot} read: {'FAILED' if program is None else 'ok'}")
         if self._wanted_slot is not None and self._wanted_slot != slot:
             # the user moved on while this was in flight
             self._shown_slot = None
@@ -1080,6 +1097,7 @@ class S950ProgramEditorWindow(QMainWindow):
     def _discard(self):
         if self._baseline is None or not self.is_dirty():
             return
+        _log(f"discarded {len(self._changes())} change(s) on program {self._slot}")
         self._load(self._baseline)
         self.status_bar.showMessage("Changes discarded", 5000)
 
@@ -1102,7 +1120,9 @@ class S950ProgramEditorWindow(QMainWindow):
             QMessageBox.StandardButton.Cancel,
         )
         if answer != QMessageBox.StandardButton.Ok:
+            _log("restore previous cancelled")
             return
+        _log(f"restore previous requested for program {self._slot}")
         self._send_write(self._baseline, copy.deepcopy(self._restore), restoring=True)
 
     def _send_write(self, baseline, edited, *, confirm=False, restoring=False):
@@ -1116,11 +1136,13 @@ class S950ProgramEditorWindow(QMainWindow):
         try:
             changes = s950_params.diff_programs(baseline, edited)
         except ValueError as e:
+            _log(f"write refused (diff failed): {e}")
             QMessageBox.warning(self, "Can't write", str(e))
             return
         problems = s950_params.program_problems(edited, changes)
         problems += self._name_clash_problems(edited)
         if problems:
+            _log(f"write refused, {len(problems)} problem(s): {problems}")
             QMessageBox.warning(
                 self,
                 "Can't write this program",
@@ -1128,7 +1150,12 @@ class S950ProgramEditorWindow(QMainWindow):
             )
             return
         if not self._confirm_first_write():
+            _log("write cancelled at the experimental warning")
             return
+        _log(
+            f"write requested: program {self._slot}, {len(changes)} change(s)"
+            f"{', restoring' if restoring else ''}"
+        )
         self._pending_restore = None if restoring else baseline
         self._restoring = restoring
         self._writing = True
@@ -1179,6 +1206,10 @@ class S950ProgramEditorWindow(QMainWindow):
         if not self._writing:
             return
         self._writing = False
+        _log(
+            f"program {slot} write result: verified={verified}, sampler state returned="
+            f"{held is not None}: {message}"
+        )
         restoring, previous = self._restoring, self._pending_restore
         self._pending_restore = None
         self._restoring = False
@@ -1231,6 +1262,7 @@ class S950ProgramEditorWindow(QMainWindow):
         if not self._confirm_discard():
             event.ignore()
             return
+        _log("closed")
         self._busy_timer.stop()
         if not self._connected:
             super().closeEvent(event)
