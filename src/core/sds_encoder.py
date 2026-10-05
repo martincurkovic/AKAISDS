@@ -439,7 +439,9 @@ def _pcm_bytes_for_wav(samples, bit_depth):
 def write_wav_file(path, samples, framerate, bit_depth=16):
     # write samples (unsigned ints as decoded by sds_bytes_to_sample) to standard wav file
     sampwidth, frames = _pcm_bytes_for_wav(samples, bit_depth)
-    with wave.open(path, "wb") as wf:
+    # open the file ourselves: wave.open(path) on a bad path leaves a half-built Wave_write whose
+    # __del__ then raises an AttributeError ("Exception ignored" in stderr / a pytest warning)
+    with open(path, "wb") as f, wave.open(f, "wb") as wf:
         wf.setnchannels(1)
         wf.setsampwidth(sampwidth)
         wf.setframerate(framerate)
@@ -465,7 +467,9 @@ def write_wav_file_stereo(path, left_samples, right_samples, framerate, bit_dept
     interleaved[0::2] = left_samples
     interleaved[1::2] = right_samples
     sampwidth, frames = _pcm_bytes_for_wav(interleaved, bit_depth)
-    with wave.open(path, "wb") as wf:
+    # open the file ourselves: wave.open(path) on a bad path leaves a half-built Wave_write whose
+    # __del__ then raises an AttributeError ("Exception ignored" in stderr / a pytest warning)
+    with open(path, "wb") as f, wave.open(f, "wb") as wf:
         wf.setnchannels(2)
         wf.setsampwidth(sampwidth)
         wf.setframerate(framerate)
