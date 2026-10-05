@@ -1049,8 +1049,8 @@ describes - don't add another).
 
 See `TESTING.md`. `tests/conftest.py` points `debug_log.LOG_PATH` at a temp dir for the whole run (removed at the end),
 so the suite never writes to the real `~/.akaisds/akaisds.log` - don't import-time-cache `LOG_PATH` somewhere
-that runs before conftest does. `uv run pytest tests/ -v` runs everything in well under
-10 seconds. Tests force `QT_QPA_PLATFORM=offscreen` via
+that runs before conftest does. `uv run pytest tests/ -v` runs everything in about
+40 seconds. Tests force `QT_QPA_PLATFORM=offscreen` via
 `tests/conftest.py`'s own unconditional assignment - NOT the per-file
 `os.environ.setdefault(...)` calls each test module also has, which are
 no-ops if the desktop environment already exports this var globally
