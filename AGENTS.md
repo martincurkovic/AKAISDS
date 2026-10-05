@@ -244,7 +244,7 @@ fields (tests also try 72..192) specifically so wrongly-read or dropped trailing
 bytes are caught. Also: **`PRGNUM`'s +1 display offset applies on the S1000 too**
 (unverified there - same `s3k.params` entry).
 
-## Akai S900/S950 support (in progress, written without hardware)
+## Akai S900/S950 support (Stages 1-4 done, written without hardware)
 
 A DIFFERENT protocol from every other Akai entry, not a variant of the S1000
 family: device byte `0x40` (not `0x48`), function codes 0-11, every 8-bit value as
@@ -294,7 +294,22 @@ behaviours were hardware-verified; `dxzl/akai-s950` has NO licence, so don't cop
 - The Dashboard needs a MIDI INPUT for everything S950 (the unit answers on it - no open-loop
   send), has no memory bar (no RSTAT), shows sparse slot numbers via `sample_slots_updated`
   (list index != sample number there, unlike `sample_list_updated`), can't delete, and shows a
-  one-time experimental warning before the first Send. The Program Editor stays unavailable.
+  one-time experimental warning before the first Send. Editing stays unavailable (Stage 5).
+- **Program viewer (Stage 4, read-only)** - `ui/s950_program_viewer.py`'s `S950ProgramViewerWindow`,
+  opened by the Dashboard's Open Editor button (`open_program_editor` branches to it for the S950; the
+  button needs both ports, and `open_program_editor` refuses with no MIDI input). A deliberately
+  separate small window, NOT `ProgramEditorWindow` (that one is built on `s3k.params`). It shares the
+  Dashboard's `SamplerController` - same connection, no `S3kBridge`/`BridgeWorker`, no second
+  thread. Reads go through `S950Transfers.request_program(slot)` (op `"program"`, in `_BUSY_OPS`, so
+  `is_transfer_busy()` covers it) and come back on `SamplerController.s950_program_received(slot,
+  Program | None)` - **`None` on ANY failure** (timeout, busy, no input, cancel, unparseable) so a
+  waiting window never hangs; every catalog read now also emits `program_slots_updated`. A catalog
+  read is NOT "busy" to `is_transfer_busy()` (the Dashboard stays usable), so the viewer waits on the
+  stricter `is_s950_idle()` before asking. The window keeps only the latest wanted slot (the user
+  clicks faster than the unit answers) and a failed slot is marked shown so it never retries in a
+  loop - Refresh clears that. It flags a keygroup sample name missing from the catalog ("not on
+  sampler"), the one useful thing a read-only viewer can say about by-name references. It writes
+  nothing (`test_it_never_writes_to_the_sampler`). Real-hardware steps: `tests/s950_test_plan.md`.
 - **Known unmeasured risk**: a receive is ONE message of up to ~1 MB. macOS CoreMIDI assembles
   it; backends that split long SysEx would lose it, because `MidiManager._on_raw_message` drops
   any fragment not starting with F0. A timeout there says so; ask for `~/.akaisds/akaisds.log`.
