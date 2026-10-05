@@ -236,9 +236,32 @@ def test_deleting_invalidates_the_cache(fake, bridge):
     assert bridge.get_parameter(_param("PRNAME", "program"), 0).strip() == "PAD PROG"
 
 
-def test_delete_keygroup_and_sample(fake, bridge):
+def test_delete_keygroup_leaves_groups_stale_like_the_real_s1000(fake, bridge):
+    # a real S1000 acknowledged DELK but kept GROUPS unchanged (2026-10-05
+    # log); the fake reproduces that unless told otherwise
+    bridge.delete_keygroup(0, 1)
+    assert len(fake.programs[0]["keygroups"]) == 1
+    assert bridge.get_parameter(_param("GROUPS", "program"), 0) == 2
+
+
+def test_delete_keygroup_updates_groups_when_the_fake_is_told_to():
+    fake = FakeS1000(delk_updates_groups=True)
+    bridge = S1000Bridge(fake.bridge(timeout=0.3))
     bridge.delete_keygroup(0, 1)
     assert bridge.get_parameter(_param("GROUPS", "program"), 0) == 1
+
+
+def test_fake_refuses_a_keygroup_written_past_the_end_of_the_chain(fake, bridge):
+    from core import akai_sysex
+
+    block = bridge.get_header_bytes("keygroup", 0, 0, 192, selector=0)
+    reply = bridge.send_and_receive(akai_sysex.build_kdata_request(0, 5, block))
+    assert not m.Reply.decode(reply).ok
+    reply = bridge.send_and_receive(akai_sysex.build_kdata_request(0, 2, block))
+    assert m.Reply.decode(reply).ok  # appending at exactly len() is fine
+
+
+def test_delete_sample(fake, bridge):
     bridge.delete_sample(0)
     assert bridge.sample_list() == ["SNARE", "PAD"]
 

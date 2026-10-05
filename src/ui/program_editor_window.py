@@ -70,6 +70,7 @@ from core.akai_sysex import baseline_semitones_for_bandwidth
 from core import midi_manager as midi_manager_module
 from core import program_editor_bridge
 from core import root_note_detection
+from core import s1000_bridge as s1000_bridge_module
 from core import sampler_models
 from core import sample_editing
 from core import sds_encoder
@@ -552,6 +553,7 @@ class ProgramEditorWindow(QMainWindow):
             # program_editor_bridge.S1000_PROGRAM_FIELDS)
             extra_program_fields=S1000_PROGRAM_FIELDS if self._is_s1000 else (),
             extra_keygroup_fields=S1000_KEYGROUP_FIELDS if self._is_s1000 else (),
+            s1000=self._is_s1000,
         )
         self._worker.busy_changed.connect(self._on_worker_busy_changed)
         self._worker.programs_loaded.connect(self._on_programs_loaded)
@@ -594,11 +596,7 @@ class ProgramEditorWindow(QMainWindow):
             )
         )
         self._worker.keygroup_deleted.connect(self._on_keygroup_deleted)
-        self._worker.keygroup_delete_failed.connect(
-            lambda _p, _k, e: self.status_bar.showMessage(
-                f"Couldn't delete keygroup: {e}"
-            )
-        )
+        self._worker.keygroup_delete_failed.connect(self._on_keygroup_delete_failed)
         self._worker.program_created.connect(self._on_program_created)
         self._worker.program_create_failed.connect(
             lambda _index, e: self.status_bar.showMessage(
@@ -3635,7 +3633,9 @@ class ProgramEditorWindow(QMainWindow):
         )
         has_keygroup = self.keygroup_list.currentRow() >= 0
         self._duplicate_keygroup_action.setEnabled(has_keygroup and not demo_mode)
-        self._delete_keygroup_action.setEnabled(has_keygroup)
+        self._delete_keygroup_action.setEnabled(
+            has_keygroup and self._keygroup_delete_allowed()
+        )
 
         # unlike DELP, no "last one is silently ignored" restriction is
         # documented for DELS (see sample_deleted's own comment in
@@ -3832,9 +3832,20 @@ class ProgramEditorWindow(QMainWindow):
         self.status_bar.showMessage(f'Deleting program "{program_name}"…')
         self._worker.submit_delete_program(program_index)
 
+    def _keygroup_delete_allowed(self):
+        if not self._is_s1000:
+            return True
+        # S1000: DELK needs the repair-and-verify path, can't empty a program,
+        # and is switched off for the session once a delete fails its check
+        return (
+            s1000_bridge_module.KEYGROUP_DELETE_SUPPORTED
+            and not self._worker.s1000_keygroup_delete_blocked
+            and self.keygroup_list.count() > 1
+        )
+
     def _confirm_delete_keygroup(self):
         keygroup_index = self.keygroup_list.currentRow()
-        if keygroup_index < 0:
+        if keygroup_index < 0 or not self._keygroup_delete_allowed():
             return
         program_index = self.program_list.currentRow()
         lo, hi = self._keygroup_ranges[keygroup_index]
@@ -3843,7 +3854,13 @@ class ProgramEditorWindow(QMainWindow):
             self,
             "Delete Keygroup",
             f"Delete keygroup {keygroup_index + 1} ({range_text})?\n\n"
-            "This cannot be undone.",
+            "This cannot be undone."
+            + (
+                "\n\nS1000 support for this is experimental: afterwards the "
+                "editor re-reads every program to check nothing else changed."
+                if self._is_s1000
+                else ""
+            ),
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,
         )
@@ -3859,6 +3876,16 @@ class ProgramEditorWindow(QMainWindow):
         # _update_list_context_actions_enabled) and every other case renumbers/
         # reorders everything after it, the same as a manual Refresh
         self._worker.submit_program_list()
+
+    def _on_keygroup_delete_failed(self, program_index, keygroup_index, error):
+        self.status_bar.showMessage(f"Couldn't delete keygroup: {error}")
+        # a failed S1000 delete may have blocked further ones this session
+        # (BridgeWorker._delete_keygroup_s1000), and the programs may no
+        # longer match what's on screen - say so in full, and reload
+        if self._is_s1000 and self._worker.s1000_keygroup_delete_blocked:
+            QMessageBox.warning(self, "Delete Keygroup", error)
+            self._update_list_context_actions_enabled()
+            self._worker.submit_program_list()
 
     def _on_keygroup_deleted(self, program_index, keygroup_index):
         if program_index != self.program_list.currentRow():
@@ -4536,7 +4563,12 @@ class ProgramEditorWindow(QMainWindow):
         which, args = self._wait_for_any_signal(
             [self._worker.program_created, self._worker.program_create_failed],
             start=lambda: self._worker.submit_create_program(
-                template_program_index, program_name
+                template_program_index,
+                program_name,
+                # S1000: clone just keygroup 0, so there is nothing to
+                # delete afterwards (an S1000 DELK corrupts the chain -
+                # see BridgeWorker._delete_keygroup_s1000)
+                first_keygroup_only=self._is_s1000,
             ),
             timeout_ms=20000,
         )
@@ -4560,6 +4592,13 @@ class ProgramEditorWindow(QMainWindow):
                 "sampler directly."
             )
         template_group_count = len(args[1])
+        if self._is_s1000 and template_group_count != 1:
+            # never expected (first_keygroup_only), but the alternative is a
+            # run of keygroup deletes on an S1000 - refuse rather than risk it
+            return False, (
+                f'Program "{program_name}" was created with {template_group_count} '
+                "keygroups instead of 1 - check the sampler directly."
+            )
 
         # keygroup 0 first, into its final configured shape - LONOTE/HINOTE
         # map it to the first slice at _FIRST_SLICE_NOTE ("C1"), CP1 forces
@@ -4589,6 +4628,7 @@ class ProgramEditorWindow(QMainWindow):
         # first: deletion may shift every index above it down, so working
         # backward never moves the next target out from under this loop
         # (same reasoning as sample delete elsewhere in this file)
+        # (an S1000 clone has only keygroup 0, so this loop never runs there)
         for keygroup_index in range(template_group_count - 1, 0, -1):
             self._worker.submit_delete_keygroup(new_index, keygroup_index)
 

@@ -11,6 +11,7 @@ from PySide6.QtCore import QThread, Signal
 import s3k.messages as m
 import s3k.params as p
 from core.s1000_bridge import S1000Bridge
+import core.s1000_bridge as s1000_bridge_module
 
 # the sampler holds exactly one resident multi (no list of multis to choose
 # between) with a fixed 16 "multipart" slots
@@ -558,9 +559,25 @@ class BridgeWorker(QThread):
     # progress bar.
     busy_changed = Signal(bool)
 
-    def __init__(self, bridge, *, extra_program_fields=(), extra_keygroup_fields=()):
+    def __init__(
+        self,
+        bridge,
+        *,
+        extra_program_fields=(),
+        extra_keygroup_fields=(),
+        s1000=False,
+    ):
         super().__init__()
         self._bridge = bridge
+        # True when `bridge` is (a wrapper around) an S1000Bridge - the
+        # worker can't isinstance() it, since LoggingBridge wraps it. Only
+        # used to pick the S1000-safe variant of a few destructive flows
+        # (see _delete_keygroup_s1000 and _handle_create_program).
+        self._s1000 = s1000
+        # set the first time an S1000 keygroup delete fails its own
+        # before/after verification - the UI then disables Delete Keygroup
+        # for the rest of the session (see _delete_keygroup_s1000)
+        self.s1000_keygroup_delete_blocked = False
         # model-specific additions to what _handle_keygroups/_handle_detail
         # read (S1000_PROGRAM_FIELDS/S1000_KEYGROUP_FIELDS for an S1000,
         # none otherwise)
@@ -650,8 +667,8 @@ class BridgeWorker(QThread):
     def submit_delete_sample(self, sample_index):
         self._submit(("delete_sample", sample_index))
 
-    def submit_create_program(self, source_index, new_name):
-        self._submit(("create_program", source_index, new_name))
+    def submit_create_program(self, source_index, new_name, first_keygroup_only=False):
+        self._submit(("create_program", source_index, new_name, first_keygroup_only))
 
     def submit_create_keygroup(self, program_index, source_keygroup_index):
         self._submit(("create_keygroup", program_index, source_keygroup_index))
@@ -990,11 +1007,183 @@ class BridgeWorker(QThread):
 
     def _handle_delete_keygroup(self, program_index, keygroup_index):
         try:
-            self._bridge.delete_keygroup(program_index, keygroup_index)
+            if self._s1000:
+                self._delete_keygroup_s1000(program_index, keygroup_index)
+            else:
+                self._bridge.delete_keygroup(program_index, keygroup_index)
         except Exception as e:
             self.keygroup_delete_failed.emit(program_index, keygroup_index, str(e))
             return
         self.keygroup_deleted.emit(program_index, keygroup_index)
+
+    #: how many block reads the post-delete check may spend on programs
+    #: OTHER than the one being edited (~0.1s each over MIDI). The target
+    #: program is always checked in full.
+    _S1000_VERIFY_READ_BUDGET = 60
+
+    @staticmethod
+    def _without_pointer(block):
+        # a program block's bytes 1-2 are FIRSTKG, a keygroup block's NXTKG:
+        # absolute addresses the sampler is free to rewrite, so content
+        # comparisons ignore them (they're compared and logged separately)
+        return bytes(block[:1]) + bytes(block[3:])
+
+    def _s1000_snapshot(self, target_index):
+        # {program_index: {"groups", "program", "keygroups", "pointers"}} for
+        # the target program (in full) and as many others as the read budget
+        # allows. Everything is read FRESH from the hardware: S1000Bridge
+        # caches blocks for 1.5s, and a PDATA write also leaves its own
+        # copy cached - neither may stand in for what the sampler holds.
+        invalidate = getattr(self._bridge, "invalidate", None)
+        if invalidate is not None:
+            invalidate()
+        count = len(self._bridge.program_list())
+        order = [target_index] + [i for i in range(count) if i != target_index]
+        budget = self._S1000_VERIFY_READ_BUDGET
+        snapshot = {}
+        for index in order:
+            if index >= count:
+                continue
+            program_block = self._bridge.get_header_bytes("program", index, 0, 192)
+            groups = self._bridge.get_parameter(p.lookup("GROUPS", "program"), index)
+            if index != target_index:
+                if budget < groups + 1:
+                    debug_log.get_logger().info(
+                        "S1000 delete check: program %d not snapshotted "
+                        "(read budget exhausted)",
+                        index,
+                    )
+                    continue
+                budget -= groups + 1
+            keygroups = [
+                self._bridge.get_header_bytes(
+                    "keygroup", index, 0, 192, selector=k
+                )
+                for k in range(groups)
+            ]
+            snapshot[index] = {
+                "groups": groups,
+                "program": self._without_pointer(program_block),
+                "keygroups": [self._without_pointer(b) for b in keygroups],
+                "pointers": [bytes(program_block[1:3])]
+                + [bytes(b[1:3]) for b in keygroups],
+            }
+        return snapshot
+
+    def _delete_keygroup_s1000(self, program_index, keygroup_index):
+        """DELK on an S1000, repaired and verified.
+
+        A real S1000 (2026-10-05 log) acknowledged DELK but left the
+        program's GROUPS unchanged. The next "add keygroup" then used that
+        stale count as the new keygroup's index, walked off the end of the
+        program's chain and linked the new keygroup into ANOTHER program,
+        orphaning that program's tail. So after DELK this rewrites the
+        program with the real GROUPS, then compares a before/after snapshot:
+        the surviving keygroups must be unchanged and in order, and no other
+        program may have changed. A mismatch raises (the UI shows it), logs
+        everything, and blocks further S1000 keygroup deletes this session.
+        """
+        logger = debug_log.get_logger()
+        if self.s1000_keygroup_delete_blocked:
+            raise DeviceError(
+                "keygroup delete is disabled for this session after an "
+                "earlier delete failed its safety check"
+            )
+        if not s1000_bridge_module.KEYGROUP_DELETE_SUPPORTED:
+            raise DeviceError("deleting a keygroup isn't supported on an S1000")
+
+        before = self._s1000_snapshot(program_index)
+        target = before[program_index]
+        groups = target["groups"]
+        if not 0 <= keygroup_index < groups:
+            raise ValueError(
+                f"keygroup {keygroup_index} is out of range (program has {groups})"
+            )
+        if groups <= 1:
+            raise ValueError(
+                "can't delete a program's only keygroup (delete the program instead)"
+            )
+
+        self._bridge.delete_keygroup(program_index, keygroup_index)
+
+        groups_param = p.lookup("GROUPS", "program")
+        groups_now = self._bridge.get_parameter(groups_param, program_index)
+        logger.info(
+            "S1000 delete keygroup %d of program %d: GROUPS %d -> %d after DELK",
+            keygroup_index, program_index, groups, groups_now,
+        )
+        if groups_now == groups:
+            # the observed S1000 behaviour: DELK left the count alone
+            header = bytearray(
+                self._bridge.get_header_bytes("program", program_index, 0, 192)
+            )
+            self._patch_field(header, "GROUPS", "program", groups - 1)
+            self._send_and_check(
+                akai_sysex.build_pdata_request(program_index, bytes(header)),
+                f"updating program {program_index} groups={groups - 1}",
+            )
+        elif groups_now != groups - 1:
+            raise DeviceError(
+                f"program {program_index} reports {groups_now} keygroups after "
+                f"deleting one of {groups} - check the sampler directly"
+            )
+
+        problems = []
+        try:
+            after = self._s1000_snapshot(program_index)
+        except Exception as e:
+            problems.append(f"couldn't read the program back ({e})")
+            after = {}
+        expected = [
+            kg for i, kg in enumerate(target["keygroups"]) if i != keygroup_index
+        ]
+        mine = after.get(program_index)
+        if after:
+            if mine is None:
+                problems.append("the edited program is missing afterwards")
+            else:
+                if mine["groups"] != groups - 1:
+                    problems.append(
+                        f"program {program_index} has {mine['groups']} keygroups, "
+                        f"expected {groups - 1}"
+                    )
+                if mine["keygroups"] != expected:
+                    problems.append(
+                        f"program {program_index}'s remaining keygroups differ "
+                        "from what they were before the delete"
+                    )
+            for index, was in before.items():
+                if index == program_index or index not in after:
+                    continue
+                now = after[index]
+                if now["groups"] != was["groups"] or now["keygroups"] != was["keygroups"]:
+                    problems.append(f"program {index} changed")
+                elif now["pointers"] != was["pointers"]:
+                    # content intact but addresses moved: not a failure, but
+                    # exactly what a tester's log should show
+                    logger.info(
+                        "S1000 delete check: program %d's addresses moved "
+                        "(content intact)", index,
+                    )
+        for index, was in before.items():
+            logger.info(
+                "S1000 delete check: program %d before: pointers %s",
+                index, [x.hex() for x in was["pointers"]],
+            )
+        for index, now in after.items():
+            logger.info(
+                "S1000 delete check: program %d after: pointers %s",
+                index, [x.hex() for x in now["pointers"]],
+            )
+        if problems:
+            self.s1000_keygroup_delete_blocked = True
+            message = "; ".join(problems)
+            logger.error("S1000 keygroup delete FAILED its safety check: %s", message)
+            raise DeviceError(
+                f"The sampler's programs didn't come back as expected after "
+                f"the delete ({message}). Keygroup deleting is now disabled; "
+                "check the programs on the sampler directly."
+            )
 
     def _handle_delete_sample(self, sample_index):
         try:
@@ -1063,7 +1252,12 @@ class BridgeWorker(QThread):
         if not result.ok:
             raise DeviceError(f"device rejected {what} (code {result.code})")
 
-    def _handle_create_program(self, source_index, new_name):
+    def _handle_create_program(self, source_index, new_name, first_keygroup_only=False):
+        # first_keygroup_only: clone just the template's keygroup 0 instead
+        # of every keygroup. Create-program-from-slices uses this on an
+        # S1000, where it would otherwise clone N keygroups only to DELK
+        # N-1 of them - and an S1000 DELK corrupts the chain (see
+        # _delete_keygroup_s1000)
         try:
             if not hasattr(self._bridge, "send_and_receive"):
                 # defensive backstop - the UI layer already disables this
@@ -1107,7 +1301,7 @@ class BridgeWorker(QThread):
             # _handle_create_keygroup below (s3000editor's own "add
             # keygroup to an existing program" step pair), just reused in
             # a loop since this app clones every keygroup, not just one
-            for keygroup_index in range(1, group_count):
+            for keygroup_index in range(1, 1 if first_keygroup_only else group_count):
                 # selector must be the SOURCE program's keygroup index here
                 # - the default is 0, which would silently clone keygroup 0
                 # over and over for a multi-keygroup source

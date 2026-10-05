@@ -58,6 +58,17 @@ from core import debug_log
 #: its full internal block, with unrelated bytes past these offsets).
 _S1000_BLOCK_SIZES = {"program": 72, "keygroup": 149, "sample": 141}
 
+#: Whether the editor offers "Delete Keygroup" at all on an S1000. A real
+#: S1000's DELK was seen (2026-10-05 log) to leave the program's GROUPS count
+#: unchanged AND to leave the program's chain ending in a stale pointer, after
+#: which the next KDATA walked off the chain and spliced a keygroup into a
+#: DIFFERENT program. `BridgeWorker._handle_delete_keygroup` therefore repairs
+#: GROUPS and then verifies (against a before/after snapshot of every program)
+#: that nothing else moved; this is the one-line kill switch if a real S1000
+#: shows that can't be made safe - flip to False and the action is disabled
+#: for the S1000 (S2000/S3000 unaffected).
+KEYGROUP_DELETE_SUPPORTED = True
+
 #: first byte of each block type ("PRIDENT"/"KGIDENT"/"SHIDENT")
 _BLOCK_IDENT = {"program": 1, "keygroup": 2, "sample": 3}
 

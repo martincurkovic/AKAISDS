@@ -817,3 +817,192 @@ def test_the_s2000_s3000_window_does_not_apply_the_s1000_rename_guard(qapp, warn
         assert editor.program_list.item(0).text() == names[1]
     finally:
         _dispose(editor)
+
+
+# --- creating a program from slices, and deleting a keygroup, on an S1000 ----
+# A real S1000's DELK left GROUPS stale and the next keygroup append linked
+# itself into ANOTHER program (2026-10-05 log). FakeS1000 reproduces both
+# (delk_updates_groups=False, KDATA past the chain refused).
+
+
+def _make_editor_for(qapp, fake):
+    bridge = LoggingBridge(S1000Bridge(fake.bridge(timeout=0.3)))
+    editor = _make_editor(qapp, "akai_s1000", bridge)
+    editor._fake = fake
+    return editor
+
+
+def _tall_fake(groups=4):
+    # program 0: `groups` keygroups; program 1 untouched bystander
+    from core.demo_s1000 import make_keygroup_block, make_program_block
+
+    fake = FakeS1000()
+    fake.programs[0] = {
+        "block": make_program_block("TALL", 0, groups),
+        "keygroups": [
+            make_keygroup_block("KICK", 24 + 10 * i, 33 + 10 * i) for i in range(groups)
+        ],
+    }
+    return fake
+
+
+def _groups_byte(fake, index):
+    from core.demo_s1000 import p as params
+
+    return fake.programs[index]["block"][params.lookup("GROUPS", "program").offset]
+
+
+def test_create_program_from_slices_clones_only_keygroup_zero_and_never_deletes(
+    editor, qapp
+):
+    from s3k.messages import Command
+
+    names = ["BREAK-01", "BREAK-02", "BREAK-03", "BREAK-04"]
+    fake = editor._fake
+    template_before = [bytes(k) for k in fake.programs[0]["keygroups"]]
+    other_before = [bytes(k) for k in fake.programs[1]["keygroups"]]
+
+    success, message = editor._create_program_from_slices(
+        names, 0, "BREAK", lambda cur, total: None, lambda text: None
+    )
+    _settle(editor, qapp)
+
+    assert success is True, message
+    assert Command.DELK not in [command for command, _payload in fake.received]
+    new = fake.programs[2]
+    assert len(new["keygroups"]) == 4
+    assert _groups_byte(fake, 2) == 4
+    # neither the template nor the bystander program was touched
+    assert [bytes(k) for k in fake.programs[0]["keygroups"]] == template_before
+    assert [bytes(k) for k in fake.programs[1]["keygroups"]] == other_before
+
+
+def test_create_program_from_slices_with_a_single_slice(editor, qapp):
+    success, message = editor._create_program_from_slices(
+        ["ONE"], 0, "ONE", lambda cur, total: None, lambda text: None
+    )
+    _settle(editor, qapp)
+    assert success is True, message
+    assert len(editor._fake.programs[2]["keygroups"]) == 1
+
+
+def test_duplicate_program_still_clones_every_keygroup(editor, qapp):
+    editor._worker.submit_create_program(0, "COPY")
+    _settle(editor, qapp)
+    assert len(editor._fake.programs[2]["keygroups"]) == 2
+
+
+def test_deleting_a_keygroup_repairs_groups_and_leaves_other_programs_alone(qapp):
+    fake = _tall_fake(4)
+    editor = _make_editor_for(qapp, fake)
+    try:
+        other_before = [bytes(k) for k in fake.programs[1]["keygroups"]]
+        survivors = [bytes(k) for i, k in enumerate(fake.programs[0]["keygroups"]) if i != 1]
+
+        editor._worker.submit_delete_keygroup(0, 1)
+        _settle(editor, qapp)
+
+        assert [bytes(k) for k in fake.programs[0]["keygroups"]] == survivors
+        assert _groups_byte(fake, 0) == 3  # the stale count was rewritten
+        assert [bytes(k) for k in fake.programs[1]["keygroups"]] == other_before
+        assert editor._worker.s1000_keygroup_delete_blocked is False
+        # and a keygroup can now be appended without walking off the chain
+        editor._worker.submit_create_keygroup(0, 0)
+        _settle(editor, qapp)
+        assert len(fake.programs[0]["keygroups"]) == 4
+    finally:
+        _dispose(editor)
+
+
+def test_deleting_a_keygroup_also_works_when_the_sampler_updates_groups_itself(qapp):
+    fake = _tall_fake(3)
+    fake.delk_updates_groups = True
+    editor = _make_editor_for(qapp, fake)
+    try:
+        editor._worker.submit_delete_keygroup(0, 0)
+        _settle(editor, qapp)
+        assert len(fake.programs[0]["keygroups"]) == 2
+        assert _groups_byte(fake, 0) == 2
+        assert editor._worker.s1000_keygroup_delete_blocked is False
+    finally:
+        _dispose(editor)
+
+
+def test_a_delete_that_damages_another_program_is_reported_and_blocks_more(
+    qapp, warnings
+):
+    from core.demo_s1000 import make_keygroup_block
+
+    def corrupt(fake, program_index, keygroup_index):
+        # what the real S1000's follow-up did: a keygroup of another program
+        # replaced by one that doesn't belong there
+        fake.programs[1]["keygroups"][0] = make_keygroup_block("INTRUDER")
+
+    fake = _tall_fake(4)
+    fake.on_delk = corrupt
+    editor = _make_editor_for(qapp, fake)
+    try:
+        editor.keygroup_list.setCurrentRow(1)
+        editor._update_list_context_actions_enabled()
+        assert editor._delete_keygroup_action.isEnabled()
+
+        editor._worker.submit_delete_keygroup(0, 1)
+        _settle(editor, qapp)
+
+        assert editor._worker.s1000_keygroup_delete_blocked is True
+        assert warnings and "program 1 changed" in warnings[0][1]
+        assert not editor._delete_keygroup_action.isEnabled()
+        # refused from here on: no further DELK ever reaches the sampler
+        from s3k.messages import Command
+
+        def delks():
+            return [c for c, _payload in fake.received if c == Command.DELK]
+
+        sent = len(delks())
+        editor._worker.submit_delete_keygroup(0, 0)
+        _settle(editor, qapp)
+        assert len(delks()) == sent
+    finally:
+        _dispose(editor)
+
+
+def test_the_only_keygroup_of_an_s1000_program_cannot_be_deleted(editor, qapp):
+    editor.program_list.setCurrentRow(1)  # PAD PROG, one keygroup
+    _settle(editor, qapp)
+    editor.keygroup_list.setCurrentRow(0)
+    editor._update_list_context_actions_enabled()
+    assert not editor._delete_keygroup_action.isEnabled()
+
+    writes = editor._fake.writes
+    editor._worker.submit_delete_keygroup(1, 0)
+    _settle(editor, qapp)
+    assert len(editor._fake.programs[1]["keygroups"]) == 1
+    assert editor._fake.writes == writes
+
+
+def test_keygroup_delete_can_be_switched_off_for_the_s1000(editor, qapp, monkeypatch):
+    import core.s1000_bridge as s1000_bridge
+
+    editor.keygroup_list.setCurrentRow(0)
+    editor._update_list_context_actions_enabled()
+    assert editor._delete_keygroup_action.isEnabled()
+
+    monkeypatch.setattr(s1000_bridge, "KEYGROUP_DELETE_SUPPORTED", False)
+    editor._update_list_context_actions_enabled()
+    assert not editor._delete_keygroup_action.isEnabled()
+
+    editor._worker.submit_delete_keygroup(0, 0)
+    _settle(editor, qapp)
+    assert len(editor._fake.programs[0]["keygroups"]) == 2
+
+
+def test_s2000_s3000_keygroup_delete_is_not_gated(qapp):
+    from s3ked.demo import DemoBridge
+
+    editor = _make_editor(qapp, "akai_s2000_s3000", DemoBridge())
+    try:
+        editor.keygroup_list.setCurrentRow(0)
+        editor._update_list_context_actions_enabled()
+        assert editor._delete_keygroup_action.isEnabled()
+    finally:
+        _dispose(editor)

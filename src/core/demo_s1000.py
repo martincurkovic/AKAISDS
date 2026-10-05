@@ -154,8 +154,18 @@ class FakeS1000:
         samples=None,
         exclusive_channel=0,
         block_size=DEFAULT_BLOCK_SIZE,
+        delk_updates_groups=False,
+        on_delk=None,
     ):
         self.exclusive_channel = exclusive_channel
+        #: a real S1000 acknowledged DELK but left the program's GROUPS
+        #: count alone (2026-10-05 log) - False reproduces that, so code
+        #: that trusts GROUPS after a delete is caught
+        self.delk_updates_groups = delk_updates_groups
+        #: optional callable(fake, program_index, keygroup_index) run after
+        #: every DELK - lets a test simulate a delete that damages another
+        #: program (what the real one's follow-up writes did)
+        self.on_delk = on_delk
         self.block_size = block_size
         # [{"block": bytearray, "keygroups": [bytearray, ...]}]
         self.programs = []
@@ -367,6 +377,11 @@ class FakeS1000:
         block = bytearray(m.decode_nibbles(payload[3:]))
         if entry is None:
             return self._reply_ok(False)
+        if kg > len(entry["keygroups"]):
+            # a keygroup index past the end of the chain: the real sampler
+            # walks off it (and linked a keygroup into the wrong program) -
+            # refused here so a stale GROUPS used as an index is caught
+            return self._reply_ok(False)
         if kg < len(entry["keygroups"]):
             entry["keygroups"][kg] = block
         else:
@@ -422,9 +437,12 @@ class FakeS1000:
         if entry is None or kg >= len(entry["keygroups"]):
             return self._reply_ok(False)
         del entry["keygroups"][kg]
-        entry["block"][p.lookup("GROUPS", "program").offset] = len(
-            entry["keygroups"]
-        )
+        if self.delk_updates_groups:
+            entry["block"][p.lookup("GROUPS", "program").offset] = len(
+                entry["keygroups"]
+            )
+        if self.on_delk is not None:
+            self.on_delk(self, m.decode_u14(payload[0], payload[1]), kg)
         self._reply_ok()
 
     def _dels(self, payload):
