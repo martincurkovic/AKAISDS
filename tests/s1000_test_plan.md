@@ -75,6 +75,21 @@ header fields back - untested on an S1000.
 - [ ] Trim / Reverse / Fade / Normalise on a scratch sample.
 - [ ] Slice Editor export of a scratch sample (and "create program").
 
+## F. Sample sends from the Dashboard (the send path was hardened)
+
+Sending now re-sends a packet the S1000 doesn't ACK instead of skipping it (see AGENTS.md, "Sample send
+hardening"). Tested on an S2000 only. Send one small sample from the Dashboard, then one larger one, and
+look at the `send finished` line for each in the log.
+
+- [ ] Normal send: `retries=0 stray_acks=0 open_loop_fallback=False`, and the sample plays correctly. Note
+      `slowest_ack_ms` (the longest the S1000 took to ACK) - that sets the post-ACK timeout.
+- [ ] If any line says `re-sending` (a retry): **does the S1000 ACK the duplicate packet, or NAK it?** Look for
+      `NAK for packet` right after, or `ignoring ACK for packet`. This is the open question the retry design
+      rests on. Does the finished sample still play correctly?
+- [ ] Any `waits=` above 0: the S1000 sent WAIT during the write (and how long the send paused).
+- [ ] Unplug the sampler's MIDI OUT mid-send: it should re-send 3 times, finish that sample at a slower pace,
+      say the replies stopped, and NOT carry on with any other queued files. Check the sample afterwards.
+
 ## What to send back
 
 - `akaisds.log` - macOS/Linux `~/.akaisds/akaisds.log`, Windows
