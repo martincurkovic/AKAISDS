@@ -232,6 +232,23 @@ def test_the_zone_card_switches_between_the_soft_and_loud_sample(win):
     assert win._zone_stack.currentIndex() == 1
 
 
+def test_zone_buttons_are_title_case_and_knob_readouts_follow_their_knobs(win):
+    _show(win, 0)
+    assert [win._zone_buttons.button(i).text() for i in (0, 1)] == [
+        "Soft Sample",
+        "Loud Sample",
+    ]
+    # the zone's Filter/Loud readouts are filled in (including a knob sitting at 0) ...
+    for attr in ("soft_filter", "soft_loudness"):
+        knob = _kg(win, attr)
+        assert knob.property("valueReadout").text() == str(knob.value())
+    # ... and sit to the RIGHT of their knob, like the S3000 editor's Zone card
+    knob = _kg(win, "soft_filter")
+    readout = knob.property("valueReadout")
+    assert knob.parentWidget() is readout.parentWidget()
+    assert knob.geometry().right() <= readout.geometry().left()
+
+
 def test_the_sample_picker_offers_the_units_samples_and_none(win):
     _show(win, 0)
     combo = _kg(win, "soft_sample")

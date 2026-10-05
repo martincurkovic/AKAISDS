@@ -55,6 +55,8 @@ from ui.editor_layout import (
     build_centered_row,
     build_content_row,
     build_knob_column,
+    build_labeled_combo_column,
+    build_labeled_knob_value_column,
     build_list_column,
     build_paired_row,
     build_zone_card,
@@ -116,6 +118,11 @@ _ENVELOPE_ATTRS = {
 
 
 # -- pure formatting (tested without a window) ------------------------------------------------
+
+
+# the LFO card's Rate/Depth knobs and the Velocity card's three (the other knobs on the
+# page are 40 or 56)
+_LFO_MAIN_KNOB = 52
 
 
 def format_key_range(lower, upper):
@@ -418,6 +425,27 @@ class S950ProgramEditorWindow(QMainWindow):
         knob.setProperty("valueReadout", value_label)
         return column
 
+    def _knob_value_column(self, scope, attr, text, size=28):
+        # label above, value readout to the RIGHT of the knob - the S3000 editor's Zone card
+        # Loud/Pan shape, sharing a row with the Sample combo
+        knob = self._editor(scope, attr)
+        knob.setFixedSize(size, size)
+        column, value_label = build_labeled_knob_value_column(
+            f"<b>{text}</b>", knob, center=False
+        )
+        knob.setProperty("valueReadout", value_label)
+        return column
+
+    def _centered_knob_row(self, scope, specs, size):
+        # a short row of knobs centered in its card with even gaps - over a longer row of
+        # smaller knobs, it sits between theirs instead of landing off to one side
+        row = QHBoxLayout()
+        row.addStretch(1)
+        for attr, text in specs:
+            row.addLayout(self._knob_column(scope, attr, text, size))
+            row.addStretch(1)
+        return row
+
     def _knob_row(self, scope, specs, size=40, spacing=10):
         row = QHBoxLayout()
         row.setSpacing(spacing)
@@ -532,7 +560,7 @@ class S950ProgramEditorWindow(QMainWindow):
         self._zone_stack.setObjectName("transparentContainer")
         self._sample_warnings = {}
         for index, (prefix, title) in enumerate((("soft", "Soft"), ("loud", "Loud"))):
-            button = QPushButton(f"{title} sample")
+            button = QPushButton(f"{title} Sample")
             button.setCheckable(True)
             button.setChecked(index == 0)
             button.setToolTip(
@@ -546,18 +574,13 @@ class S950ProgramEditorWindow(QMainWindow):
             page_layout = QVBoxLayout()
             page_layout.setSpacing(6)
             combo = self._editor("kg", f"{prefix}_sample")
-            sample_column = QVBoxLayout()
-            sample_column.setSpacing(4)
-            sample_column.addWidget(QLabel("<b>Sample</b>"))
-            sample_column.addWidget(combo)
+            # label above each control, left-aligned, knob readouts beside their knobs - the
+            # same shape as the S3000 editor's Zone card, so the combo lines up with the knobs
+            sample_column = build_labeled_combo_column("<b>Sample</b>", combo, center=False)
             top_row = QHBoxLayout()
             top_row.addLayout(sample_column, stretch=1)
-            top_row.addLayout(
-                self._knob_column("kg", f"{prefix}_filter", "Filter", 28, bold=True)
-            )
-            top_row.addLayout(
-                self._knob_column("kg", f"{prefix}_loudness", "Loud", 28, bold=True)
-            )
+            top_row.addLayout(self._knob_value_column("kg", f"{prefix}_filter", "Filter"))
+            top_row.addLayout(self._knob_value_column("kg", f"{prefix}_loudness", "Loud"))
             page_layout.addLayout(top_row)
             warning = QLabel()
             warning.setObjectName("mutedLabel")
@@ -583,21 +606,23 @@ class S950ProgramEditorWindow(QMainWindow):
                     ("release_vel", "Release"),
                     ("loudness_vel", "Loudness"),
                 ],
+                size=_LFO_MAIN_KNOB,
             ),
         )
+        # Rate and Depth are the LFO's main controls: first row, a little larger; the three
+        # that shape it (build-up, aftertouch, mod wheel) sit below at the page's usual size
         lfo_card = build_section_card(
             "LFO",
+            self._centered_knob_row(
+                "kg", [("lfo_rate", "Rate"), ("lfo_depth", "Depth")], _LFO_MAIN_KNOB
+            ),
             self._knob_row(
                 "kg",
                 [
-                    ("lfo_rate", "Rate"),
-                    ("lfo_depth", "Depth"),
                     ("lfo_build", "Build-up"),
+                    ("aftertouch_depth", "Aftertouch"),
+                    ("modwheel_depth", "Mod Wheel"),
                 ],
-            ),
-            self._knob_row(
-                "kg",
-                [("aftertouch_depth", "Aftertouch"), ("modwheel_depth", "Mod Wheel")],
             ),
         )
         equalize_card_heights(velocity_card, lfo_card)
