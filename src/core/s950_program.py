@@ -20,6 +20,7 @@
 import dataclasses
 
 from core.s950_sysex import (
+    NAME_LENGTH,
     decode_db,
     decode_dw,
     decode_name,
@@ -209,13 +210,23 @@ class Keygroup:
         return cls(**values)
 
     def to_bytes(self):
+        # a field is only re-encoded when it no longer matches what `raw` already
+        # holds, so an untouched field keeps its exact bytes (a name the unit padded
+        # with NULs would otherwise come back padded with spaces)
         out = bytearray(self.raw)
-        for attr, offset, _signed in _KEYGROUP_DB_FIELDS:
-            out[offset : offset + 2] = bytes(encode_db(getattr(self, attr)))
+        for attr, offset, signed in _KEYGROUP_DB_FIELDS:
+            value = getattr(self, attr)
+            held = decode_db(out[offset], out[offset + 1])
+            if (to_signed(held, 8) if signed else held) != value:
+                out[offset : offset + 2] = bytes(encode_db(value))
         for attr, offset in _KEYGROUP_DW_FIELDS:
-            out[offset : offset + 4] = bytes(encode_dw(getattr(self, attr)))
+            value = getattr(self, attr)
+            if to_signed(decode_dw(out[offset : offset + 4]), 16) != value:
+                out[offset : offset + 4] = bytes(encode_dw(value))
         for attr, offset in _KEYGROUP_NAME_FIELDS:
-            out[offset : offset + 20] = bytes(encode_name(getattr(self, attr)))
+            value = getattr(self, attr)
+            if decode_name(out[offset : offset + 20]) != value.rstrip(" \x00")[:20]:
+                out[offset : offset + 20] = bytes(encode_name(value))
         return bytes(out)
 
 
@@ -291,13 +302,48 @@ class Program:
             )
         header = bytearray(self.header_raw)
 
-        def put(offset, encoded):
-            header[offset : offset + len(encoded)] = bytes(encoded)
+        # same rule as Keygroup.to_bytes: only a field that changed is re-encoded
+        def put(offset, encoded, held, wanted):
+            if held != wanted:
+                header[offset : offset + len(encoded)] = bytes(encoded)
 
-        put(_H_NAME, encode_name(self.name))
-        put(_H_KEY_TILT, encode_dw(self.key_tilt))
-        put(_H_POSITIONAL_XFADE, encode_db(1 if self.positional_xfade else 0))
-        put(_H_NUM_KEYGROUPS, encode_db(len(self.keygroups)))
-        put(_H_MIDI_PROGRAM, encode_db(self.midi_program_number))
-        put(_H_ENABLE_MIDI_PROGRAM, encode_db(255 if self.enable_midi_program else 0))
+        def db_at(offset):
+            return decode_db(header[offset], header[offset + 1])
+
+        put(
+            _H_NAME,
+            encode_name(self.name),
+            decode_name(header[_H_NAME : _H_NAME + 20]),
+            self.name.rstrip(" \x00")[:NAME_LENGTH],
+        )
+        put(
+            _H_KEY_TILT,
+            encode_dw(self.key_tilt),
+            to_signed(decode_dw(header[_H_KEY_TILT : _H_KEY_TILT + 4]), 16),
+            self.key_tilt,
+        )
+        put(
+            _H_POSITIONAL_XFADE,
+            encode_db(1 if self.positional_xfade else 0),
+            bool(db_at(_H_POSITIONAL_XFADE)),
+            bool(self.positional_xfade),
+        )
+        put(
+            _H_NUM_KEYGROUPS,
+            encode_db(len(self.keygroups)),
+            db_at(_H_NUM_KEYGROUPS),
+            len(self.keygroups),
+        )
+        put(
+            _H_MIDI_PROGRAM,
+            encode_db(self.midi_program_number),
+            db_at(_H_MIDI_PROGRAM),
+            self.midi_program_number,
+        )
+        put(
+            _H_ENABLE_MIDI_PROGRAM,
+            encode_db(255 if self.enable_midi_program else 0),
+            bool(db_at(_H_ENABLE_MIDI_PROGRAM)),
+            bool(self.enable_midi_program),
+        )
         return bytes(header) + b"".join(kg.to_bytes() for kg in self.keygroups)

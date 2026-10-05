@@ -756,33 +756,33 @@ def test_s950_send_is_enabled_with_files_and_an_input(s950_dashboard):
     assert d.btn_send.toolTip() == ""
 
 
-def test_s950_enables_the_viewer_with_a_read_only_tooltip(s950_dashboard):
+def test_s950_enables_the_editor_with_an_experimental_tooltip(s950_dashboard):
     assert s950_dashboard.btn_open_editor.isEnabled() is True
-    assert "read-only" in s950_dashboard.btn_open_editor.toolTip()
+    assert "experimental" in s950_dashboard.btn_open_editor.toolTip()
 
 
-def test_s950_viewer_needs_both_ports(s950_dashboard):
+def test_s950_editor_needs_both_ports(s950_dashboard):
     s950_dashboard.midi_manager.input_name = None
     s950_dashboard._update_open_editor_enabled()
     assert s950_dashboard.btn_open_editor.isEnabled() is False
     assert "Settings" in s950_dashboard.btn_open_editor.toolTip()
 
 
-def test_s950_opens_the_viewer_on_the_shared_controller_not_a_bridge(
+def test_s950_opens_its_editor_on_the_shared_controller_not_a_bridge(
     s950_dashboard, monkeypatch
 ):
     from ui import dashboard as dashboard_module
 
     opened = []
 
-    class _StubViewer:
+    class _StubEditor2:
         def __init__(self, main_window, controller):
             opened.append((main_window, controller))
 
         def show(self):
             pass
 
-    monkeypatch.setattr(dashboard_module, "S950ProgramViewerWindow", _StubViewer)
+    monkeypatch.setattr(dashboard_module, "S950ProgramEditorWindow", _StubEditor2)
     monkeypatch.setattr(
         dashboard_module.program_editor_bridge,
         "connect",
@@ -851,7 +851,7 @@ def test_leaving_s950_keeps_send_available_without_a_queue_change(s950_dashboard
     assert d.btn_send.toolTip() == ""
 
 
-def test_s950_viewer_refuses_without_a_midi_input_and_never_touches_a_bridge(
+def test_s950_editor_refuses_without_a_midi_input_and_never_touches_a_bridge(
     s950_dashboard, monkeypatch
 ):
     from core import program_editor_bridge
@@ -863,8 +863,8 @@ def test_s950_viewer_refuses_without_a_midi_input_and_never_touches_a_bridge(
     monkeypatch.setattr(program_editor_bridge, "connect", _must_not_connect)
     monkeypatch.setattr(
         dashboard_module,
-        "S950ProgramViewerWindow",
-        lambda *a, **k: pytest.fail("opened a viewer with no MIDI input"),
+        "S950ProgramEditorWindow",
+        lambda *a, **k: pytest.fail("opened an editor with no MIDI input"),
     )
     s950_dashboard.midi_manager.input_name = None  # the unit answers on the input
     s950_dashboard.open_program_editor()

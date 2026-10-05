@@ -36,11 +36,14 @@ out. The timeout message says so, and every request/reply is logged.
 """
 
 import os
+import re
 import time
+from datetime import datetime
+from pathlib import Path
 
 from PySide6.QtCore import QObject, QTimer
 
-from core import debug_log, s950_program, s950_sysex as s, sds_encoder
+from core import debug_log, s950_params, s950_program, s950_sysex as s, sds_encoder
 
 #: sample numbers the S950 has (its catalog uses one byte, the dump header 14 bits)
 SLOT_COUNT = 100
@@ -50,7 +53,9 @@ MIN_SAMPLE_RATE_HZ = round(1e9 / s.MAX_PERIOD_NS)  # 2 kHz - the dump header's l
 MAX_SAMPLE_RATE_HZ = round(1e9 / s.MIN_PERIOD_NS)  # not what the hardware plays
 MIDI_BYTES_PER_SECOND = 3125
 
-_BUSY_OPS = ("send", "receive", "info", "rename", "program")
+_BUSY_OPS = ("send", "receive", "info", "rename", "program", "program_write")
+#: where the original of every program is saved before it is overwritten
+BACKUP_DIR = Path.home() / ".akaisds" / "s950_backups"
 
 
 def clamp_sample_rate(hz):
@@ -162,8 +167,12 @@ class S950Transfers(QObject):
         self._progress_emit = None
         # info / rename
         self._rename_to = None
-        # program read
+        # program read / write
         self._program_slot = None
+        self._write_changes = []
+        self._write_merged = None
+        self._write_backup_path = None
+        self.backup_dir = BACKUP_DIR
 
         self._reply_timer = self._make_timer(self._on_reply_timeout)
         self._step_timer = self._make_timer(self._run_step)
@@ -256,6 +265,47 @@ class S950Transfers(QObject):
             s.FUNC_RPRGM, slot, s.FUNC_PRGM, self._publish_program, f"program {slot}"
         )
 
+    def write_program(self, slot, baseline, edited):
+        """Write the editable fields of `edited` that differ from `baseline` onto the
+        program in `slot`; reports on the controller's `s950_program_written`.
+
+        Never creates a program (the slot must already hold one) and never changes the
+        keygroup count. The order, each step logged: read the program fresh, refuse if it
+        can't be backed up, apply ONLY the changed fields to that fresh copy, send it, wait
+        out the wire time and the NAK window, read it back and compare. The unit doesn't
+        answer a PRGM write, so the read-back is the only evidence it landed.
+        """
+        try:
+            changes = s950_params.diff_programs(baseline, edited)
+        except ValueError as e:
+            self._write_refused(slot, f"Not written: {e}")
+            return
+        problems = s950_params.program_problems(edited, changes)
+        if problems:
+            self._write_refused(slot, "Not written: " + "; ".join(problems))
+            return
+        if not self._begin("program_write", "Writing a program"):
+            self._c.s950_program_written.emit(
+                slot, False, None, "Not written: another operation is in progress (or no MIDI input)"
+            )
+            return
+        self._program_slot = slot
+        self._write_changes = changes
+        self._phase = "preread"
+        self._c.status_changed.emit(f"Writing program {slot}...")
+        self._request(
+            s.FUNC_RPRGM,
+            slot,
+            s.FUNC_PRGM,
+            self._on_write_preread,
+            f"program {slot} (before writing it)",
+        )
+
+    def _write_refused(self, slot, message):
+        debug_log.get_logger().info(f"S950Transfers: {message}")
+        self._c.status_changed.emit(message)
+        self._c.s950_program_written.emit(slot, False, None, message)
+
     def cancel(self):
         """Abort whatever is running. Returns True if something was."""
         if self._op is None:
@@ -284,6 +334,15 @@ class S950Transfers(QObject):
             self._c.status_changed.emit("Cancelled")
             if op == "program":
                 self._c.s950_program_received.emit(program_slot, None)
+            if op == "program_write":
+                self._c.s950_program_written.emit(
+                    program_slot,
+                    False,
+                    None,
+                    "Cancelled - the sampler may already have received the program"
+                    if phase in ("draining", "naks")
+                    else "Cancelled - nothing was written",
+                )
         return True
 
     def handle_sysex(self, data):
@@ -327,6 +386,9 @@ class S950Transfers(QObject):
         self._catalog_then = None
         self._rename_to = None
         self._program_slot = None
+        self._write_changes = []
+        self._write_merged = None
+        self._write_backup_path = None
         self._step_fn = None
 
     def _stop_timers(self):
@@ -406,6 +468,8 @@ class S950Transfers(QObject):
         self._c.status_changed.emit(message)
         if op == "program":
             self._c.s950_program_received.emit(program_slot, None)
+        if op == "program_write":
+            self._c.s950_program_written.emit(program_slot, False, None, message)
         if op == "send":
             self._c.transfer_finished.emit(False)
         elif op == "receive":
@@ -457,7 +521,7 @@ class S950Transfers(QObject):
         pending.callback(message)
 
     def _on_handshake(self, code):
-        if self._op == "send" and self._phase in ("draining", "naks"):
+        if self._op in ("send", "program_write") and self._phase in ("draining", "naks"):
             if code == s.CODE_NAKS:
                 self._naks += 1
             return
@@ -754,6 +818,127 @@ class S950Transfers(QObject):
         self._reset()
         self._c.s950_program_received.emit(slot, program)
         self._c.status_changed.emit(f"Read program {slot}: {program.name.strip()}")
+
+    # -- program write -----------------------------------------------------------------
+
+    def _on_write_preread(self, message):
+        slot = self._program_slot
+        try:
+            current = s950_program.Program.from_payload(message.payload)
+        except ValueError as e:
+            self._fail(f"Not written: couldn't read program {slot} first ({e})")
+            return
+        try:
+            merged = s950_params.apply_changes(current, self._write_changes)
+        except ValueError as e:
+            self._fail(f"Not written: {e}")
+            return
+        problems = s950_params.program_problems(merged)
+        if problems:
+            self._fail("Not written: " + "; ".join(problems))
+            return
+        try:
+            self._write_backup_path = self._save_backup(slot, current.name, message)
+        except OSError as e:
+            self._fail(
+                f"Not written: couldn't save a backup of program {slot} first ({e}) - "
+                "nothing was changed on the sampler"
+            )
+            return
+        self._write_merged = merged
+        data = s.build_akai_data(s.FUNC_PRGM, slot, merged.to_payload(), self._c.channel)
+        log = debug_log.get_logger()
+        log.info(
+            f"S950Transfers: writing program {slot} {merged.name!r}: "
+            f"{len(self._write_changes)} change(s), {merged.num_keygroups} keygroup(s), "
+            f"{len(data) + 2} bytes on the wire, backup {self._write_backup_path}"
+        )
+        for change in self._write_changes:
+            log.info(f"S950Transfers:   {change.describe()}")
+        self._naks = 0
+        self._phase = "draining"
+        if not self._send(data):
+            return
+        wire_ms = (len(data) + 2) * 1000 / MIDI_BYTES_PER_SECOND
+        self._after(max(self.drain_floor_ms, wire_ms * self.drain_margin), self._after_write_drain)
+
+    def _save_backup(self, slot, name, message):
+        # the complete PRGM message exactly as the unit sent it, as a .syx file any
+        # SysEx librarian can send straight back
+        self.backup_dir.mkdir(parents=True, exist_ok=True)
+        safe = re.sub(r"[^A-Za-z0-9_-]+", "_", name.strip()) or "unnamed"
+        stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        path = self.backup_dir / f"prog{slot:02d}-{safe}-{stamp}.syx"
+        raw = s.build_akai_data(s.FUNC_PRGM, slot, message.payload, message.channel)
+        path.write_bytes(bytes([0xF0, *raw, 0xF7]))
+        return path
+
+    def _after_write_drain(self):
+        self._phase = "naks"
+        self._after(self.nak_window_ms, self._after_write_nak_window)
+
+    def _after_write_nak_window(self):
+        if self._naks:
+            self._fail(
+                f"{self._naks} NAK(s) from the S900/S950 while writing program "
+                f"{self._program_slot} - it may not have taken the whole program. "
+                f"The original is saved at {self._write_backup_path}"
+            )
+            return
+        self._phase = "verify"
+        self._after(self.sprm_settle_ms, self._read_back_program)
+
+    def _read_back_program(self):
+        self._request(
+            s.FUNC_RPRGM,
+            self._program_slot,
+            s.FUNC_PRGM,
+            self._on_write_readback,
+            f"program {self._program_slot} (to check the write)",
+        )
+
+    def _on_write_readback(self, message):
+        slot, sent, backup = self._program_slot, self._write_merged, self._write_backup_path
+        try:
+            held = s950_program.Program.from_payload(message.payload)
+        except ValueError as e:
+            self._fail(
+                f"Program {slot} was sent, but the read-back is unreadable ({e}). "
+                f"The original is saved at {backup}"
+            )
+            return
+        log = debug_log.get_logger()
+        self._reset()
+        if held == sent:
+            if held.to_payload() != sent.to_payload():
+                # same modelled fields, different bytes elsewhere: the unit normalised
+                # something we don't model - not a failure, but worth a log line
+                log.warning(
+                    f"S950Transfers: program {slot} read back with different unmodelled bytes "
+                    f"than were sent (sent {len(sent.to_payload())}, got {len(held.to_payload())})"
+                )
+            log.info(f"S950Transfers: program {slot} written and verified")
+            text = f"Program {slot} written and verified. Original saved to {backup}"
+            self._c.status_changed.emit(text)
+            self._c.s950_program_written.emit(slot, True, held, text)
+            return
+        try:
+            differing = [c.describe() for c in s950_params.diff_programs(sent, held)]
+        except ValueError:
+            differing = ["the number of keygroups"]
+        if not differing:
+            differing = ["fields the editor doesn't offer"]
+        log.warning(
+            f"S950Transfers: program {slot} read back DIFFERENT from what was sent: "
+            + "; ".join(differing)
+        )
+        text = (
+            f"Program {slot} was sent, but the sampler now reports different values "
+            f"({'; '.join(differing[:3])}{'...' if len(differing) > 3 else ''}). "
+            f"Original saved to {backup}"
+        )
+        self._c.status_changed.emit(text)
+        self._c.s950_program_written.emit(slot, False, held, text)
 
     # -- info / rename ---------------------------------------------------------------
 

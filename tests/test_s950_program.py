@@ -168,3 +168,32 @@ def test_rejects_malformed_programs():
         p.Program(keygroups=[p.Keygroup()] * 32).to_payload()
     with pytest.raises(ValueError):
         p.Keygroup.from_bytes(bytes(139))
+
+
+def test_an_untouched_field_keeps_its_exact_bytes_even_if_the_unit_encoded_it_oddly():
+    # a name padded with NULs (not spaces) must come back NUL-padded when it wasn't edited
+    program = p.Program(name="ABC", keygroups=[p.Keygroup(soft_sample="KICK")])
+    payload = bytearray(program.to_payload())
+    for i in range(3, 10):  # header name: NUL padding instead of spaces
+        payload[2 * i : 2 * i + 2] = bytes(s.encode_db(0))
+    kg0 = p.PROGRAM_HEADER_SIZE
+    for i in range(4, 10):  # soft sample name likewise
+        off = kg0 + 48 + 2 * i
+        payload[off : off + 2] = bytes(s.encode_db(0))
+    reparsed = p.Program.from_payload(bytes(payload))
+    assert reparsed.to_payload() == bytes(payload)  # byte-identical, no normalisation
+
+
+def test_an_edited_field_is_re_encoded_and_only_that_field():
+    payload = p.Program(keygroups=[p.Keygroup(attack=1)]).to_payload()
+    program = p.Program.from_payload(payload)
+    program.keygroups[0].attack = 50
+    out = program.to_payload()
+    changed = [i for i in range(len(out)) if out[i] != payload[i]]
+    assert changed and all(p.PROGRAM_HEADER_SIZE + 6 <= i < p.PROGRAM_HEADER_SIZE + 8 for i in changed)
+
+
+def test_a_changed_name_is_space_padded():
+    program = p.Program.from_payload(p.Program(name="ABC").to_payload())
+    program.name = "XY"
+    assert p.Program.from_payload(program.to_payload()).name == "XY"

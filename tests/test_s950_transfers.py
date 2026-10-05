@@ -675,3 +675,215 @@ def test_is_s950_idle_is_stricter_than_is_transfer_busy(rig):
     assert rig.controller.is_s950_idle() is False  # ...but it owns the wire
     assert wait_until(lambda: rig.rec.slots)
     assert rig.controller.is_s950_idle()
+
+
+# --- program write (Stage 5) ---------------------------------------------------------------------
+
+import dataclasses
+
+from core import s950_params
+
+
+class _WriteRecorder:
+    def __init__(self, controller):
+        self.results = []
+        controller.s950_program_written.connect(
+            lambda slot, ok, program, message: self.results.append((slot, ok, program, message))
+        )
+
+
+def _edit(program, **keygroup0):
+    kgs = [dataclasses.replace(kg) for kg in program.keygroups]
+    kgs[0] = dataclasses.replace(kgs[0], **keygroup0)
+    return dataclasses.replace(program, keygroups=kgs)
+
+
+@pytest.fixture
+def wrig(rig, tmp_path):
+    rig.engine.backup_dir = tmp_path / "backups"
+    rig.writes = _WriteRecorder(rig.controller)
+    return rig
+
+
+def test_writing_an_unchanged_program_verifies_and_backs_up_the_original(wrig):
+    original = wrig.fake.programs[0]
+    before = original.to_payload()
+    wrig.controller.write_program(0, original, original)
+    assert wait_until(lambda: wrig.writes.results)
+    slot, ok, held, message = wrig.writes.results[0]
+    assert (slot, ok) == (0, True) and "verified" in message
+    assert held == original
+    assert wrig.fake.prgm_writes == 1
+    assert wrig.fake.programs[0].to_payload() == before  # byte-identical no-op
+    backups = list((wrig.engine.backup_dir).glob("prog00-DRUMS-*.syx"))
+    assert len(backups) == 1
+    raw = backups[0].read_bytes()
+    assert raw[0] == 0xF0 and raw[-1] == 0xF7
+    assert s.parse_akai(raw[1:-1]).payload == before  # the exact original PRGM payload
+    # read, write, read back - in that order
+    assert [m[2] for m in wrig.midi.sent] == [s.FUNC_RPRGM, s.FUNC_PRGM, s.FUNC_RPRGM]
+    assert wrig.engine.idle
+
+
+def test_a_write_changes_only_the_edited_fields(wrig):
+    original = wrig.fake.programs[0]
+    edited = _edit(original, attack=12, soft_transpose=16)
+    edited = dataclasses.replace(edited, key_tilt=-5)
+    wrig.controller.write_program(0, original, edited)
+    assert wait_until(lambda: wrig.writes.results)
+    assert wrig.writes.results[0][1] is True
+    stored = wrig.fake.programs[0]
+    assert stored.key_tilt == -5
+    assert stored.keygroups[0].attack == 12 and stored.keygroups[0].soft_transpose == 16
+    # everything else - the second keygroup included - is untouched
+    assert stored.keygroups[1] == original.keygroups[1]
+    assert dataclasses.replace(stored.keygroups[0], attack=0, soft_transpose=0) == dataclasses.replace(
+        original.keygroups[0], attack=0, soft_transpose=0
+    )
+
+
+def test_unmodelled_bytes_survive_a_write(wrig):
+    original = wrig.fake.programs[0]
+    junk = bytearray(original.keygroups[0].raw)
+    junk[112:116] = bytes([1, 2, 3, 4])  # reserved 112..127: never modelled
+    original.keygroups[0] = dataclasses.replace(original.keygroups[0], raw=bytes(junk))
+    hdr = bytearray(original.header_raw)
+    hdr[60:64] = bytes([9, 8, 7, 6])
+    original.header_raw = bytes(hdr)
+    wrig.controller.write_program(0, original, _edit(original, decay=5))
+    assert wait_until(lambda: wrig.writes.results)
+    assert wrig.writes.results[0][1] is True
+    stored = wrig.fake.programs[0]
+    assert stored.keygroups[0].raw[112:116] == bytes([1, 2, 3, 4])
+    assert stored.header_raw[60:64] == bytes([9, 8, 7, 6])
+
+
+def test_a_front_panel_edit_made_after_loading_is_not_clobbered(wrig):
+    loaded = dataclasses.replace(wrig.fake.programs[0], keygroups=[dataclasses.replace(k) for k in wrig.fake.programs[0].keygroups])
+    # someone turns the attack knob on the unit after we loaded the program...
+    wrig.fake.programs[0] = _edit(wrig.fake.programs[0], attack=33)
+    # ...and we only change the decay
+    wrig.controller.write_program(0, loaded, _edit(loaded, decay=7))
+    assert wait_until(lambda: wrig.writes.results)
+    stored = wrig.fake.programs[0].keygroups[0]
+    assert stored.decay == 7 and stored.attack == 33
+
+
+def test_out_of_range_values_are_refused_before_anything_is_sent(wrig):
+    original = wrig.fake.programs[0]
+    wrig.controller.write_program(0, original, _edit(original, attack=100))
+    assert wrig.writes.results[0][1:3] == (False, None)
+    assert "attack must be 0..99" in wrig.writes.results[0][3]
+    assert wrig.midi.sent == []
+    assert wrig.engine.idle
+
+
+def test_an_inverted_key_range_is_refused(wrig):
+    original = wrig.fake.programs[0]
+    wrig.controller.write_program(0, original, _edit(original, lower_key=100, upper_key=30))
+    assert wrig.writes.results[0][1] is False
+    assert "lower key is above" in wrig.writes.results[0][3]
+    assert wrig.midi.sent == []
+
+
+def test_changing_the_keygroup_count_is_refused(wrig):
+    original = wrig.fake.programs[0]
+    fewer = dataclasses.replace(original, keygroups=original.keygroups[:1])
+    wrig.controller.write_program(0, original, fewer)
+    assert "number of keygroups" in wrig.writes.results[0][3]
+    assert wrig.midi.sent == []
+
+
+def test_a_value_the_unit_already_holds_out_of_range_may_stay(wrig):
+    original = wrig.fake.programs[0]
+    odd = _edit(original, filter_key_track=120)  # beyond our assumed 0..99
+    wrig.fake.programs[0] = odd
+    wrig.controller.write_program(0, odd, _edit(odd, attack=3))
+    assert wait_until(lambda: wrig.writes.results)
+    assert wrig.writes.results[0][1] is True
+    assert wrig.fake.programs[0].keygroups[0].filter_key_track == 120
+
+
+def test_writing_to_an_empty_slot_never_creates_a_program(wrig):
+    wrig.engine.reply_timeout_ms = 30
+    original = wrig.fake.programs[0]
+    wrig.controller.write_program(9, original, _edit(original, attack=1))
+    assert wait_until(lambda: wrig.writes.results)
+    assert wrig.writes.results[0][1:3] == (False, None)
+    assert "No reply" in wrig.writes.results[0][3]
+    assert wrig.fake.prgm_writes == 0 and 9 not in wrig.fake.programs
+
+
+def test_no_backup_means_no_write(wrig, tmp_path):
+    blocker = tmp_path / "not-a-dir"
+    blocker.write_text("x")
+    wrig.engine.backup_dir = blocker  # mkdir will fail
+    original = wrig.fake.programs[0]
+    wrig.controller.write_program(0, original, _edit(original, attack=1))
+    assert wait_until(lambda: wrig.writes.results)
+    assert wrig.writes.results[0][1] is False
+    assert "backup" in wrig.writes.results[0][3]
+    assert wrig.fake.prgm_writes == 0
+
+
+def test_a_nak_during_the_write_fails_it_and_names_the_backup(wrig):
+    real = wrig.fake._prgm
+
+    def nak_then_store(slot, payload):
+        real(slot, payload)
+        wrig.fake._send(s.build_handshake(s.CODE_NAKS))
+
+    wrig.fake._prgm = nak_then_store
+    original = wrig.fake.programs[0]
+    wrig.controller.write_program(0, original, _edit(original, attack=1))
+    assert wait_until(lambda: wrig.writes.results)
+    _, ok, held, message = wrig.writes.results[0]
+    assert ok is False and held is None
+    assert "NAK" in message and ".syx" in message
+
+
+def test_a_readback_that_differs_is_reported_with_what_the_unit_holds(wrig):
+    real = wrig.fake._prgm
+
+    def store_but_clamp(slot, payload):
+        real(slot, payload)
+        kg = wrig.fake.programs[slot].keygroups[0]
+        wrig.fake.programs[slot].keygroups[0] = dataclasses.replace(kg, attack=kg.attack - 1)
+
+    wrig.fake._prgm = store_but_clamp
+    original = wrig.fake.programs[0]
+    wrig.controller.write_program(0, original, _edit(original, attack=20))
+    assert wait_until(lambda: wrig.writes.results)
+    _, ok, held, message = wrig.writes.results[0]
+    assert ok is False
+    assert held is not None and held.keygroups[0].attack == 19  # what the unit says now
+    assert "different values" in message and "attack" in message
+
+
+def test_a_write_while_busy_is_refused_and_leaves_the_running_op_alone(wrig):
+    wrig.controller.refresh_sample_list()
+    original = wrig.fake.programs[0]
+    wrig.controller.write_program(0, original, _edit(original, attack=1))
+    assert wrig.writes.results[0][1:3] == (False, None)
+    assert wrig.engine._op == "catalog"
+    assert wait_until(lambda: wrig.rec.slots)
+    assert wrig.fake.prgm_writes == 0
+
+
+def test_a_write_counts_as_a_transfer_and_can_be_cancelled(wrig):
+    original = wrig.fake.programs[0]
+    wrig.controller.write_program(0, original, _edit(original, attack=1))
+    assert wrig.controller.is_transfer_busy() is True
+    assert wrig.engine.cancel() is True
+    assert wrig.writes.results[0][1] is False and "nothing was written" in wrig.writes.results[0][3]
+    assert wrig.engine.idle
+
+
+def test_writing_needs_a_midi_input(qapp, monkeypatch, tmp_path):
+    r = _build(qapp, monkeypatch, FakeS950(), input_name=None)
+    r.engine.backup_dir = tmp_path
+    rec = _WriteRecorder(r.controller)
+    original = r.fake.programs[0]
+    r.controller.write_program(0, original, _edit(original, attack=1))
+    assert rec.results[0][1:3] == (False, None)
+    assert r.midi.sent == []

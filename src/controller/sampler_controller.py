@@ -15,6 +15,11 @@ class SamplerController(QObject):
     # if the read failed, so a waiting window never hangs on a lost reply
     program_slots_updated = Signal(list)
     s950_program_received = Signal(int, object)
+    # write_program()'s outcome: (slot, verified, Program the sampler holds now | None,
+    # message). verified means the read-back matched what was sent; False with a Program
+    # means "written, but the sampler shows something different" (the Program is what it
+    # reports); False with None means nothing usable came back / nothing was written.
+    s950_program_written = Signal(int, bool, object, str)
     status_changed = Signal(str)
     transfer_progress = Signal(int, int)  # (packets sent so far, total packets)
     unit_progress = Signal(float)
@@ -218,6 +223,14 @@ class SamplerController(QObject):
         if not self._is_s950():
             return
         self._s950.request_program(slot)
+
+    def write_program(self, slot, baseline, edited):
+        # S900/S950 only: write the fields of `edited` that differ from `baseline`
+        # (the program as loaded) onto the program in `slot` - see
+        # S950Transfers.write_program
+        if not self._is_s950():
+            return
+        self._s950.write_program(slot, baseline, edited)
 
     def delete_sample(self, sample_number, channel=None):
         if self._s950_not_supported(

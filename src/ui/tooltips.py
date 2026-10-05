@@ -34,8 +34,8 @@ OPEN_EDITOR_NEEDS_MIDI_PORTS = (
 OPEN_EDITOR_NEEDS_AKAI_DEVICE_TYPE = (
     'Set Sampler Type to Akai S1000 or Akai S2000/S3000 in Settings first'
 )
-OPEN_EDITOR_S950_VIEWER = (
-    "Opens the Akai S900/S950 program viewer (read-only - editing isn't available yet)"
+OPEN_EDITOR_S950 = (
+    "Opens the Akai S900/S950 program editor (experimental - writes are untested on hardware)"
 )
 # Akai S900/S950 (see controller/s950_transfers.py): it answers on the MIDI
 # input, so sending/receiving/browsing all need one; and it has no delete
