@@ -1,6 +1,6 @@
 # Akai S900/S950 support - real-hardware test plan
 
-S900/S950 support (Dashboard transfers + the program editor) was written from
+S900/S950 support (Dashboard transfers, the program editor and its Samples tab) was written from
 s950tools' notes with **no S900/S950 to test against** (see AGENTS.md, "Akai S900/S950
 support"). This is the plan for the first person who has one. It runs from safest to
 riskiest - **stop at the first step that misbehaves and send the log**
@@ -9,12 +9,13 @@ riskiest - **stop at the first step that misbehaves and send the log**
 ## Before you start
 
 1. **Use MIDI in both directions.** The S900/S950 answers on your MIDI input; with only an
-   output selected, Refresh/Receive/Send/the viewer all refuse (by design - no open-loop send).
-2. In AKAISDS: **Settings > Sampler Type > Akai S900/S950**, pick the MIDI input AND output,
+   output selected, Refresh/Receive/Send/the program editor all refuse (by design - no open-loop
+   send).
+2. In AKAISDS: **Settings > Sampler Type > Akai S900/S950 (experimental)**, pick the MIDI input AND output,
    press OK. The SysEx channel in Settings should match the sampler's MIDI channel setting.
 3. On the sampler, enable MIDI/RS-232 system-exclusive reception if it has such a setting.
 4. Do anything that **writes** (Send, Rename, and every program edit) to a scratch sample or
-   program you can lose. Reading never writes.
+   program you can lose. Reading never writes - and the Samples tab never writes at all.
 5. **Save everything on the sampler to disk (floppy) first**, as for any experimental write.
    AKAISDS also backs up each program it overwrites (see section D), but that backup is itself
    untested.
@@ -35,24 +36,25 @@ riskiest - **stop at the first step that misbehaves and send the log**
 Open it with the Dashboard's **Open Editor** button (or Ctrl+E). Until you press a Write button,
 nothing here writes.
 
+- [ ] The first program is selected and shown by itself when the editor opens (no "select a
+      program" prompt).
 - [ ] The Programs list matches the sampler's own program list (names and order are
       guesses - note any difference).
 - [ ] Click a program: the Program page shows its name and MIDI program number, and the Keygroups
-      column lists its keygroups (the count is under the list).
+      column lists all of its keygroups.
 - [ ] The keygroup list and the range bar match the sampler's own key ranges. Note names use
       the S3000XL convention (middle C = C3) - say which octave your sampler's panel uses.
 - [ ] For each keygroup (click it, then the Zone card's Soft sample / Loud sample buttons), the
-      sample names are right. A name flagged "Not on the sampler" really isn't in the sample list (programs find samples by NAME).
+      sample names are right. A name flagged "Not on the sampler" really isn't in the sample list
+      (programs find samples by NAME).
 - [ ] Envelope values (attack/decay/sustain/release, amplitude and filter), velocity switch,
       filter key tracking, LFO and mod wheel/aftertouch values match the sampler's screen.
       **Any value that reads as nonsense is more likely a wrong byte offset in
       `core/s950_program.py` than a fault in the sampler** - send the log.
-- [ ] The first program is selected and shown by itself when the editor opens (no "select a
-      program" prompt).
 - [ ] A program with MANY keygroups (up to 31) reads and lists them all.
 - [ ] Refresh keeps the selected program and re-reads it.
 - [ ] Switching to the Dashboard (Ctrl+T) and back works; closing is refused while a read is
-      in flight.
+      in flight. The Programs and Samples tabs also switch with Ctrl+2 / Ctrl+3.
 
 ### B2. Samples tab (read-only)
 
@@ -64,14 +66,15 @@ things - it can't change a sample. Rename a sample from the Dashboard.
       background, only while this tab is showing). Compare a few against the sampler's screen.
 - [ ] Click a sample: **Length, Sample rate, Replay mode, Direction, Start, End, Loop length** match
       what the sampler shows. Note anything that doesn't - especially Replay mode and the three
-      position fields (see guesses 15-16 below).
+      position fields (see guesses 13-14 below).
 - [ ] The waveform shows the sample's start/end markers (and loop markers for a looping sample) before
       any audio is loaded. Do they sit where the sampler says the loop is?
 - [ ] **Double-click the waveform** to load the audio. The window stays usable while it transfers (the
       status bar shows a percentage); a small sample should arrive in a second or two. The waveform
       should look like the sound, at the right length.
 - [ ] A large sample (several seconds): does it arrive at all? A timeout on a *small* sample, but not a
-      large one, would point at the MIDI backend splitting long SysEx messages (guess 12).
+      large one, would point at the MIDI backend splitting long SysEx messages (guesses 12
+      and 18).
 - [ ] Switching to the Programs tab and back works; nothing on the Samples tab ever writes (the unit's
       screen should never change because of it).
 - [ ] With ~20+ samples on the unit: the durations all fill in without errors, and Refresh re-reads them.
@@ -101,7 +104,7 @@ Every write: (1) re-reads the program, (2) saves that original as a `.syx` in
 - [ ] **D2 - one value.** Change one keygroup's Attack by a few steps, press **Write to Sampler**
       (a one-time warning appears first). Expect "written and verified". **Check the sampler's own
       screen AND play the keygroup** - the read-back can pass while the sound hasn't changed (see
-      guess 5 below). Note whether you needed to re-select the program on the sampler (ENT) to
+      guess 4 below). Note whether you needed to re-select the program on the sampler (ENT) to
       hear it.
 - [ ] **D3 - restore.** Press **Restore Previous**: the value returns and verifies.
 - [ ] **D4 - more fields**, one card at a time, checking the sampler each time: Filter, Filter Envelope,
@@ -124,8 +127,10 @@ Every write: (1) re-reads the program, (2) saves that original as a `.syx` in
       write. *(This relies on the same assumption as every program write - see guess 1.)*
 
 **Not offered, on purpose:** creating a program, deleting one (there is no MIDI delete),
-adding/removing keygroups, and editing the keygroup "Options" bits (read-only - their meaning is
-inferred).
+adding/removing keygroups, editing the keygroup "Options" bits (read-only - their meaning is
+inferred), and editing a sample's own parameters (loop points, replay mode, start/end - the Samples
+tab is read-only until what those fields do has been confirmed on a unit). A sample rename from the
+Dashboard does not update the programs that use it.
 
 ## What is a guess
 
@@ -180,27 +185,27 @@ behaviour is the only evidence - they describe a real unit but were not reproduc
     both ways (the sample-receive risk, but 200x smaller).
 
 ### The Samples tab
-15. **What the SPRM position fields mean.** The tab shows Start, End and Loop length straight from the
+13. **What the SPRM position fields mean.** The tab shows Start, End and Loop length straight from the
     sample parameters, and draws markers from them: start = Start, end = End, and a looping sample
     loops over the last *Loop length* words before the end (the S3000-family convention). The real
     S900/S950 behaviour is only inferred from s950tools - a loop that appears in the wrong place on
     the waveform means this mapping is wrong, not necessarily the unit.
-16. **Replay mode** is read as the letter in the sample parameters: `O` one-shot, `L` loop, `A`
+14. **Replay mode** is read as the letter in the sample parameters: `O` one-shot, `L` loop, `A`
     alternating. **Direction** is `R` = reversed. Anything else is shown as "unknown (n)".
-17. **Duration** = length in words / sample rate. The sampler may play at a different rate than the
+15. **Duration** = length in words / sample rate. The sampler may play at a different rate than the
     rate stored in its parameters.
-18. **Nominal pitch** is shown as the raw number with "unverified units" - its unit and direction are
+16. **Nominal pitch** is shown as the raw number with "unverified units" - its unit and direction are
     inferred (1/16 semitone, C3 = 960), so no root note is shown.
-19. **One parameter read per sample** are issued back to back while the tab is open. The sampler may
+17. **One parameter read per sample** is issued back to back while the tab is open. The sampler may
     not like ~100 of them in a row; each is a small request, but it is not measured.
-20. **Loading audio is a real sample dump**, the same transfer the Dashboard's Receive uses, so every
+18. **Loading audio is a real sample dump**, the same transfer the Dashboard's Receive uses, so every
     transfer guess above applies (one long SysEx, the unit stalling until ACKed, the "NAK/empty slot"
     behaviour).
 
 ### The safety net
-13. **The backup `.syx` restores a program.** It is the unit's own PRGM reply, byte for byte, so it
+19. **The backup `.syx` restores a program.** It is the unit's own PRGM reply, byte for byte, so it
     is only as restorable as guess 1.
-14. **"Restore Previous"** writes the earlier values back through the same path; it is exactly as
+20. **"Restore Previous"** writes the earlier values back through the same path; it is exactly as
     trustworthy as a normal write, no more.
 
 ## What to send back
