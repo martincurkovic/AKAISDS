@@ -52,6 +52,19 @@ from PySide6.QtWidgets import (
 from s3k.messages import AKAI_CHARSET, NAME_LENGTH
 from ui.knob import Knob
 from ui.note_spinbox import NoteSpinBox
+from ui.editor_layout import (
+    add_keygroup_row,
+    build_centered_row,
+    build_content_row,
+    build_knob_column,
+    build_knob_value_row,
+    build_labeled_combo_column,
+    build_labeled_knob_value_column,
+    build_list_column,
+    build_paired_row,
+    build_zone_card,
+    equalize_card_heights,
+)
 from ui.qt_helpers import FullWidthTabBar, build_scroll_area, build_section_card
 from ui.envelope_graph import ADSREnvelopeGraph, Envelope2Graph
 from ui.keygroup_range_bar import KeygroupRangeBar, keygroup_color
@@ -730,23 +743,10 @@ class ProgramEditorWindow(QMainWindow):
 
         self.keygroup_range_bar = KeygroupRangeBar()
 
-        # bold header + list, same layout shape as the dashboard's queue/hardware panels
-        programs_column = QVBoxLayout()
-        programs_column.setContentsMargins(0, 0, 0, 0)
-        programs_column.setSpacing(6)
-        programs_column.addWidget(QLabel("<b>Programs</b>"))
-        programs_column.addWidget(self.program_list)
-        programs_container = QWidget()
-        programs_container.setLayout(programs_column)
-
-        keygroups_column = QVBoxLayout()
-        keygroups_column.setContentsMargins(0, 0, 0, 0)
-        keygroups_column.setSpacing(6)
-        keygroups_column.addWidget(QLabel("<b>Keygroups</b>"))
-        keygroups_column.addWidget(self.keygroup_range_bar)
-        keygroups_column.addWidget(self.keygroup_list)
-        keygroups_container = QWidget()
-        keygroups_container.setLayout(keygroups_column)
+        programs_container = build_list_column("Programs", self.program_list)
+        keygroups_container = build_list_column(
+            "Keygroups", self.keygroup_range_bar, self.keygroup_list
+        )
 
         self.note_lo_spinbox = NoteSpinBox()
         self.note_hi_spinbox = NoteSpinBox()
@@ -812,16 +812,16 @@ class ProgramEditorWindow(QMainWindow):
         self.release1_knob.setFixedSize(40, 40)
         self.release1_knob.setToolTip(tt.ENV1_RELEASE_KNOB)
 
-        attack1_col, self.attack1_value_label = self._build_knob_column(
+        attack1_col, self.attack1_value_label = build_knob_column(
             "Attack", self.attack1_knob
         )
-        decay1_col, self.decay1_value_label = self._build_knob_column(
+        decay1_col, self.decay1_value_label = build_knob_column(
             "Decay", self.decay1_knob
         )
-        sustain1_col, self.sustain1_value_label = self._build_knob_column(
+        sustain1_col, self.sustain1_value_label = build_knob_column(
             "Sustain", self.sustain1_knob
         )
-        release1_col, self.release1_value_label = self._build_knob_column(
+        release1_col, self.release1_value_label = build_knob_column(
             "Release", self.release1_knob
         )
 
@@ -885,8 +885,8 @@ class ProgramEditorWindow(QMainWindow):
             level_knob.setFixedSize(32, 32)
             level_knob.setToolTip(tt.ENV2_LEVEL_KNOB.format(stage=i))
 
-            rate_layout, rate_value_label = self._build_knob_value_row(rate_knob)
-            level_layout, level_value_label = self._build_knob_value_row(level_knob)
+            rate_layout, rate_value_label = build_knob_value_row(rate_knob)
+            level_layout, level_value_label = build_knob_value_row(level_knob)
             env2_rate_layouts.append(rate_layout)
             env2_level_layouts.append(level_layout)
 
@@ -934,23 +934,17 @@ class ProgramEditorWindow(QMainWindow):
                 keygroup_index_getter=self.keygroup_list.currentRow,
             )
 
-        env1_graph_row = QHBoxLayout()
-        env1_graph_row.addStretch()
-        env1_graph_row.addWidget(self.env1_graph)
-        env1_graph_row.addStretch()
-        env2_graph_row = QHBoxLayout()
-        env2_graph_row.addStretch()
-        env2_graph_row.addWidget(self.env2_graph)
-        env2_graph_row.addStretch()
+        env1_graph_row = build_centered_row(self.env1_graph)
+        env2_graph_row = build_centered_row(self.env2_graph)
 
-        cutoff_column, self.cutoff_value_label = self._build_knob_column(
+        cutoff_column, self.cutoff_value_label = build_knob_column(
             "Cutoff", self.cutoff_knob
         )
-        resonance_column, self.resonance_value_label = self._build_knob_column(
+        resonance_column, self.resonance_value_label = build_knob_column(
             "Resonance", self.resonance_knob
         )
         key_filter_track_column, self.key_filter_track_value_label = (
-            self._build_knob_column("Key Filter Track", self.key_filter_track_knob)
+            build_knob_column("Key Filter Track", self.key_filter_track_knob)
         )
 
         knobs_layout = QHBoxLayout()
@@ -1055,7 +1049,7 @@ class ProgramEditorWindow(QMainWindow):
             # usual centered/plain knob-column labels.
             combo = QComboBox()
             combo.setEnabled(False)
-            sample_column = self._build_labeled_combo_column(
+            sample_column = build_labeled_combo_column(
                 "<b>Sample</b>", combo, center=False
             )
             self._zone_combos.append(combo)
@@ -1071,10 +1065,10 @@ class ProgramEditorWindow(QMainWindow):
             pan_knob.setEnabled(True)
             pan_knob.setToolTip(tt.ZONE_PAN_KNOB)
 
-            loud_col, loud_val_label = self._build_labeled_knob_value_column(
+            loud_col, loud_val_label = build_labeled_knob_value_column(
                 "<b>Loud</b>", loud_knob, center=False
             )
-            pan_col, pan_val_label = self._build_labeled_knob_value_column(
+            pan_col, pan_val_label = build_labeled_knob_value_column(
                 "<b>Pan</b>", pan_knob, center=False
             )
 
@@ -1209,17 +1203,7 @@ class ProgramEditorWindow(QMainWindow):
 
         self._zone_button_group.idClicked.connect(self._zone_stack.setCurrentIndex)
 
-        zone_header = QLabel("Zone")
-        zone_header.setObjectName("sectionHeader")
-        zone_section = QVBoxLayout()
-        zone_section.setContentsMargins(12, 10, 12, 12)
-        zone_section.setSpacing(10)
-        zone_section.addWidget(zone_header)
-        zone_section.addLayout(zone_selector_row)
-        zone_section.addWidget(self._zone_stack)
-        zone_card = QWidget()
-        zone_card.setObjectName("zoneCard")
-        zone_card.setLayout(zone_section)
+        zone_card = build_zone_card(zone_selector_row, self._zone_stack)
 
         # same grouping principle as the Program tab: Range on its own,
         # every filter control together, then the existing per-zone card.
@@ -1239,25 +1223,21 @@ class ProgramEditorWindow(QMainWindow):
         # each naturally shorter than their paired Filter/Envelope 2, which
         # reads oddly side by side once cards no longer auto-stretch to
         # fill the row (see _build_section_card's own Fixed-policy comment)
-        self._equalize_card_heights(range_section, filter_section)
-        self._equalize_card_heights(env1_section, env2_section)
+        equalize_card_heights(range_section, filter_section)
+        equalize_card_heights(env1_section, env2_section)
 
         # Range is a single short row and Filter is comparable in height -
         # side by side halves the vertical space these two cost together.
         # Same idea for the two envelope cards, which were side by side
         # already as one card's two halves - now just two cards instead.
-        range_filter_row = QHBoxLayout()
         # 1:1, not the 2-for-Filter split this briefly had - measured
         # sizeHints say Filter's own content (273px: 3 knobs) is actually
         # narrower than Range's (299px: label + two note spinboxes), so the
         # 2x weight was giving Filter more than its share and stretching it
         # wider than Range needed to be. Matches every other paired row on
         # the Program tab, which is never anything but 1:1.
-        range_filter_row.addWidget(range_section, stretch=1)
-        range_filter_row.addWidget(filter_section, stretch=1)
-        envelopes_row = QHBoxLayout()
-        envelopes_row.addWidget(env1_section, stretch=1)
-        envelopes_row.addWidget(env2_section, stretch=1)
+        range_filter_row = build_paired_row(range_section, filter_section)
+        envelopes_row = build_paired_row(env1_section, env2_section)
 
         # Modulation (Keygroup tab half) - the other side of the Program
         # tab's Modulation card: amounts for the destinations whose value
@@ -1332,7 +1312,7 @@ class ProgramEditorWindow(QMainWindow):
         # inputs - per direct user request.
         self.lfo1_to_pitch_knob = self._build_mod_amount_knob()
         lfo1_to_pitch_knob_row, self.lfo1_to_pitch_value_label = (
-            self._build_knob_value_row(self.lfo1_to_pitch_knob)
+            build_knob_value_row(self.lfo1_to_pitch_knob)
         )
         self._wire_knob_write(
             self.lfo1_to_pitch_knob,
@@ -1457,14 +1437,14 @@ class ProgramEditorWindow(QMainWindow):
         self.pan_knob.setRange(-50, 50)
         self.pan_knob.setFixedSize(56, 56)
         self.pan_knob.setToolTip(tt.PROGRAM_PAN_KNOB)
-        pan_column, self.pan_value_label = self._build_knob_column("Pan", self.pan_knob)
+        pan_column, self.pan_value_label = build_knob_column("Pan", self.pan_knob)
 
         self.loud_knob = Knob()
         self.loud_knob.setRange(0, 99)
         self.loud_knob.setDefaultValue(80)
         self.loud_knob.setFixedSize(56, 56)
         self.loud_knob.setToolTip(tt.PROGRAM_LOUDNESS_KNOB)
-        loud_column, self.loud_value_label = self._build_knob_column(
+        loud_column, self.loud_value_label = build_knob_column(
             "Loud", self.loud_knob
         )
 
@@ -1473,7 +1453,7 @@ class ProgramEditorWindow(QMainWindow):
         self.velocity_knob.setDefaultValue(20)
         self.velocity_knob.setFixedSize(56, 56)
         self.velocity_knob.setToolTip(tt.PROGRAM_VELOCITY_KNOB)
-        velocity_column, self.velocity_value_label = self._build_knob_column(
+        velocity_column, self.velocity_value_label = build_knob_column(
             "Velocity", self.velocity_knob
         )
 
@@ -1525,17 +1505,17 @@ class ProgramEditorWindow(QMainWindow):
         self.lfo1_sync_combo = QComboBox()
         self.lfo1_sync_combo.addItems(["On", "Off"])
         self.lfo1_sync_combo.setToolTip(tt.LFO1_SYNC_COMBO)
-        lfo1_sync_column = self._build_labeled_combo_column(
+        lfo1_sync_column = build_labeled_combo_column(
             "LFO1 sync", self.lfo1_sync_combo
         )
 
-        lfo_rate_column, self.lfo_rate_value_label = self._build_knob_column(
+        lfo_rate_column, self.lfo_rate_value_label = build_knob_column(
             "LFO rate", self.lfo_rate_knob
         )
-        lfo_depth_column, self.lfo_depth_value_label = self._build_knob_column(
+        lfo_depth_column, self.lfo_depth_value_label = build_knob_column(
             "LFO depth", self.lfo_depth_knob
         )
-        lfo_delay_column, self.lfo_delay_value_label = self._build_knob_column(
+        lfo_delay_column, self.lfo_delay_value_label = build_knob_column(
             "LFO delay", self.lfo_delay_knob
         )
 
@@ -1592,17 +1572,17 @@ class ProgramEditorWindow(QMainWindow):
         self.lfo2_trig_combo = QComboBox()
         self.lfo2_trig_combo.addItems(["Off", "On"])
         self.lfo2_trig_combo.setToolTip(tt.LFO2_TRIG_COMBO)
-        lfo2_trig_column = self._build_labeled_combo_column(
+        lfo2_trig_column = build_labeled_combo_column(
             "LFO2 retrig", self.lfo2_trig_combo
         )
 
-        lfo2_rate_column, self.lfo2_rate_value_label = self._build_knob_column(
+        lfo2_rate_column, self.lfo2_rate_value_label = build_knob_column(
             "LFO2 rate", self.lfo2_rate_knob
         )
-        lfo2_depth_column, self.lfo2_depth_value_label = self._build_knob_column(
+        lfo2_depth_column, self.lfo2_depth_value_label = build_knob_column(
             "LFO2 depth", self.lfo2_depth_knob
         )
-        lfo2_delay_column, self.lfo2_delay_value_label = self._build_knob_column(
+        lfo2_delay_column, self.lfo2_delay_value_label = build_knob_column(
             "LFO2 delay", self.lfo2_delay_knob
         )
 
@@ -1700,7 +1680,7 @@ class ProgramEditorWindow(QMainWindow):
         self.bend_up_combo.addItems([f"{i} st" for i in range(25)])
         self.bend_up_combo.setMaximumWidth(70)
         self.bend_up_combo.setToolTip(tt.BEND_UP_COMBO)
-        bend_up_column = self._build_labeled_combo_column("Bend up", self.bend_up_combo)
+        bend_up_column = build_labeled_combo_column("Bend up", self.bend_up_combo)
 
         self.bend_down_combo = QComboBox()
         # s3k.params declares B_PTCHD's range as 0-12 (asymmetric with
@@ -1712,7 +1692,7 @@ class ProgramEditorWindow(QMainWindow):
         self.bend_down_combo.addItems([f"{i} st" for i in range(25)])
         self.bend_down_combo.setMaximumWidth(70)
         self.bend_down_combo.setToolTip(tt.BEND_DOWN_COMBO)
-        bend_down_column = self._build_labeled_combo_column(
+        bend_down_column = build_labeled_combo_column(
             "Bend down", self.bend_down_combo
         )
 
@@ -1742,7 +1722,7 @@ class ProgramEditorWindow(QMainWindow):
         self.portamento_rate_knob.setFixedSize(28, 28)
         self.portamento_rate_knob.setToolTip(tt.PORTAMENTO_RATE_KNOB)
         portamento_rate_column, self.portamento_rate_value_label = (
-            self._build_labeled_knob_value_column("Rate", self.portamento_rate_knob)
+            build_labeled_knob_value_column("Rate", self.portamento_rate_knob)
         )
 
         self.portamento_type_combo = QComboBox()
@@ -1775,7 +1755,7 @@ class ProgramEditorWindow(QMainWindow):
         self.mono_legato_combo = QComboBox()
         self.mono_legato_combo.addItems(["Off", "On"])
         self.mono_legato_combo.setMaximumWidth(70)
-        mono_legato_column = self._build_labeled_combo_column(
+        mono_legato_column = build_labeled_combo_column(
             "Mono Legato", self.mono_legato_combo
         )
 
@@ -1840,7 +1820,7 @@ class ProgramEditorWindow(QMainWindow):
         # practice (LFO1/LFO2 are symmetric), but pin it explicitly rather
         # than leaving it an accident of current content - a future layout
         # tweak to just one of the two shouldn't silently throw this off.
-        self._equalize_card_heights(lfo_section, lfo2_section)
+        equalize_card_heights(lfo_section, lfo2_section)
 
         # Pitch - tuning offset and pitch-bend range, up and down
         pitch_row = QHBoxLayout()
@@ -1851,7 +1831,7 @@ class ProgramEditorWindow(QMainWindow):
         pitch_section = self._build_section_card("Pitch", pitch_row)
         # same reasoning as Range/Filter and Envelope 1/2 on the Keygroup
         # tab - see _equalize_card_heights' own comment
-        self._equalize_card_heights(volume_section, pitch_section)
+        equalize_card_heights(volume_section, pitch_section)
 
         # Voice & MIDI - how the program responds to incoming MIDI and
         # allocates/steals voices
@@ -1873,7 +1853,7 @@ class ProgramEditorWindow(QMainWindow):
         portamento_section = self._build_section_card("Portamento", portamento_row)
         # same reasoning as Range/Filter and Envelope 1/2 on the Keygroup
         # tab - see _equalize_card_heights' own comment
-        self._equalize_card_heights(voice_section, portamento_section)
+        equalize_card_heights(voice_section, portamento_section)
 
         # Modulation - the assignable modulation matrix (MODS*/MODV*
         # fields). Every destination's SOURCE choice is a program-wide
@@ -2104,10 +2084,9 @@ class ProgramEditorWindow(QMainWindow):
         self.cancel_transfer_button.clicked.connect(self._cancel_hardware_transfer)
         self.cancel_transfer_button.setVisible(False)
 
-        content_layout = QHBoxLayout()
-        content_layout.addWidget(programs_container)
-        content_layout.addWidget(keygroups_container)
-        content_layout.addWidget(self.detail_stack, stretch=1)
+        content_layout = build_content_row(
+            programs_container, keygroups_container, self.detail_stack
+        )
         programs_tab_page = QWidget()
         programs_tab_page.setLayout(content_layout)
 
@@ -2696,7 +2675,7 @@ class ProgramEditorWindow(QMainWindow):
                 knob.setFixedSize(28, 28)
                 knob.setToolTip(tt.S1000_CONTROLLER_TOOLTIPS[field])
                 knob.setEnabled(True)
-                cell_layout, value_label = self._build_knob_value_row(knob)
+                cell_layout, value_label = build_knob_value_row(knob)
                 grid.addLayout(cell_layout, row, column, centered)
                 self._wire_knob_write(
                     knob, field, region, keygroup_index_getter=getter
@@ -2847,7 +2826,7 @@ class ProgramEditorWindow(QMainWindow):
             knob.setFixedSize(40, 40)
             knob.setToolTip(tooltip)
             knob.setEnabled(True)
-            column, value_label = self._build_knob_column(label, knob)
+            column, value_label = build_knob_column(label, knob)
             controls_row.addLayout(column)
             setattr(self, attr, knob)
             self._env2_adsr_knobs.append(knob)
@@ -2882,7 +2861,7 @@ class ProgramEditorWindow(QMainWindow):
         for card in (env1_section, env2_section):
             card.setMinimumHeight(0)
             card.setMaximumHeight(16777215)  # QWIDGETSIZE_MAX
-        self._equalize_card_heights(env1_section, env2_section)
+        equalize_card_heights(env1_section, env2_section)
 
     def _on_env2_adsr_knob_changed(self):
         # same live-redraw as _on_env1_knob_changed
@@ -3410,7 +3389,7 @@ class ProgramEditorWindow(QMainWindow):
         # through _on_program_selected first
         self.keygroup_list.clear()
         for i, (lo, hi) in enumerate(keygroup_ranges):
-            self._add_keygroup_row(i, lo, hi)
+            add_keygroup_row(self.keygroup_list, i, lo, hi, self._refresh_swatch)
         self._keygroup_ranges = [list(r) for r in keygroup_ranges]
         self.keygroup_range_bar.set_ranges(self._keygroup_ranges)
         # blockSignals during every one of these loaded-from-hardware
@@ -4928,43 +4907,6 @@ class ProgramEditorWindow(QMainWindow):
     def _check_for_updates_manual(self):
         self._update_runner.start(manual=True)
 
-    def _build_knob_column(self, label_text, knob, *, show_label=True):
-        # show_label=False skips the name label entirely - used by the
-        # Modulation matrix grid below, which shows "Amount" once as a
-        # column header instead of repeating it above every single knob
-        column = QVBoxLayout()
-        column.setSpacing(4)  # fixed gap, in pixels - never stretches
-
-        if show_label:
-            name_label = QLabel(label_text)
-            name_label.setAlignment(Qt.AlignmentFlag.AlignHCenter)
-            name_label.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
-            column.addWidget(name_label, alignment=Qt.AlignmentFlag.AlignHCenter)
-
-        value_label = QLabel("-")
-        value_label.setAlignment(Qt.AlignmentFlag.AlignHCenter)
-
-        column.addWidget(knob, alignment=Qt.AlignmentFlag.AlignHCenter)
-        column.addWidget(value_label)
-
-        knob.valueChanged.connect(lambda v: value_label.setText(str(v)))
-
-        return column, value_label
-
-    def _build_labeled_spinbox_column(self, label_text, spinbox):
-        # same "label above, centered" shape as the Tune/MIDI channel/etc
-        # columns already on the Program tab, for a plain spinbox rather
-        # than a knob or combo
-        name_label = QLabel(label_text)
-        name_label.setAlignment(Qt.AlignmentFlag.AlignHCenter)
-
-        column = QVBoxLayout()
-        column.setSpacing(4)
-        column.addWidget(name_label, alignment=Qt.AlignmentFlag.AlignHCenter)
-        column.addWidget(spinbox, alignment=Qt.AlignmentFlag.AlignHCenter)
-
-        return column
-
     # --- modulation matrix helpers -------------------------------------
     # The assignable modulation matrix (MODS*/MODV* fields - see the
     # Modulation section cards on both the Program and Keygroup tabs) is
@@ -5018,32 +4960,6 @@ class ProgramEditorWindow(QMainWindow):
         knob.setEnabled(True)
         return knob
 
-    def _build_knob_value_row(self, knob):
-        # knob + live numeric readout side by side, same compact row shape
-        # as the Multis tab's knobs (_build_multi_part_knob) - unlike
-        # _build_knob_column's vertical (knob, then value below) layout,
-        # this is for grids that already carry their own row/column
-        # headers (the Modulation cards' "Slot N"/"Amount" header - see
-        # _build_mod_matrix_header/_build_mod_matrix_amount_header - and
-        # ENV2's "Stage N"/"Rate"/"Level" grid below), so there's no
-        # per-knob name label to stack above the value here, just the knob
-        # and its readout beside each other. Fixed width (matching
-        # _build_multi_part_knob's own value_label) so the label's own
-        # width doesn't change as its text does ("0" vs "-50") - unfixed,
-        # a value crossing a digit-count boundary reflowed the row's total
-        # width, which visibly nudged the knob sideways since these rows
-        # sit centered in their grid cell (see _build_mod_matrix_row/
-        # _build_mod_matrix_amount_row's AlignHCenter).
-        value_label = QLabel("-")
-        value_label.setFixedWidth(28)
-        row = QHBoxLayout()
-        row.setContentsMargins(0, 0, 0, 0)
-        row.setSpacing(4)
-        row.addWidget(knob)
-        row.addWidget(value_label)
-        knob.valueChanged.connect(lambda v: value_label.setText(str(v)))
-        return row, value_label
-
     def _build_mod_slot(
         self,
         source_param,
@@ -5063,7 +4979,7 @@ class ProgramEditorWindow(QMainWindow):
         # card comments below for the full list.
         combo = self._build_mod_source_combo()
         knob = self._build_mod_amount_knob()
-        amount_column, value_label = self._build_knob_value_row(knob)
+        amount_column, value_label = build_knob_value_row(knob)
 
         self._wire_combo_write(
             combo,
@@ -5078,53 +4994,6 @@ class ProgramEditorWindow(QMainWindow):
             keygroup_index_getter=keygroup_index_getter,
         )
         return combo, amount_column, knob, value_label
-
-    def _build_labeled_combo_column(self, label_text, combo, *, center=True):
-        # same "label above, centered" shape as _build_labeled_spinbox_column,
-        # for a combo instead of a spinbox - still used outside the
-        # Modulation matrix (e.g. lfo1_sync_combo/lfo2_trig_combo), which
-        # aren't part of a grid with its own header row. center=False
-        # instead left-aligns the label flush with the combo's own
-        # (left-aligned) displayed text - for the Zone card's Sample combo
-        # (see _build_zone_page), which stretches to fill whatever width
-        # its row gives it: centering that label put it in the middle of
-        # the whole stretched width, nowhere near "BASS C1" etc.
-        name_label = QLabel(label_text)
-        column = QVBoxLayout()
-        column.setSpacing(4)
-        if center:
-            name_label.setAlignment(Qt.AlignmentFlag.AlignHCenter)
-            column.addWidget(name_label, alignment=Qt.AlignmentFlag.AlignHCenter)
-        else:
-            column.addWidget(name_label)
-        column.addWidget(combo)
-        return column
-
-    def _build_labeled_knob_value_column(self, label_text, knob, *, center=True):
-        # label above, knob+value beside each other below it - the Zone
-        # card's Loud/Pan knobs' own shape (see _build_zone_page below),
-        # sharing a row with the Sample combo (_build_labeled_combo_column)
-        # rather than the knob row those two used to have further down the
-        # page. Neither existing knob helper fit: _build_knob_column stacks
-        # the value below the knob (fine stand-alone, but taller than this
-        # row has room for next to a combo), and _build_knob_value_row has
-        # no label at all (built for grids with their own header row,
-        # which this single pair of knobs isn't part of). center=False
-        # left-aligns the label instead, flush with the knob rather than
-        # floating over its middle - same reasoning, and same "Sample"/
-        # "Loud"/"Pan" row, as _build_labeled_combo_column's own center
-        # param.
-        name_label = QLabel(label_text)
-        column = QVBoxLayout()
-        column.setSpacing(4)
-        if center:
-            name_label.setAlignment(Qt.AlignmentFlag.AlignHCenter)
-            column.addWidget(name_label, alignment=Qt.AlignmentFlag.AlignHCenter)
-        else:
-            column.addWidget(name_label)
-        knob_row, value_label = self._build_knob_value_row(knob)
-        column.addLayout(knob_row)
-        return column, value_label
 
     def _build_mod_source_only_column(self, source_param, source_region):
         # used where the matching amount field is per-keygroup (so it's
@@ -5141,7 +5010,7 @@ class ProgramEditorWindow(QMainWindow):
         # with no source dropdown, for the Keygroup tab's own Modulation
         # card (the matching source lives on the Program tab)
         knob = self._build_mod_amount_knob()
-        column, value_label = self._build_knob_value_row(knob)
+        column, value_label = build_knob_value_row(knob)
         self._wire_knob_write(
             knob,
             amount_param,
@@ -5204,7 +5073,7 @@ class ProgramEditorWindow(QMainWindow):
         # horizontal scrollbar at this page's own minimum width.
         source_mirror = self._build_mod_source_mirror_combo()
         knob = self._build_mod_amount_knob()
-        knob_row, value_label = self._build_knob_value_row(knob)
+        knob_row, value_label = build_knob_value_row(knob)
         self._wire_knob_write(
             knob,
             amount_param,
@@ -5339,22 +5208,6 @@ class ProgramEditorWindow(QMainWindow):
         # directly, not through this wrapper, by ui/settings_dialog.py).
         return build_section_card(title, *row_layouts)
 
-    def _equalize_card_heights(self, *cards):
-        # pairs like Range+Filter or the two Envelope cards read oddly
-        # when one is visibly taller than its neighbor sitting right next
-        # to it - now that _build_section_card pins every card to its OWN
-        # sizeHint (see its own comment), nothing does that matching
-        # automatically the way the horizontal 1:1 stretch on their shared
-        # row already equalizes WIDTH. setFixedHeight (not just a min/max)
-        # since these cards' own vertical policy is already Fixed - this
-        # is that same fixed value, just the larger of the two rather than
-        # each one's own independently measured sizeHint. Call this after
-        # every row/widget has already been added to each card, since
-        # sizeHint() needs the real final content to measure correctly.
-        target_height = max(card.sizeHint().height() for card in cards)
-        for card in cards:
-            card.setFixedHeight(target_height)
-
     def _build_scroll_area(self, page):
         # both detail_stack pages (Program, Keygroup) are wrapped in one of
         # these rather than added directly - see
@@ -5383,7 +5236,7 @@ class ProgramEditorWindow(QMainWindow):
         # but this one lands inside a QWidget#sectionCard (${bg_panel},
         # a different shade - see _build_section_card), which showed up
         # as a visible colored box behind the knob+label - same fix as
-        # _add_keygroup_row's own row_widget below.
+        # ui.editor_layout.add_keygroup_row's own row_widget.
         widget.setObjectName("transparentContainer")
         row = QHBoxLayout(widget)
         row.setContentsMargins(0, 0, 0, 0)
@@ -6082,35 +5935,6 @@ class ProgramEditorWindow(QMainWindow):
         if 0 <= row < len(self._sample_list):
             return self._sample_list[row]
         return ""
-
-    def _add_keygroup_row(self, index, lo, hi):
-        # colored swatch + range text, same row-widget approach as the
-        # dashboard's queue/hardware panels - keeps each row's identity tied
-        # to its keygroup_range_bar segment (same color, same order) rather
-        # than color alone
-        item = QListWidgetItem(self.keygroup_list)
-
-        row_widget = QWidget()
-        row_widget.setObjectName("transparentContainer")
-        row_layout = QHBoxLayout(row_widget)
-        row_layout.setContentsMargins(8, 6, 8, 6)
-        row_layout.setSpacing(8)
-
-        swatch = QLabel()
-        swatch.setFixedSize(10, 10)
-        swatch.setProperty("swatchKind", "keygroup")
-        swatch.setProperty("keygroupIndex", index)
-        self._refresh_swatch(swatch)
-        row_layout.addWidget(swatch)
-
-        label = QLabel(
-            f"Keygroup {index + 1}: {midi_note_to_name(lo)} - {midi_note_to_name(hi)}"
-        )
-        label.setObjectName("keygroupRangeLabel")
-        row_layout.addWidget(label, stretch=1)
-
-        item.setSizeHint(row_widget.sizeHint())
-        self.keygroup_list.setItemWidget(item, row_widget)
 
     def _tune_offset_to_semitones(self, raw_value):
         return round(raw_value / 2.56) / 100
