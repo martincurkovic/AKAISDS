@@ -13,7 +13,7 @@ uv sync
 uv run pytest tests/ -v
 ```
 
-This is the same command that the CI pipeline runs. Running the whole suite takes about 10 seconds.
+This is the same command that the CI pipeline runs. Running the whole suite takes about 40 seconds.
 
 ## What's actually tested and why
 
@@ -31,7 +31,11 @@ This is the same command that the CI pipeline runs. Running the whole suite take
 
 `tests/test_theme.py` is the stylesheet renderer which generates both light and dark themes. Also uses `monkeypatch/tmp_path`.
 
-`tests/test_sampler_controller.py` is the big dawg test. This one might require some explanation cos it's very much not like the others. See below for details
+`tests/test_sampler_controller.py` is the big dawg test. This one might require some explanation cos it's very much not like the others. See below for details. It includes the send-hardening tests (re-send on a lost ACK, the packet-number guard against stray ACKs, ignoring late replies, WAIT handling, the mid-send fallback that cancels the rest of the queue) - all driven with the fake timer below, so "2 seconds of silence" costs nothing.
+
+`tests/test_diagnostics.py` is the bug-report plumbing: crash/exception logging, the one-line config snapshot, and the message-box logger. It stubs out the global hooks (`sys.excepthook`, `faulthandler`, the Qt message handler) so running it doesn't change the test process.
+
+`tests/conftest.py` also points the app's debug log at a temp directory for the whole run, so the suite never writes into your real `~/.akaisds/akaisds.log`.
 
 `tests/test_midi_notes.py` and `tests/test_note_spinbox.py` are the MIDI note number <-> note name convention (e.g. `midi_note_to_name(60) == "C3"`) and its exact inverse parser, tested together since the two silently drifting apart is exactly what caused a real bug (see below).
 
