@@ -220,11 +220,40 @@ Delete Keygroup goes through `BridgeWorker._delete_keygroup_s1000`: snapshot (ta
 in full + other programs within `_S1000_VERIFY_READ_BUDGET` reads), DELK, rewrite `GROUPS` via
 PDATA if the sampler left it, snapshot again and compare keygroup CONTENT (pointer bytes
 ignored, logged as `S1000 delete check:` lines). Any mismatch raises, shows a dialog, and sets
-`s1000_keygroup_delete_blocked` (action disabled for the session). It is EXPERIMENTAL -
-whether the sampler tolerates the repaired `GROUPS` is unmeasured; if a tester's log shows it
-failing, flip `s1000_bridge.KEYGROUP_DELETE_SUPPORTED` to False (the action is then disabled
-on an S1000). `FakeS1000` reproduces (a) (`delk_updates_groups=False` default) and refuses a
-KDATA past the end of the chain, but does NOT model the address pointers themselves.
+`s1000_keygroup_delete_blocked` (action disabled for the session).
+
+**Standalone Delete Keygroup on an S1000: the ORIGINAL flow failed on real hardware (2026-10-06 tester log,
+`akaisds-5.log`); a REDESIGN is ON in the test build sent after that (`s1000_bridge.KEYGROUP_DELETE_SUPPORTED = True`),
+UNMEASURED.** What failed, in order, on a throwaway 10-keygroup copy (program 2, program at 0x1068, `FIRSTKG`
+0x10fe): (1) DELK(program 2, keygroup 0) was acknowledged; (2) the sampler did NOT touch `GROUPS` (10 -> 10, as
+before) and did NOT compact memory - it only advanced the program's `FIRSTKG` by 150 (0x10fe -> 0x1194, i.e.
+kg 1 is now first; the old kg 0 block is orphaned) and left the last keygroup's stale `NXTKG` (0x0672, a sample
+header) alone; (3) our PDATA rewriting the program with `GROUPS=9` (and the sampler's new `FIRSTKG`) got
+`REPLY` error `47 00 16 48 01` (code 01; the tester's status bar read "device rejected updating program 2
+groups=9 (code 1)"); (4) the program was left with 9 reachable keygroups but `GROUPS=10`, so every read of
+keygroup 9 hit "block identifier is 3, expected 2" and the editor couldn't load it. Other programs were untouched.
+Two later delete attempts were stopped harmlessly by the pre-DELK snapshot failing on that broken program.
+**Why the PDATA was rejected is NOT known.** Hypothesis (unmeasured): a PDATA is only accepted when
+`FIRSTKG == the program's own address + 150` (every PDATA that has worked - creates, editor writes, GROUPS+1
+after a KDATA - satisfied that), and DELK of keygroup 0 broke it. (Other candidates: the sampler validates
+`GROUPS` against a count of physical blocks that still includes the orphan; unknowable from this log.)
+**The redesign** (`BridgeWorker._delete_keygroup_s1000`): read keygroups k..N-1 up front; overwrite slot i with
+slot i+1's content for i = k..N-2 by KDATA, ascending, each slot KEEPING ITS OWN bytes 1-2 (`NXTKG`) so no
+address moves (`_shift_keygroups_down_s1000`); DELK the LAST keygroup (index N-1) so `FIRSTKG` should not
+move; then PDATA `GROUPS=N-1` (`_repair_groups_after_delk`) and the existing before/after snapshot compare.
+Deleting the last keygroup shifts nothing. Any failure once the first write is sent sets
+`s1000_keygroup_delete_blocked` (before this, only a failed *verify* did, so a tester could retry) and shows
+"only partly applied"; **no recovery is attempted** (a blind KDATA against a stale `GROUPS` is what linked a
+keygroup into another program on 2026-10-05). Until the DELK, a failure just leaves a program with a repeated
+keygroup. A "probe" PDATA with `GROUPS=N-1` first was considered and dropped: if the sampler validates `GROUPS`
+against the chain (the spec says "GROUPS must be correct"; `FakeS1000` models that), the probe would fail even
+when the real sequence would work. **What to look for in the next log**: the `S1000 delete keygroup ... Program
+pointers before:` line, the `GROUPS a -> b after DELK` line, and whether the program's `FIRSTKG` changed after
+DELK of the last keygroup. If it fails again, set the flag False and rewrite this paragraph with the new
+measurement - don't try variants blind. The sampler's front panel is the way to remove a program left broken.
+`FakeS1000` reproduces (a) (`delk_updates_groups=False` default) and refuses a
+KDATA past the end of the chain, but does NOT model the address pointers themselves (so it cannot show
+the real rejection - it needs an address model before a redesign can be tested offline).
 Duplicate Program/Keygroup still send the template's stale `NXTKG` terminator (they never
 failed in the logs); rewriting it to `FIRSTKG + 150*(n+1)` (the value a pristine program has)
 is a held-back hypothesis, not implemented.
