@@ -59,6 +59,7 @@ from ui.editor_layout import (
     equalize_card_heights,
     keygroup_row_label,
     keygroup_row_text,
+    style_card_page_layout,
 )
 from ui.envelope_graph import ADSREnvelopeGraph
 from ui.keygroup_range_bar import KeygroupRangeBar, keygroup_color
@@ -398,6 +399,7 @@ class S950ProgramEditorWindow(QMainWindow):
         equalize_card_heights(program_card, keyboard_card)
 
         layout = QVBoxLayout()
+        style_card_page_layout(layout)
         layout.addLayout(build_paired_row(program_card, keyboard_card))
         layout.addStretch()
         page = QWidget()
@@ -547,6 +549,7 @@ class S950ProgramEditorWindow(QMainWindow):
         equalize_card_heights(pitch_card, output_card)
 
         layout = QVBoxLayout()
+        style_card_page_layout(layout)
         layout.addLayout(build_paired_row(range_card, filter_card))
         layout.addLayout(build_paired_row(amp_card, env_filter_card))
         layout.addWidget(zone_card)

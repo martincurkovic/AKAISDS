@@ -4563,3 +4563,24 @@ def test_export_slices_uses_the_retrying_reload_not_a_single_attempt(
     assert success is True
     assert calls["n"] >= 2
 
+
+
+def _assert_card_page_layout(layout):
+    from ui.editor_layout import CARD_PAGE_MARGINS, CARD_SPACING
+
+    assert layout.spacing() == CARD_SPACING
+    m = layout.contentsMargins()
+    assert (m.left(), m.top(), m.right(), m.bottom()) == CARD_PAGE_MARGINS
+
+
+def test_every_page_of_cards_uses_the_shared_spacing_and_margins(editor):
+    # the S1000/S2000/S3000 editor and the S900/S950 one share the gap between section cards
+    # (ui.editor_layout.CARD_SPACING) and the page margins (no left margin, so the gap to the
+    # list beside the cards is the spacing alone - it was 15px with Fusion's default margin).
+    # The paired rows inherit the spacing from the page layout.
+    for index in (0, 1):  # Programs tab: program page, keygroup page
+        _assert_card_page_layout(editor.detail_stack.widget(index).widget().layout())
+    # Samples tab: the cards column beside the sample list
+    samples_page = editor.main_tabs.widget(editor._samples_tab_index)
+    scroll_area = samples_page.layout().itemAt(1).widget()
+    _assert_card_page_layout(scroll_area.widget().layout())

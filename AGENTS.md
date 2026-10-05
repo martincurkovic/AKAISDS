@@ -517,6 +517,16 @@ methods are gone; call the functions). **Change a measurement there and BOTH edi
 both.** Moving them was verified by rendering the S3000 editor from the old and new code (Programs program
 page, Programs keygroup page, Multi, Samples) and comparing pixel by pixel: identical.
 
+**Card spacing is `editor_layout.CARD_SPACING` (6) and every page of cards is styled with
+`style_card_page_layout`** (spacing 6, margins `(0, 0, 8, 0)`): the S3000 editor's program page, keygroup page and
+Samples-tab cards column, and both S950 pages. Spacing alone isn't the visible gap: a page inside a scroll area has
+Fusion's default 9px left margin, and 6 (the content row's spacing) + 9 made a 15px gap between the keygroup list and
+the cards - hence the 0 left margin (8 on the right keeps the cards clear of the scroll bar, as the Samples tab always
+did). The paired-card rows inherit the page layout's spacing, because a sub-layout's spacing defaults to its parent's.
+It was 12 on the S3000 Programs pages and 10 on its Samples tab; the S950 editor's 6 looked better and everything now
+uses it. Spacing INSIDE a card (10) is separate and unchanged. `tests/test_program_editor_window.py` and
+`tests/test_s950_program_editor.py` guard all of it.
+
 The windows themselves stay separate classes on purpose - the S3000's edits write each field as it changes
 through `BridgeWorker`, the S950's are staged and written whole once (see the S900/S950 section). Swatch
 colouring (`_refresh_swatch`, recoloured on `theme.notifier.changed`) is still per-window, because the

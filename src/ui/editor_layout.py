@@ -26,6 +26,18 @@ from PySide6.QtWidgets import (
 
 from core.midi_notes import midi_note_to_name
 
+# the gap between section cards, vertically AND horizontally. Set on every editor page's
+# top-level QVBoxLayout through style_card_page_layout; the paired-card rows
+# (build_paired_row) inherit it from that layout (a sub-layout's own spacing defaults to its
+# parent's). The S3000 editor's Programs pages used 12 and its Samples tab 10; the S900/S950
+# editor's 6 (Fusion's default, previously implicit) looked better, so everything uses 6.
+CARD_SPACING = 6
+# the page's own margins: none on the left/top/bottom - the gap to the list beside it must be
+# the layout's spacing and nothing more (Fusion's default 9px left margin used to add to it: a
+# 6px spacing + 9px margin = a 15px gap between the keygroup list and the cards) - and 8 on the
+# right so the cards clear the scroll bar. The Samples tab already did exactly this.
+CARD_PAGE_MARGINS = (0, 0, 8, 0)
+
 
 # -- knobs -----------------------------------------------------------------------------------
 
@@ -134,6 +146,13 @@ def equalize_card_heights(*cards):
     target_height = max(card.sizeHint().height() for card in cards)
     for card in cards:
         card.setFixedHeight(target_height)
+
+
+def style_card_page_layout(layout):
+    # the spacing + margins of a page of section cards (see CARD_SPACING/CARD_PAGE_MARGINS) -
+    # call this on the page's top-level layout, once per page
+    layout.setSpacing(CARD_SPACING)
+    layout.setContentsMargins(*CARD_PAGE_MARGINS)
 
 
 def build_paired_row(left, right):

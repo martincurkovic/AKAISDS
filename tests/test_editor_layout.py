@@ -7,7 +7,7 @@ import os
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
-from PySide6.QtWidgets import QApplication, QLabel, QListWidget, QWidget
+from PySide6.QtWidgets import QApplication, QLabel, QListWidget, QVBoxLayout, QWidget
 
 from ui import editor_layout as el
 from ui.knob import Knob
@@ -98,3 +98,15 @@ def test_zone_card_is_the_zone_card_object(qapp):
     card = el.build_zone_card(QHBoxLayout(), QStackedWidget())
     assert card.objectName() == "zoneCard"
     assert card.findChild(QLabel, "sectionHeader").text() == "Zone"
+
+
+def test_card_spacing_is_the_s950_editors_tighter_gap():
+    assert el.CARD_SPACING == 6  # was 12 on the S3000 editor; 6 on the S950's (Fusion default)
+
+
+def test_a_card_page_has_no_left_margin_so_the_gap_to_its_list_is_the_spacing_alone(qapp):
+    layout = QVBoxLayout()
+    el.style_card_page_layout(layout)
+    m = layout.contentsMargins()
+    assert (m.left(), m.top(), m.right(), m.bottom()) == (0, 0, 8, 0)
+    assert layout.spacing() == el.CARD_SPACING

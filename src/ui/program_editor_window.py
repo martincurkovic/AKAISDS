@@ -64,6 +64,7 @@ from ui.editor_layout import (
     build_paired_row,
     build_zone_card,
     equalize_card_heights,
+    style_card_page_layout,
 )
 from ui.qt_helpers import FullWidthTabBar, build_scroll_area, build_section_card
 from ui.envelope_graph import ADSREnvelopeGraph, Envelope2Graph
@@ -1388,7 +1389,7 @@ class ProgramEditorWindow(QMainWindow):
         )
 
         detail_container_layout = QVBoxLayout()
-        detail_container_layout.setSpacing(12)
+        style_card_page_layout(detail_container_layout)
         detail_container_layout.addLayout(range_filter_row)
         detail_container_layout.addLayout(envelopes_row)
         detail_container_layout.addWidget(zone_card)
@@ -2046,7 +2047,7 @@ class ProgramEditorWindow(QMainWindow):
 
         program_page = QWidget()
         program_page_layout = QVBoxLayout()
-        program_page_layout.setSpacing(12)
+        style_card_page_layout(program_page_layout)
         program_page_layout.addWidget(name_section)
         program_page_layout.addLayout(program_row1)
         program_page_layout.addLayout(program_row2)
@@ -5707,10 +5708,9 @@ class ProgramEditorWindow(QMainWindow):
 
         tune_card = self._build_section_card("Root Note & Tune", tune_meta_row)
 
-        # right margin leaves a gap between the cards and the scrollbar below
+        # the right margin leaves a gap between the cards and the scrollbar below
         waveform_column = QVBoxLayout()
-        waveform_column.setContentsMargins(0, 0, 8, 0)
-        waveform_column.setSpacing(10)
+        style_card_page_layout(waveform_column)
         waveform_column.addWidget(loop_controls_card)
         waveform_column.addWidget(loop_preview_card)
         waveform_column.addWidget(tune_card)

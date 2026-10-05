@@ -560,3 +560,13 @@ def test_the_bottom_bar_has_refresh_on_the_left_and_close_on_the_right(win):
     buttons = [b for b in win.centralWidget().findChildren(type(win.refresh_button))]
     texts = [b.text() for b in buttons if b.parent() is win.centralWidget()]
     assert texts[0] == "Refresh" and texts[-1] == "Close"
+
+
+def test_both_pages_use_the_shared_card_spacing_and_margins(win):
+    from ui.editor_layout import CARD_PAGE_MARGINS, CARD_SPACING
+
+    for index in (0, 1):
+        layout = win.detail_stack.widget(index).widget().layout()
+        assert layout.spacing() == CARD_SPACING
+        m = layout.contentsMargins()
+        assert (m.left(), m.top(), m.right(), m.bottom()) == CARD_PAGE_MARGINS
