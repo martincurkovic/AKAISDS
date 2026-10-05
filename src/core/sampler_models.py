@@ -41,7 +41,7 @@ FAMILY_S950 = "s950"
 CHOICES = [
     ("Akai S1000", AKAI_S1000),
     ("Akai S2000/S3000", AKAI_S2000_S3000),
-    ("Akai S900/S950", AKAI_S900_S950),
+    ("Akai S900/S950 (experimental)", AKAI_S900_S950),
     ("Generic SDS", GENERIC_SDS),
 ]
 
