@@ -460,22 +460,42 @@ def test_check_packet_timeout_switches_to_open_loop_when_generation_matches(cont
     assert calls == [1]
 
 
-def test_timeout_before_any_ack_resends_once_then_falls_back_to_open_loop(controller):
+def test_timeout_before_any_ack_falls_back_to_open_loop_without_resending_the_header(controller):
+    # a duplicate same-name header may leave the sample silent on a real S2000
     controller._send_queue = [b"pkt0", b"pkt1"]
     controller._send_index = 0
     controller._packet_send_generation = 5
     calls = []
     controller._send_current_packet = lambda: calls.append(controller._send_index)
 
-    controller._check_packet_timeout(5)  # first silence: re-send the same packet
-    assert calls == [0]
-    assert controller._no_response_detected is False
-    assert controller._send_stats["retries"] == 1
+    controller._check_packet_timeout(5)
 
-    controller._check_packet_timeout(5)  # still silent, zero ACKs ever: open loop as before
     assert controller._no_response_detected is True
     assert controller._send_index == 1
-    assert calls == [0, 1]
+    assert calls == [1]
+    assert controller._send_stats["retries"] == 0
+
+
+def test_midstream_loss_finishes_this_sample_then_cancels_the_rest_of_the_queue(controller):
+    controller._send_midstream_loss_at = "36/143"
+    controller._batch_loss_note = "36/143"
+    controller._current_file_path = "a.wav"
+    controller._file_queue = [("b.wav",), ("c.wav",)]
+    controller._stereo_queue = [("x",)]
+    next_file = []
+    controller._send_next_queued_file = lambda: next_file.append(1)
+    status, finished, sent = [], [], []
+    controller.status_changed.connect(status.append)
+    controller.transfer_finished.connect(finished.append)
+    controller.file_transferred.connect(sent.append)
+
+    controller._finish_unit(True)
+
+    assert next_file == []
+    assert controller._file_queue == [] and controller._stereo_queue == []
+    assert sent == ["a.wav"]
+    assert finished == [True]
+    assert any("2 remaining queued files not sent" in m and "right channel" in m for m in status)
 
 
 def test_lost_ack_after_handshaking_resends_same_packet_up_to_max_retries(controller):
@@ -495,23 +515,83 @@ def test_lost_ack_after_handshaking_resends_same_packet_up_to_max_retries(contro
     assert controller._no_response_detected is False
 
 
-def test_retries_exhausted_after_handshaking_aborts_instead_of_going_open_loop(controller):
+def test_retries_exhausted_after_handshaking_finishes_open_loop_and_flags_it(controller):
     controller._send_queue = [b"pkt0", b"pkt1", b"pkt2"]
     controller._send_index = 2
     controller._send_stats["acks"] = 2
     controller._send_packet_retries = controller._send_packet_max_retries
     controller._packet_send_generation = 5
-    status, finished = [], []
+    calls = []
+    controller._send_current_packet = lambda: calls.append(controller._send_index)
+    status = []
     controller.status_changed.connect(status.append)
-    controller.transfer_finished.connect(finished.append)
 
     controller._check_packet_timeout(5)
 
-    assert controller._no_response_detected is False
-    assert controller._send_queue == []
-    assert finished == [False]
-    assert any("stopped responding at packet 2/3" in m for m in status)
-    assert controller.midi_manager.sent[-1][2] == 0x7D  # SDS CANCEL
+    assert controller._no_response_detected is True
+    assert controller._send_midstream_loss_at == "2/3"
+    assert controller._batch_loss_note == "2/3"
+    assert controller._send_index == 3
+    assert calls == [3]
+    assert any("replies stopped at packet 2" in m for m in status)
+
+
+def test_midstream_open_loop_uses_the_slower_pace(controller, controller_module, monkeypatch):
+    delays = []
+    monkeypatch.setattr(
+        controller_module.QTimer, "singleShot", staticmethod(lambda ms, fn: delays.append(ms))
+    )
+    controller._send_queue = [b"\xf0\x00\xf7", b"\xf0\x01\xf7", b"\xf0\x02\xf7"]
+    controller._send_index = 0
+    controller._no_response_detected = True
+    controller._send_midstream_loss_at = "1/3"
+
+    controller._send_current_packet()
+    assert delays == [controller._send_midstream_delay_ms]
+
+    # plain zero-ACK fallback keeps the original pacing
+    delays.clear()
+    controller._send_midstream_loss_at = None
+    controller._send_current_packet()
+    assert delays == [controller._open_loop_delay_ms]
+
+
+def test_open_loop_keeps_the_original_pace(controller, controller_module, monkeypatch):
+    delays = []
+    monkeypatch.setattr(
+        controller_module.QTimer, "singleShot", staticmethod(lambda ms, fn: delays.append(ms))
+    )
+    controller._send_queue = [b"\xf0\x00\xf7", b"\xf0\x01\xf7"]
+    controller._send_index = 0
+    controller._no_response_detected = True
+
+    controller._send_current_packet()
+
+    assert delays == [controller._open_loop_delay_ms]
+
+
+def test_late_replies_after_giving_up_do_not_advance_the_send(controller):
+    controller._send_queue = [b"hdr", b"d0", b"d1", b"d2"]
+    controller._send_index = 2
+    controller._no_response_detected = True
+    calls = []
+    controller._send_current_packet = lambda: calls.append(controller._send_index)
+
+    controller._on_handshake_message("ack", [0x7E, 0, 0x7F, 1])
+    controller._on_handshake_message("nak", [0x7E, 0, 0x7E, 1])
+    controller._on_handshake_message("wait", [0x7E, 0, 0x7C, 1])
+
+    assert controller._send_index == 2
+    assert calls == []
+    assert controller._send_stats["late_acks"] == 1
+
+
+def test_batch_status_names_where_replies_stopped(controller):
+    controller._batch_loss_note = "28/143"
+    status = []
+    controller.status_changed.connect(status.append)
+    controller._finish_unit(True)
+    assert any("replies stopped at packet 28/143" in m for m in status)
 
 
 def test_ack_resets_retries_and_timeout_grows_once_handshaking(controller):

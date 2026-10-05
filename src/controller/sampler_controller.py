@@ -62,6 +62,14 @@ class SamplerController(QObject):
         self._s950_engine = None  # built on first use - see _s950
 
         self._open_loop_delay_ms = 40  # pacing for open loop sending
+        # replies stopped MID-send after the sampler had been handshaking: finish the sample
+        # open loop but slower - a handshaking S2000 sometimes needs far more than 40ms per
+        # packet (measured ACKs of ~270ms), which closed loop absorbs and open loop can't
+        self._send_midstream_delay_ms = 100
+        self._send_midstream_loss_at = None  # "N/M" of the packet the replies stopped at
+        self._batch_loss_note = None  # same, remembered for the batch's final status
+        self._batch_cancelled_files = 0  # queued files dropped after a mid-send loss
+        self._batch_cancelled_right_channel = False
         self._handshake_timeout_ms = 500  # how long to wait for a reponse before switching to open-loop transmission
         self._no_response_detected = False
         self._packet_send_generation = 0
@@ -72,7 +80,7 @@ class SamplerController(QObject):
         # out of retries aborts the send instead of silently going open loop
         self._send_packet_retries = 0
         self._send_packet_max_retries = 3
-        self._send_unproven_max_retries = 1
+        self._send_unproven_max_retries = 0  # no ACK for the header: fall back at once, don't re-send it
         self._send_proven_timeout_ms = 2000
         self._send_wait_cap_ms = 30000  # a sampler holding WAIT longer than this is dead
         self._send_slowest_ack_ms = 0.0
@@ -791,6 +799,7 @@ class SamplerController(QObject):
         self._send_packet_retries = 0
         self._send_slowest_ack_ms = 0.0
         self._send_wait_started = None
+        self._send_midstream_loss_at = None
         debug_log.get_logger().info(
             f"SamplerController: send start ({kind}) name={name!r} slot={sample_number} "
             f"bits={bit_depth} packets={len(self._send_queue)} channel={self._active_channel} "
@@ -816,6 +825,14 @@ class SamplerController(QObject):
     def _on_handshake_message(self, kind, data_bytes=None):
         if not self._send_queue:
             return
+        if self._no_response_detected and kind != "cancel":
+            # we've given up on replies and are pacing packets ourselves. A reply
+            # trickling in now must NOT advance the index - that would skip packets
+            # and start a second packet chain alongside the paced one
+            self._send_stats["late_acks" if kind == "ack" else "late_other"] = (
+                self._send_stats.get("late_acks" if kind == "ack" else "late_other", 0) + 1
+            )
+            return
         if kind == "ack":
             acked = data_bytes[3] if data_bytes is not None and len(data_bytes) > 3 else None
             log = debug_log.get_logger()
@@ -827,7 +844,6 @@ class SamplerController(QObject):
             if (
                 acked is not None
                 and self._send_index >= 1  # the header's ACK numbering isn't pinned down
-                and not self._no_response_detected
                 and acked != self._expected_ack_number(self._send_index)
             ):
                 # e.g. the original ACK arriving after we already re-sent and advanced -
@@ -839,12 +855,8 @@ class SamplerController(QObject):
                     f"{self._send_index}/{len(self._send_queue)})"
                 )
                 return
-            if self._no_response_detected:
-                # already gave up on handshaking and moved on - this reply is late
-                self._send_stats["late_acks"] += 1
-            else:
-                latency_ms = (time.monotonic() - self._send_packet_sent_at) * 1000
-                self._send_slowest_ack_ms = max(self._send_slowest_ack_ms, latency_ms)
+            latency_ms = (time.monotonic() - self._send_packet_sent_at) * 1000
+            self._send_slowest_ack_ms = max(self._send_slowest_ack_ms, latency_ms)
             self._send_stats["acks"] += 1
             self._send_packet_retries = 0
             self._send_wait_started = None
@@ -1169,6 +1181,7 @@ class SamplerController(QObject):
         self._file_queue_total = len(file_entries)
         self._file_queue_skipped = 0
         self._file_queue_channel = channel
+        self._batch_loss_note = None
         self._batch_names_before = None
         self._batch_units_sent = 0
         self._batch_unacknowledged = False
@@ -1709,7 +1722,11 @@ class SamplerController(QObject):
             # OR given up waiting for hardware to send a handshake after a fixed timeout
             self._send_index += 1
             self._emit_progress(self._send_index, len(self._send_queue))
-            QTimer.singleShot(self._open_loop_delay_ms, self._send_current_packet)
+            if self._send_midstream_loss_at is not None and not self._is_open_loop():
+                delay_ms = self._send_midstream_delay_ms
+            else:
+                delay_ms = self._open_loop_delay_ms
+            QTimer.singleShot(delay_ms, self._send_current_packet)
         else:
             # normal ACK driven path but with safety net:
             # if nothing reponds within documented threshold, fall back to open loop comms
@@ -1767,14 +1784,26 @@ class SamplerController(QObject):
             return
 
         if proven:
-            # the sampler HAS been handshaking, so silence now means a lost/dead link -
-            # finishing "open loop" would very likely leave a corrupt sample
+            # the sampler HAS been handshaking and then went quiet. Our output demonstrably
+            # works (we've re-sent this packet repeatedly), so the likeliest cause is a
+            # dropped reply path - finish the sample open loop, slower, and flag it
+            # unverified rather than leaving a partial sample on the sampler
+            where = f"{self._send_index}/{total}"
             log.warning(
-                f"SamplerController: sampler stopped responding at packet "
-                f"{self._send_index}/{total} after {self._send_packet_retries} retries - aborting "
-                f"(acks so far: {stats['acks']})"
+                f"SamplerController: replies stopped at packet {where} after "
+                f"{self._send_packet_retries} retries (acks so far: {stats['acks']}) - "
+                f"sending the remaining packets open loop at {self._send_midstream_delay_ms}ms"
             )
-            self._abort_stalled_send(f"Sampler stopped responding at packet {self._send_index}/{total}")
+            self.status_changed.emit(
+                f"Sampler replies stopped at packet {self._send_index} - "
+                f"sending the rest without confirmation..."
+            )
+            self._send_midstream_loss_at = where
+            self._batch_loss_note = self._batch_loss_note or where
+            self._no_response_detected = True
+            self._send_index += 1
+            self._emit_progress(self._send_index, total)
+            self._send_current_packet()
             return
 
         # never saw a single ACK - per spec, assume packet got thru and move past it
@@ -1806,7 +1835,7 @@ class SamplerController(QObject):
             f"{self._send_index}/{len(self._send_queue)} - acks={stats['acks']} "
             f"naks={stats['naks']} waits={stats['waits']} late_acks={stats['late_acks']} "
             f"retries={stats['retries']} timeouts={stats['timeouts']} "
-            f"stray_acks={stats['stray_acks']} slowest_ack_ms={self._send_slowest_ack_ms:.0f} "
+            f"stray_acks={stats['stray_acks']} midstream_loss={self._send_midstream_loss_at} slowest_ack_ms={self._send_slowest_ack_ms:.0f} "
             f"open_loop_fallback={self._no_response_detected}"
         )
         if completed:
@@ -1826,6 +1855,15 @@ class SamplerController(QObject):
     def _finish_unit(self, completed):
         # called once single send unit is finished - generic sds or akai sdata
         # decided whether to continue to a stereo right channel, next queued file or declare everything done
+
+        if completed and self._send_midstream_loss_at is not None:
+            # the sampler stopped replying mid-send. This sample was finished open loop, but
+            # carrying on blind through the rest of the queue would stack up unverified
+            # (possibly silent) samples, so stop here
+            self._batch_cancelled_files = len(self._file_queue)
+            self._batch_cancelled_right_channel = bool(self._stereo_queue)
+            self._stereo_queue = []
+            self._file_queue = []
 
         if completed and self._stereo_queue:
             name, samples, framerate, channel, bit_depth, sample_number = (
@@ -1856,11 +1894,20 @@ class SamplerController(QObject):
         self._file_queue = []
         self._rename_after_send = None
         if completed:
-            unverified = (
-                " - the sampler never acknowledged any packets, so this is unverified"
-                if self._batch_unacknowledged
-                else ""
-            )
+            if self._batch_loss_note is not None:
+                unverified = (
+                    f" - the sampler's replies stopped at packet {self._batch_loss_note}, so the "
+                    f"rest was sent without confirmation. Check the sample(s)"
+                )
+                if self._batch_cancelled_right_channel:
+                    unverified += ". The right channel was not sent"
+                if self._batch_cancelled_files:
+                    n = self._batch_cancelled_files
+                    unverified += f". {n} remaining queued file{'s' if n != 1 else ''} not sent"
+            elif self._batch_unacknowledged:
+                unverified = " - the sampler never acknowledged any packets, so this is unverified"
+            else:
+                unverified = ""
             if self._file_queue_skipped:
                 self.status_changed.emit(
                     f"Transfer complete ({self._file_queue_skipped} file"
@@ -1877,6 +1924,9 @@ class SamplerController(QObject):
         self._batch_names_before = None
         self._batch_units_sent = 0
         self._batch_unacknowledged = False
+        self._batch_loss_note = None
+        self._batch_cancelled_files = 0
+        self._batch_cancelled_right_channel = False
         self.transfer_finished.emit(completed)
 
     def _start_send(self, name, samples, framerate, sample_number, channel):
