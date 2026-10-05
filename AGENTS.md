@@ -244,6 +244,42 @@ fields (tests also try 72..192) specifically so wrongly-read or dropped trailing
 bytes are caught. Also: **`PRGNUM`'s +1 display offset applies on the S1000 too**
 (unverified there - same `s3k.params` entry).
 
+## Akai S900/S950 support (in progress, written without hardware)
+
+A DIFFERENT protocol from every other Akai entry, not a variant of the S1000
+family: device byte `0x40` (not `0x48`), function codes 0-11, every 8-bit value as
+TWO MIDI bytes, 10-char plain-ASCII names, XOR checksums, and a sample dump that is
+ONE SysEx (header + all blocks + a single `F7`) with 4-byte handshakes
+(`F0 7E code F7`) - the standard 6-byte SDS ACK is silently ignored. Plan and
+staging: `~/Desktop/AKAISDS-S900-S950-support-plan.md` (not in this repo).
+**Nothing here has been run against hardware.** Ported from
+[s950tools](https://github.com/diemonster/s950tools) (MIT - see
+`THIRD_PARTY_NOTICES.md`; keep the notice when porting more). Its comments say which
+behaviours were hardware-verified; `dxzl/akai-s950` has NO licence, so don't copy from it.
+
+- `core/s950_sysex.py` - codecs (DB/DW/DD/TB/SW), framing, catalog, SPRM, sample dump,
+  16->12-bit conversion. `core/s950_program.py` - PRGM (76-byte header + 1-31 140-byte
+  keygroups). Messages are the bytes BETWEEN F0 and F7, like `core/akai_sysex.py`.
+  Only the program HEADER offsets are pinned by real captures (in `tests/test_s950_program.py`);
+  SPRM and keygroup offsets are as good as s950tools' copy. Unmodelled bytes are kept in `raw`
+  and written back untouched; `raw` is excluded from dataclass equality on purpose.
+  There is NO delete opcode - don't invent one.
+- `core/demo_s950.py` - `FakeS950`, a fake on rtmidi-style ports (like `FakeS1000`). Its
+  docstring separates what comes from s950tools' hardware notes from what is GUESSED
+  (catalog order, default name of an uploaded sample, ACK count per dump, NAK behaviour...).
+- Sampler Type "Akai S900/S950" (`akai_s900_s950`) has its OWN protocol family, `"s950"`
+  (`sampler_models.FAMILY_S950`) - not "akai", not "generic". **Nothing may fall through to
+  the akai/generic branches for it** (they'd put S1000-family or standard-SDS bytes on the
+  wire). Until the transfers exist (Stage 3), every public send/receive/list/delete/rename
+  entry point in `SamplerController` refuses via `_s950_not_supported_yet`, incoming SysEx is
+  not parsed, and the Dashboard greys out the hardware side, Send, and the Program Editor
+  (with tooltips). **When you implement a transfer, replace the matching guard - don't add a
+  parallel path beside it.** The only thing that works is Settings > Run Hardware Test, which
+  sends RCAT and reports the program/sample counts.
+- Byte-for-byte collision to remember: a standard SDS ACK on channel 0 (`F0 7E 00 pp F7`...)
+  looks like the S950's own request-sample-dump (`F0 7E 00 nn 00 F7`). Generic SDS mode against
+  an S950 gives nonsense, not a clean failure.
+
 ## Theme preference (Settings > Settings tab > Appearance)
 
 `config.json`'s `"theme"` is `"system"` (default - follows the OS light/dark setting live, as
