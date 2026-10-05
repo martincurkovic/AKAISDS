@@ -449,6 +449,7 @@ def test_check_packet_timeout_switches_to_open_loop_when_generation_matches(cont
     controller._send_queue = [b"pkt0", b"pkt1"]
     controller._send_index = 0
     controller._packet_send_generation = 5
+    controller._send_packet_retries = controller._send_unproven_max_retries  # retry budget spent
     calls = []
     controller._send_current_packet = lambda: calls.append(controller._send_index)
 
@@ -457,6 +458,126 @@ def test_check_packet_timeout_switches_to_open_loop_when_generation_matches(cont
     assert controller._no_response_detected is True
     assert controller._send_index == 1
     assert calls == [1]
+
+
+def test_timeout_before_any_ack_resends_once_then_falls_back_to_open_loop(controller):
+    controller._send_queue = [b"pkt0", b"pkt1"]
+    controller._send_index = 0
+    controller._packet_send_generation = 5
+    calls = []
+    controller._send_current_packet = lambda: calls.append(controller._send_index)
+
+    controller._check_packet_timeout(5)  # first silence: re-send the same packet
+    assert calls == [0]
+    assert controller._no_response_detected is False
+    assert controller._send_stats["retries"] == 1
+
+    controller._check_packet_timeout(5)  # still silent, zero ACKs ever: open loop as before
+    assert controller._no_response_detected is True
+    assert controller._send_index == 1
+    assert calls == [0, 1]
+
+
+def test_lost_ack_after_handshaking_resends_same_packet_up_to_max_retries(controller):
+    controller._send_queue = [b"pkt0", b"pkt1", b"pkt2"]
+    controller._send_index = 1
+    controller._send_stats["acks"] = 1  # sampler has proven it handshakes
+    controller._packet_send_generation = 5
+    calls = []
+    controller._send_current_packet = lambda: calls.append(controller._send_index)
+
+    for n in range(controller._send_packet_max_retries):
+        controller._check_packet_timeout(5)
+        assert controller._send_packet_retries == n + 1
+
+    assert calls == [1] * controller._send_packet_max_retries
+    assert controller._send_index == 1  # never skipped
+    assert controller._no_response_detected is False
+
+
+def test_retries_exhausted_after_handshaking_aborts_instead_of_going_open_loop(controller):
+    controller._send_queue = [b"pkt0", b"pkt1", b"pkt2"]
+    controller._send_index = 2
+    controller._send_stats["acks"] = 2
+    controller._send_packet_retries = controller._send_packet_max_retries
+    controller._packet_send_generation = 5
+    status, finished = [], []
+    controller.status_changed.connect(status.append)
+    controller.transfer_finished.connect(finished.append)
+
+    controller._check_packet_timeout(5)
+
+    assert controller._no_response_detected is False
+    assert controller._send_queue == []
+    assert finished == [False]
+    assert any("stopped responding at packet 2/3" in m for m in status)
+    assert controller.midi_manager.sent[-1][2] == 0x7D  # SDS CANCEL
+
+
+def test_ack_resets_retries_and_timeout_grows_once_handshaking(controller):
+    controller._send_queue = [b"pkt0", b"pkt1", b"pkt2"]
+    controller._send_index = 0
+    controller._send_packet_retries = 2
+    controller._send_current_packet = lambda: None
+    assert controller._current_packet_timeout_ms() == controller._handshake_timeout_ms
+
+    controller._on_handshake_message("ack", [0x7E, 0, 0x7F, 0])
+
+    assert controller._send_packet_retries == 0
+    assert controller._current_packet_timeout_ms() >= controller._send_proven_timeout_ms
+
+
+def test_ack_for_a_different_packet_is_ignored(controller):
+    # the original ACK arriving after we already re-sent and advanced
+    controller._send_queue = [b"hdr", b"d0", b"d1", b"d2"]
+    controller._send_index = 2  # expecting ACK for data packet 1
+    calls = []
+    controller._send_current_packet = lambda: calls.append(controller._send_index)
+
+    controller._on_handshake_message("ack", [0x7E, 0, 0x7F, 0])  # stale: packet 0
+
+    assert controller._send_index == 2
+    assert calls == []
+    assert controller._send_stats["stray_acks"] == 1
+
+    controller._on_handshake_message("ack", [0x7E, 0, 0x7F, 1])
+    assert controller._send_index == 3
+
+
+def test_header_ack_is_accepted_whatever_its_packet_number(controller):
+    controller._send_queue = [b"hdr", b"d0"]
+    controller._send_index = 0
+    controller._send_current_packet = lambda: None
+
+    controller._on_handshake_message("ack", [0x7E, 0, 0x7F, 0x55])
+
+    assert controller._send_index == 1
+
+
+def test_wait_rearms_timeout_so_it_is_not_treated_as_silence(controller):
+    controller._send_queue = [b"pkt0", b"pkt1"]
+    controller._send_index = 0
+    controller._packet_send_generation = 5
+    controller._send_current_packet = lambda: None
+    armed = []
+    controller._arm_packet_timeout = lambda ms: armed.append(ms)
+
+    controller._on_handshake_message("wait", [0x7E, 0, 0x7C, 0])
+
+    assert armed == [controller._send_wait_cap_ms]
+
+
+def test_wait_cap_expiry_aborts(controller):
+    controller._send_queue = [b"pkt0", b"pkt1"]
+    controller._send_index = 0
+    controller._send_wait_started = 1.0
+    controller._packet_send_generation = 5
+    finished = []
+    controller.transfer_finished.connect(finished.append)
+
+    controller._check_packet_timeout(5)
+
+    assert finished == [False]
 
 
 def test_check_packet_timeout_ignored_when_generation_is_stale(controller):

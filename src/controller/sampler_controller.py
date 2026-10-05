@@ -65,6 +65,19 @@ class SamplerController(QObject):
         self._handshake_timeout_ms = 500  # how long to wait for a reponse before switching to open-loop transmission
         self._no_response_detected = False
         self._packet_send_generation = 0
+        # a lost packet / lost ACK gets re-sent a few times before anything else happens
+        # (SDS: a receiver that already has packet N just ACKs it again). Until the
+        # sampler has ACKed once we can't tell "slow/lossy" from "open loop only", so
+        # that stays quick; once it is proven to handshake the wait is longer and running
+        # out of retries aborts the send instead of silently going open loop
+        self._send_packet_retries = 0
+        self._send_packet_max_retries = 3
+        self._send_unproven_max_retries = 1
+        self._send_proven_timeout_ms = 2000
+        self._send_wait_cap_ms = 30000  # a sampler holding WAIT longer than this is dead
+        self._send_slowest_ack_ms = 0.0
+        self._send_packet_sent_at = 0.0
+        self._send_wait_started = None  # monotonic time of the first WAIT for this packet
 
         # watchdog for request/reply exchanges (RSTAT, RSLIST) - without it a dead
         # input path leaves the app waiting forever with nothing in the log
@@ -750,7 +763,7 @@ class SamplerController(QObject):
 
         handshake = sds_encoder.classify_response(data_bytes)
         if handshake is not None:
-            self._on_handshake_message(handshake)
+            self._on_handshake_message(handshake, data_bytes)
             return
 
         # anything else - log it for now rather than crash so i can figure out wtf is going on
@@ -768,10 +781,16 @@ class SamplerController(QObject):
 
     @staticmethod
     def _new_send_stats():
-        return {"acks": 0, "naks": 0, "waits": 0, "late_acks": 0}
+        return {
+            "acks": 0, "naks": 0, "waits": 0, "late_acks": 0,
+            "retries": 0, "timeouts": 0, "stray_acks": 0,
+        }
 
     def _log_send_start(self, kind, name, sample_number, bit_depth):
         self._send_stats = self._new_send_stats()
+        self._send_packet_retries = 0
+        self._send_slowest_ack_ms = 0.0
+        self._send_wait_started = None
         debug_log.get_logger().info(
             f"SamplerController: send start ({kind}) name={name!r} slot={sample_number} "
             f"bits={bit_depth} packets={len(self._send_queue)} channel={self._active_channel} "
@@ -789,22 +808,58 @@ class SamplerController(QObject):
         ) / self._current_file_total_legs
         self.unit_progress.emit(min(unit_fraction, 1.0))
 
-    def _on_handshake_message(self, kind):
+    @staticmethod
+    def _expected_ack_number(send_index):
+        # index 0 is the header; data packet n (0-based) is queue index n + 1
+        return (send_index - 1) & 0x7F
+
+    def _on_handshake_message(self, kind, data_bytes=None):
         if not self._send_queue:
             return
         if kind == "ack":
+            acked = data_bytes[3] if data_bytes is not None and len(data_bytes) > 3 else None
+            log = debug_log.get_logger()
+            if acked is not None:
+                log.debug(
+                    f"SamplerController: ACK pp={acked} for queue index "
+                    f"{self._send_index}/{len(self._send_queue)}"
+                )
+            if (
+                acked is not None
+                and self._send_index >= 1  # the header's ACK numbering isn't pinned down
+                and not self._no_response_detected
+                and acked != self._expected_ack_number(self._send_index)
+            ):
+                # e.g. the original ACK arriving after we already re-sent and advanced -
+                # taking it as "this packet accepted" would skip a packet
+                self._send_stats["stray_acks"] += 1
+                log.warning(
+                    f"SamplerController: ignoring ACK for packet {acked}, expected "
+                    f"{self._expected_ack_number(self._send_index)} (queue index "
+                    f"{self._send_index}/{len(self._send_queue)})"
+                )
+                return
             if self._no_response_detected:
                 # already gave up on handshaking and moved on - this reply is late
                 self._send_stats["late_acks"] += 1
+            else:
+                latency_ms = (time.monotonic() - self._send_packet_sent_at) * 1000
+                self._send_slowest_ack_ms = max(self._send_slowest_ack_ms, latency_ms)
             self._send_stats["acks"] += 1
+            self._send_packet_retries = 0
+            self._send_wait_started = None
             # previous packet accepted - move on to next packet
             self._send_index += 1
             self._emit_progress(self._send_index, len(self._send_queue))
             self._send_current_packet()
         elif kind == "wait":
-            # Sampler still processing - do nothing and stfu
+            # Sampler still busy - it will ACK/NAK when ready, so what we're waiting
+            # for is no longer "silence". Restart the timer with the WAIT cap instead.
             self._send_stats["waits"] += 1
+            if self._send_wait_started is None:
+                self._send_wait_started = time.monotonic()
             self.status_changed.emit("Sampler asked us to wait...")
+            self._arm_packet_timeout(self._send_wait_cap_ms)
         elif kind == "nak":
             # checksum failed on sampler's end - resend the same packet, DONT advance the index
             self._send_stats["naks"] += 1
@@ -1658,12 +1713,20 @@ class SamplerController(QObject):
         else:
             # normal ACK driven path but with safety net:
             # if nothing reponds within documented threshold, fall back to open loop comms
-            self._packet_send_generation += 1
-            expected_generation = self._packet_send_generation
-            QTimer.singleShot(
-                self._handshake_timeout_ms,
-                lambda: self._check_packet_timeout(expected_generation),
-            )
+            self._send_packet_sent_at = time.monotonic()
+            self._arm_packet_timeout(self._current_packet_timeout_ms())
+
+    def _current_packet_timeout_ms(self):
+        if self._send_stats["acks"] == 0:
+            return self._handshake_timeout_ms  # sampler not proven to handshake yet
+        return max(self._send_proven_timeout_ms, 4 * self._send_slowest_ack_ms)
+
+    def _arm_packet_timeout(self, timeout_ms):
+        self._packet_send_generation += 1
+        expected_generation = self._packet_send_generation
+        QTimer.singleShot(
+            int(timeout_ms), lambda: self._check_packet_timeout(expected_generation)
+        )
 
     def _check_packet_timeout(self, expected_generation):
         if not self._send_queue:
@@ -1671,18 +1734,70 @@ class SamplerController(QObject):
         if self._packet_send_generation != expected_generation:
             return  # a real reponse has already arrived and move things on - stale timeout, ignore
 
-        # no reponse arrived in time - per spec, assume packet got thru and move past it
+        stats = self._send_stats
+        stats["timeouts"] += 1
+        total = len(self._send_queue)
+        log = debug_log.get_logger()
+
+        if self._send_wait_started is not None:
+            waited = time.monotonic() - self._send_wait_started
+            log.warning(
+                f"SamplerController: sampler held WAIT for {waited:.1f}s at packet "
+                f"{self._send_index}/{total} - aborting"
+            )
+            self._abort_stalled_send(f"Sampler stopped responding at packet {self._send_index}/{total}")
+            return
+
+        proven = stats["acks"] > 0
+        max_retries = self._send_packet_max_retries if proven else self._send_unproven_max_retries
+        if self._send_packet_retries < max_retries:
+            self._send_packet_retries += 1
+            stats["retries"] += 1
+            elapsed_ms = (time.monotonic() - self._send_packet_sent_at) * 1000
+            log.warning(
+                f"SamplerController: no handshake for packet {self._send_index}/{total} after "
+                f"{elapsed_ms:.0f}ms - re-sending (retry {self._send_packet_retries}/{max_retries}, "
+                f"acks so far: {stats['acks']})"
+            )
+            self.status_changed.emit(
+                f"No reply - re-sending packet {self._send_index} "
+                f"(retry {self._send_packet_retries}/{max_retries})"
+            )
+            self._send_current_packet()
+            return
+
+        if proven:
+            # the sampler HAS been handshaking, so silence now means a lost/dead link -
+            # finishing "open loop" would very likely leave a corrupt sample
+            log.warning(
+                f"SamplerController: sampler stopped responding at packet "
+                f"{self._send_index}/{total} after {self._send_packet_retries} retries - aborting "
+                f"(acks so far: {stats['acks']})"
+            )
+            self._abort_stalled_send(f"Sampler stopped responding at packet {self._send_index}/{total}")
+            return
+
+        # never saw a single ACK - per spec, assume packet got thru and move past it
         # ie, switch to open loop comms
         self.status_changed.emit("No reponse from the sampler - assuming open loop...")
-        debug_log.get_logger().warning(
+        log.warning(
             f"SamplerController: no handshake within {self._handshake_timeout_ms}ms at "
-            f"packet {self._send_index}/{len(self._send_queue)} - falling back to open loop "
-            f"(acks so far: {self._send_stats['acks']})"
+            f"packet {self._send_index}/{total} - falling back to open loop "
+            f"(acks so far: {stats['acks']}, retries: {self._send_packet_retries})"
         )
         self._no_response_detected = True
         self._send_index += 1
-        self._emit_progress(self._send_index, len(self._send_queue))
+        self._emit_progress(self._send_index, total)
         self._send_current_packet()
+
+    def _abort_stalled_send(self, message):
+        self.status_changed.emit(message)
+        # tell the sampler to drop the transfer (best effort - the link may be dead)
+        self.midi_manager.send_sysex(
+            [0x7E, self._active_channel & 0x7F, sds_encoder.CANCEL,
+             self._send_index & 0x7F]
+        )
+        self._abort_transfer(completed=False)
 
     def _abort_transfer(self, completed):
         stats = self._send_stats
@@ -1690,6 +1805,8 @@ class SamplerController(QObject):
             f"SamplerController: send {'finished' if completed else 'ABORTED'} at packet "
             f"{self._send_index}/{len(self._send_queue)} - acks={stats['acks']} "
             f"naks={stats['naks']} waits={stats['waits']} late_acks={stats['late_acks']} "
+            f"retries={stats['retries']} timeouts={stats['timeouts']} "
+            f"stray_acks={stats['stray_acks']} slowest_ack_ms={self._send_slowest_ack_ms:.0f} "
             f"open_loop_fallback={self._no_response_detected}"
         )
         if completed:
