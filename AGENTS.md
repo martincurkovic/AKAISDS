@@ -470,6 +470,52 @@ hand-scaled peaked at 22724 (its real content). `sds_encoder`'s
 `_read_float_scaled_to_int16` always reads float first (libsndfile
 normalizes reliably to `[-1,1]`) and scales to int16 by hand.
 
+## Sample send hardening (`SamplerController._send_current_packet` and friends)
+
+Akai SDATA and generic SDS sends share ONE packet loop (`_send_current_packet`/`_check_packet_timeout`/
+`_on_handshake_message`), so everything here applies to both. Any batch (Dashboard Send, Program Editor
+Trim/Duplicate, Slice Editor export) goes through it. Built after a real S1000 user's log, validated against a
+real S2000 (2026-10-05).
+
+- **Timeout = re-send, not skip.** The timeout used to assume "it got through" and drop the rest of the transfer
+  into permanent open loop, so one lost packet/ACK silently produced a corrupt sample reported as success.
+  Now: re-send the SAME packet (`_send_packet_max_retries` = 3) once the sampler has ACKed at least once; a
+  sampler that has never ACKed (`_send_stats["acks"] == 0`) gets `_send_unproven_max_retries` = **0**, i.e. the
+  old immediate fallback to open loop, so open-loop-only devices aren't slowed. The timeout is 500 ms until the
+  first ACK, then `max(2000, 4 x slowest ACK)` (`_current_packet_timeout_ms`).
+- **ACKs carry the packet number**, and an ACK for a different data packet is ignored (`stray_acks`) so a late
+  original ACK can't double-advance after a re-send. The HEADER's ACK number is deliberately not checked (queue
+  index 0; its numbering isn't pinned down). Data packet n is queue index n+1 (`_expected_ack_number`).
+- **Once `_no_response_detected` is set, ACK/NAK/WAIT are all ignored** (`late_acks` counted) - a reply
+  trickling in after we gave up must not advance the index or start a second packet chain next to the paced one.
+  (The original code advanced on late ACKs; it was latent because fallback only happened with zero ACKs.)
+- **WAIT** re-arms the timer to `_send_wait_cap_ms` (30 s) instead of being ignored; expiry aborts the send
+  (`_abort_stalled_send`: SDS CANCEL, no DELS) - a sampler holding WAIT is busy, not unreachable.
+- **Replies stop MID-send (after ACKs were flowing)**: skip the stuck packet, finish THIS sample open loop at
+  `_send_midstream_delay_ms` (100 ms - the pace a real S2000 landed at; 40 ms untested for this case), mark it
+  unverified, then `_finish_unit` CANCELS THE REST OF THE QUEUE (files and a stereo right channel) and says how
+  many weren't sent. Aborting instead was tried first and left a partial, garbled sample on the sampler (it keeps
+  header + the packets it got). Status text names the packet (`_batch_loss_note`).
+- The ACK-less open-loop path also exists on purpose with no MIDI IN selected / Generic SDS (`_is_open_loop`).
+  In S2000/S3000 mode with an input defined and the cable dead, a send never starts: the pre-send slot list
+  (RSLIST) can't get a reply. That's correct - slot choice and verification need it.
+- Per-unit end line in the log: `acks naks waits late_acks retries timeouts stray_acks midstream_loss
+  slowest_ack_ms open_loop_fallback`. DEBUG logs every ACK's packet number.
+
+**Measured on a real S2000 (don't re-derive, and don't "tune" these without re-measuring)**: closed loop acks
+a data packet every ~50 ms, the header ACK takes ~270 ms. I theorised 40 ms open-loop pacing was too fast
+because BLIND/REPLUG samples landed silent (right length, no audio), and added 100 ms pacing + a 400 ms header
+gap. **That theory was wrong and is reverted**: a scratch harness driving the real controller against the sampler
+(replies suppressed, header re-sent, 40 ms and 100 ms, a queue of 3 blind files, the cable physically unplugged
+and confirmed out) landed with full audio EVERY time, 12-bit generic included (verified by receiving the sample
+back and checking its peak). The original silent samples were never explained; the one scenario not
+reproduced (a sample following a mid-send-loss sample in the same queue) can't occur any more since the queue is
+cancelled. Also: a new sample is listed at the LOWEST free slot (so `SINE` moved from 0 to 1) - find a sent
+sample by NAME in the list, never by the slot you asked for, when verifying.
+
+Tests: `tests/test_sampler_controller.py` (fake QTimer fires immediately - monkeypatch
+`controller_module.QTimer.singleShot` to capture delays). Not covered: a real mid-send loss on the generic path.
+
 ## Debug logging
 
 `core/debug_log.py` → rotating log at `~/.akaisds/akaisds.log`.
