@@ -197,6 +197,34 @@ invalidate the block cache, or the reload after a duplicate shows the old
 `GROUPS`. `TransferDashboard.open_program_editor` shows a one-time experimental
 warning.
 
+**S1000 memory layout and DELK (measured, 2026-10-05 tester log) - why create-from-slices
+never deletes**: programs, keygroups and sample headers are 150-byte blocks in ONE linked
+memory area; bytes 1-2 of a program block (`FIRSTKG`) and of a keygroup block (`NXTKG`) are
+ABSOLUTE addresses (program 0 at 0 with 10 keygroups ends at 0x672, the 12 sample headers
+that follow end at 0xd7a where the next program starts). When a keygroup is appended the
+sampler repoints the PREVIOUS keygroup's `NXTKG`, but the last one keeps whatever we sent -
+a clone's last keygroup carries the template's stale terminator. A real `DELK` was
+acknowledged but (a) left the program's `GROUPS` unchanged and (b) left the chain ending in
+that stale pointer (into a sample header); the next "add keygroup" used the stale `GROUPS` as
+its index, walked off the chain and linked the new keygroup into ANOTHER program (program 0
+grew a keygroup 6 = the new clone, its 7-9 orphaned, "block identifier is 3, expected 2" on
+every later read). That is what "Create new program with slices" did with a multi-keygroup
+template (clone N, DELK N-1). So: `_handle_create_program(first_keygroup_only=True)` clones
+only keygroup 0 on an S1000 and `_create_program_from_slices` refuses to continue if the clone
+has more than one - **no DELK anywhere in that flow, don't reintroduce one**. The standalone
+Delete Keygroup goes through `BridgeWorker._delete_keygroup_s1000`: snapshot (target program
+in full + other programs within `_S1000_VERIFY_READ_BUDGET` reads), DELK, rewrite `GROUPS` via
+PDATA if the sampler left it, snapshot again and compare keygroup CONTENT (pointer bytes
+ignored, logged as `S1000 delete check:` lines). Any mismatch raises, shows a dialog, and sets
+`s1000_keygroup_delete_blocked` (action disabled for the session). It is EXPERIMENTAL -
+whether the sampler tolerates the repaired `GROUPS` is unmeasured; if a tester's log shows it
+failing, flip `s1000_bridge.KEYGROUP_DELETE_SUPPORTED` to False (the action is then disabled
+on an S1000). `FakeS1000` reproduces (a) (`delk_updates_groups=False` default) and refuses a
+KDATA past the end of the chain, but does NOT model the address pointers themselves.
+Duplicate Program/Keygroup still send the template's stale `NXTKG` terminator (they never
+failed in the logs); rewriting it to `FIRSTKG + 150*(n+1)` (the value a pristine program has)
+is a held-back hypothesis, not implemented.
+
 **Known/untested, flagged for the first real-S1000 report**: whether re-sending a
 program/sample block with its own unchanged name behaves as an in-place replace
 (the spec: a duplicate name "should be avoided"; it's read as meaning a name that
