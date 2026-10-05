@@ -1389,3 +1389,67 @@ def test_set_device_type_generic_is_its_own_family(controller):
     controller.set_device_type("generic")
     assert controller.device_type == "generic"
     assert controller.sampler_model == "generic"
+
+
+# --- Sampler Type: Akai S900/S950 (its own protocol family, no transfers yet) ---
+
+
+def test_set_device_type_s900_s950_is_its_own_family(controller):
+    controller.set_device_type("akai_s900_s950")
+    assert controller.device_type == "s950"
+    assert controller.sampler_model == "akai_s900_s950"
+
+
+@pytest.fixture
+def s950_controller(controller):
+    controller.set_device_type("akai_s900_s950")
+    statuses = []
+    controller.status_changed.connect(statuses.append)
+    controller.statuses = statuses
+    return controller
+
+
+def test_s950_refresh_sends_nothing(s950_controller):
+    s950_controller.refresh_sample_list()
+    assert s950_controller.midi_manager.sent == []
+    assert s950_controller._awaiting_memory_status is False
+
+
+def test_s950_refuses_every_public_transfer_entry_point(s950_controller, tmp_path):
+    # nothing an S900/S950 would misread (S1000-family or standard SDS bytes)
+    # may ever go out while the real S950 transfers don't exist
+    c = s950_controller
+    wav = str(tmp_path / "x.wav")
+    c.delete_sample(1)
+    c.rename_sample(1, "NEW")
+    c.request_sample_info(1)
+    c.send_sample_file(wav)
+    c.send_stereo_sample_file(wav, 0, 1)
+    c.send_sample_file_generic(wav)
+    c.send_sample_file_generic_and_rename(wav, "NEW")
+    assert c.send_file_queue([{"filepath": wav}], starting_sample_number=0) is False
+    c.receive_sample_generic(1, wav)
+    c.receive_samples([(1, wav)])
+    assert c.midi_manager.sent == []
+    assert not c._receiving and not c._file_queue and not c._receive_queue
+    assert len(c.statuses) == 10
+    assert all("S900/S950" in s for s in c.statuses)
+
+
+def test_s950_sysex_is_not_run_through_the_akai_parser(s950_controller):
+    c = s950_controller
+    updates = []
+    c.sample_list_updated.connect(updates.append)
+    # an S900/S950 CAT reply - function 0x0B means SDATA to the S1000 family
+    c.on_sysex_received([0x47, 0x00, 0x0B, 0x40, 0x00, 0x00, 0x00])
+    # ...and one whose byte 2 (0x05) is the S1000 family's SLIST
+    c.on_sysex_received([0x47, 0x00, 0x05, 0x40, 0x00, 0x00, 0x00])
+    assert updates == []
+    assert c.statuses == []
+
+
+def test_leaving_the_s950_family_restores_normal_behaviour(s950_controller):
+    c = s950_controller
+    c.set_device_type("akai_s2000_s3000")
+    c.refresh_sample_list()
+    assert len(c.midi_manager.sent) == 1  # an RSTAT again

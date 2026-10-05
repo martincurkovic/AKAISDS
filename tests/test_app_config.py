@@ -48,6 +48,12 @@ def test_s1000_device_type_round_trips(monkeypatch, tmp_path):
     assert app_config.get_saved_device_type() == "akai_s1000"
 
 
+def test_s900_s950_device_type_round_trips(monkeypatch, tmp_path):
+    _use_temp_config(monkeypatch, tmp_path)
+    app_config.save_device_type("akai_s900_s950")
+    assert app_config.get_saved_device_type() == "akai_s900_s950"
+
+
 def test_unrecognised_saved_device_type_falls_back_to_s2000_s3000(
     monkeypatch, tmp_path
 ):

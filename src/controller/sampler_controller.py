@@ -36,8 +36,8 @@ class SamplerController(QObject):
         # global SysEx device ID/channel (0-127) - NOT THE SAME AS MIDI CHANNELS (1-16)!!!
         # defaults to 0, otherwise it can be set manually for a daisy-chained setup
         self.channel = 0
-        # device_type is the PROTOCOL FAMILY ("akai"/"generic") every transfer
-        # path below branches on; sampler_model is the full Settings choice
+        # device_type is the PROTOCOL FAMILY ("akai"/"generic"/"s950") every
+        # transfer path below branches on; sampler_model is the full Settings choice
         # (core/sampler_models.py) - only the Program Editor cares about the
         # S1000 vs S2000/S3000 split, which transfers don't
         self.device_type = "akai"
@@ -149,9 +149,29 @@ class SamplerController(QObject):
         self.sampler_model = sampler_models.normalize(selection)
         self.device_type = sampler_models.protocol_family(self.sampler_model)
 
+    def _s950_not_supported_yet(self, what):
+        # The S900/S950 speak neither protocol the paths below were written
+        # for (core/s950_sysex.py has its wire format; the transfers aren't
+        # wired up yet). Every public entry point that would put Akai-family
+        # or generic-SDS bytes on the wire checks this first, so choosing
+        # that Sampler Type can never send an S900/S950 something it
+        # misreads - the Dashboard disables the matching buttons too, but
+        # that's presentation, this is the guard.
+        if self.device_type != sampler_models.FAMILY_S950:
+            return False
+        debug_log.get_logger().info(
+            f"SamplerController: refused {what} - not implemented for the S900/S950 yet"
+        )
+        self.status_changed.emit(
+            f"{what} isn't available for the Akai S900/S950 yet"
+        )
+        return True
+
     def refresh_sample_list(self, silent=False):
         if self.device_type == "generic":
             return
+        if self.device_type == sampler_models.FAMILY_S950:
+            return  # nothing to ask yet, and nothing worth a status message
         self._refresh_is_silent = silent
         self._awaiting_memory_status = True
         try:
@@ -167,6 +187,8 @@ class SamplerController(QObject):
             self.status_changed.emit("Requesting available memory...")
 
     def delete_sample(self, sample_number, channel=None):
+        if self._s950_not_supported_yet("Deleting samples"):
+            return
         if channel is None:
             channel = self.channel
         # delete the selected sample (DELS command in akai documentation)
@@ -176,6 +198,8 @@ class SamplerController(QObject):
         QTimer.singleShot(300, self.refresh_sample_list)
 
     def rename_sample(self, sample_number, new_name, channel=None):
+        if self._s950_not_supported_yet("Renaming samples"):
+            return
         if channel is None:
             channel = self.channel
         # rename existing sample WITHOUT touching its audio data
@@ -189,6 +213,8 @@ class SamplerController(QObject):
         QTimer.singleShot(300, self.refresh_sample_list)
 
     def request_sample_info(self, sample_number, channel=None):
+        if self._s950_not_supported_yet("Sample info"):
+            return
         if channel is None:
             channel = self.channel
         # fetch sample's header info (name, sample_rate, length, root_key, detune)
@@ -528,6 +554,15 @@ class SamplerController(QObject):
         if not data_bytes:
             return
 
+        if self.device_type == sampler_models.FAMILY_S950:
+            # S900/S950 traffic (also F0 47 ..., but device byte 0x40 and
+            # other function codes) must not reach the Akai-family parser
+            # below, which would misread it. Nothing consumes it here yet.
+            debug_log.get_logger().debug(
+                f"SamplerController: ignoring S900/S950 SysEx ({len(data_bytes)} bytes)"
+            )
+            return
+
         if data_bytes[0] == 0x47:
             function_code = data_bytes[2] if len(data_bytes) > 2 else None
             if function_code == 0x05:
@@ -745,6 +780,8 @@ class SamplerController(QObject):
         effective_bits=16,
         target_sample_rate=None,
     ):
+        if self._s950_not_supported_yet("Sending samples"):
+            return
         if channel is None:
             channel = self.channel
         samples, framerate = sds_encoder.read_wav_samples(filepath)
@@ -764,6 +801,8 @@ class SamplerController(QObject):
         effective_bits=16,
         target_sample_rate=None,
     ):
+        if self._s950_not_supported_yet("Sending samples"):
+            return
         if channel is None:
             channel = self.channel
         channels, framerate = sds_encoder.read_wav_channels(filepath)
@@ -801,6 +840,8 @@ class SamplerController(QObject):
     def send_sample_file_generic(
         self, filepath, sample_number=0, channel=None, bit_depth=16
     ):
+        if self._s950_not_supported_yet("Sending samples"):
+            return
         if channel is None:
             channel = self.channel
         # send sample using generic usiversal midi sds protocol (NOT THE AKAI ONE)
@@ -822,6 +863,8 @@ class SamplerController(QObject):
     def send_sample_file_generic_and_rename(
         self, filepath, new_name, channel=None, bit_depth=16
     ):
+        if self._s950_not_supported_yet("Sending samples"):
+            return
         if channel is None:
             channel = self.channel
         # send via generic sds then rename it correctly using the diff sample slist logic
@@ -965,6 +1008,8 @@ class SamplerController(QObject):
     # ---------------------------------------------------------
 
     def send_file_queue(self, file_entries, channel=None, starting_sample_number=None):
+        if self._s950_not_supported_yet("Sending samples"):
+            return False
         if channel is None:
             channel = self.channel
         # send batch of local wav files, one after another without overwriting anything already on the hardware
@@ -1143,6 +1188,8 @@ class SamplerController(QObject):
     # -----------------------------------------------------------------------------
 
     def receive_sample_generic(self, sample_number, save_path, channel=None):
+        if self._s950_not_supported_yet("Receiving samples"):
+            return
         # receive ONE sample from a generic SDS device
         # the user must specify a sample number manually for generic SDS, no way to obtain a file list in generic SDS
         # requests a sample dump from the device as per SDS protocol
@@ -1180,6 +1227,8 @@ class SamplerController(QObject):
         self.status_changed.emit(f"Requesting sample {sample_number} (generic SDS)...")
 
     def receive_samples(self, sample_requests, channel=None):
+        if self._s950_not_supported_yet("Receiving samples"):
+            return
         if channel is None:
             channel = self.channel
         # download batch of samples from hardware, one after another, saving each as wav file

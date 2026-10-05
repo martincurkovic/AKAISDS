@@ -34,6 +34,16 @@ OPEN_EDITOR_NEEDS_MIDI_PORTS = (
 OPEN_EDITOR_NEEDS_AKAI_DEVICE_TYPE = (
     'Set Sampler Type to Akai S1000 or Akai S2000/S3000 in Settings first'
 )
+OPEN_EDITOR_NOT_READY_S950 = (
+    "The Program Editor isn't available for the Akai S900/S950 yet"
+)
+# shown in place of the hardware list, and on Send Samples, while the S900/S950
+# Sampler Type is selected - its transfers aren't implemented yet
+S950_TRANSFERS_NOT_READY = (
+    "Akai S900/S950 support is in development:\n"
+    "sending, receiving and browsing samples isn't available yet.\n"
+    "Use Settings > Run Hardware Test to check the connection."
+)
 # shown on both btn_open_editor and btn_settings (and mirrored onto their
 # menu actions - see TransferDashboard._sync_menu_actions) while a transfer
 # is in flight - opening either window mid-transfer risks a second MIDI
@@ -58,6 +68,8 @@ SAMPLER_TYPE = (
     "deleting samples on the hardware (Akai-specific extension to\n"
     "the SDS standard). Pick the one that matches your sampler:\n"
     "the Program Editor speaks a different protocol to each.\n"
+    "Akai S900/S950 use a different protocol again - support is in\n"
+    "development, so for now it only enables the connection test.\n"
     "Generic SDS uses only the universal standard - sending and\n"
     "receiving still work, but by sample number only, with no way\n"
     "to browse, rename or delete what's on the device."

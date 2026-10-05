@@ -339,6 +339,11 @@ class TransferDashboard(QWidget):
             return
         main_window = self.window()
         sampler_model = self.sampler_controller.sampler_model
+        if sampler_models.is_s950(sampler_model):
+            # belt-and-braces alongside btn_open_editor being disabled - the
+            # editor is built on s3k.params, which has nothing for this model
+            self.status_bar.showMessage(tooltips.OPEN_EDITOR_NOT_READY_S950)
+            return
         if sampler_models.is_s1000(
             sampler_model
         ) and not app_config.get_s1000_editor_warning_acknowledged():
@@ -476,6 +481,7 @@ class TransferDashboard(QWidget):
             self.midi_manager.output_name
         )
         is_akai = self.sampler_controller.device_type == "akai"
+        is_s950 = self.sampler_controller.device_type == sampler_models.FAMILY_S950
         # a MIDI transfer in progress (started from here, or from the
         # Program Editor sharing this same sampler_controller) locks out
         # BOTH windows that could open a second thing on the wire - see
@@ -494,6 +500,8 @@ class TransferDashboard(QWidget):
             self.btn_open_editor.setToolTip("")
         elif not has_ports:
             self.btn_open_editor.setToolTip(tooltips.OPEN_EDITOR_NEEDS_MIDI_PORTS)
+        elif is_s950:
+            self.btn_open_editor.setToolTip(tooltips.OPEN_EDITOR_NOT_READY_S950)
         else:
             self.btn_open_editor.setToolTip(
                 tooltips.OPEN_EDITOR_NEEDS_AKAI_DEVICE_TYPE
@@ -501,8 +509,24 @@ class TransferDashboard(QWidget):
 
     def _update_device_type_ui(self):
         is_generic = self.sampler_controller.device_type == "generic"  # True or False
+        is_s950 = self.sampler_controller.device_type == sampler_models.FAMILY_S950
         is_open_loop = self.sampler_controller.is_open_loop()
         has_samples = self.list_hardware.count() > 0
+
+        if is_s950:
+            # S900/S950: no transfer path is wired up yet (SamplerController
+            # refuses them too) - the whole hardware side is inert
+            self.list_hardware.clear()
+            self.list_hardware.setEnabled(False)
+            self.btn_select_all.setEnabled(False)
+            self.btn_delete_selected.setEnabled(False)
+            self.btn_refresh.setEnabled(False)
+            self.btn_receive.setEnabled(False)
+            self.memory_avail_prog_bar.setVisible(False)
+            self.empty_hardware_label.setText(tooltips.S950_TRANSFERS_NOT_READY)
+            self.empty_hardware_label.setVisible(True)
+            self._update_queue_buttons_state()
+            return
 
         if is_generic:
             self.list_hardware.setEnabled(False)
@@ -530,6 +554,9 @@ class TransferDashboard(QWidget):
             self.empty_hardware_label.setVisible(True)
         else:
             self._update_empty_hardware_placeholder()
+        # Send Samples depends on the family too (disabled for the S900/S950),
+        # so leaving that Sampler Type has to re-enable it
+        self._update_queue_buttons_state()
 
     def open_global_settings_dialog(self):
         dialog = SampleSettingsDialog(
@@ -1375,7 +1402,16 @@ class TransferDashboard(QWidget):
         has_files = self.list_local.count() > 0
         self.btn_clear_queue.setEnabled(has_files)
         self.btn_global_settings.setEnabled(has_files)
-        self.btn_send.setEnabled(has_files)
+        can_send = (
+            has_files
+            and self.sampler_controller.device_type != sampler_models.FAMILY_S950
+        )
+        self.btn_send.setEnabled(can_send)
+        self.btn_send.setToolTip(
+            tooltips.S950_TRANSFERS_NOT_READY
+            if has_files and not can_send
+            else ""
+        )
 
     def _update_delete_selected_button_state(self):
         # enabled whenever at least ONE hardware checkbox is currently selected

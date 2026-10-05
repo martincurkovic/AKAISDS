@@ -99,7 +99,9 @@ class _FakeSamplerController:
 
     def set_device_type(self, selection):
         self.sampler_model = selection
-        self.device_type = "generic" if selection == "generic" else "akai"
+        self.device_type = {"generic": "generic", "akai_s900_s950": "s950"}.get(
+            selection, "akai"
+        )
 
 
 def test_dialog_width_never_drops_below_the_floor_with_short_port_names(qapp):
@@ -140,17 +142,23 @@ def test_dialog_width_ignores_which_tab_is_currently_shown(qapp):
 # --- Sampler Type combo (S1000 / S2000/S3000 / Generic) ----------------------
 
 
-def test_sampler_type_combo_lists_the_three_models_alphabetically(qapp):
+def test_sampler_type_combo_lists_the_four_models_alphabetically(qapp):
     dialog = MidiSettingsDialog(_FakeMidiManager(["In A"], ["Out A"]), _FakeSamplerController())
     labels = [
         dialog.combo_device_type.itemText(i)
         for i in range(dialog.combo_device_type.count())
     ]
-    assert labels == ["Akai S1000", "Akai S2000/S3000", "Generic SDS"]
+    assert labels == [
+        "Akai S1000",
+        "Akai S2000/S3000",
+        "Akai S900/S950",
+        "Generic SDS",
+    ]
     assert labels == sorted(labels)
-    assert [dialog.combo_device_type.itemData(i) for i in range(3)] == [
+    assert [dialog.combo_device_type.itemData(i) for i in range(4)] == [
         "akai_s1000",
         "akai_s2000_s3000",
+        "akai_s900_s950",
         "generic",
     ]
 
@@ -168,6 +176,7 @@ def test_hardware_test_speaks_the_akai_protocol_for_the_s1000(qapp):
     for selection, family in [
         ("akai_s1000", "akai"),
         ("akai_s2000_s3000", "akai"),
+        ("akai_s900_s950", "s950"),
         ("generic", "generic"),
     ]:
         dialog.combo_device_type.setCurrentIndex(
@@ -369,3 +378,100 @@ def test_align_form_label_columns_tolerates_no_labels(qapp):
 
     align_form_label_columns(QFormLayout())  # nothing to do, no crash
     align_form_label_columns()
+
+
+# --- Run Hardware Test against an S900/S950 -------------------------------------------------------
+
+
+class _PortsOnFakeS950:
+    # a mido-style (send/poll) output+input pair wired to a FakeS950 - the
+    # dialog's hardware test talks to real mido ports, this stands in for them
+    def __init__(self, fake):
+        self.fake = fake
+
+    def send(self, message):
+        self.fake.out.send_message([0xF0, *message.data, 0xF7])
+
+    def poll(self):
+        import mido
+
+        got = self.fake.inp.get_message()
+        if got is None:
+            return None
+        return mido.Message("sysex", data=got[0][1:-1])
+
+
+def _s950_dialog(qapp):
+    dialog = MidiSettingsDialog(
+        _FakeMidiManager(["In A"], ["Out A"]), _FakeSamplerController()
+    )
+    dialog.combo_device_type.setCurrentIndex(
+        dialog.combo_device_type.findData("akai_s900_s950")
+    )
+    return dialog
+
+
+def test_s950_hardware_test_asks_for_a_catalog_and_reports_the_counts(qapp):
+    from core.demo_s950 import FakeS950
+
+    fake = FakeS950()
+    ports = _PortsOnFakeS950(fake)
+    dialog = _s950_dialog(qapp)
+    ok, entries = dialog._send_identity_request(ports, ports)
+    assert ok
+    # exactly one request went out, and it was a catalog request
+    assert len(fake.received) == 1 and fake.received[0][1:4] == [0x47, 0x00, 0x03]
+    text = dialog._format_s950_result(entries)
+    assert "S900/S950" in text
+    assert "Programs in memory: 2" in text and "Samples in memory: 3" in text
+
+
+def test_s950_hardware_test_uses_the_dialogs_channel(qapp):
+    from core.demo_s950 import FakeS950
+
+    fake = FakeS950(channel=4)
+    ports = _PortsOnFakeS950(fake)
+    dialog = _s950_dialog(qapp)
+    dialog.spin_channel.setValue(4)
+    ok, entries = dialog._send_identity_request(ports, ports)
+    assert ok and len(entries) == 5
+
+
+def test_s950_hardware_test_reports_an_unreadable_reply(qapp):
+    import mido
+
+    class _BadReply:
+        def __init__(self):
+            self.sent = False
+
+        def send(self, message):
+            self.sent = True
+
+        def poll(self):
+            if not self.sent:
+                return None
+            self.sent = False
+            # an S1000-family RSTAT reply: right manufacturer, wrong device byte
+            return mido.Message("sysex", data=[0x47, 0x00, 0x02, 0x48, 0x00, 0x00, 0x00])
+
+    ports = _BadReply()
+    ok, message = _s950_dialog(qapp)._send_identity_request(ports, ports)
+    assert not ok
+    assert "doesn't look like an S900/S950 catalog" in message
+
+
+def test_s950_hardware_test_reports_no_answer(qapp, monkeypatch):
+    import ui.settings_dialog as settings_dialog
+
+    monkeypatch.setattr(settings_dialog, "_LOOPBACK_RECEIVE_TIMEOUT", 0.05)
+
+    class _Silent:
+        def send(self, message):
+            pass
+
+        def poll(self):
+            return None
+
+    ports = _Silent()
+    ok, message = _s950_dialog(qapp)._send_identity_request(ports, ports)
+    assert not ok and "not found" in message

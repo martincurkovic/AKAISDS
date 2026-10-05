@@ -14,7 +14,14 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 from PySide6.QtCore import Qt
-from core import app_config, audio_preview, debug_log, midi_identity, sampler_models
+from core import (
+    app_config,
+    audio_preview,
+    debug_log,
+    midi_identity,
+    s950_sysex,
+    sampler_models,
+)
 from ui.qt_helpers import (
     align_form_label_columns,
     FullWidthTabBar,
@@ -447,6 +454,10 @@ class MidiSettingsDialog(QDialog):
                         self.id_results_label.setText(
                             self._format_stat_result(id_response)
                         )
+                    elif device_type == sampler_models.FAMILY_S950:
+                        self.id_results_label.setText(
+                            self._format_s950_result(id_response)
+                        )
                     else:
                         self.id_results_label.setText(
                             self._format_identity_result(id_response)
@@ -490,6 +501,17 @@ class MidiSettingsDialog(QDialog):
             output_port.send(
                 mido.Message("sysex", data=midi_identity.build_rstat_request_message())
             )
+        elif device_type == sampler_models.FAMILY_S950:
+            # the S900/S950 answer neither RSTAT nor a MIDI identity request;
+            # a catalog request is the cheapest message they do answer
+            output_port.send(
+                mido.Message(
+                    "sysex",
+                    data=s950_sysex.build_akai_request(
+                        s950_sysex.FUNC_RCAT, channel=self.spin_channel.value()
+                    ),
+                )
+            )
         else:
             output_port.send(
                 mido.Message(
@@ -510,6 +532,21 @@ class MidiSettingsDialog(QDialog):
 
         if device_type == "akai":
             received_data = midi_identity.parse_stat_response(response.data)
+        elif device_type == sampler_models.FAMILY_S950:
+            try:
+                message = s950_sysex.parse_akai(response.data)
+                if message.function != s950_sysex.FUNC_CAT:
+                    raise ValueError(f"unexpected function code {message.function}")
+                received_data = s950_sysex.parse_catalog(message.payload)
+            except ValueError as e:
+                debug_log.get_logger().warning(
+                    f"MidiSettingsDialog: unreadable S900/S950 reply "
+                    f"({len(response.data)} bytes, {e}): {bytes(response.data).hex(' ')}"
+                )
+                return (
+                    False,
+                    f"Got a reply, but it doesn't look like an S900/S950 catalog ({e})",
+                )
         else:
             received_data = midi_identity.parse_identity_response(response.data)
         return True, received_data
@@ -520,6 +557,15 @@ class MidiSettingsDialog(QDialog):
             f"OS Version: {data['version_string']}\n"
             f"Program/sample slots free: {data['num_blocks_free']} / {data['max_num_blocks']}\n"
             f"Sample memory free: {data['num_words_free']:,} / {data['max_num_samp_words']:,} words"
+        )
+
+    def _format_s950_result(self, entries):
+        programs = sum(1 for e in entries if e.kind == "P")
+        samples = sum(1 for e in entries if e.kind == "S")
+        return (
+            f"Akai S900/S950 sampler\n"
+            f"Programs in memory: {programs}\n"
+            f"Samples in memory: {samples}"
         )
 
     def _format_identity_result(self, data):

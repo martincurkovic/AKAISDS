@@ -704,3 +704,65 @@ def test_open_editor_is_enabled_for_the_s1000_too(dashboard):
     dashboard.sampler_controller.set_device_type("akai_s1000")
     dashboard._update_open_editor_enabled()
     assert dashboard.btn_open_editor.isEnabled() is True
+
+
+# --- Akai S900/S950: selectable, but no transfers or editor yet --------------
+
+
+@pytest.fixture
+def s950_dashboard(dashboard):
+    dashboard.midi_manager.input_name = "Fake In"
+    dashboard.midi_manager.output_name = "Fake Out"
+    dashboard.sampler_controller.set_device_type("akai_s900_s950")
+    dashboard._update_device_type_ui()
+    dashboard._update_open_editor_enabled()
+    return dashboard
+
+
+def test_s950_makes_the_hardware_side_inert_and_says_why(s950_dashboard):
+    d = s950_dashboard
+    assert not d.list_hardware.isEnabled()
+    for button in (d.btn_refresh, d.btn_receive, d.btn_select_all, d.btn_delete_selected):
+        assert not button.isEnabled()
+    assert d.memory_avail_prog_bar.isHidden()
+    assert not d.empty_hardware_label.isHidden()
+    assert "S900/S950" in d.empty_hardware_label.text()
+
+
+def test_s950_disables_the_editor_with_an_s950_specific_tooltip(s950_dashboard):
+    # ports ARE set here, so only the model can be the reason
+    assert s950_dashboard.btn_open_editor.isEnabled() is False
+    assert "S900/S950" in s950_dashboard.btn_open_editor.toolTip()
+
+
+def test_s950_disables_send_even_with_files_queued(s950_dashboard):
+    d = s950_dashboard
+    d.list_local.addItem("kick.wav")
+    d._update_queue_buttons_state()
+    assert d.btn_send.isEnabled() is False
+    assert "S900/S950" in d.btn_send.toolTip()
+
+
+def test_leaving_s950_re_enables_send_without_a_queue_change(s950_dashboard):
+    d = s950_dashboard
+    d.list_local.addItem("kick.wav")
+    d._update_queue_buttons_state()
+    assert d.btn_send.isEnabled() is False
+    d.sampler_controller.set_device_type("akai_s2000_s3000")
+    d._update_device_type_ui()
+    assert d.btn_send.isEnabled() is True
+    assert d.btn_send.toolTip() == ""
+    assert d.list_hardware.isEnabled()
+
+
+def test_open_program_editor_refuses_on_s950_without_touching_the_bridge(
+    s950_dashboard, monkeypatch
+):
+    from core import program_editor_bridge
+
+    def _must_not_connect(*_a, **_k):
+        raise AssertionError("connected a bridge for an S900/S950")
+
+    monkeypatch.setattr(program_editor_bridge, "connect", _must_not_connect)
+    s950_dashboard.open_program_editor()
+    assert "S900/S950" in s950_dashboard.status_bar.currentMessage()
