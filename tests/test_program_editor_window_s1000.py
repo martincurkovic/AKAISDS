@@ -34,6 +34,17 @@ def qapp():
     yield app
 
 
+@pytest.fixture(autouse=True)
+def _keygroup_delete_enabled(monkeypatch):
+    # S1000 keygroup delete is OFF in production (a real S1000 rejected the
+    # repair step, 2026-10-06 - see s1000_bridge.KEYGROUP_DELETE_SUPPORTED),
+    # but its repair-and-verify code is kept and still tested here. The
+    # shipped default is pinned in test_s1000_bridge.py.
+    import core.s1000_bridge as s1000_bridge
+
+    monkeypatch.setattr(s1000_bridge, "KEYGROUP_DELETE_SUPPORTED", True)
+
+
 def _pump_until(qapp, predicate, timeout=5.0):
     deadline = time.monotonic() + timeout
     while not predicate():
@@ -962,6 +973,133 @@ def test_a_delete_that_damages_another_program_is_reported_and_blocks_more(
         editor._worker.submit_delete_keygroup(0, 0)
         _settle(editor, qapp)
         assert len(delks()) == sent
+    finally:
+        _dispose(editor)
+
+
+def test_a_failed_groups_repair_after_delk_blocks_further_deletes(qapp, warnings):
+    # the 2026-10-06 real-S1000 failure: DELK was acknowledged, the PDATA
+    # rewriting GROUPS was rejected. Nothing may be retried afterwards.
+    from s3k.bridge import DeviceError
+    from s3k.messages import Command
+
+    fake = _tall_fake(4)
+    editor = _make_editor_for(qapp, fake)
+    try:
+        def reject(frame, what):
+            raise DeviceError(f"device rejected {what} (code 1)")
+
+        editor._worker._send_and_check = reject
+        # the LAST keygroup: nothing to shift, so the first rejected frame is
+        # the GROUPS rewrite itself, after the DELK went through
+        editor._worker.submit_delete_keygroup(0, 3)
+        _settle(editor, qapp)
+
+        assert editor._worker.s1000_keygroup_delete_blocked is True
+        assert warnings and "program 0" in warnings[0][1]
+        assert len(fake.programs[0]["keygroups"]) == 3
+        editor.keygroup_list.setCurrentRow(0)
+        editor._update_list_context_actions_enabled()
+        assert not editor._delete_keygroup_action.isEnabled()
+
+        def delks():
+            return [c for c, _payload in fake.received if c == Command.DELK]
+
+        sent = len(delks())
+        editor._worker.submit_delete_keygroup(0, 0)
+        _settle(editor, qapp)
+        assert len(delks()) == sent
+    finally:
+        _dispose(editor)
+
+
+def _kdata_and_delk_log(fake):
+    from s3k.messages import Command
+
+    return [
+        (c, payload[2])  # (command, keygroup index)
+        for c, payload in fake.received
+        if c in (Command.KDATA, Command.DELK) and len(payload) > 2
+    ]
+
+
+def _tag_pointers(fake, program_index):
+    # give every keygroup slot a distinct NXTKG (bytes 1-2), like the real
+    # absolute addresses, so a delete that moved them would show
+    for i, block in enumerate(fake.programs[program_index]["keygroups"]):
+        block[1], block[2] = 0x10 + i, 0x20 + i
+
+
+def test_delete_shifts_keygroups_down_and_only_ever_deletes_the_last(qapp):
+    from s3k.messages import Command
+
+    fake = _tall_fake(5)
+    _tag_pointers(fake, 0)
+    editor = _make_editor_for(qapp, fake)
+    try:
+        before = [bytes(k) for k in fake.programs[0]["keygroups"]]
+        fake.received.clear()
+
+        editor._worker.submit_delete_keygroup(0, 1)
+        _settle(editor, qapp)
+
+        # slots 1..3 each overwritten once, in ascending order, then DELK 4
+        assert _kdata_and_delk_log(fake) == [
+            (Command.KDATA, 1),
+            (Command.KDATA, 2),
+            (Command.KDATA, 3),
+            (Command.DELK, 4),
+        ]
+        after = [bytes(k) for k in fake.programs[0]["keygroups"]]
+        assert len(after) == 4
+        # content moved down; every slot kept its OWN pointer bytes
+        assert after[0] == before[0]
+        for slot, donor in [(1, 2), (2, 3), (3, 4)]:
+            assert after[slot][1:3] == before[slot][1:3]
+            assert after[slot][:1] + after[slot][3:] == before[donor][:1] + before[donor][3:]
+        assert _groups_byte(fake, 0) == 4
+        assert editor._worker.s1000_keygroup_delete_blocked is False
+    finally:
+        _dispose(editor)
+
+
+def test_deleting_the_last_keygroup_shifts_nothing(qapp):
+    from s3k.messages import Command
+
+    fake = _tall_fake(3)
+    editor = _make_editor_for(qapp, fake)
+    try:
+        fake.received.clear()
+        editor._worker.submit_delete_keygroup(0, 2)
+        _settle(editor, qapp)
+        assert _kdata_and_delk_log(fake) == [(Command.DELK, 2)]
+        assert len(fake.programs[0]["keygroups"]) == 2
+        assert _groups_byte(fake, 0) == 2
+    finally:
+        _dispose(editor)
+
+
+def test_a_rejected_shift_write_blocks_before_any_delk(qapp, warnings):
+    from s3k.bridge import DeviceError
+    from s3k.messages import Command
+
+    fake = _tall_fake(4)
+    editor = _make_editor_for(qapp, fake)
+    try:
+        def reject(frame, what):
+            raise DeviceError(f"device rejected {what} (code 1)")
+
+        editor._worker._send_and_check = reject
+        fake.received.clear()
+        editor._worker.submit_delete_keygroup(0, 0)
+        _settle(editor, qapp)
+
+        assert editor._worker.s1000_keygroup_delete_blocked is True
+        assert warnings and "partly applied" in warnings[0][1]
+        assert Command.DELK not in [c for c, _p in fake.received]
+        # nothing was removed: still a readable 4-keygroup program
+        assert len(fake.programs[0]["keygroups"]) == 4
+        assert _groups_byte(fake, 0) == 4
     finally:
         _dispose(editor)
 

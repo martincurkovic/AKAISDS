@@ -640,3 +640,12 @@ def test_rewriting_an_item_under_its_own_name_deletes_nothing(fake, bridge):
     assert fake.deleted_by_name_clash == []
     assert bridge.program_list() == ["DRUMS", "PAD PROG"]
     assert bridge.sample_list() == ["KICK", "SNARE", "PAD"]
+
+
+def test_s1000_keygroup_delete_flag_is_on_for_the_shift_down_test_build():
+    # ON as an unmeasured hypothesis (shift-down + DELK of the last keygroup,
+    # after the original flow failed on a real S1000, 2026-10-06). If a
+    # tester's log shows it failing, flip it to False AND update this test.
+    import core.s1000_bridge as s1000_bridge
+
+    assert s1000_bridge.KEYGROUP_DELETE_SUPPORTED is True

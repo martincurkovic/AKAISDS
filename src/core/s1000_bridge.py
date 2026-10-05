@@ -65,8 +65,17 @@ _S1000_BLOCK_SIZES = {"program": 72, "keygroup": 149, "sample": 141}
 #: DIFFERENT program. `BridgeWorker._handle_delete_keygroup` therefore repairs
 #: GROUPS and then verifies (against a before/after snapshot of every program)
 #: that nothing else moved; this is the one-line kill switch if a real S1000
-#: shows that can't be made safe - flip to False and the action is disabled
-#: for the S1000 (S2000/S3000 unaffected).
+#: shows that can't be made safe - False disables the action for the S1000
+#: (S2000/S3000 unaffected).
+#:
+#: 2026-10-06 tester log: the ORIGINAL flow (DELK of the chosen keygroup, then
+#: PDATA to rewrite GROUPS) failed on a real S1000 - DELK of keygroup 0 advanced
+#: the program's FIRSTKG by 150 (0x10fe -> 0x1194, no compaction, GROUPS still
+#: 10) and the PDATA carrying GROUPS=9 was rejected with REPLY error 01. The
+#: flow is now shift-down + DELK of the LAST keygroup + GROUPS rewrite
+#: (`BridgeWorker._delete_keygroup_s1000`), ON for the next test build as an
+#: UNMEASURED hypothesis. If a tester's log shows it failing, set this False
+#: (see AGENTS.md "S1000 memory layout and DELK").
 KEYGROUP_DELETE_SUPPORTED = True
 
 #: first byte of each block type ("PRIDENT"/"KGIDENT"/"SHIDENT")

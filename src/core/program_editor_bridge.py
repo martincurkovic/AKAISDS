@@ -1070,6 +1070,68 @@ class BridgeWorker(QThread):
             }
         return snapshot
 
+    def _read_keygroups_to_shift_s1000(self, program_index, keygroup_index, groups):
+        # the FULL blocks (pointer bytes included) of keygroups k..N-1, read
+        # fresh before anything is written
+        return [
+            bytes(
+                self._bridge.get_header_bytes(
+                    "keygroup", program_index, 0, 192, selector=i
+                )
+            )
+            for i in range(keygroup_index, groups)
+        ]
+
+    def _shift_keygroups_down_s1000(self, program_index, keygroup_index, blocks):
+        """Overwrite keygroup k..N-2 with the content of k+1..N-1.
+
+        Why delete the LAST keygroup instead of the chosen one: a real S1000
+        (2026-10-06 log) answered DELK of keygroup 0 by moving the program's
+        FIRSTKG forward 150 bytes, and then rejected the PDATA that rewrites
+        GROUPS (every PDATA that ever worked carried an unchanged FIRSTKG).
+        Deleting the last keygroup should leave FIRSTKG alone. Each slot keeps
+        ITS OWN pointer bytes (1-2, NXTKG: an absolute address) - only the
+        content moves - so the chain's addresses never change. Ascending
+        order, from blocks read up front, so nothing is read after being
+        overwritten. Until the DELK that follows, this only duplicates content:
+        a failure part-way leaves a valid program with a repeated keygroup.
+        """
+        for offset in range(len(blocks) - 1):
+            slot = keygroup_index + offset
+            slot_block = blocks[offset]
+            donor = blocks[offset + 1]
+            new_block = slot_block[:1] + slot_block[1:3] + donor[3:]
+            if new_block == slot_block:
+                continue
+            self._send_and_check(
+                akai_sysex.build_kdata_request(program_index, slot, new_block),
+                f"moving keygroup {slot + 1} down to {slot} of program {program_index}",
+            )
+
+    def _repair_groups_after_delk(self, program_index, keygroup_index, groups):
+        logger = debug_log.get_logger()
+        groups_param = p.lookup("GROUPS", "program")
+        groups_now = self._bridge.get_parameter(groups_param, program_index)
+        logger.info(
+            "S1000 delete keygroup %d of program %d: GROUPS %d -> %d after DELK",
+            keygroup_index, program_index, groups, groups_now,
+        )
+        if groups_now == groups:
+            # the observed S1000 behaviour: DELK left the count alone
+            header = bytearray(
+                self._bridge.get_header_bytes("program", program_index, 0, 192)
+            )
+            self._patch_field(header, "GROUPS", "program", groups - 1)
+            self._send_and_check(
+                akai_sysex.build_pdata_request(program_index, bytes(header)),
+                f"updating program {program_index} groups={groups - 1}",
+            )
+        elif groups_now != groups - 1:
+            raise DeviceError(
+                f"program {program_index} reports {groups_now} keygroups after "
+                f"deleting one of {groups} - check the sampler directly"
+            )
+
     def _delete_keygroup_s1000(self, program_index, keygroup_index):
         """DELK on an S1000, repaired and verified.
 
@@ -1082,6 +1144,11 @@ class BridgeWorker(QThread):
         the surviving keygroups must be unchanged and in order, and no other
         program may have changed. A mismatch raises (the UI shows it), logs
         everything, and blocks further S1000 keygroup deletes this session.
+
+        The DELK itself always targets the LAST keygroup, after the ones
+        behind the chosen one were shifted down over it
+        (_shift_keygroups_down_s1000) - deleting keygroup 0 directly broke
+        the GROUPS repair on a real S1000 (2026-10-06, see AGENTS.md).
         """
         logger = debug_log.get_logger()
         if self.s1000_keygroup_delete_blocked:
@@ -1104,29 +1171,35 @@ class BridgeWorker(QThread):
                 "can't delete a program's only keygroup (delete the program instead)"
             )
 
-        self._bridge.delete_keygroup(program_index, keygroup_index)
-
-        groups_param = p.lookup("GROUPS", "program")
-        groups_now = self._bridge.get_parameter(groups_param, program_index)
-        logger.info(
-            "S1000 delete keygroup %d of program %d: GROUPS %d -> %d after DELK",
-            keygroup_index, program_index, groups, groups_now,
+        to_shift = self._read_keygroups_to_shift_s1000(
+            program_index, keygroup_index, groups
         )
-        if groups_now == groups:
-            # the observed S1000 behaviour: DELK left the count alone
-            header = bytearray(
-                self._bridge.get_header_bytes("program", program_index, 0, 192)
-            )
-            self._patch_field(header, "GROUPS", "program", groups - 1)
-            self._send_and_check(
-                akai_sysex.build_pdata_request(program_index, bytes(header)),
-                f"updating program {program_index} groups={groups - 1}",
-            )
-        elif groups_now != groups - 1:
+        logger.info(
+            "S1000 delete keygroup %d of program %d (%d keygroups): shifting %d "
+            "down, then DELK of the last (%d). Program pointers before: %s",
+            keygroup_index, program_index, groups, len(to_shift) - 1, groups - 1,
+            target["pointers"][0].hex(),
+        )
+
+        # From here the sampler IS being changed. Any failure leaves a program
+        # that is repeated-keygroup at best and unreadable at worst (2026-10-06
+        # log: GROUPS stale, the PDATA rewriting it rejected), so it blocks
+        # further deletes exactly like a failed safety check - otherwise the
+        # tester can retry and compound the damage. No recovery is attempted:
+        # a blind KDATA against a stale GROUPS is what linked a keygroup into
+        # another program on 2026-10-05.
+        try:
+            self._shift_keygroups_down_s1000(program_index, keygroup_index, to_shift)
+            self._bridge.delete_keygroup(program_index, groups - 1)
+            self._repair_groups_after_delk(program_index, groups - 1, groups)
+        except Exception as e:
+            self.s1000_keygroup_delete_blocked = True
+            logger.error("S1000 keygroup delete FAILED part-way: %s", e)
             raise DeviceError(
-                f"program {program_index} reports {groups_now} keygroups after "
-                f"deleting one of {groups} - check the sampler directly"
-            )
+                f"The delete was only partly applied to program {program_index} "
+                f"({e}). Keygroup deleting is now disabled; check that program "
+                "on the sampler directly - it may need to be deleted."
+            ) from e
 
         problems = []
         try:
