@@ -278,6 +278,9 @@ def build_sample_cards(panel):
     # Envelope, the two other envelopes, then LFO/Controllers and Output/EQ.
     layout = QVBoxLayout()
     style_card_page_layout(layout)
+    # the page of cards sits inside a container that already applies the scroll-bar clearance on the right (the waveform card is
+    # in it too): a second one here made every card 8 px narrower than the waveform card
+    layout.setContentsMargins(0, 0, 0, 0)
     for left, right in ((pitch, key_range), (level, loop), (filt, feg), (aeg, peg), (lfo, controls), (out, eq)):
         equalize_card_heights(left, right)
         layout.addLayout(build_paired_row(left, right))

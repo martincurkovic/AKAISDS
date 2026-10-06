@@ -622,3 +622,20 @@ def test_the_sample_page_is_aligned_pairs_with_no_collapsible_parts(win):
     # everything is simply shown: nothing hides behind a header
     assert not [b for b in tab.cards_scroll.widget().findChildren(QToolButton) if b.text().startswith(("▸", "▾"))]
     assert not tab.panel.widgets["level_key_scaling_break_1"].isHidden()
+
+
+def test_the_waveform_card_is_exactly_as_wide_as_the_cards_below_it(win):
+    tab = win.samples_tab
+    tab.select_sample("sine wave")
+    assert wait_until(lambda: tab.name_label.text() == "sine wave" and not tab.cards_scroll.isHidden())
+    container = tab.cards_scroll.widget()
+    container.resize(1000, 2600)
+    container.layout().activate()
+    tab.cards_page.layout().activate()
+    waveform = _card_titled(container, "Waveform")
+    pitch, key_range = _card_titled(container, "Pitch"), _card_titled(container, "Key & Velocity Range")
+    def span(card):
+        left = card.mapTo(container, card.rect().topLeft()).x()
+        return left, left + card.width()
+    assert span(waveform)[0] == span(pitch)[0]  # lined up on the left...
+    assert span(waveform)[1] == span(key_range)[1]  # ...and on the right (it used to stick out by the scroll-bar margin)
