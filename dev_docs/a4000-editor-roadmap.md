@@ -51,6 +51,12 @@ the unit - record one: RECORD > SETUP: input StOut, type New, Stereo; TRIGGER Ma
 `QT_QPA_PLATFORM=offscreen uv run python tools/a4000_marker_check.py "<name>" --preview`, which also prints whether both channel views
 agree) and **whether the unit moves a stereo sample's right-channel address twins itself**.
 
+**Session 4 also built NATIVE SAMPLE LOADING** (Dashboard Send over the unit's own wave + sample bulk dumps, mono and real stereo), an estimated
+Dashboard memory bar and a Settings "Wave memory (kB)" field - see AGENTS.md and `dev_docs/a4000-native-load-findings.md` (the hardware fork's
+measurements and the not-yet-done tests). **Not yet run end to end against the real unit through the app code** (the pieces were measured with
+`tools/a4000_load_probe.py`/`a4000_load_lab.py`; the app path is only tested against `FakeA4000`): do that first next session, in the app.
+Unit state: ~184 objects incl. many `T-*`/`PROBE`/`PAIR`/`SYNTH` throwaways - a power cycle clears them.
+
 **Do next, in this order** (full notes under "Next steps"): (1) the missing
 parameter tables (effects, controllers, system, banks); (2) native audio loading; (3) a stereo sample to test assigning/restoring one AND
 the stereo markers/preview (above).
@@ -512,9 +518,8 @@ stereo loading, Dashboard list + receive, sample list durations, envelope graphs
    layout is documented), sample banks, stereo R wave/loop addresses. Same method as before: add rows, `tools/a4000_verify_params.py`
    (read-only) then `tools/a4000_write_verify.py` on throwaways. NOTE the restore job restores whatever rows exist, so new rows are
    restored for free.
-3. **Native audio LOADING** so the Yamaha Sampler Type need not send over SDS (which the unit cancels with Bulk Protect on and which
-   stalled once). Likely a bulk load of a wave + sample object pair; completely unmeasured - capture what the unit accepts on a
-   throwaway first. Also gives "Send" a stereo option (the Dashboard's stereo send makes two unrelated mono samples).
+3. ~~Native audio LOADING~~ - BUILT in session 4 (see HANDOFF and `a4000-native-load-findings.md`); remaining: the open items listed in that file
+   (link-after-load silence, pacing minimum, odd names, a failed replace, wave-memory-full), optionally a "replace the sample and keep its settings" option.
 4. **A stereo sample to test with**: assigning one and restoring a program that uses one are UNTESTED (no stereo sample after the cold
    boot). Record one on the unit (RECORD > SETUP: input StOut, type New, Stereo; TRIGGER: Manual/Manual; RECORD > GO > START >
    FINISH - see session 2 notes), then `a4000_link_probe.py multi --stereo "<name>"`.
