@@ -642,10 +642,10 @@ def test_rewriting_an_item_under_its_own_name_deletes_nothing(fake, bridge):
     assert bridge.sample_list() == ["KICK", "SNARE", "PAD"]
 
 
-def test_s1000_keygroup_delete_flag_is_on_for_the_shift_down_test_build():
-    # ON as an unmeasured hypothesis (shift-down + DELK of the last keygroup,
-    # after the original flow failed on a real S1000, 2026-10-06). If a
-    # tester's log shows it failing, flip it to False AND update this test.
+def test_s1000_keygroup_delete_is_off_after_two_failed_real_sampler_tests():
+    # a real S1000 rejected the GROUPS repair after DELK in two tester logs (2026-10-06, both the original flow and the
+    # shift-down + DELK-last redesign) and the program was left corrupt - see AGENTS.md. Don't flip this without a measurement
+    # that explains the rejection.
     import core.s1000_bridge as s1000_bridge
 
-    assert s1000_bridge.KEYGROUP_DELETE_SUPPORTED is True
+    assert s1000_bridge.KEYGROUP_DELETE_SUPPORTED is False

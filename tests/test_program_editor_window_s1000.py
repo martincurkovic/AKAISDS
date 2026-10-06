@@ -962,7 +962,8 @@ def test_a_delete_that_damages_another_program_is_reported_and_blocks_more(
 
         assert editor._worker.s1000_keygroup_delete_blocked is True
         assert warnings and "program 1 changed" in warnings[0][1]
-        assert not editor._delete_keygroup_action.isEnabled()
+        assert editor._delete_keygroup_action.isEnabled()  # still offered: triggering it explains why it won't run
+        assert "switched off for this session" in editor._keygroup_delete_unavailable_message()
         # refused from here on: no further DELK ever reaches the sampler
         from s3k.messages import Command
 
@@ -998,9 +999,7 @@ def test_a_failed_groups_repair_after_delk_blocks_further_deletes(qapp, warnings
         assert editor._worker.s1000_keygroup_delete_blocked is True
         assert warnings and "program 0" in warnings[0][1]
         assert len(fake.programs[0]["keygroups"]) == 3
-        editor.keygroup_list.setCurrentRow(0)
-        editor._update_list_context_actions_enabled()
-        assert not editor._delete_keygroup_action.isEnabled()
+        assert "switched off for this session" in editor._keygroup_delete_unavailable_message()
 
         def delks():
             return [c for c, _payload in fake.received if c == Command.DELK]
@@ -1118,19 +1117,28 @@ def test_the_only_keygroup_of_an_s1000_program_cannot_be_deleted(editor, qapp):
     assert editor._fake.writes == writes
 
 
-def test_keygroup_delete_can_be_switched_off_for_the_s1000(editor, qapp, monkeypatch):
+def test_keygroup_delete_off_for_the_s1000_explains_itself_instead_of_doing_nothing(editor, qapp, monkeypatch):
     import core.s1000_bridge as s1000_bridge
+    from PySide6.QtWidgets import QMessageBox
 
     editor.keygroup_list.setCurrentRow(0)
     editor._update_list_context_actions_enabled()
     assert editor._delete_keygroup_action.isEnabled()
+    assert editor._keygroup_delete_unavailable_message() is None
 
     monkeypatch.setattr(s1000_bridge, "KEYGROUP_DELETE_SUPPORTED", False)
+    shown = []
+    monkeypatch.setattr(QMessageBox, "information", lambda parent, title, text, *a, **k: shown.append((title, text)))
     editor._update_list_context_actions_enabled()
-    assert not editor._delete_keygroup_action.isEnabled()
+    assert editor._delete_keygroup_action.isEnabled()  # a greyed-out item would give no reason; this one says why
 
-    editor._worker.submit_delete_keygroup(0, 0)
+    editor._delete_keygroup_action.trigger()  # the menu item / the Delete key
     _settle(editor, qapp)
+    assert len(shown) == 1 and shown[0][0] == "Delete Keygroup"
+    assert "not reliable at this time" in shown[0][1] and "front panel" in shown[0][1]
+    from s3k.messages import Command
+
+    assert not [c for c, _p in editor._fake.received if c == Command.DELK]  # nothing reached the sampler
     assert len(editor._fake.programs[0]["keygroups"]) == 2
 
 
