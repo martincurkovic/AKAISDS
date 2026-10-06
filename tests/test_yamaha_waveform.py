@@ -7,13 +7,14 @@ import os
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
+from PySide6.QtCore import QTimer
 
 from core import demo_a4000 as demo
 from core import sds_encoder
 from core import yamaha_params as yp
 from ui import yamaha_samples_tab as tab_module
 
-from test_s950_transfers import qapp, wait_until  # noqa: F401
+from test_s950_transfers import _Midi, qapp, wait_until  # noqa: F401
 from test_yamaha_program_editor import build_window, dispose
 from test_yamaha_session import build, collect
 
@@ -140,6 +141,74 @@ def test_a_cancelled_dump_leaves_the_tab_usable(window):
     assert tab._audio_name is None
     tab.select_sample("sine wave")  # and it still works afterwards
     assert wait_until(lambda: tab._selected == "sine wave")
+
+
+# --- cancelling a long load ----------------------------------------------------------------------------------------
+
+
+class _Paced(_Midi):
+    """Delivers ONE message per event-loop turn (the plain fake drains a whole dump inside a single call), so a
+    transfer is really in flight for a while, the way it is at MIDI speed."""
+
+    def _deliver(self):
+        got = self.fake.inp.get_message()
+        if got is not None:
+            self.sysex_received.emit(bytes(got[0][1:-1]))
+            QTimer.singleShot(0, self._deliver)
+
+
+def test_cancel_stops_a_long_load_tells_the_unit_and_leaves_everything_usable(window):
+    window.fake.audio["square"] = [0] * 30000  # ~750 packets: far longer than this test waits
+    window.midi.__class__ = _Paced
+    tab = window.samples_tab
+    assert tab.cancel_load_button.isHidden()  # nothing to cancel yet
+    # the fake answers faster than a test can react: click Cancel from inside the progress signal, a few packets in
+    clicked = []
+
+    def on_progress(received, total):
+        if received >= 3 and not clicked:
+            clicked.append(received)
+            QTimer.singleShot(0, tab.cancel_load_button.click)
+
+    window.controller.receive_progress.connect(on_progress)
+    load(window, "square")
+    path = tab._wave_path
+    assert path is not None and not tab.cancel_load_button.isHidden()
+    assert wait_until(lambda: bool(clicked) and tab._wave_path is None)
+    assert clicked[0] < 30000  # it really stopped part-way (progress counts samples)
+    assert len(window.controller._receive_packets) < 750
+    assert tab._wave_path is None and tab.cancel_load_button.isHidden()
+    assert not window.controller.is_transfer_busy()
+    assert "Cancelled" in window.status_bar.currentMessage()
+    assert not os.path.exists(path)  # the temp file is gone
+    assert not tab.waveform_view.has_waveform() and tab._audio_name is None
+    assert any(m[:1] == b"\x7e" and m[2] == sds_encoder.CANCEL for _k, m in window.fake.received)  # the unit was told
+    # the Yamaha session and a new load both work again
+    entries = collect_list(window)
+    assert len(entries) == 142
+    tab.select_sample("saw up")
+    assert wait_until(lambda: tab._selected == "saw up" and "saw up" in tab._cache)
+    tab._load_audio()
+    assert wait_until(lambda: tab._audio_name == "saw up")
+
+
+def test_the_cancel_button_hides_when_a_load_finishes_or_fails(window):
+    tab = load(window, "triangle")
+    assert not tab.cancel_load_button.isHidden()
+    assert wait_until(lambda: tab._audio_name == "triangle")
+    assert tab.cancel_load_button.isHidden()
+
+
+def test_cancel_with_nothing_loading_does_nothing(window):
+    window.samples_tab._cancel_load()
+    assert "Cancelled" not in window.status_bar.currentMessage()
+
+
+def collect_list(window):
+    got = []
+    window._session.request_object_list(got.append)
+    assert wait_until(lambda: bool(got))
+    return got[0]
 
 
 # --- the session waits for an SDS transfer ---------------------------------------------------------------------

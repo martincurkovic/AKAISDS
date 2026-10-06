@@ -35,6 +35,7 @@ def build(fake, model="yamaha_a4000"):
         rig.session.reply_timeout_ms = 300
         rig.session.bulk_timeout_ms = 400
         rig.session.select_settle_ms = 1
+        rig.session.edit_settle_ms = 1
     return rig
 
 
@@ -208,3 +209,140 @@ def test_the_session_only_exists_for_the_yamaha_model(qapp):  # noqa: F811
 def test_yamaha_transfers_use_the_generic_family(rig):
     assert rig.controller.device_type == "generic" and rig.controller.is_yamaha_model()
     assert rig.controller.is_yamaha_idle()
+
+
+# --- writes ---------------------------------------------------------------------------------------------------
+
+
+def write(rig, row_scope, key, value, name, slot=None):
+    row = yp.get(row_scope, key)
+    return collect(rig, lambda cb: rig.session.write_parameter(row, value, name, cb, slot=slot))
+
+
+def test_a_write_backs_up_the_object_first_then_changes_exactly_that_value(rig):
+    before = bytes(rig.fake.programs[1])
+    result = write(rig, "program", "program_level", 50, "001")
+    assert result.ok and (result.previous, result.readback, result.requested) == (127, 50, 50)
+    assert result.edit_sent and result.backup_path is not None and result.backup_path.exists()
+    # the backup is the object as it was BEFORE the write, as a loadable .syx
+    saved = y.parse_bulk_dump(y.split_messages(result.backup_path.read_bytes())[0])
+    assert (saved.fmt, saved.name, bytes(saved.data)) == ("PG", "001", before)
+    # wire order: the dump request (backup), then select, probe, edit, read-back
+    assert [k for k, _m in rig.fake.received] == [
+        "dump_request", "parameter", "parameter_request", "parameter", "parameter_request",
+    ]
+    assert yp.extract(yp.get("program", "program_level"), rig.fake.programs[1]) == 50
+    assert rig.fake.edits == 1 and rig.session.idle
+
+
+def test_only_the_first_write_to_an_object_makes_a_backup(rig):
+    first = write(rig, "program", "program_level", 50, "001")
+    second = write(rig, "program", "program_level", 60, "001")
+    assert second.ok and second.backup_path == first.backup_path  # the ORIGINAL is what stays saved
+    assert [k for k, _m in rig.fake.received].count("dump_request") == 1
+    other = write(rig, "program", "program_level", 60, "002")
+    assert other.backup_path != first.backup_path  # another object is backed up on its own
+    assert [k for k, _m in rig.fake.received].count("dump_request") == 2
+
+
+def test_easy_edit_and_sample_writes_go_to_the_right_object_and_slot(rig):
+    rig.fake.assign(1, "sine wave")
+    rig.fake.assign(1, "saw up")
+    result = write(rig, "easy_edit", "level_offset", 20, "001", slot=1)
+    assert result.ok and result.previous == 0
+    assert yp.extract(yp.get("easy_edit", "level_offset"), rig.fake.programs[1], 1) == 20
+    assert yp.extract(yp.get("easy_edit", "level_offset"), rig.fake.programs[1], 0) == 0
+    result = write(rig, "sample", "filter_cutoff", 77, "saw up")
+    assert result.ok and yp.extract(yp.get("sample", "filter_cutoff"), rig.fake.samples["saw up"]) == 77
+    assert yp.extract(yp.get("sample", "filter_cutoff"), rig.fake.samples["sine wave"]) != 77
+
+
+def test_signed_and_bitfield_values_round_trip(rig):
+    assert write(rig, "program", "transpose", -12, "001").ok
+    assert yp.extract(yp.get("program", "transpose"), rig.fake.programs[1]) == -12
+    assert write(rig, "program", "lfo_cycle", 5, "001").ok  # a 3-bit field inside a shared byte
+    assert yp.extract(yp.get("program", "lfo_cycle"), rig.fake.programs[1]) == 5
+    assert yp.extract(yp.get("program", "lfo_wave"), rig.fake.programs[1]) == 0  # its neighbour is untouched
+
+
+def test_a_write_the_unit_does_not_take_is_reported_with_what_it_holds(qapp):  # noqa: F811
+    rig = build(demo.FakeA4000(bulk_protect=True))
+    result = write(rig, "program", "program_level", 50, "001")
+    assert not result.ok and result.edit_sent and result.readback == 127
+    assert "Bulk Protect" in result.message
+    assert result.backup_path is not None  # the backup was still made first
+
+
+def test_nothing_is_written_when_the_backup_cannot_be_saved(rig, tmp_path):
+    blocker = tmp_path / "not-a-dir"
+    blocker.write_text("x")
+    rig.session.backup_dir = blocker / "backups"  # a directory can't be made under a file
+    result = write(rig, "program", "program_level", 50, "001")
+    assert not result.ok and not result.edit_sent
+    assert rig.fake.edits == 0 and yp.extract(yp.get("program", "program_level"), rig.fake.programs[1]) == 127
+    assert any("backup" in s for s in rig.statuses)
+    assert rig.session.idle
+
+
+def test_nothing_is_written_when_the_unit_never_answers_for_the_object(rig):
+    result = write(rig, "program", "program_level", 50, "200")  # no such program: the select is ignored, no reply
+    assert not result.ok and not result.edit_sent
+    assert rig.fake.edits == 0
+
+
+def test_a_lost_select_never_lets_an_edit_land_on_the_previous_object(rig):
+    collect(rig, lambda cb: rig.session.request_parameters("program", "002", [(1, 10, 0, 0, 0, 0)], cb))
+    rig.fake.drop_selects = True  # the unit keeps program 2 selected although 1 was asked for
+    result = write(rig, "program", "program_level", 50, "001")
+    assert not result.ok and not result.edit_sent
+    assert rig.fake.edits == 0
+    assert yp.extract(yp.get("program", "program_level"), rig.fake.programs[2]) == 127
+
+
+@pytest.mark.parametrize(
+    "scope,key,value,slot,fragment",
+    [
+        ("program", "program_level", 200, None, "range"),
+        ("program", "program_name", 1, None, "can't be written"),
+        ("program", "assigned_samples", 3, None, "can't be written"),
+        ("program", "effect456_connection", 1, None, "A5000"),
+        ("sample", "sampling_frequency_l", 44100, None, "not changed"),
+        ("easy_edit", "level_offset", 5, None, "slot"),
+    ],
+)
+def test_rows_and_values_that_must_not_be_written_are_refused_without_touching_the_unit(rig, scope, key, value, slot, fragment):
+    result = write(rig, scope, key, value, "001", slot=slot)
+    assert not result.ok and not result.edit_sent and fragment in result.message
+    assert rig.fake.received == []
+
+
+def test_a_queued_write_to_the_same_row_is_updated_instead_of_repeated(rig):
+    row = yp.get("program", "program_level")
+    got = []
+    # the first write starts at once (backup dump goes out); the next two wait in the queue and merge
+    rig.session.write_parameter(row, 10, "001", got.append)
+    rig.session.write_parameter(row, 20, "001", got.append)
+    rig.session.write_parameter(row, 30, "001", got.append)
+    assert wait_until(lambda: len(got) == 3)
+    assert [r.requested for r in got] == [10, 30, 30]
+    assert all(r.ok for r in got)
+    assert yp.extract(row, rig.fake.programs[1]) == 30
+    assert rig.fake.edits == 2
+
+
+def test_writes_wait_for_a_sample_transfer_like_every_other_operation(rig):
+    rig.controller._receiving = True  # a Sample Dump transfer owns the wire
+    got = []
+    rig.session.busy_retry_ms = 5
+    rig.session.write_parameter(yp.get("program", "program_level"), 50, "001", got.append)
+    assert not wait_until(lambda: bool(got), timeout=0.15) and rig.fake.received == []
+    rig.controller._receiving = False
+    assert wait_until(lambda: bool(got)) and got[0].ok
+
+
+def test_cancel_reports_a_pending_write_as_not_written(rig):
+    got = []
+    rig.session.write_parameter(yp.get("program", "program_level"), 50, "001", got.append)
+    assert rig.session.writes_pending
+    rig.session.cancel()
+    assert len(got) == 1 and not got[0].ok and not rig.session.writes_pending

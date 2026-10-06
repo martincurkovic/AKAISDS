@@ -46,5 +46,12 @@ _TEST_LOG_DIR = Path(tempfile.mkdtemp(prefix="akaisds-test-log-"))
 debug_log.LOG_PATH = _TEST_LOG_DIR / "akaisds.log"
 
 
+# Likewise the Yamaha editor's pre-write .syx backups (controller/yamaha_session.py) - a test run must not
+# leave files in the developer's real ~/.akaisds/a4000_backups, where the genuine ones are.
+from controller import yamaha_session as _yamaha_session
+
+_yamaha_session.BACKUP_DIR = _TEST_LOG_DIR / "a4000_backups"
+
+
 def pytest_sessionfinish(session, exitstatus):
     shutil.rmtree(_TEST_LOG_DIR, ignore_errors=True)

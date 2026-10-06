@@ -233,3 +233,13 @@ def test_linked_programs_reads_the_128_bit_map():
     data[112 + 36 : 112 + 40] = (1 << 31).to_bytes(4, "big")  # program 128
     assert yp.linked_programs(data) == [1, 34, 64, 128]
     assert yp.ENUMS["lfo_reset_channel"][-2] == "Off"
+
+
+def test_a_samples_right_channel_wave_name_marks_it_stereo():
+    from core import demo_a4000 as demo
+
+    mono = demo.make_sample_payload("sine wave")
+    assert yp.wave_name_right(mono) == "" and not yp.is_stereo(mono)
+    stereo = bytearray(mono)
+    stereo[80:96] = b"SMP 000002R     "
+    assert yp.wave_name_right(stereo) == "SMP 000002R" and yp.is_stereo(stereo)

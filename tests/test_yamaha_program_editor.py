@@ -1,4 +1,4 @@
-# tests for ui/yamaha_program_editor.py + ui/yamaha_samples_tab.py - the Yamaha A4000 editor (view-only).
+# tests for ui/yamaha_program_editor.py + ui/yamaha_samples_tab.py - the Yamaha A4000 editor (reads and writes).
 #
 # The real window, real SamplerController and real YamahaSession run against core/demo_a4000.FakeA4000
 # over the S950 tests' fake MidiManager. Offscreen Qt; every wire wait is shrunk.
@@ -9,12 +9,13 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
 from PySide6.QtCore import QCoreApplication, QEvent, Qt
-from PySide6.QtWidgets import QCheckBox, QComboBox, QLabel, QMainWindow, QSpinBox
+from PySide6.QtWidgets import QCheckBox, QComboBox, QLabel, QMainWindow, QMessageBox, QSpinBox
 
 from controller.sampler_controller import SamplerController
 from core import demo_a4000 as demo
 from core import yamaha_params as yp
 from ui import yamaha_program_editor as editor_module
+from ui import yamaha_writer as writer_module
 from ui import yamaha_samples_tab as samples_module
 from ui.knob import Knob
 from ui.yamaha_program_editor import YamahaProgramEditorWindow
@@ -80,21 +81,36 @@ def build_window(qapp, fake):  # noqa: F811
     session = controller.yamaha_session()
     session.device = fake.device
     session.select_settle_ms = 1
+    session.edit_settle_ms = 1
     session.reply_timeout_ms = 400
     session.bulk_timeout_ms = 600
     main = _Main()
     window = YamahaProgramEditorWindow(main, controller)
+    window._writer.THROTTLE_MS = 5
+    window._writer.REREAD_MS = 30
     window.main, window.controller, window.midi, window.fake = main, controller, midi, fake
     return window
 
 
 def dispose(window):
+    window._writer.close()
     window._scan_generation += 1
     window._session.cancel()
     window._connected = False
     window.close()
     window.deleteLater()
     QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete.value)
+
+
+@pytest.fixture(autouse=True)
+def warning_acknowledged(monkeypatch):
+    """The one-time experimental warning is a modal dialog and a flag in the REAL config.json: never in a test."""
+    state = {"ack": True, "saved": []}
+    monkeypatch.setattr(writer_module.app_config, "get_yamaha_write_warning_acknowledged", lambda: state["ack"])
+    monkeypatch.setattr(
+        writer_module.app_config, "save_yamaha_write_warning_acknowledged", lambda value=True: state["saved"].append(value)
+    )
+    return state
 
 
 @pytest.fixture
@@ -170,12 +186,15 @@ def test_the_assigned_info_explains_the_effective_range(win, fake):
     assert "Plays C-2 - G8 in this program" in win.assigned_info.text()
 
 
-def test_every_control_is_view_only(win):
+def test_exactly_the_writable_rows_are_enabled(win):
     for panel in (win.program_panel, win.easy_panel, win.samples_tab.panel):
         for key, widget in panel.widgets.items():
             if isinstance(widget, QLabel):
                 continue
-            assert not widget.isEnabled(), (panel.scope, key)
+            p = yp.get(panel.scope, key)
+            writable = not (p.read_only or p.bulk_only or p.write_ignored or p.a5000_only)
+            assert widget.isEnabled() == writable, (panel.scope, key)
+    assert win.program_panel.widgets["program_level"].isEnabled()
 
 
 def test_widgets_use_the_tables_ranges_and_enum_labels(win):
@@ -208,7 +227,8 @@ def test_the_samples_tab_lists_samples_and_fills_every_card(win):
     assert tab.panel.value("original_key_l") == 66
     assert tab.panel.value("fine_tune_l") == -20
     assert "48,000 Hz" in tab.summary_label.text()
-    assert tab.used_label.text() == "Used in programs 001"  # the fake marks the link map, like the unit
+    # the fake marks the link map, like the unit; the header warns that the sample is shared
+    assert tab.used_label.text() == "Used in programs 001 - a change here affects all of them"
 
 
 def test_a_sample_nobody_uses_says_so(win):
@@ -256,3 +276,168 @@ def test_closing_is_refused_while_a_transfer_is_busy(win, monkeypatch):
     win.close()
     assert win._connected is True
     assert "already in progress" in win.status_bar.currentMessage()
+
+
+# --- editing ---------------------------------------------------------------------------------------------------
+
+
+def program_level(fake, n=1):
+    return yp.extract(yp.get("program", "program_level"), fake.programs[n])
+
+
+def test_changing_a_knob_writes_it_to_the_unit_after_a_backup(win, fake):
+    win.program_panel.widgets["program_level"].setValue(60)
+    assert wait_until(lambda: program_level(fake) == 60)
+    assert wait_until(lambda: "Wrote" in win.status_bar.currentMessage())
+    backups = list(win._session.backup_dir.glob("PG-001-*.syx"))
+    assert len(backups) == 1
+    assert win.program_panel.value("program_level") == 60
+    assert yp.extract(yp.get("program", "program_level"), win._program_data[1]) == 60
+
+
+def test_a_burst_of_edits_sends_only_the_value_it_ends_on(win, fake):
+    knob = win.program_panel.widgets["program_level"]
+    for v in (10, 20, 30, 40, 50):
+        knob.setValue(v)
+    assert wait_until(lambda: program_level(fake) == 50)
+    assert wait_until(lambda: win._writer.busy is False)
+    assert fake.edits == 1
+
+
+def test_an_easy_edit_goes_to_the_selected_assigned_sample(win, fake):
+    win.assigned_list.setCurrentRow(1)
+    win.easy_panel.widgets["level_offset"].setValue(15)
+    assert wait_until(lambda: yp.extract(yp.get("easy_edit", "level_offset"), fake.programs[1], 1) == 15)
+    assert yp.extract(yp.get("easy_edit", "level_offset"), fake.programs[1], 0) == 0
+
+
+def test_an_edit_is_written_to_the_program_it_was_made_on_even_if_another_is_selected_at_once(win, fake):
+    win.program_panel.widgets["program_level"].setValue(33)
+    win.program_list.setCurrentItem(win._items[5])
+    assert wait_until(lambda: program_level(fake) == 33)
+    assert program_level(fake, 5) == 127
+
+
+def test_a_combo_and_a_checkbox_write_their_raw_values(win, fake):
+    combo = win.program_panel.widgets["lfo_wave"]
+    combo.setCurrentIndex(2)
+    combo.activated.emit(2)
+    assert wait_until(lambda: yp.extract(yp.get("program", "lfo_wave"), fake.programs[1]) == combo.currentData())
+    win.easy_panel.widgets["midi_control_on"].setChecked(True)
+    assert wait_until(lambda: yp.extract(yp.get("easy_edit", "midi_control_on"), fake.programs[1], 0) == 1)
+
+
+def test_a_write_the_unit_swallows_puts_the_widget_back_to_what_it_holds(win, fake):
+    fake.bulk_protect = True
+    win.program_panel.widgets["program_level"].setValue(60)
+    assert wait_until(lambda: "Bulk Protect" in win.status_bar.currentMessage())
+    assert wait_until(lambda: win.program_panel.value("program_level") == 127)
+    assert program_level(fake) == 127
+
+
+def test_the_window_rereads_the_program_after_its_writes_to_show_what_the_unit_really_holds(win, fake):
+    win.program_panel.widgets["program_level"].setValue(60)
+    assert wait_until(lambda: program_level(fake) == 60)
+    # a side effect the edit's own read-back can't see (here: a front-panel change) shows up after the re-read
+    yp.store(yp.get("program", "transpose"), fake.programs[1], 7)
+    assert wait_until(lambda: win.program_panel.value("transpose") == 7)
+
+
+def test_an_edit_that_moves_a_samples_range_updates_the_list_and_the_bar(win, fake):
+    win.assigned_list.setCurrentRow(0)
+    win.easy_panel.widgets["key_limit_low"].setValue(60)
+    assert wait_until(lambda: editor_module.keygroup_row_label(win.assigned_list, 0).text().startswith("sine wave: C3"))
+    assert "Plays C3" in win.assigned_info.text()
+
+
+def test_the_first_edit_asks_once_and_declining_writes_nothing(win, fake, warning_acknowledged, monkeypatch):
+    warning_acknowledged["ack"] = False
+    asked = []
+    monkeypatch.setattr(
+        writer_module.QMessageBox, "question", lambda *a, **k: asked.append(a[1]) or QMessageBox.StandardButton.Cancel
+    )
+    win.program_panel.widgets["program_level"].setValue(60)
+    assert len(asked) == 1 and "experimental" in asked[0]
+    assert win.program_panel.value("program_level") == 127  # put back
+    assert not wait_until(lambda: fake.edits > 0, timeout=0.2)
+    assert warning_acknowledged["saved"] == []
+
+
+def test_accepting_the_warning_is_remembered_and_the_edit_goes_through(win, fake, warning_acknowledged, monkeypatch):
+    warning_acknowledged["ack"] = False
+    monkeypatch.setattr(writer_module.QMessageBox, "question", lambda *a, **k: QMessageBox.StandardButton.Yes)
+    win.program_panel.widgets["program_level"].setValue(60)
+    assert wait_until(lambda: program_level(fake) == 60)
+    assert warning_acknowledged["saved"] == [True]
+
+
+def test_the_window_will_not_close_or_refresh_under_a_write(win, fake):
+    win.program_panel.widgets["program_level"].setValue(60)
+    win.close()
+    assert win._connected is True and "Still writing" in win.status_bar.currentMessage()
+    win.refresh_button.click()
+    assert "Still writing" in win.status_bar.currentMessage()
+    assert wait_until(lambda: program_level(fake) == 60 and not win._writer.busy)
+    win.close()
+    assert win._connected is False
+
+
+def test_write_back_unchanged_checks_the_whole_dump(win, fake):
+    win._write_back_unchanged()
+    assert wait_until(lambda: "Write-back test passed" in win.status_bar.currentMessage())
+    assert fake.edits == 1 and program_level(fake) == 127
+    assert wait_until(lambda: list(win._session.backup_dir.glob("PG-001-*.syx")))
+
+
+def test_write_back_unchanged_reports_a_difference(win, fake):
+    original = fake._edit
+
+    def edit_with_side_effect(m):
+        original(m)
+        fake.programs[1][200] ^= 0x55  # the unit changed something it was not asked to
+
+    fake._edit = edit_with_side_effect
+    win._write_back_unchanged()
+    assert wait_until(lambda: "DIFFERS" in win.status_bar.currentMessage())
+    assert "200" in win.status_bar.currentMessage()
+
+
+def test_sample_edits_write_to_that_sample_and_header_warns_it_is_shared(win, fake):
+    tab = win.samples_tab
+    tab.select_sample("sine wave")
+    assert wait_until(lambda: tab.name_label.text() == "sine wave" and not tab.cards_scroll.isHidden())
+    tab.panel.widgets["filter_cutoff"].setValue(50)
+    assert wait_until(lambda: yp.extract(yp.get("sample", "filter_cutoff"), fake.samples["sine wave"]) == 50)
+    assert yp.extract(yp.get("sample", "filter_cutoff"), fake.samples["saw up"]) != 50
+    assert wait_until(lambda: list(win._session.backup_dir.glob("SP-sine_wave-*.syx")))
+
+
+def test_a_sample_range_edit_shows_up_in_the_programs_tab(win, fake):
+    tab = win.samples_tab
+    win.main_tabs.setCurrentIndex(win._samples_tab_index)
+    tab.select_sample("sine wave")
+    assert wait_until(lambda: tab.name_label.text() == "sine wave" and not tab.cards_scroll.isHidden())
+    tab.panel.widgets["key_range_low"].setValue(48)
+    assert wait_until(lambda: yp.extract(yp.get("sample", "key_range_low"), fake.samples["sine wave"]) == 48)
+    win.main_tabs.setCurrentIndex(0)
+    assert editor_module.keygroup_row_label(win.assigned_list, 0).text().startswith("sine wave: C2")
+
+
+def test_the_samples_tab_is_view_only_without_a_writer(win):
+    from ui.yamaha_samples_tab import YamahaSamplesTab
+
+    tab = YamahaSamplesTab(win.controller, win._session, {})
+    assert not tab.panel.widgets["filter_cutoff"].isEnabled()
+    tab.disconnect_controller()
+    tab.deleteLater()
+
+
+def test_a_stereo_sample_says_only_its_left_wave_is_covered(win, fake):
+    stereo = fake.samples["pulse 3"]
+    stereo[80:96] = b"pulse 3 right   "
+    win.samples_tab.select_sample("pulse 3")
+    assert wait_until(lambda: win.samples_tab.name_label.text() == "pulse 3")
+    assert "stereo" in win.samples_tab.summary_label.text()
+    win.samples_tab.select_sample("pulse 2")
+    assert wait_until(lambda: win.samples_tab.name_label.text() == "pulse 2")
+    assert "stereo" not in win.samples_tab.summary_label.text()
