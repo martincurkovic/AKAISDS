@@ -20,7 +20,7 @@ real hardware; the codec exists and is tested; nothing else is built yet.**
 | `src/ui/yamaha_program_editor.py`, `yamaha_samples_tab.py`, `yamaha_fields.py` - the editor | **DONE, VIEW-ONLY**: Programs tab (programs | assigned samples | cards) + Samples tab; every control disabled. Verified end to end against the real A4000 (offscreen screenshot) |
 | Waveform in the Samples tab | **DONE** (double-click to load; plain SDS through the Dashboard's controller). Verified on the real unit. Slow for long samples (see "The waveform") |
 | `tools/a4000_sds_probe.py` - read-only probe of the unit's SDS numbering | done and used (see "The waveform") |
-| Editing (writes from the UI) | **NOT STARTED** - the widgets are built and bind to `FieldPanel.edited(key, value)`; no write path exists in `YamahaSession` yet |
+| Editing (writes from the UI) | **DONE for program / Easy Edit / sample rows** (`YamahaSession.write_parameter`, `ui/yamaha_writer.py`); real-unit proven for program + sample rows, Easy Edit fake-tested only |
 | Any write to the unit | **done 2026-10-06 with the user's go-ahead** (throwaway objects, RAM only, all restored; see "Verification"). The app/codec has no write path yet |
 
 Git: the codec, params, editor, fake and session were committed by the user during session 1; the WAVEFORM work
@@ -378,39 +378,69 @@ read and drawn in the shared `WaveformView` with locked markers (wave start/end;
   packets".
 - The SDS header's period is whole nanoseconds, so 48000 Hz arrives as **48001** and 44100 as 44101 (hence `RATE_TOLERANCE_HZ = 2`).
   The SDS length equals the sample's `wave_length`/`wave_end_address` for both samples seen (128 and 31,165).
-- **Unmeasured:** whether numbers shift after a sample is DELETED from the middle of the list (positional is assumed), stereo samples
-  (probably two objects), sample banks. So every received dump is CHECKED against the selected sample's own parameters (frames ==
-  wave length or wave end, rate within 2 Hz) and REFUSED with a status message if it doesn't match - never show the wrong audio.
-  The factory samples all have identical length/rate, so the check can only catch a gross mismatch; a real fix would compare content.
+- **Numbers after a DELETE (measured 2026-10-06, `tools/a4000_sds_numbering.py`, identified by audio fingerprint, not name):** with
+  5 user samples sent after the 7 factory ones (list positions 7-11), deleting the SECOND of them (front panel COMMAND > DELETE >
+  OneSample) made every later sample move down one: the SDS number is always the CURRENT list position, with no gaps. The
+  editor's number == row rule holds. (Numbers past the last sample are answered by a CANCEL.)
+- **Stereo:** a stereo WAV sent through the Dashboard becomes TWO independent mono samples (`-L`/`-R` legs; the unit named them
+  "MIDI 00104/5", each with an empty right-wave name) - the unit has no idea they belong together. A genuine stereo sample (made on
+  the unit by recording stereo) has a non-empty right wave name at payload @80 (`yp.is_stereo`); what SDS sends for one is still
+  UNMEASURED (the check `audio_matches` refuses a mismatching dump, and the tab labels such a sample "stereo").
+- The unit TRIMS 4 frames off a sent sample (4000 sent -> `wave_length` 3996, SDS dump 3996); the dump check compares against the
+  unit's own `wave_length`, so this is fine.
+- **Bulk Protect ON makes the unit CANCEL incoming SDS sample sends** (WAIT, then CANCEL at packet 0) - and silently ignores
+  parameter edits. Check it first when a send or a write "does nothing".
 - **Speed:** SDS is MIDI-bound with a handshake per 120-byte packet: the 128-frame sine takes 0.7 s, the 31,165-frame sample took
   ~2 minutes (86% after 90 s). Progress shows in the status bar. The Yamaha session WAITS while an SDS transfer is on the wire
   (`YamahaSession.busy_retry_ms`, via `controller.is_transfer_busy()`), and the tab waits for the session to go idle before it
-  starts one; closing the editor is refused while a transfer runs (same rule as the other editors). There is no cancel button yet.
+  starts one; closing the editor is refused while a transfer runs (same rule as the other editors). The tab has a "Cancel load" button (`SamplerController.cancel_transfer()`).
 - The SDS channel used is `controller.channel` (the Dashboard's exclusive-channel setting, default 0 = the unit's Device Number 0).
   The manual says the unit answers when the channel matches its device number, or always for 0x7F.
 
+## The native WAVE DATA dump ("WD") - measured 2026-10-06 (`tools/a4000_wave_probe.py`)
+
+The unit has its own audio route besides SDS: a Yamaha bulk dump of the sample's WAVE OBJECTS (owner's manual "MIDI Data Format",
+printed p.277-279: "1.1.4 Wave Data Bulk Dump"; request `F0 43 2n 7A "LM  0474" "WD" <wave object name> F7`). A sample links its left
+wave object by name (SP payload @64) and, for a STEREO sample, a right one (@80) - e.g. `_NewSample` -> `SMP 036742    -L` /
+`-R`. **Verified byte for byte against SDS dumps** (md5 of the int16 frames equal for "sine wave", "MIDI 00101", "MIDI 00103").
+- A long wave arrives as SEVERAL COMPLETE bulk messages (each its own F0..F7 with the 26-byte header, ~4 KB; 4070 data bytes in
+  the first, 4068 in the rest) - NOT one message with several blocks like the object list. `request_bulk` therefore returns only the
+  first one: a wave needs its own collector.
+- Each message's `data` begins with a 2-byte block number (`00 00`, `00 01`, ...). The first then holds the [Common] block; its UL
+  at data[22:26] is the WORD COUNT = the sample's frames + 4 guard words (4000 for a sample whose `wave_length` is 3996; 132 for the
+  128-frame sine). Audio words are 16-bit big-endian signed: frame k = the word at data[75 + 2k] of the first message, continuing
+  at data[2:] of each later message; the last 4 words are the loop guard (a copy of the wave's start), not audio. (The manual
+  says the words start at payload offset 72; counting the 2-byte block number that is data[74] - measured is data[75], i.e. one
+  extra byte; trust the measurement.)
+- Speed: ~620 frames/s (5,996 frames in 9.7 s; 44,540 frames ~70 s) vs SDS's ~2 min for 31k - MIDI-bound, no per-packet handshake.
+- It worked while SDS did NOT: after the user recorded a stereo sample on the unit, every SDS dump request (even of earlier mono
+  samples) stalled after the header (WAIT, then a checksum error / silence) while WD kept working. Cause of the SDS stall unknown.
+- A bulk dump can't be aborted: after a cancel the unit keeps streaming the remaining messages, which occupy the wire (the session
+  must keep draining until the stream goes quiet before sending the next request).
+- NOT yet used by the editor (the Samples tab still loads waveforms over SDS).
+
 ## Next steps (in order)
 
-1. **Writes (the big one).** Add `YamahaSession.write_parameter(object_type, name, params, value_bytes, callback)`: select, settle,
-   object edit, then read back (select + request, announce-checked) and compare; refuse unless a `.syx` backup of the object
-   was saved first (S950 `write_program` precedent); first-write experimental warning (`app_config` flag); then enable the
-   widgets (`FieldPanel.set_editable`) and connect `FieldPanel.edited` (note: it passes the table value, e.g. a signed int).
-   Start with Easy Edit rows (program-local, safe), then program rows, then sample rows with an "affects N programs" warning
-   using `linked_programs`. Skip `write_ignored` rows (shown disabled) and the coupled wave/loop address rows until there is a
-   geometry-aware writer. Expect the unit's side effects (mirrored bytes, derived EQ bytes, the edited flag) - re-read after a
-   write rather than trusting a local copy. `tools/a4000_write_verify.py` is the reference for the exact wire sequence; its
-   `restore` command is the model for undoing. The waveform markers could become editable only after that (they map to the
-   coupled wave/loop rows).
-2. **Waveform polish:** a Cancel button / abort for a long load (`SamplerController.cancel_transfer()` exists); a check that numbers
-   don't shift after a delete (delete one sample on the front panel, re-probe with `tools/a4000_sds_probe.py`); stereo samples;
-   remember a loaded waveform per sample for the session (only the last one is kept now, to bound memory).
-3. **UI polish:** sample list rows (use `build_sample_list_row_widget` + a duration like the other editors); program-card
-   whitespace; show program names for empty programs on demand; remember the last selected program/tab.
-4. **Table gaps:** effect blocks + controls (read manual page 39 first), system parameters (single-value only - no bulk layout is
-   documented), sample banks, the MIDI-channel bitmaps, stereo R wave/loop addresses.
-5. Later/maybe: create/delete/link objects (object-link-change message exists; create/delete have no known opcode - a bulk
-   load of a new object may create it; don't guess, test on a throwaway). Also a Settings field for the Device Number
-   (`yamaha_device_number` is config.json-only today).
+DONE 2026-10-06 (session 2): writes (see "Writes" below), the waveform Cancel button, the delete-numbering check, stereo
+detection/labelling. Next:
+
+1. ~~Easy Edit writes on the real unit~~ DONE (see Writes).
+2. **A genuine stereo sample**: record one on the unit (RECORD mode, Sample Type "Stereo"), then `tools/a4000_sds_numbering.py
+   list` and `probe` to see what SDS sends for it (one mono dump? two numbers?) and make the waveform load handle it.
+3. Waveform polish: remember a loaded waveform per sample for the session (only the last is kept).
+4. UI polish: sample list rows with durations, program-card whitespace, program names for empty programs on demand, remember the
+   last program/tab; a restore-from-backup action (the backups are plain `.syx` the unit can load; no in-app restore yet).
+5. Table gaps: effect blocks + controls (read manual page 39 first), system parameters, sample banks, MIDI-channel bitmaps,
+   stereo R wave/loop addresses. Geometry-aware writing of wave/loop addresses (they are coupled).
+6. Later/maybe: create/delete/link objects (object-link-change exists; test on a throwaway), a Settings field for the Device Number.
+
+### Writes (session 2) - what was built and measured
+`YamahaSession.write_parameter` (backup first, object proven selected by an announce, read-back) + `ui/yamaha_writer.py`
+(`WriteCoordinator`: throttle, one-time warning, post-write re-read). Proven on the real A4000 with
+`tools/a4000_session_write_check.py`: 13/13 program and sample rows EXACT (including signed values and bitfields), write-back of a
+row's own value leaves the dump identical, all originals restored, backups equal the pre-write object; and the real editor window
+(offscreen, real ports) edited a program knob and a sample parameter, ran "Write Program Back Unchanged (test)" and restored.
+Easy Edit rows through the session: 6/6 EXACT on program 001 slot 0 (level/pan offset, key range shift, key low limit, coarse tune, MIDI control), restored byte for byte (19/19 in the whole run).
 
 ### Decisions made with the user (2026-10-06)
 - Editor layout: BOTH program-centric (Programs | assigned samples | cards) and a Samples tab, like the S3000 editor.
