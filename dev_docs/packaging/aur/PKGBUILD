@@ -1,0 +1,29 @@
+# Maintainer: Martin Curkovic <YOUR_EMAIL_HERE>
+#
+# This is a "-bin" package: it downloads the prebuilt AppImage that AKAISDS's
+# own GitHub Actions build already produces, instead of compiling from source.
+# That keeps this PKGBUILD simple, but it also means you are personally
+# vouching that the binary matches the tagged source - see PACKAGING.md.
+
+pkgname=akaisds-bin
+pkgver=1.1.1
+pkgrel=1
+pkgdesc="MIDI Sample Dump Standard transfer tool for Akai and generic SDS-compatible samplers (prebuilt AppImage)"
+arch=('x86_64')
+url="https://github.com/martincurkovic/AKAISDS"
+license=('GPL-3.0-or-later')
+depends=('fuse2' 'qt6-base' 'alsa-lib')
+provides=('akaisds')
+conflicts=('akaisds')
+source=("https://github.com/martincurkovic/AKAISDS/releases/download/v${pkgver}/AKAISDS-linux.zip"
+        "akaisds.desktop"
+        "icon_512x512.png")
+sha256sums=('12ce6ccd330956f6b4a78921110094d14e8905b3a43cd2d65343730fe0a46f96'
+            'SKIP'
+            'SKIP')
+
+package() {
+  install -Dm755 "AKAISDS-linux.AppImage" "$pkgdir/usr/bin/akaisds"
+  install -Dm644 "akaisds.desktop" "$pkgdir/usr/share/applications/akaisds.desktop"
+  install -Dm644 "icon_512x512.png" "$pkgdir/usr/share/icons/hicolor/512x512/apps/akaisds.png"
+}

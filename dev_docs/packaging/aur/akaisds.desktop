@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=AKAISDS
+Exec=akaisds
+Icon=akaisds
+Categories=AudioVideo;Audio;Utility;
+Comment=MIDI Sample Dump Standard transfer tool for Akai and generic SDS-compatible samplers
+Terminal=false
