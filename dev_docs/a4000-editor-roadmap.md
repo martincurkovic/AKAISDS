@@ -21,7 +21,7 @@ real hardware; the codec exists and is tested; nothing else is built yet.**
 Git: the earlier S1000/S950 work is committed (HEAD `68aeeab`). **Uncommitted at time of writing:**
 `src/core/yamaha_sysex.py`, `tests/test_yamaha_sysex.py`, `tests/fixtures/a4000/` (8 small `.syx` captures, 36 KB),
 the `AGENTS.md` A4000 section, and the new `dev_docs/` + `tools/` folders (this file moved here from the user's Desktop).
-Full suite: 1612 tests pass (`uv run pytest tests/ -q`, ~40 s).
+Full suite passes (`uv run pytest tests/ -q`, ~40 s).
 
 Hardware at the user's desk: Yamaha **A4000**, cold-booted, only the factory built-in waveforms loaded (sine wave,
 saw up, triangle, square, pulse 1/2/3), **Device Number 0**, Bulk Protect off, connected through a **PreSonus Studio 26**
