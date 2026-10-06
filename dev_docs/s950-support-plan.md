@@ -301,7 +301,7 @@ docstring (what the fake assumes). The ones that matter most:
 - A script run with `os._exit(...)` doesn't flush a piped stdout - `print(..., flush=True)`.
 
 ### Running things
-- Whole suite: `uv run pytest tests -q` (~40 s, 1552 tests as of this revision).
+- Whole suite: `uv run pytest tests -q` (~40 s).
 - Just this feature: `uv run pytest tests/test_s950_sysex.py tests/test_s950_program.py
   tests/test_s950_params.py tests/test_demo_s950.py tests/test_s950_transfers.py
   tests/test_s950_program_editor.py tests/test_s950_samples_tab.py -q` (a few seconds).
