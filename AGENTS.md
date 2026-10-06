@@ -524,9 +524,30 @@ samples | cards, and a Samples tab; every writable control edits the unit) all e
   assigned-samples column (`AssignDialog`; removal asks first); both lock the window like a restore. `_select_sample_after_load` selects the
   new slot once the program is re-read; `_counts` follows so the "has samples" filter stays right. Untested on hardware: stereo samples,
   sample banks (the UI only assigns samples), a full program.
+- **Editable markers + click-to-preview (session 4, 2026-10-06)**: the Samples tab's four waveform markers are editable and a single
+  click on the waveform previews the sample (like the S3000 editor). `core/yamaha_markers.py` is the model: the unit keeps FOUR independent
+  addresses (wave start, wave end, loop start, loop end) and derives the two lengths; it SILENTLY IGNORES a write that would break
+  start <= loop_start <= loop_end <= end (or an end past the wave's own size), so `plan_marker_writes` orders a change (widen the wave,
+  widen the loop, narrow the loop, narrow the wave) and `target_for_edit` builds the target from only the markers that MOVED (the view
+  draws a non-looping sample's loop at the wave end, which is NOT what the unit stores - never write the view's loop markers back
+  wholesale). MEASURED with `tools/a4000_marker_probe.py` and proven with `tools/a4000_marker_check.py` (the real tab + write path on a
+  user sample): `wave_length`/`wave_end_address` are NOT ignored on a USER sample (they were only ever flagged `write_ignored` from a
+  built-in; the flag is gone, a built-in simply ignores an end change and the tab says so); while the loop mode does not loop (0/3/4/5)
+  the loop END follows the wave end (and the loop can end up with start > end and an underflowed length - move the loop first, which the
+  planner does); a loop start may sit AT the wave end (the default of a fresh user sample - a drag can't reach it, the view's last
+  frame is end-1). The tab writes the plan one step at a time (`_run_marker_step`, through `WriteCoordinator`, each step guarded and
+  read back), re-reads the sample, and puts the markers back from the cache if a step fails; a drag made meanwhile waits and is
+  re-planned from a fresh read. The two channel views are linked (`_on_markers_changed`/`WaveformView.apply_markers`): one set of
+  addresses on the unit. **STEREO IS UNMEASURED**: no stereo sample was on the unit - does the unit really move the right channel's
+  twin address bytes with a write? (the tab only ever reads/writes the left addresses). The restore plan now writes the four ADDRESS rows
+  in planner order and never the two length rows (derived). `FakeA4000._edit_geometry` models all of the above. Preview: `SlicePreviewPlayer.play/
+  play_loop` take an optional `right_samples` (real two-channel output; mono callers are untouched); loop modes: 0/4 plain run, 1 held
+  loop (click again to stop), 2 loop for `_RELEASE_PREVIEW_MS`, 3/5 a reversed copy with the playhead mapped back. No pitch shift (the
+  sample plays at its own rate/key). Audio must be loaded first; `audio_matches` now accepts a wave LONGER than the end address (a
+  trimmed end is legal).
 - **HANDOFF (end of session 3, 2026-10-06):** sessions 1-2 are committed on `s1000-support`; session 3's work (restore + assign) may be
   UNCOMMITTED - check `git status` and offer a commit; the suite had 2060 passing tests. Read `dev_docs/a4000-editor-roadmap.md` "HANDOFF"
-  and "Next steps" before continuing: editable loop/wave markers (coupled addresses!), then the missing tables
+  and "Next steps" before continuing: (markers + preview are DONE, see above - stereo markers still need a real stereo sample), then the missing tables
   (effects/controllers/system/banks), then native audio loading; a stereo sample is needed to test assigning/restoring one (the unit was
   cold-booted, only factory samples remain). The user's look-and-feel decisions are listed there too.
 - **Testing the Yamaha code - gotchas:** replies that must arrive over time (cancel mid-stream, progressive fill) use
