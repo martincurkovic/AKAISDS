@@ -104,12 +104,14 @@ def test_dump_request_is_exactly_what_the_a4000_answered():
     assert ol[:3] == bytes([0x43, 0x20, 0x7A]) and ol[11:13] == b"OL" and ol[13:] == b" " * 16
 
 
-def test_object_select_matches_capture_and_the_units_echo_parses():
+def test_object_select_matches_capture_and_the_units_announcement_parses():
     sent = y.build_object_select(0, "001", "program")
     assert sent == bytes.fromhex("43 10 58 00 30 30 31" + " 20" * 13 + " 14")
-    echo = y.parse_parameter_message(_message("object_select_echo.syx"))
-    assert (echo.kind, echo.object_name, echo.object_type) == ("select", "001", 0x14)
-    assert echo.device == 0
+    # captured: the unit sends this select-shaped message ahead of every parameter reply (it announces the
+    # current object; it does NOT echo our select - nothing comes back until a parameter is requested)
+    announced = y.parse_parameter_message(_message("object_select_announce.syx"))
+    assert (announced.kind, announced.object_name, announced.object_type) == ("select", "001", 0x14)
+    assert announced.device == 0
 
 
 def test_parameter_request_matches_capture():

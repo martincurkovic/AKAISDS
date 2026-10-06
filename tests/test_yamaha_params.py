@@ -173,6 +173,12 @@ def test_signed_two_bit_fields_read_minus_one():
     assert yp.extract(yp.get("easy_edit", "key_xfade_on"), data, 0) == -1
 
 
+def test_rows_the_unit_ignored_writes_to_are_flagged():
+    flagged = {p.key for p in yp.rows("sample") if p.write_ignored}
+    assert flagged == {"sampling_frequency_l", "sampling_frequency_r", "wave_length", "wave_end_address"}
+    assert not any(p.write_ignored for p in yp.rows("program") + yp.rows("easy_edit"))
+
+
 def test_range_check_and_enums():
     assert yp.in_range(yp.get("sample", "filter_cutoff"), 127)
     assert not yp.in_range(yp.get("sample", "filter_cutoff"), 128)
