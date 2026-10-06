@@ -1223,6 +1223,9 @@ class SamplerController(QObject):
     def send_file_queue(self, file_entries, channel=None, starting_sample_number=None):
         if self._is_s950():
             return self._s950.send_file_queue(file_entries)
+        if self.is_yamaha_model():
+            # the unit's own bulk load (wave + sample dumps) - not Sample Dump Standard; see controller/yamaha_transfers.py
+            return self._yamaha_transfers.send_file_queue(file_entries)
         if channel is None:
             channel = self.channel
         # send batch of local wav files, one after another without overwriting anything already on the hardware

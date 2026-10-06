@@ -424,11 +424,19 @@ class TransferDashboard(QWidget):
                 "Can't open Settings - a MIDI transfer is already in progress"
             )
             return
+        memory_before = app_config.get_yamaha_wave_memory_kb()
         dialog = MidiSettingsDialog(self.midi_manager, self.sampler_controller, self)
         dialog.exec()
         diagnostics.log_session_config("after Settings")
         self._update_device_type_ui()
         self._update_open_editor_enabled()
+        if (
+            self._is_yamaha()
+            and app_config.get_yamaha_wave_memory_kb() != memory_before
+            and not self.sampler_controller.is_open_loop()
+        ):
+            # the memory bar is an estimate against that size: redo it (a silent list refresh re-reads the sample sizes)
+            self.sampler_controller.refresh_sample_list(silent=True)
 
     def request_sample_list(self):
         self.sampler_controller.refresh_sample_list()
@@ -593,14 +601,15 @@ class TransferDashboard(QWidget):
         if self._is_yamaha():
             # Yamaha A4000/A5000: its sample list and downloads use the unit's own protocol (the object list and
             # wave dumps - controller/yamaha_transfers.py), so browsing and receiving work like the Akai family but
-            # need a MIDI input; there is no memory-status request (no bar) and no known delete opcode. SENDING
-            # samples is still plain Sample Dump Standard.
+            # need a MIDI input; there is no memory-status request and no known delete opcode. SENDING is the unit's
+            # native bulk load too (controller/yamaha_transfers.py).
             self.list_hardware.setEnabled(True)
             self.btn_select_all.setEnabled(has_samples)
             self.btn_refresh.setEnabled(not is_open_loop)
             self.btn_receive.setEnabled(not is_open_loop and has_samples)
             self.btn_delete_selected.setEnabled(False)
-            self.memory_avail_prog_bar.setVisible(False)
+            # the unit can't report its free memory: the bar is an estimate, shown once the memory size is known (config.json)
+            self.memory_avail_prog_bar.setVisible(app_config.get_yamaha_wave_memory_kb() is not None)
             if is_open_loop:
                 self.empty_hardware_label.setText(tooltips.YAMAHA_LIST_NEEDS_MIDI_INPUT)
                 self.empty_hardware_label.setVisible(self.list_hardware.count() == 0)
@@ -1056,7 +1065,7 @@ class TransferDashboard(QWidget):
         # determine real units to send so the second progress_bar_overall can be shown appropriately
         total_units = 0
         for entry in entries:
-            if entry["mono"]:
+            if entry["mono"] or self._is_yamaha():  # a Yamaha loads a stereo file as ONE (stereo) sample
                 units = 1
             else:
                 try:
@@ -1258,7 +1267,8 @@ class TransferDashboard(QWidget):
     def on_transfer_progress(self, sent, total):
         percent = int((sent / total) * 100) if total else 0
         self.progress_bar_current_smpl.setValue(percent)
-        self.status_bar.showMessage(f"Sending packet {sent}/{total}")
+        if not self._is_yamaha():  # a Yamaha load reports its own, richer status (bytes aren't packets)
+            self.status_bar.showMessage(f"Sending packet {sent}/{total}")
 
     def on_unit_progress(self, fraction):
         # drives overall progress bar
@@ -1516,11 +1526,17 @@ class TransferDashboard(QWidget):
         # and naming all read replies), so it can't be sent to open loop
         needs_input = (
             self.sampler_controller.device_type == sampler_models.FAMILY_S950
-            and self.sampler_controller.is_open_loop()
-        )
+            or self._is_yamaha()  # a native Yamaha load is checked by reading the unit afterwards
+        ) and self.sampler_controller.is_open_loop()
         self.btn_send.setEnabled(has_files and not needs_input)
         self.btn_send.setToolTip(
-            tooltips.S950_NEEDS_MIDI_INPUT if has_files and needs_input else ""
+            (
+                tooltips.YAMAHA_SEND_NEEDS_MIDI_INPUT
+                if self._is_yamaha()
+                else tooltips.S950_NEEDS_MIDI_INPUT
+            )
+            if has_files and needs_input
+            else ""
         )
 
     def _update_delete_selected_button_state(self):
@@ -1615,10 +1631,16 @@ class TransferDashboard(QWidget):
             self.memory_avail_prog_bar.setProperty("memoryLevel", "normal")
 
         self.memory_avail_prog_bar.setValue(percent_used)
-        self.memory_avail_prog_bar.setToolTip(
-            f"{info['num_words_free']:,} sample words free\n"
-            f"{info['num_blocks_free']:,} sample blocks/slots free"
-        )
+        if info.get("estimated"):
+            self.memory_avail_prog_bar.setToolTip(
+                f"About {info['num_words_free']:,} sample words free (an estimate: the sampler can't report its memory over\n"
+                "MIDI, so this adds up the samples' sizes against the memory size set in config.json)"
+            )
+        else:
+            self.memory_avail_prog_bar.setToolTip(
+                f"{info['num_words_free']:,} sample words free\n"
+                f"{info['num_blocks_free']:,} sample blocks/slots free"
+            )
         self.memory_avail_prog_bar.style().unpolish(self.memory_avail_prog_bar)
         self.memory_avail_prog_bar.style().polish(self.memory_avail_prog_bar)
 

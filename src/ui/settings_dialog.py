@@ -187,6 +187,22 @@ class MidiSettingsDialog(QDialog):
         self.combo_device_type.setToolTip(tooltips.SAMPLER_TYPE)
         midi_form.addRow(QLabel("Sampler Type:"), self.combo_device_type)
 
+        # Yamaha A4000/A5000 only: the unit can't report its free wave memory over MIDI, so the Dashboard's memory bar is an
+        # estimate against the size entered here (0 = unknown = no bar)
+        self.spin_yamaha_memory = QSpinBox()
+        self.spin_yamaha_memory.setRange(0, 1_048_576)  # kB, as the unit's own FREE MEMORY page shows it
+        self.spin_yamaha_memory.setSingleStep(1024)
+        self.spin_yamaha_memory.setSuffix(" kB")
+        self.spin_yamaha_memory.setSpecialValueText("Unknown")
+        value = app_config.get_yamaha_wave_memory_kb()
+        self.spin_yamaha_memory.setValue(int(round(value)) if value else 0)
+        self.spin_yamaha_memory.setToolTip(tooltips.YAMAHA_WAVE_MEMORY)
+        midi_form.addRow(QLabel("Wave memory:"), self.spin_yamaha_memory)
+        self._yamaha_memory_row = midi_form.rowCount() - 1
+        self._midi_form = midi_form
+        self.combo_device_type.currentIndexChanged.connect(self._update_yamaha_memory_row)
+        self._update_yamaha_memory_row()
+
         midi_card = build_section_card("MIDI Input/Output", midi_form)
 
         # Unrelated to MIDI/SysEx transfers - this is the output device/
@@ -354,6 +370,11 @@ class MidiSettingsDialog(QDialog):
         widen_popup_to_fit_items(self.combo_input)
         widen_popup_to_fit_items(self.combo_output)
 
+    def _update_yamaha_memory_row(self, *_):
+        self._midi_form.setRowVisible(
+            self._yamaha_memory_row, sampler_models.is_yamaha(self.combo_device_type.currentData())
+        )
+
     def _apply_and_close(self):
         input_name = self.combo_input.currentData()
         output_name = self.combo_output.currentData()
@@ -398,6 +419,8 @@ class MidiSettingsDialog(QDialog):
         app_config.save_ports(input_name, output_name)
         app_config.save_channel(channel)
         app_config.save_device_type(device_type)
+        if sampler_models.is_yamaha(device_type):
+            app_config.save_yamaha_wave_memory_kb(self.spin_yamaha_memory.value())
         app_config.save_audio_output_device(self.combo_audio_output.currentData())
         app_config.save_audio_buffer_samples(self.combo_audio_buffer.currentData())
 

@@ -7,9 +7,9 @@
 #   "akai_s1000"       - Akai S1000 (and S1100)
 #   "akai_s900_s950"   - Akai S900/S950 (a different protocol: see core/s950_sysex.py)
 #   "generic"          - any MIDI Sample Dump Standard device
-#   "yamaha_a4000"     - Yamaha A4000/A5000: SENDING samples is plain Sample Dump Standard (the "generic"
-#                        family), but listing and receiving samples and the Program Editor speak Yamaha SysEx
-#                        (core/yamaha_sysex.py, controller/yamaha_transfers.py)
+#   "yamaha_a4000"     - Yamaha A4000/A5000: its PROTOCOL FAMILY is "generic", but listing, receiving AND SENDING
+#                        samples and the Program Editor all speak Yamaha SysEx (core/yamaha_sysex.py,
+#                        controller/yamaha_transfers.py - sends are the unit's native bulk load, not SDS)
 #
 # Before the S1000 existed the S2000/S3000 entry was saved as plain "akai".
 # That legacy value is still ACCEPTED everywhere (normalize() maps it), and
@@ -65,7 +65,8 @@ def normalize(selection):
 def protocol_family(selection):
     # "akai", "generic" or "s950" - what SamplerController.device_type holds
     selection = normalize(selection)
-    # the Yamaha's sample SENDS are standard SDS; its list, receives and editor are Yamaha-specific (is_yamaha)
+    # still the "generic" family for the code paths that never learnt about the Yamaha; everything user-facing (list, receive,
+    # send, editor) branches on is_yamaha() and uses its native protocol
     if selection in (GENERIC_SDS, YAMAHA_A4000):
         return FAMILY_GENERIC
     if selection == AKAI_S900_S950:

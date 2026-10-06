@@ -1,4 +1,4 @@
-"""The Transfer Dashboard's Yamaha A4000/A5000 side: the sample LIST and RECEIVING samples, over the unit's native protocol.
+"""The Transfer Dashboard's Yamaha A4000/A5000 side: the sample LIST, RECEIVING and SENDING samples, over the unit's native protocol.
 
 Built lazily by `SamplerController` (like `S950Transfers`) and reports through the controller's own signals, so the
 Dashboard needs almost no Yamaha-specific code:
@@ -10,15 +10,25 @@ Dashboard needs almost no Yamaha-specific code:
    is written as a mono or stereo WAV at the sample's own rate. Faster than SDS (no per-packet handshake), reaches BOTH
    channels of a stereo sample (SDS offers one number per sample) and kept working on a unit whose SDS dumps stalled.
 
-SENDING samples to the unit is still plain Sample Dump Standard (the controller's generic path) - the native route for
-loading audio is unmeasured.
+ - `send_file_queue(entries)` loads WAV files as new samples with the native bulk load (core/yamaha_load.py): the wave dump(s) then
+   the sample dump, ~620 frames/s per channel on the wire (the same MIDI speed as a receive). Stereo files become real STEREO samples.
+   A sample is never overwritten: a name already on the unit gets a number added. Each load is VERIFIED afterwards (the object list
+   must hold the new sample and its waves, and the sample's own dump must describe what was sent) because the unit never answers a
+   bulk load - a refusal (Bulk Protect on, wave memory full...) is otherwise invisible.
 
 Everything goes through `YamahaSession`, so it queues behind (and never interleaves with) the editor's own operations.
 A wave dump can't be aborted on the unit: a cancel drains the rest of its stream first (see the session).
 """
 
-from core import debug_log, sds_encoder
+import os
+
+from PySide6.QtCore import QTimer
+
+from core import app_config, debug_log, sds_encoder
+from core import yamaha_load as yl
 from core import yamaha_params as yp
+from core import yamaha_sysex as ysx
+from core import yamaha_wave
 
 
 def _log(message):
@@ -29,11 +39,23 @@ class YamahaTransfers:
     def __init__(self, controller):
         self._c = controller
         self.names = []  # the samples of the last list read, in order (index == number)
-        self.busy = False  # a receive is running
+        self.busy = False  # a receive or a send is running
+        self._mode = None  # "receive" / "send" while busy
+        self._send_total = 0
+        self._send_done = 0
+        self._send_skipped = 0
+        self._send_current = None
         self._queue = []
         self._token = 0  # bumped on every start/cancel so late callbacks from an abandoned receive are ignored
         self._total = 0
         self._done = 0
+        #: after the last message of a load, how long before the unit is asked anything (it answers an identity request 2-4 s
+        #: after the last message, measured) and how often / how far apart a verification read is retried (the first request
+        #: after a load is sometimes simply not answered)
+        self.verify_delay_ms = 2500
+        self.verify_retries = 3
+        self.verify_retry_ms = 3000
+        self._memory_token = 0  # bumped per refresh so a slower estimate from an earlier one is dropped
 
     @property
     def _session(self):
@@ -51,12 +73,49 @@ class YamahaTransfers:
             self.names = [e.name for e in entries if e.kind == "sample"]
             _log(f"sample list: {len(self.names)} sample(s)")
             self._c.sample_list_updated.emit(list(self.names))
+            self._estimate_memory(list(self.names))
             if not silent:
                 self._c.status_changed.emit(f"Loaded {len(self.names)} sample(s) from hardware")
 
         if not silent:
             self._c.status_changed.emit("Requesting the sample list...")
         self._session.request_object_list(got)
+
+    # -- memory (an ESTIMATE) -------------------------------------------------------------------------------------
+
+    def _estimate_memory(self, names):
+        """The unit can't report its free wave memory over MIDI, so - only if the memory size is known (config.json's
+        `yamaha_wave_memory_kb`) - add up the words of every sample's wave(s), read from each sample's own dump, and report the
+        share as the Dashboard's "memory used" bar (`memory_status_updated`, flagged `estimated`). Waves no sample uses, and the
+        unit's own bookkeeping, are not counted: the bar can only under-state."""
+        capacity_kb = app_config.get_yamaha_wave_memory_kb()
+        self._memory_token += 1
+        if capacity_kb is None or not names:
+            return
+        token = self._memory_token
+        capacity_words = int(capacity_kb * 1024 / 2)
+        used = [0]
+
+        def next_one(remaining):
+            if token != self._memory_token:
+                return
+            if not remaining:
+                free = max(capacity_words - used[0], 0)
+                _log(f"memory estimate: {used[0]:,} of {capacity_words:,} words used by {len(names)} sample(s)")
+                self._c.memory_status_updated.emit(
+                    {"max_num_samp_words": capacity_words, "num_words_free": free, "num_blocks_free": -1, "estimated": True}
+                )
+                return
+            name, rest = remaining[0], remaining[1:]
+
+            def got(dump):
+                if dump is not None:
+                    used[0] += sample_words(bytes(dump.data))
+                next_one(rest)
+
+            self._session.request_bulk("SP", name, got)
+
+        next_one(list(names))
 
     # -- receiving ---------------------------------------------------------------------------------------------
 
@@ -68,6 +127,7 @@ class YamahaTransfers:
             self._c.status_changed.emit("A transfer is already in progress - please wait for it to finish")
             return
         self.busy = True
+        self._mode = "receive"
         self._token += 1
         self._queue = list(requests)
         self._total = len(requests)
@@ -79,13 +139,25 @@ class YamahaTransfers:
         """Stop a running receive. True if there was one (the controller then has nothing more to do)."""
         if not self.busy:
             return False
-        _log("receive cancelled")
+        mode = self._mode
+        _log(f"{mode} cancelled")
         self._token += 1
         self.busy = False
+        self._mode = None
         self._queue = []
         self._session.cancel()  # fails whatever is in flight/queued - the stale callbacks are ignored by the token
-        self._c.status_changed.emit("Transfer cancelled")
-        self._c.receive_finished.emit(False)
+        if mode == "send":
+            sent = self._send_done
+            self._c.status_changed.emit(
+                "Transfer cancelled" + (f" - {sent} sample(s) were already loaded" if sent else "")
+                + ("; the one being sent was not completed" if self._send_current else "")
+            )
+            self._send_current = None
+            self._c.transfer_finished.emit(False)
+            self._c.refresh_sample_list(silent=True)
+        else:
+            self._c.status_changed.emit("Transfer cancelled")
+            self._c.receive_finished.emit(False)
         return True
 
     def _fail(self, token, message):
@@ -181,3 +253,201 @@ class YamahaTransfers:
         self._c.status_changed.emit(f"Saved {label} to {path}")
         self._c.sample_received.emit(path)
         self._next(token)
+
+    # -- sending -----------------------------------------------------------------------------------------------
+
+    def send_file_queue(self, entries):
+        """Load WAV files as new samples. entries: the Dashboard's dicts (filepath, name or None, sample_rate or None, mono; the
+        bit depth is ignored - the unit's waves are always 16-bit). Reports through the controller's signals like the other
+        engines: transfer_progress / unit_progress, file_transferred per file that landed, transfer_finished at the end."""
+        if not entries:
+            return False
+        if self.busy or self._c.is_sds_transfer_busy():
+            self._c.status_changed.emit("A transfer is already in progress - please wait for it to finish")
+            return False
+        if self._c.is_open_loop():
+            self._c.status_changed.emit("Sending to a Yamaha sampler needs a MIDI input too - it is how each load is checked")
+            return False
+        self.busy = True
+        self._mode = "send"
+        self._token += 1
+        self._queue = list(entries)
+        self._send_total = len(entries)
+        self._send_done = 0
+        self._send_skipped = 0
+        self._send_current = None
+        _log(f"send start: {self._send_total} file(s)")
+        self._next_send(self._token)
+        return True
+
+    def _send_finished(self, token, ok, message):
+        if token != self._token:
+            return
+        self._token += 1
+        self.busy = False
+        self._mode = None
+        self._queue = []
+        self._send_current = None
+        _log(f"send finished ok={ok}: {message}")
+        self._c.status_changed.emit(message)
+        self._c.transfer_finished.emit(ok)
+        self._c.refresh_sample_list(silent=True)  # show what is on the unit now
+
+    def _next_send(self, token):
+        if token != self._token:
+            return
+        if not self._queue:
+            done, skipped = self._send_done, self._send_skipped
+            parts = [f"Sent {done} sample{'' if done == 1 else 's'} to the Yamaha sampler"]
+            if skipped:
+                parts.append(f"skipped {skipped}")
+            self._send_finished(token, True, ", ".join(parts))
+            return
+        entry = self._queue.pop(0)
+        path = entry["filepath"]
+        base = os.path.splitext(os.path.basename(path))[0]
+        index = self._send_total - len(self._queue)
+        self._c.status_changed.emit(f"Reading file {index}/{self._send_total}: {base}...")
+        try:
+            channels, rate = prepare_channels(
+                *sds_encoder.read_wav_channels(path), target_rate=entry.get("sample_rate"), force_mono=entry.get("mono", False)
+            )
+            yl.check_audio(channels, rate)  # empty, too long...
+        except (OSError, ValueError) as e:
+            # skipped, not failed: the rest of the queue is unaffected and the file stays in the Dashboard's queue
+            debug_log.get_logger().warning(f"YamahaTransfers: skipping {path!r}: {e!r}")
+            self._c.status_changed.emit(f"Skipping {os.path.basename(path)}: {e}")
+            self._send_skipped += 1
+            self._next_send(token)
+            return
+        self._send_current = entry
+        # fresh names every time: an earlier file of this batch (or the front panel) may have taken one
+        self._session.request_object_list(
+            lambda objects: self._on_names(token, entry, base, index, channels, rate, objects)
+        )
+
+    def _on_names(self, token, entry, base, index, channels, rate, objects):
+        if token != self._token:
+            return
+        if objects is None:
+            self._send_finished(
+                token, False,
+                "Couldn't read the Yamaha sampler's object list before sending - check the MIDI ports, its Device Number and Bulk Protect",
+            )
+            return
+        samples = [o.name for o in objects if o.kind == "sample"]
+        waves = [o.name for o in objects if o.kind == "wave"]
+        try:
+            wanted = yl.sample_name_for(entry.get("name") or base)
+            name = yl.unique_name(wanted, samples)
+            load = yl.build_sample_load(self._session.device, name, channels, rate, taken_samples=samples, taken_waves=waves)
+        except yl.LoadError as e:
+            self._c.status_changed.emit(f"Skipping {base}: {e}")
+            self._send_skipped += 1
+            self._next_send(token)
+            return
+        label = f"'{load.sample_name}' ({index}/{self._send_total})"
+        renamed = f" (named '{load.sample_name}' - '{wanted}' is already on the sampler)" if name != wanted else ""
+        _log(
+            f"loading {label}: {load.frames} frames @ {load.rate} Hz, {'stereo' if load.stereo else 'mono'}, "
+            f"{len(load.messages)} messages, {load.wire_bytes} bytes (~{load.wire_seconds:.0f} s); waves {load.wave_names}"
+        )
+        self._c.status_changed.emit(f"Sending {label}: {load.frames / load.rate:.1f} s of audio, about {load.wire_seconds:.0f} s on the wire{renamed}")
+
+        def progress(sent, total):
+            if token == self._token:
+                self._c.transfer_progress.emit(sent, total)
+                self._c.unit_progress.emit(sent / total if total else 0.0)
+
+        self._session.send_messages(load.messages, lambda ok: self._on_sent(token, entry, load, label, ok), on_progress=progress)
+
+    def _on_sent(self, token, entry, load, label, ok):
+        if token != self._token:
+            return
+        if not ok:
+            self._send_finished(token, False, f"Sending {label} failed - see the log")
+            return
+        self._c.status_changed.emit(f"Checking {label} on the sampler...")
+        QTimer.singleShot(self.verify_delay_ms, lambda: self._check_objects(token, entry, load, label, 0))
+
+    def _check_objects(self, token, entry, load, label, attempt):
+        if token != self._token:
+            return
+        self._session.request_object_list(lambda objects: self._verify_objects(token, entry, load, label, objects, attempt))
+
+    def _verify_objects(self, token, entry, load, label, objects, attempt=0):
+        if token != self._token:
+            return
+        if objects is None and attempt < self.verify_retries:
+            _log(f"verification of {label}: no object list (attempt {attempt + 1}), retrying")
+            QTimer.singleShot(self.verify_retry_ms, lambda: self._check_objects(token, entry, load, label, attempt + 1))
+            return
+        names = {(o.kind, o.name) for o in objects or []}
+        missing = [n for n in [("sample", load.sample_name)] + [("wave", w) for w in load.wave_names] if n not in names]
+        if objects is None or missing:
+            self._send_failed_check(token, load, label, "it did not appear on the sampler" if objects is not None else "the sampler didn't answer")
+            return
+        self._read_sample(token, entry, load, label, 0)
+
+    def _read_sample(self, token, entry, load, label, attempt):
+        self._session.request_bulk("SP", load.sample_name, lambda dump: self._verify_sample(token, entry, load, label, dump, attempt))
+
+    def _verify_sample(self, token, entry, load, label, dump, attempt=0):
+        if token != self._token:
+            return
+        if dump is None and attempt < self.verify_retries:
+            _log(f"verification of {label}: no sample dump (attempt {attempt + 1}), retrying")
+            QTimer.singleShot(self.verify_retry_ms, lambda: self._read_sample(token, entry, load, label, attempt + 1) if token == self._token else None)
+            return
+        problem = None
+        if dump is None:
+            problem = "the sampler didn't answer when it was read back"
+        else:
+            data = bytes(dump.data)
+            got = (
+                yp.extract(yp.get("sample", "wave_length"), data),
+                yp.extract(yp.get("sample", "sampling_frequency_l"), data),
+                yp.is_stereo(data),
+            )
+            if got != (load.frames, load.rate, load.stereo):
+                problem = (
+                    f"the sampler holds {got[0]:,} frames at {got[1]} Hz ({'stereo' if got[2] else 'mono'}) "
+                    f"instead of {load.frames:,} at {load.rate}"
+                )
+        if problem:
+            self._send_failed_check(token, load, label, problem)
+            return
+        self._send_done += 1
+        self._send_current = None
+        self._c.unit_progress.emit(1.0)
+        self._c.file_transferred.emit(entry["filepath"])
+        self._next_send(token)
+
+    def _send_failed_check(self, token, load, label, why):
+        # the unit never answers a bulk load, so this is the only place a refusal shows up
+        done = self._send_done
+        self._send_finished(
+            token, False,
+            f"{label} was not loaded: {why}. Check that Bulk Protect is off and that the sampler has free wave memory"
+            + (f" ({done} earlier sample(s) did load)" if done else ""),
+        )
+
+
+def prepare_channels(channels, framerate, *, target_rate=None, force_mono=False):
+    """WAV channels -> (channels, rate) ready for `yamaha_load.build_sample_load`: left only when `force_mono`, resampled to
+    `target_rate` if given (or down to 48000 Hz if the file's own rate is above what the unit's rate row can hold)."""
+    channels = [list(c) for c in (channels[:1] if force_mono else channels)]
+    rate = int(target_rate or framerate)
+    if rate > yl.MAX_RATE:
+        rate = 48000
+    if rate != framerate:
+        channels = [sds_encoder.resample_to_target_rate(c, framerate, rate)[0] for c in channels]
+        rate = int(rate)
+    return channels, rate
+
+
+def sample_words(sp_data):
+    """The wave words a sample's dump accounts for: its [Common] word count (frames + guard words) per channel - or its wave length
+    if that is zero - doubled for a stereo sample."""
+    words = int.from_bytes(sp_data[20:24], "big") or (yp.extract(yp.get("sample", "wave_length"), sp_data) + yamaha_wave.GUARD_WORDS)
+    return words * (2 if yp.is_stereo(sp_data) else 1)

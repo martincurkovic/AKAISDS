@@ -47,6 +47,11 @@ start, wave end, loop start, loop end) are independent and the two lengths follo
 start <= loop end <= end is accepted and ignored; the end can't pass the wave's own size; on a BUILT-IN waveform (the factory
 samples) end/length writes are accepted and ignored; while the loop mode does not loop (0, 3, 4, 5) the loop END follows the wave
 end (which can leave loop start > loop end and an underflowed loop length - the unit really did).
+BULK LOADS (MEASURED 2026-10-06, tools/a4000_load_probe.py - see core/yamaha_load.py): a bulk dump SENT to the unit is never answered; a
+wave dump (WD) alone is dropped, but a wave and the sample dump (SP) that names it, sent back to back in either order, create both
+objects; a wave sent under an EXISTING wave's name replaces its audio; a sample naming a wave that doesn't exist is refused. Bulk
+protect makes all of it ignored. (`staged_waves` holds a received wave until a sample claims it - the real unit's window for that is
+unmeasured, so here it is until the next sample dump.)
 NOT MODELLED: the unit's other side effects of an edit (mirrored R bytes, derived EQ coefficients, control
 blocks mirrored at the start of a sample's parameters, a stereo sample's right-channel address twins) - an edit changes
 exactly the table's bytes here - and timing.
@@ -156,6 +161,13 @@ class FakeA4000:
         #: {sample name: list of int16 words} - a STEREO sample's right channel (see `add_sample`)
         self.audio_right = {}
         self._sds_packets = []  # the data packets still to send, each after an ACK
+        #: native loads: waves received but not yet claimed by a sample, the sample dump waiting for its waves, and a log
+        self.staged_waves = {}
+        self.staged_sample = None
+        self._wave_assemblers = {}
+        self.bulk_loads = []  # (format, name) of every bulk dump received
+        #: what the unit does when a sample dump arrives under a name already in use (GUESS until measured)
+        self.same_name_replaces = True
         self._wave_sizes = {}  # sample name -> frames in its wave (what the end address may not pass), fixed at first use
         #: the object edits and parameter requests apply to: (type, key) or None
         self.current = None
@@ -196,6 +208,7 @@ class FakeA4000:
             self.audio[name] = list(audio)
             for key in ("wave_length", "wave_end_address"):
                 yp.store(yp.get("sample", key), data, len(audio))
+            data[20:24] = (len(audio) + yamaha_wave.GUARD_WORDS).to_bytes(4, "big")  # the [Common] word count (measured)
         if audio_right is not None:
             self.audio_right[name] = list(audio_right)
             data[yp.WAVE_NAME_L_OFFSET : yp.WAVE_NAME_L_OFFSET + 16] = y.pad_name(f"{name}-L")
@@ -305,6 +318,8 @@ class FakeA4000:
         kind, model, sub = m[1] >> 4, m[2], m[3]
         if kind == y.KIND_DUMP_REQUEST and model == y.MODEL_BULK:
             self._dump_request(m)
+        elif kind == y.KIND_BULK_DUMP and model == y.MODEL_BULK:
+            self._bulk_load(m)
         elif model == y.MODEL_PARAM and kind == y.KIND_PARAMETER_CHANGE and sub == y.SUB_OBJECT_SELECT:
             self._select(m)
         elif model == y.MODEL_PARAM and kind == y.KIND_PARAMETER_CHANGE and sub == y.SUB_OBJECT_PARAMETER:
@@ -317,6 +332,71 @@ class FakeA4000:
             self.ignored_ops.append(f"yamaha kind {kind} model {model:#04x} sub {sub:#04x}")
 
     # -- bulk -------------------------------------------------------------------------------------------
+
+    def _bulk_load(self, m):
+        """A bulk dump sent TO the unit (a native sample load) - see the module docstring."""
+        if self.bulk_protect:
+            self.ignored_ops.append("bulk load while bulk protect is on")
+            return
+        try:
+            dump = y.parse_bulk_dump(m)
+        except y.YamahaSysexError:
+            self.ignored_ops.append("bulk load that failed its checksum")
+            return
+        self.bulk_loads.append((dump.fmt, dump.name))
+        if dump.fmt == "WD":
+            asm = self._wave_assemblers.setdefault(dump.name, yamaha_wave.WaveAssembler(dump.name))
+            try:
+                asm.feed(dump)
+            except y.YamahaSysexError:
+                self.ignored_ops.append(f"wave message of {dump.name!r} out of order")
+                self._wave_assemblers.pop(dump.name, None)
+                return
+            if asm.done:
+                self.staged_waves[dump.name] = list(asm.frames)
+                del self._wave_assemblers[dump.name]
+                self._claim_staged()
+        elif dump.fmt == "SP":
+            self.staged_sample = (dump.name, bytearray(dump.data))
+            self._claim_staged()
+        else:
+            self.ignored_ops.append(f"bulk load of {dump.fmt}")
+
+    def _claim_staged(self):
+        # a wave that replaces an existing wave's audio takes effect at once
+        for wave, frames in list(self.staged_waves.items()):
+            for sample in self.samples:
+                names = self._wave_names(sample)
+                if wave in names and not (self.staged_sample and wave in self._payload_waves(self.staged_sample[1])):
+                    if names.index(wave) == 0:
+                        self.audio[sample] = list(frames)
+                    else:
+                        self.audio_right[sample] = list(frames)
+                    del self.staged_waves[wave]
+                    break
+        if self.staged_sample is None:
+            return
+        name, payload = self.staged_sample
+        waves = self._payload_waves(payload)
+        if not all(w in self.staged_waves for w in waves):
+            return  # still waiting for a wave (or the sample names one that doesn't exist: refused when it never arrives)
+        self.staged_sample = None
+        old = self.samples.pop(name, None) if self.same_name_replaces else None
+        if old is not None:
+            self.audio.pop(name, None)
+            self.audio_right.pop(name, None)
+        self.samples[name] = payload
+        self.audio[name] = list(self.staged_waves.pop(waves[0]))
+        if len(waves) > 1:
+            self.audio_right[name] = list(self.staged_waves.pop(waves[1]))
+        self._wave_sizes.pop(name, None)
+
+    @staticmethod
+    def _payload_waves(payload):
+        names = [bytes(payload[yp.WAVE_NAME_L_OFFSET : yp.WAVE_NAME_L_OFFSET + 16]).decode("ascii", "replace").strip(" \x00")]
+        if yp.is_stereo(payload):
+            names.append(yp.wave_name_right(payload))
+        return names
 
     def _dump_request(self, m):
         fmt = m[11:13].decode("ascii", "replace")
