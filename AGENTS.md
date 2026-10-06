@@ -416,14 +416,24 @@ behaviours were hardware-verified; `dxzl/akai-s950` has NO licence, so don't cop
   looks like the S950's own request-sample-dump (`F0 7E 00 nn 00 F7`). Generic SDS mode against
   an S950 gives nonsense, not a clean failure.
 
-## Yamaha A4000/A5000 editing (IN PROGRESS - codec + parameter tables)
+## Yamaha A4000/A5000 editing (IN PROGRESS - view-only editor works)
 
 Goal: a program/sample editor for the user's Yamaha A4000 (transfers already work through Generic SDS and stay
 there). Plan, handoff and every measured fact: **`dev_docs/a4000-editor-roadmap.md`** (read it before
-touching anything here). State: `core/yamaha_sysex.py` (the codec, pure, "bytes between F0 and F7") and
-`core/yamaha_params.py` (204 program/Easy Edit/sample parameter rows: P-address + bulk offset) exist with tests; no fake,
-bridge, UI or Sampler Type entry yet, and writes to a real A4000 have only ever come from `tools/a4000_write_verify.py` (throwaway objects, RAM, 2026-10-06).
+touching anything here). State: `core/yamaha_sysex.py` (codec) + `core/yamaha_params.py` (204 program/Easy Edit/sample
+rows: P-address + bulk offset) + `core/demo_a4000.py` (`FakeA4000`) + `controller/yamaha_session.py` (conversation
+engine) + `ui/yamaha_program_editor.py`/`yamaha_samples_tab.py`/`yamaha_fields.py` (a VIEW-ONLY editor: Programs | assigned
+samples | cards, and a Samples tab) all exist with tests and were checked against the real unit. The Sampler Type is
+`yamaha_a4000` ("Yamaha A4000/A5000 (experimental)"): its PROTOCOL FAMILY is `generic` (sample transfers are plain SDS) but
+`sampler_models.is_yamaha()` makes the Dashboard offer the Yamaha editor. Not done: waveform, any write from the UI,
+effects/controls/system params. Writes to a real A4000 have only ever come from `tools/a4000_write_verify.py`
+(throwaway objects, RAM, 2026-10-06).
 
+- **No worker thread.** `SamplerController.yamaha_session()` -> `YamahaSession`, event-driven on the GUI thread, fed incoming
+  0x43 SysEx by the controller. **Never connect `controller.on_sysex_received` to `MidiManager.sysex_received` yourself** - the
+  controller already does, and a second connection delivers every message twice (that once made the next program's read
+  return the previous program's value). The session also refuses any parameter value not preceded by a fresh announce of the
+  right object, so a stray duplicate can't be mistaken for a reply.
 - Verified on a real A4000 (2026-10-06, device number 0): the service manual (MIDI DATA FORMAT, p.32-42) is accurate,
   with one correction - the bulk byte count is **MSB-first** and a dump is **several blocks inside one F0..F7**
   (`count(2) span xor-checksum` each; only the first span carries the 26-byte header; XOR, not a sum). Don't rewrite
