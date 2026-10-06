@@ -277,6 +277,40 @@ fields (tests also try 72..192) specifically so wrongly-read or dropped trailing
 bytes are caught. Also: **`PRGNUM`'s +1 display offset applies on the S1000 too**
 (unverified there - same `s3k.params` entry).
 
+## Program files: Save/Load as `.p1`/`.p3` (Programs tab, S1000 and S2000/S3000) - written without hardware
+
+The Programs list column has Save... / Load... buttons (also its context menu). The file is the Akai disk format:
+150-byte header + N x 150-byte keygroups (`.p1`, S1000) or 192 + N x 192 (`.p3`, S2000/S3000), N at header byte 42.
+`core/akai_program_file.py` (pure codec) + `BridgeWorker.submit_export_program`/`submit_import_program`
+(`program_exported`/`program_imported` and their `*_failed` signals) + `ProgramEditorWindow._save_program_to_file`/
+`_load_program_from_file`. Decisions the user made: Akai file format (so files from other tools work), **samples are NOT
+saved** (zones reference them by NAME; the Load confirmation lists the ones not resident), lives in the Program Editor.
+
+- **No parameter list is needed**: the blocks are exactly what RPDATA/RKDATA return, so every byte (modelled by `s3k.params`
+  or not) round-trips. Don't "decode" the blocks into fields for this.
+- **Pointer bytes** (1-2 of the header = FIRSTKG, of each keygroup = NXTKG; the spec calls them "internal use", as it does the per-zone
+  `SBADD`, `LVXF/HVXF` and `TPNUM`) are addresses the SAMPLER assigns. A file holds file-relative stand-ins (150, 300, ... - confirmed
+  against the S1000 spec's own defaults `150,0` / `44,1`=300 / 450 / 600 and two open-source tools' notes: `header + N x block == file size`,
+  N at byte 42, no extra file header, on 2000+ real programs). On save `build_file` rewrites them; on a sampler those same numbers are
+  addresses of OTHER programs' blocks. Whether a sampler honours the pointers of an incoming PDATA/KDATA is UNKNOWN (measured only: an appended
+  keygroup keeps the NXTKG it was sent; an S1000 walks the chain by the stored pointers - that is what scrambled programs after DELK). So
+  **`BridgeWorker._import_program` never sends a pointer the sampler didn't hand us**: after the create PDATA (the one write that has to
+  carry the file's) it reads the new program back and **stops before writing any keygroup if its FIRSTKG equals an address another program
+  uses**; keygroup 0 goes out with the dummy slot's own NXTKG, each appended keygroup with the previous slot's terminator, every GROUPS+1 PDATA
+  with the sampler's current FIRSTKG; each append's resulting link is checked for collisions; then a full read-back compares the new program
+  with the file (ignoring `_IMPORT_*_INTERNAL` bytes) and every other program with the pre-load snapshot (`_s1000_snapshot`, ~60-read budget).
+  Any stop/mismatch raises `_ImportSafetyError` and sets `program_import_blocked` for the session (like the keygroup-delete block). The log
+  has `program load:` INFO lines (FIRSTKG sent vs held, where each keygroup was placed, NXTKG and zone SBADD read back vs the file's) - ask a
+  tester for them. **No DELK anywhere**; a failed load can leave a partial program (the message says so) - never deleted automatically.
+  The duplicate flows were NOT changed and still send the template's pointers (never failed in the logs; same unknown applies).
+- **Load = a NEW program** through the duplicate flow's order (PDATA GROUPS=1, KDATA 0, then KDATA + PDATA(GROUPS+1)). A name
+  matching a resident program is never sent (PDATA would delete it) - the window prompts for another. A `.p1` is refused on an
+  S2000/S3000 setting and vice versa (different block lengths; padding a 150-byte block would invent neutral values we can't vouch for).
+  Disabled in demo mode like Duplicate Program (DemoBridge has no add-program primitive); Save works there if the demo bridge reads blocks.
+- Tests: `tests/test_akai_program_file.py` (codec + worker, incl. a FakeS1000 round trip) and
+  `tests/test_program_editor_window_program_files.py`. **The file layout and pointer values are NOT yet checked against a file from
+  another tool** - `tests/akai_program_file_test_plan.md` lists every guess and the real-hardware steps.
+
 ## Akai S900/S950 support (written without hardware)
 
 A DIFFERENT protocol from every other Akai entry, not a variant of the S1000
