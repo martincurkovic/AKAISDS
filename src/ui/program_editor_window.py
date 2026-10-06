@@ -3619,8 +3619,13 @@ class ProgramEditorWindow(QMainWindow):
         )
         has_keygroup = self.keygroup_list.currentRow() >= 0
         self._duplicate_keygroup_action.setEnabled(has_keygroup and not demo_mode)
+        # enabled even when an S1000 can't do it: triggering it (menu, Delete key) explains why instead of doing nothing
         self._delete_keygroup_action.setEnabled(
-            has_keygroup and self._keygroup_delete_allowed()
+            has_keygroup
+            and (
+                self._keygroup_delete_unavailable_message() is not None
+                or self._keygroup_delete_allowed()
+            )
         )
 
         # unlike DELP, no "last one is silently ignored" restriction is
@@ -3818,11 +3823,29 @@ class ProgramEditorWindow(QMainWindow):
         self.status_bar.showMessage(f'Deleting program "{program_name}"…')
         self._worker.submit_delete_program(program_index)
 
+    def _keygroup_delete_unavailable_message(self):
+        """Why Delete Keygroup can't be offered on this sampler (text for the user), or None if it can."""
+        if not self._is_s1000:
+            return None
+        if not s1000_bridge_module.KEYGROUP_DELETE_SUPPORTED:
+            return (
+                "Deleting keygroups on an Akai S1000 series sampler is not reliable at this time, so the delete "
+                "feature is disabled for now.\n\n"
+                "The S1000's delete command leaves the program's keygroup count wrong and the sampler refuses the "
+                "fix, which can corrupt the program. To remove a keygroup, delete it on the sampler's front panel."
+            )
+        if self._worker.s1000_keygroup_delete_blocked:
+            return (
+                "Keygroup deleting has been switched off for this session after an earlier delete failed its safety "
+                "check. Check that program on the sampler, or restart the editor to try again."
+            )
+        return None
+
     def _keygroup_delete_allowed(self):
         if not self._is_s1000:
             return True
-        # S1000: DELK needs the repair-and-verify path, can't empty a program,
-        # and is switched off for the session once a delete fails its check
+        # S1000: can't empty a program (the flag / session block are explained by
+        # _keygroup_delete_unavailable_message)
         return (
             s1000_bridge_module.KEYGROUP_DELETE_SUPPORTED
             and not self._worker.s1000_keygroup_delete_blocked
@@ -3831,7 +3854,13 @@ class ProgramEditorWindow(QMainWindow):
 
     def _confirm_delete_keygroup(self):
         keygroup_index = self.keygroup_list.currentRow()
-        if keygroup_index < 0 or not self._keygroup_delete_allowed():
+        if keygroup_index < 0:
+            return
+        unavailable = self._keygroup_delete_unavailable_message()
+        if unavailable is not None:
+            QMessageBox.information(self, "Delete Keygroup", unavailable)
+            return
+        if not self._keygroup_delete_allowed():
             return
         program_index = self.program_list.currentRow()
         lo, hi = self._keygroup_ranges[keygroup_index]

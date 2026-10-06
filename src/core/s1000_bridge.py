@@ -72,11 +72,16 @@ _S1000_BLOCK_SIZES = {"program": 72, "keygroup": 149, "sample": 141}
 #: PDATA to rewrite GROUPS) failed on a real S1000 - DELK of keygroup 0 advanced
 #: the program's FIRSTKG by 150 (0x10fe -> 0x1194, no compaction, GROUPS still
 #: 10) and the PDATA carrying GROUPS=9 was rejected with REPLY error 01. The
-#: flow is now shift-down + DELK of the LAST keygroup + GROUPS rewrite
-#: (`BridgeWorker._delete_keygroup_s1000`), ON for the next test build as an
-#: UNMEASURED hypothesis. If a tester's log shows it failing, set this False
-#: (see AGENTS.md "S1000 memory layout and DELK").
-KEYGROUP_DELETE_SUPPORTED = True
+#: flow was then changed to shift-down + DELK of the LAST keygroup + GROUPS
+#: rewrite (`BridgeWorker._delete_keygroup_s1000`) as an unmeasured hypothesis,
+#: and a second tester log (2026-10-06, first/middle/last keygroup of 10- and
+#: 12-keygroup programs) showed it failing the same way: DELK of the last
+#: keygroup DOES remove it (the slot then holds a sample header) but leaves
+#: GROUPS unchanged, and the PDATA with GROUPS-1 is rejected (REPLY error 01)
+#: even though FIRSTKG did not move - so the program is left corrupt. OFF for
+#: good until the real reason is known (see AGENTS.md "S1000 memory layout and
+#: DELK"); the repair-and-verify code is kept and still tested.
+KEYGROUP_DELETE_SUPPORTED = False
 
 #: first byte of each block type ("PRIDENT"/"KGIDENT"/"SHIDENT")
 _BLOCK_IDENT = {"program": 1, "keygroup": 2, "sample": 3}
