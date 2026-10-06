@@ -103,7 +103,7 @@ class Knob(QDial):
 
     def setBipolar(self, bipolar=True):
         """For a range that spans zero (pan, tune offsets, ...): the value arc grows from the knob's ZERO instead of from its
-        minimum, and a small tick marks where zero is. Off by default - the S3000 editor's knobs are unchanged."""
+        minimum. Off by default - the S3000 editor's knobs are unchanged."""
         self._bipolar = bool(bipolar)
         self.update()
 
@@ -353,18 +353,6 @@ class Knob(QDial):
         origin = self._origin_fraction()
         start_deg, span_deg = arc_start_and_span(fraction, origin)
         painter.drawArc(rect, int(start_deg * 16), int(span_deg * 16))
-        if origin:
-            # a bipolar knob: a small tick on the ring where zero sits
-            zero_rad = math.radians(START_ANGLE_DEG - SWEEP_DEG * origin)
-            zcx, zcy, zr = rect.center().x(), rect.center().y(), rect.width() / 2
-            tick = QPen(QColor(palette["text_disabled"] if not enabled else palette["text"]))
-            tick.setWidthF(1.5)
-            painter.setPen(tick)
-            painter.drawLine(
-                QPointF(zcx + (zr + _RING_WIDTH / 2 + 1) * math.cos(zero_rad), zcy - (zr + _RING_WIDTH / 2 + 1) * math.sin(zero_rad)),
-                QPointF(zcx + (zr + _RING_WIDTH / 2 + 3) * math.cos(zero_rad), zcy - (zr + _RING_WIDTH / 2 + 3) * math.sin(zero_rad)),
-            )
-
         # pointer line - same underlying angle as the arc's current
         # endpoint, converted to an (x, y) point via trig. Screen y grows
         # downward, so the y term is negated to keep this pointing the
