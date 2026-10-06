@@ -505,6 +505,14 @@ class YamahaSamplesTab(QWidget):
             except RuntimeError:  # the row was deleted under us (the list was rebuilt or the window is going away)
                 self._rows.pop(name, None)
 
+    def reload_sample(self, name):
+        """The host changed a sample on the unit behind our back (a restore): read it again and show what it holds now."""
+        self._cache.pop(name, None)
+        if name == self._selected and self.sample_list_widget.currentItem() is not None:
+            self._on_selected(self.sample_list_widget.currentItem(), None)
+        else:
+            self._show_duration(name)
+
     def note_cached(self, name):
         """The host cached a sample's dump (the Programs tab needs each assigned sample's key range): show its duration."""
         self._show_duration(name)

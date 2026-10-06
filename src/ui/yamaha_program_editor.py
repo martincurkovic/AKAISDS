@@ -31,6 +31,7 @@ from PySide6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QMainWindow,
+    QMessageBox,
     QPushButton,
     QStackedWidget,
     QStatusBar,
@@ -39,12 +40,16 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from controller.yamaha_restore import RestoreJob
 from core import debug_log
+from core import yamaha_backups, yamaha_restore
 from core import yamaha_params as yp
 from core import yamaha_sysex as ysx
 from core.midi_notes import midi_note_to_name
 from ui import theme, tooltips as tt
 from ui.diagnostics_ui import add_open_log_folder_action
+from ui.yamaha_assign_dialog import AssignDialog
+from ui.yamaha_restore_dialog import RestoreDialog
 from ui.yamaha_writer import WriteCoordinator
 from ui.editor_layout import (
     add_keygroup_row,
@@ -93,6 +98,39 @@ def effective_key_range(sample_data, easy_data, slot):
     return low, high
 
 
+def describe_restore_plan(plan, limit=8):
+    """The confirmation text for a restore: what will change (current -> what the backup holds), and anything that won't."""
+    kind = {"PG": "program", "SP": "sample"}.get(plan.fmt, plan.fmt)
+    lines = [f"Put {len(plan.items)} value(s) of {kind} {plan.name!r} back to what the backup holds:", ""]
+    for item in plan.items[:limit]:
+        lines.append(f"   {item.label}: {item.current} -> {item.value}")
+    if len(plan.items) > limit:
+        lines.append(f"   ... and {len(plan.items) - limit} more")
+    for note in plan.notes:
+        lines += ["", note]
+    lines += ["", "The object as it is now is saved as a new backup first, so this can be undone."]
+    return "\n".join(lines)
+
+
+def describe_restore_result(result):
+    """The summary shown when a restore ends."""
+    lines = [result.message]
+    if result.remaining:
+        shown = ", ".join(result.remaining[:6]) + (f" and {len(result.remaining) - 6} more" if len(result.remaining) > 6 else "")
+        lines.append(f"Not restored: {shown}.")
+    if result.residual_offsets:
+        lines.append(
+            f"{len(result.residual_offsets)} byte(s) still differ from the backup that the editor has no control over: the unit's own "
+            "bookkeeping (for a sample, the right channel's mirror bytes) and, for a program, samples assigned or removed since the "
+            "backup - use Assign Sample / Remove for those."
+        )
+    for note in result.notes:
+        lines.append(note)
+    if result.snapshot_path is not None:
+        lines.append(f"The state before the restore is saved at {result.snapshot_path}")
+    return "\n\n".join(lines)
+
+
 def format_range(low, high):
     return f"{midi_note_to_name(low)} - {midi_note_to_name(high)}"
 
@@ -124,6 +162,9 @@ class YamahaProgramEditorWindow(QMainWindow):
         self._range_rows = []  # [(low, high)] of the assigned list (None until known)
         self._assigned = []  # [(sample name, object type)] of the shown program
         self._connected = True
+        self._restoring = False  # a restore from backup is running: nothing else may write, refresh or close the window
+        self._linking = False  # a sample is being assigned/removed: same lock
+        self._select_sample_after_load = None  # after an assignment, select that sample's row once the program is re-read
 
         self.program_panel = FieldPanel("program")
         self.easy_panel = FieldPanel("easy_edit")
@@ -158,7 +199,18 @@ class YamahaProgramEditorWindow(QMainWindow):
         self.assigned_list.currentRowChanged.connect(self._show_assigned)
         self.assigned_list.itemClicked.connect(lambda _item: self.detail_stack.setCurrentIndex(1))
         self.range_bar = KeygroupRangeBar()
-        assigned_container = build_list_column("Assigned samples", self.range_bar, self.assigned_list)
+        self.assign_button = QPushButton("Assign Sample...")
+        self.assign_button.setToolTip("Add one of the sampler's samples to this program")
+        self.assign_button.clicked.connect(self._assign_sample)
+        self.remove_assigned_button = QPushButton("Remove")
+        self.remove_assigned_button.setToolTip("Take the selected sample out of this program (the sample itself stays on the sampler)")
+        self.remove_assigned_button.clicked.connect(self._remove_assigned)
+        assign_buttons = QWidget()
+        assign_row = QHBoxLayout(assign_buttons)
+        assign_row.setContentsMargins(0, 0, 0, 0)
+        assign_row.addWidget(self.assign_button, 1)
+        assign_row.addWidget(self.remove_assigned_button, 1)
+        assigned_container = build_list_column("Assigned samples", self.range_bar, self.assigned_list, assign_buttons)
 
         self.placeholder = QLabel()
         self.placeholder.setObjectName("emptyQueueLabel")
@@ -383,6 +435,12 @@ class YamahaProgramEditorWindow(QMainWindow):
         )
         self._unchanged_action.triggered.connect(self._write_back_unchanged)
         hardware.addAction(self._unchanged_action)
+        self._restore_action = QAction("Restore from Backup...", self)
+        self._restore_action.setToolTip(
+            "Put an object back to what one of its saved backups holds (the current state is saved first, so it can be undone)"
+        )
+        self._restore_action.triggered.connect(self._restore_from_backup)
+        hardware.addAction(self._restore_action)
         backups = QAction("Open Backup Folder", self)
         backups.setToolTip(f"Opens {self._session.backup_dir} - the .syx saved before the first change to each object")
         backups.triggered.connect(self._open_backup_folder)
@@ -431,6 +489,9 @@ class YamahaProgramEditorWindow(QMainWindow):
 
     def _refresh(self):
         self._writer.flush()
+        if self._restoring or self._linking:
+            self.status_bar.showMessage("A change is being made on the sampler - try again when it has finished", 5000)
+            return
         if self._writer.busy:
             self.status_bar.showMessage("Still writing to the sampler - try again in a moment", 5000)
             return
@@ -579,6 +640,10 @@ class YamahaProgramEditorWindow(QMainWindow):
                 self._show_placeholder(f"Couldn't read program {number:03d} from the sampler.")
             return
         self._program_data[number] = bytearray(dump.data)
+        count = yp.extract(yp.get("program", "assigned_samples"), dump.data)
+        if self._counts.get(number) != count:  # an assignment changed it: the list's "has samples" filter must follow
+            self._counts[number] = count
+            self._apply_visibility(only=number)
         if number == self._selected:
             self._show_program(number)
 
@@ -602,9 +667,13 @@ class YamahaProgramEditorWindow(QMainWindow):
         self._show_details()
         self.detail_stack.setCurrentIndex(0)
         if count:
-            self.assigned_list.setCurrentRow(0)
-            self.detail_stack.setCurrentIndex(0)  # the program page first, as in the S3000 editor
+            wanted = self._select_sample_after_load
+            self._select_sample_after_load = None
+            names = [name for name, _otype in self._assigned]
+            self.assigned_list.setCurrentRow(names.index(wanted) if wanted in names else 0)
+            self.detail_stack.setCurrentIndex(1 if wanted in names else 0)  # a sample just assigned: show ITS page
             self._fetch_sample_ranges(number)
+        self._update_assign_buttons()
 
     def _fetch_sample_ranges(self, number):
         # each assigned sample's own key range comes from the sample's dump - one at a time, only for
@@ -799,6 +868,171 @@ class YamahaProgramEditorWindow(QMainWindow):
         self._writer.flush()
         self._session.write_parameter(row, yp.extract(row, before), name, written)
 
+    # -- restoring from a backup ---------------------------------------------------------------------------------
+
+    def _current_object(self):
+        """(fmt, name) of what the user is looking at - the selected program or sample - or None."""
+        if self.main_tabs.currentIndex() == self._samples_tab_index:
+            return ("SP", self.samples_tab._selected) if self.samples_tab._selected else None
+        return ("PG", ysx.program_object_name(self._selected)) if self._selected is not None else None
+
+    def _restore_from_backup(self):
+        self._writer.flush()
+        if self._restoring or self._linking or self._writer.busy:
+            self.status_bar.showMessage("Still writing to the sampler - try again in a moment", 5000)
+            return
+        folder = self._session.backup_dir
+        dialog = RestoreDialog(yamaha_backups.list_backups(folder), self._current_object(), str(folder), self)
+        if dialog.exec() != RestoreDialog.DialogCode.Accepted or not dialog.chosen_path:
+            return
+        try:
+            backup = yamaha_restore.load_backup(dialog.chosen_path)
+        except yamaha_restore.RestoreError as e:
+            QMessageBox.warning(self, "Restore from Backup", str(e))
+            return
+        _log(f"restore: chose {dialog.chosen_path} ({backup.fmt} {backup.name!r})")
+        self._set_restoring(True)
+        self.status_bar.showMessage("Reading the object from the sampler...")
+        job = RestoreJob(self._session, backup)
+        job.prepare(lambda plan, message, job=job: self._on_restore_planned(job, plan, message))
+
+    def _on_restore_planned(self, job, plan, message):
+        if not self._connected:
+            return
+        if plan is None:
+            self._set_restoring(False)
+            QMessageBox.warning(self, "Restore from Backup", message)
+            return
+        if plan.identical:
+            self._set_restoring(False)
+            QMessageBox.information(self, "Restore from Backup", f"{plan.name!r} already matches the backup - nothing to restore." + (
+                "\n\n" + "\n".join(plan.notes) if plan.notes else ""))
+            return
+        answer = QMessageBox.question(
+            self, "Restore from Backup", describe_restore_plan(plan),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel, QMessageBox.StandardButton.Cancel,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            _log("restore: declined")
+            self._set_restoring(False)
+            self.status_bar.showMessage("Restore cancelled", 5000)
+            return
+        _log(f"restore: writing {len(plan.items)} value(s) to {plan.fmt} {plan.name!r}")
+        job.run(
+            lambda result, job=job: self._on_restore_done(job, result),
+            on_progress=lambda done, total, label: self.status_bar.showMessage(f"Restoring {label} ({done + 1}/{total})..."),
+        )
+
+    def _on_restore_done(self, job, result):
+        if not self._connected:
+            return
+        _log(f"restore: ok={result.ok} written={result.written} passes={result.passes} - {result.message}")
+        self._set_restoring(False)
+        self._reload_object(job.backup.fmt, job.backup.name)  # whatever happened, show what the unit holds now
+        self.status_bar.showMessage(result.message, 10000)
+        text = describe_restore_result(result)
+        (QMessageBox.information if result.ok else QMessageBox.warning)(self, "Restore from Backup", text)
+
+    def _set_restoring(self, restoring):
+        self._restoring = restoring
+        self._apply_lock()
+
+    def _set_linking(self, linking):
+        self._linking = linking
+        self._apply_lock()
+
+    def _apply_lock(self):
+        """While a restore or an assignment runs nothing else may write: controls and the buttons that start something are off."""
+        locked = self._restoring or self._linking
+        self._restore_action.setEnabled(not locked)
+        self._unchanged_action.setEnabled(not locked)
+        self.refresh_button.setEnabled(not locked)
+        for panel in (self.program_panel, self.easy_panel, self.samples_tab.panel):
+            panel.set_editable(not locked)
+        self._update_assign_buttons()
+
+    def _update_assign_buttons(self):
+        locked = self._restoring or self._linking
+        self.assign_button.setEnabled(not locked and self._selected is not None and self._selected in self._program_data)
+        row = self.assigned_list.currentRow()
+        self.remove_assigned_button.setEnabled(not locked and 0 <= row < len(self._assigned))
+
+    # -- assigning samples to a program ---------------------------------------------------------------------------
+
+    def _assign_sample(self):
+        number = self._selected
+        if number is None or self._restoring or self._linking:
+            return
+        self._writer.flush()
+        if self._writer.busy:
+            self.status_bar.showMessage("Still writing to the sampler - try again in a moment", 5000)
+            return
+        taken = {name for name, _otype in self._assigned}
+        candidates = [n for n in self._sample_names if n not in taken]
+        durations = {n: label.text() for n, label in self.samples_tab._rows.items() if label.text()}
+        dialog = AssignDialog(candidates, f"program {number:03d}", durations, self)
+        if dialog.exec() != AssignDialog.DialogCode.Accepted or not dialog.chosen:
+            return
+        _log(f"assign {dialog.chosen!r} to program {number:03d}")
+        self._start_link(number, dialog.chosen, True, "sample")
+
+    def _remove_assigned(self):
+        number, row = self._selected, self.assigned_list.currentRow()
+        if number is None or self._restoring or self._linking or not 0 <= row < len(self._assigned):
+            return
+        self._writer.flush()
+        if self._writer.busy:
+            self.status_bar.showMessage("Still writing to the sampler - try again in a moment", 5000)
+            return
+        name, otype = self._assigned[row]
+        answer = QMessageBox.question(
+            self,
+            "Remove Sample",
+            f"Remove {name!r} from program {number:03d}?\n\nIts settings for this program (level, pan, key limits, ...) are "
+            "discarded, and the samples after it move up one place. The sample itself stays on the sampler.\n\nThe program is "
+            "backed up first.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Cancel,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        _log(f"remove {name!r} from program {number:03d}")
+        self._start_link(number, name, False, ysx.OBJECT_TYPE_NAMES.get(otype, "sample"))
+
+    def _start_link(self, number, sample, linked, sample_type):
+        self._set_linking(True)
+        self.status_bar.showMessage(f"{'Assigning' if linked else 'Removing'} {sample!r}...")
+        self._select_sample_after_load = sample if linked else None
+        self._session.change_link(
+            ysx.program_object_name(number), sample, linked,
+            lambda result, n=number: self._on_link_done(n, result), sample_type,
+        )
+
+    def _on_link_done(self, number, result):
+        if not self._connected:
+            return
+        _log(f"link: ok={result.ok} linked={result.linked} - {result.message}")
+        self._set_linking(False)
+        self.status_bar.showMessage(result.message, 8000)
+        if not result.ok:
+            self._select_sample_after_load = None
+            QMessageBox.warning(self, "Assign Sample" if result.requested else "Remove Sample", result.message)
+        # whatever happened, show what the unit holds now: the program (its slots changed) and the sample ("used in programs")
+        self._reload_object("PG", ysx.program_object_name(number))
+        self._sample_cache.pop(result.sample, None)
+        self.samples_tab.reload_sample(result.sample)
+
+    def _reload_object(self, fmt, name):
+        """Forget what is cached for a restored object and read it again, so every control shows what the unit holds."""
+        if fmt == "PG" and name.isdigit():
+            number = int(name)
+            self._program_data.pop(number, None)
+            if number == self._selected and self.program_list.currentItem() is not None:
+                self._on_program_selected(self.program_list.currentItem(), None)
+        elif fmt == "SP":
+            self._sample_cache.pop(name, None)
+            self.samples_tab.reload_sample(name)
+
     def _open_backup_folder(self):
         folder = self._session.backup_dir
         folder.mkdir(parents=True, exist_ok=True)
@@ -818,7 +1052,7 @@ class YamahaProgramEditorWindow(QMainWindow):
             event.ignore()
             return
         self._writer.flush()
-        if self._writer.busy:
+        if self._writer.busy or self._restoring or self._linking:
             self.status_bar.showMessage("Still writing to the sampler - try closing again in a moment", 5000)
             event.ignore()
             return

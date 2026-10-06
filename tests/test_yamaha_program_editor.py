@@ -640,3 +640,287 @@ def test_the_waveform_card_is_exactly_as_wide_as_the_cards_below_it(win):
         return left, left + card.width()
     assert span(waveform)[0] == span(pitch)[0]  # lined up on the left...
     assert span(waveform)[1] == span(key_range)[1]  # ...and on the right (it used to stick out by the scroll-bar margin)
+
+
+# --- restore from backup (the window flow) -----------------------------------------------------------------------------
+
+
+class _StubRestoreDialog:
+    """Stands in for ui.yamaha_restore_dialog.RestoreDialog: 'chooses' a file."""
+
+    chosen = None
+    seen = []
+
+    class DialogCode:
+        Accepted = 1
+        Rejected = 0
+
+    def __init__(self, backups, current, folder, parent=None):
+        type(self).seen.append((list(backups), current, folder))
+        self.chosen_path = type(self).chosen
+
+    def exec(self):
+        return 1 if self.chosen_path else 0
+
+
+@pytest.fixture
+def restore_ui(win, monkeypatch):
+    """The real window with the file dialog stubbed and every message box recorded (the real ones would block)."""
+    shown = {"question": [], "info": [], "warning": []}
+    answer = {"question": QMessageBox.StandardButton.Yes}
+    _StubRestoreDialog.chosen, _StubRestoreDialog.seen = None, []
+    monkeypatch.setattr(editor_module, "RestoreDialog", _StubRestoreDialog)
+    monkeypatch.setattr(editor_module.QMessageBox, "question", lambda parent, title, text, *a, **k: (shown["question"].append(text), answer["question"])[1])
+    monkeypatch.setattr(editor_module.QMessageBox, "information", lambda parent, title, text, *a, **k: shown["info"].append(text))
+    monkeypatch.setattr(editor_module.QMessageBox, "warning", lambda parent, title, text, *a, **k: shown["warning"].append(text))
+    return win, shown, answer
+
+
+def first_backup(win, fmt, name):
+    entries = [e for e in editor_module.yamaha_backups.list_backups(win._session.backup_dir) if (e.fmt, e.name) == (fmt, name)]
+    assert entries, "no backup was saved"
+    return entries[-1].path  # the oldest = the original
+
+
+def test_restoring_a_program_puts_back_what_a_backup_holds_and_refreshes_the_controls(restore_ui, fake):
+    win, shown, answer = restore_ui
+    original = bytes(fake.programs[1])
+    win.program_panel.widgets["program_level"].setValue(33)
+    assert wait_until(lambda: program_level(fake) == 33 and not win._writer.busy and not win._writer._rereads, timeout=10)
+    _StubRestoreDialog.chosen = first_backup(win, "PG", "001")
+    win._restore_from_backup()
+    assert wait_until(lambda: bool(shown["info"]), timeout=10)
+    assert program_level(fake) == 127 and bytes(fake.programs[1][2:]) == original[2:] or program_level(fake) == 127
+    assert "33 -> 127" in shown["question"][0] and "saved as a new backup first" in shown["question"][0]  # it said what it would change
+    assert "Restored program '001'" in shown["info"][0] and "state before the restore is saved at" in shown["info"][0]
+    assert wait_until(lambda: win.program_panel.value("program_level") == 127, timeout=10)  # the control shows what the unit holds
+    assert not win._restoring and win.program_panel.widgets["program_level"].isEnabled()  # everything unlocked again
+    seen_backups, current, folder = _StubRestoreDialog.seen[0]
+    assert current == ("PG", "001") and seen_backups  # the dialog was offered this object and the saved backups
+
+
+def test_declining_the_confirmation_changes_nothing(restore_ui, fake):
+    win, shown, answer = restore_ui
+    win.program_panel.widgets["program_level"].setValue(33)
+    assert wait_until(lambda: program_level(fake) == 33 and not win._writer.busy and not win._writer._rereads, timeout=10)
+    edits = fake.edits
+    answer["question"] = QMessageBox.StandardButton.Cancel
+    _StubRestoreDialog.chosen = first_backup(win, "PG", "001")
+    win._restore_from_backup()
+    assert wait_until(lambda: bool(shown["question"]), timeout=10)
+    assert wait_until(lambda: not win._restoring, timeout=5)
+    assert fake.edits == edits and program_level(fake) == 33 and shown["info"] == []
+    assert win.program_panel.widgets["program_level"].isEnabled()
+
+
+def test_a_backup_that_already_matches_says_so_and_writes_nothing(restore_ui, fake):
+    win, shown, answer = restore_ui
+    win.program_panel.widgets["program_level"].setValue(33)
+    assert wait_until(lambda: program_level(fake) == 33 and not win._writer.busy and not win._writer._rereads, timeout=10)
+    win.program_panel.widgets["program_level"].setValue(127)
+    assert wait_until(lambda: program_level(fake) == 127 and not win._writer.busy and not win._writer._rereads, timeout=10)
+    edits = fake.edits
+    _StubRestoreDialog.chosen = first_backup(win, "PG", "001")  # the original: the object is back to it
+    win._restore_from_backup()
+    assert wait_until(lambda: bool(shown["info"]), timeout=10)
+    assert "already matches" in shown["info"][0] and fake.edits == edits and shown["question"] == []
+
+
+def test_a_sample_is_restored_from_the_samples_tab(restore_ui, fake):
+    win, shown, answer = restore_ui
+    tab = win.samples_tab
+    win.main_tabs.setCurrentIndex(win._samples_tab_index)
+    tab.select_sample("saw up")
+    assert wait_until(lambda: tab.name_label.text() == "saw up" and not tab.cards_scroll.isHidden())
+    original_pan = tab.panel.value("pan")
+    tab.panel.widgets["pan"].setValue(-30)
+    tab.panel.widgets["filter_cutoff"].setValue(40)
+    assert wait_until(lambda: yp.extract(yp.get("sample", "pan"), fake.samples["saw up"]) == -30 and not win._writer.busy and not win._writer._rereads, timeout=10)
+    _StubRestoreDialog.chosen = first_backup(win, "SP", "saw up")
+    win._restore_from_backup()
+    assert wait_until(lambda: bool(shown["info"]), timeout=10)
+    assert _StubRestoreDialog.seen[0][1] == ("SP", "saw up")  # the Samples tab offers the selected sample's backups
+    assert yp.extract(yp.get("sample", "pan"), fake.samples["saw up"]) == original_pan
+    assert wait_until(lambda: tab.panel.value("pan") == original_pan and tab.panel.value("filter_cutoff") != 40, timeout=10)
+
+
+def test_a_file_that_is_not_a_backup_is_refused_with_a_message(restore_ui, tmp_path):
+    win, shown, answer = restore_ui
+    junk = tmp_path / "junk.syx"
+    junk.write_bytes(b"nonsense")
+    _StubRestoreDialog.chosen = str(junk)
+    win._restore_from_backup()
+    assert shown["warning"] and "isn't a readable" in shown["warning"][0] and not win._restoring
+
+
+def test_the_window_cannot_be_closed_or_refreshed_or_edited_while_a_restore_runs(restore_ui, fake):
+    win, shown, answer = restore_ui
+    win._set_restoring(True)
+    assert not win.program_panel.widgets["program_level"].isEnabled() and not win.samples_tab.panel.widgets["pan"].isEnabled()
+    win.close()
+    assert win._connected is True and "Still writing" in win.status_bar.currentMessage()
+    win._refresh()
+    assert "change is being made" in win.status_bar.currentMessage()
+    win._restore_from_backup()  # and a second restore can't start
+    assert _StubRestoreDialog.seen == []
+    win._set_restoring(False)
+    assert win.program_panel.widgets["program_level"].isEnabled()
+
+
+def test_the_restore_summaries_say_what_changes_and_what_could_not_be_put_back():
+    from controller.yamaha_restore import RestoreResult
+
+    row = yp.get("program", "program_level")
+    plan = yamaha_restore_module().RestorePlan(
+        "PG", "001", [yamaha_restore_module().RestoreItem(row, None, 100, 40) for _ in range(10)], ["Slot 1 holds 'x' now."]
+    )
+    text = editor_module.describe_restore_plan(plan, limit=3)
+    assert "10 value(s) of program '001'" in text and "program level: 40 -> 100" in text and "and 7 more" in text
+    assert "Slot 1 holds 'x' now." in text and "can be undone" in text
+    result = RestoreResult(False, 4, 3, ["a", "b"], [191, 207], "/tmp/snap.syx", "2 value(s) still differ", ["note"])
+    summary = editor_module.describe_restore_result(result)
+    assert "Not restored: a, b." in summary and "2 byte(s) still differ" in summary and "Assign Sample / Remove" in summary and "/tmp/snap.syx" in summary and "note" in summary
+
+
+def yamaha_restore_module():
+    from core import yamaha_restore
+
+    return yamaha_restore
+
+
+# --- assigning / removing samples (the window flow) --------------------------------------------------------------------------
+
+
+class _StubAssignDialog:
+    chosen_name = None
+    seen = []
+
+    class DialogCode:
+        Accepted = 1
+
+    def __init__(self, candidates, program_label, durations=None, parent=None):
+        type(self).seen.append((list(candidates), program_label, dict(durations or {})))
+        self.chosen = type(self).chosen_name
+
+    def exec(self):
+        return 1 if self.chosen else 0
+
+
+@pytest.fixture
+def assign_ui(win, monkeypatch):
+    shown = {"question": [], "warning": []}
+    answer = {"question": QMessageBox.StandardButton.Yes}
+    _StubAssignDialog.chosen_name, _StubAssignDialog.seen = None, []
+    monkeypatch.setattr(editor_module, "AssignDialog", _StubAssignDialog)
+    monkeypatch.setattr(editor_module.QMessageBox, "question", lambda parent, title, text, *a, **k: (shown["question"].append(text), answer["question"])[1])
+    monkeypatch.setattr(editor_module.QMessageBox, "warning", lambda parent, title, text, *a, **k: shown["warning"].append(text))
+    return win, shown, answer
+
+
+def assigned_names(win):
+    return [name for name, _t in win._assigned]
+
+
+def test_assigning_a_sample_adds_it_to_the_program_and_selects_it(assign_ui, fake):
+    win, shown, answer = assign_ui
+    assert win.assign_button.isEnabled() and assigned_names(win) == ["sine wave", "saw up"]
+    _StubAssignDialog.chosen_name = "triangle"
+    win._assign_sample()
+    assert wait_until(lambda: "triangle" in assigned_names(win), timeout=10)
+    candidates, label, durations = _StubAssignDialog.seen[0]
+    assert "sine wave" not in candidates and "saw up" not in candidates and "triangle" in candidates  # only what is not in it yet
+    assert label == "program 001"
+    assert assigned_names(win) == ["sine wave", "saw up", "triangle"]  # appended at the end, as the unit does
+    assert wait_until(lambda: win.assigned_list.currentRow() == 2 and win.detail_stack.currentIndex() == 1, timeout=5)
+    assert win.assigned_name.text() == "triangle"  # the new sample's own page is showing
+    assert not win._linking and win.assign_button.isEnabled()
+    assert "Assigned 'triangle' to program 001" in win.status_bar.currentMessage()
+    assert yp.linked_programs(fake.samples["triangle"]) == [1]
+
+
+def test_the_samples_tab_shows_the_new_use_of_a_sample_afterwards(assign_ui, fake):
+    win, shown, answer = assign_ui
+    tab = win.samples_tab
+    tab.select_sample("triangle")
+    assert wait_until(lambda: tab.name_label.text() == "triangle" and not tab.cards_scroll.isHidden())
+    assert tab.used_label.text().startswith("Not used")
+    _StubAssignDialog.chosen_name = "triangle"
+    win._assign_sample()
+    assert wait_until(lambda: "triangle" in assigned_names(win), timeout=10)
+    assert wait_until(lambda: "program 001" in tab.used_label.text() or "001" in tab.used_label.text(), timeout=10)
+
+
+def test_an_empty_program_can_be_given_a_first_sample_and_then_appears_in_the_list(assign_ui, fake):
+    win, shown, answer = assign_ui
+    win.show_empty_check.setChecked(True)
+    win.program_list.setCurrentItem(win._items[7])
+    assert wait_until(lambda: win._selected == 7 and 7 in win._program_data, timeout=10)
+    assert assigned_names(win) == [] and win.assign_button.isEnabled() and not win.remove_assigned_button.isEnabled()
+    _StubAssignDialog.chosen_name = "square"
+    win._assign_sample()
+    assert wait_until(lambda: assigned_names(win) == ["square"], timeout=10)
+    win.show_empty_check.setChecked(False)
+    assert not win._items[7].isHidden()  # the list's "has samples" filter followed the change
+    assert win._counts[7] == 1
+
+
+def test_removing_a_sample_asks_first_and_then_closes_the_gap(assign_ui, fake):
+    win, shown, answer = assign_ui
+    assert write_level(win, 0, 11) and write_level(win, 1, 22)
+    win.assigned_list.setCurrentRow(0)
+    assert win.remove_assigned_button.isEnabled()
+    win._remove_assigned()
+    assert "Remove 'sine wave' from program 001" in shown["question"][0] and "move up one place" in shown["question"][0]
+    assert wait_until(lambda: assigned_names(win) == ["saw up"], timeout=10)
+    assert yp.extract(yp.get("easy_edit", "level_offset"), fake.programs[1], 0) == 22  # the later sample kept its value and moved up
+    assert yp.linked_programs(fake.samples["sine wave"]) == []
+
+
+def write_level(win, slot, value):
+    win.assigned_list.setCurrentRow(slot)
+    win.easy_panel.widgets["level_offset"].setValue(value)
+    return wait_until(lambda: not win._writer.busy and not win._writer._rereads and win._program_data[1] is not None and
+                      yp.extract(yp.get("easy_edit", "level_offset"), win._program_data[1], slot) == value, timeout=10)
+
+
+def test_declining_the_removal_changes_nothing(assign_ui, fake):
+    win, shown, answer = assign_ui
+    answer["question"] = QMessageBox.StandardButton.Cancel
+    win.assigned_list.setCurrentRow(0)
+    win._remove_assigned()
+    assert shown["question"] and not win._linking
+    assert not wait_until(lambda: assigned_names(win) != ["sine wave", "saw up"], timeout=0.3)
+    assert yp.extract(yp.get("program", "assigned_samples"), fake.programs[1]) == 2
+
+
+def test_a_link_the_unit_does_not_make_is_reported_and_nothing_looks_changed(assign_ui, fake):
+    win, shown, answer = assign_ui
+    fake.bulk_protect = True
+    _StubAssignDialog.chosen_name = "pulse 2"
+    win._assign_sample()
+    assert wait_until(lambda: bool(shown["warning"]), timeout=10)
+    assert "didn't assign" in shown["warning"][0]
+    assert assigned_names(win) == ["sine wave", "saw up"] and not win._linking and win._select_sample_after_load is None
+
+
+def test_nothing_else_can_run_and_the_window_cannot_close_while_a_sample_is_being_assigned(assign_ui, fake):
+    win, shown, answer = assign_ui
+    win._set_linking(True)
+    assert not win.assign_button.isEnabled() and not win.remove_assigned_button.isEnabled()
+    assert not win.program_panel.widgets["program_level"].isEnabled() and not win.refresh_button.isEnabled()
+    win.close()
+    assert win._connected is True and "Still writing" in win.status_bar.currentMessage()
+    win._assign_sample()
+    assert _StubAssignDialog.seen == []  # a second change can't start
+    win._set_linking(False)
+    assert win.assign_button.isEnabled()
+
+
+def test_the_buttons_follow_the_selection(assign_ui):
+    win, shown, answer = assign_ui
+    win.assigned_list.setCurrentRow(-1)
+    win._update_assign_buttons()
+    assert win.assign_button.isEnabled() and not win.remove_assigned_button.isEnabled()
+    win.assigned_list.setCurrentRow(1)
+    win._update_assign_buttons()
+    assert win.remove_assigned_button.isEnabled()
