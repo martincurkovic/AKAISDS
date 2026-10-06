@@ -416,7 +416,7 @@ behaviours were hardware-verified; `dxzl/akai-s950` has NO licence, so don't cop
   looks like the S950's own request-sample-dump (`F0 7E 00 nn 00 F7`). Generic SDS mode against
   an S950 gives nonsense, not a clean failure.
 
-## Yamaha A4000/A5000 editing (IN PROGRESS - parameter editing, native wave dumps and Dashboard list/receive work; no assign/create/delete/restore yet)
+## Yamaha A4000/A5000 editing (IN PROGRESS - parameter editing, native wave dumps, Dashboard list/receive, restore-from-backup and assign/remove samples work; no create/delete yet)
 
 Goal: a program/sample editor for the user's Yamaha A4000 (sending samples works through plain SDS, which the Yamaha
 Sampler Type keeps; listing/receiving samples and the editor use the unit's own protocol). Plan, handoff and every measured fact: **`dev_docs/a4000-editor-roadmap.md`** (read it before
@@ -426,7 +426,7 @@ engine) + `ui/yamaha_program_editor.py`/`yamaha_samples_tab.py`/`yamaha_fields.p
 samples | cards, and a Samples tab; every writable control edits the unit) all exist with tests and were checked against the real unit. The Sampler Type is
 `yamaha_a4000` ("Yamaha A4000/A5000 (experimental)"): its PROTOCOL FAMILY is `generic` (sample SENDS are plain SDS) but
 `sampler_models.is_yamaha()` makes the Dashboard offer the Yamaha editor, list and receive. The Samples tab shows the WAVEFORM
-(double-click; the native wave dump, both channels). Not done: effects/controls/system params, create/delete/link objects, wave/loop address editing.
+(double-click; the native wave dump, both channels). Not done: effects/controls/system params, create/delete objects, wave/loop address editing.
 
 - **Audio comes over the unit's NATIVE wave dump ("WD"), not SDS** (`core/yamaha_wave.py`, `YamahaSession.request_wave`; layout
   measured and verified byte for byte against SDS dumps - read that module's docstring before touching it): a sample links a left
@@ -510,11 +510,25 @@ samples | cards, and a Samples tab; every writable control edits the unit) all e
   (`_RECEIVE_CANCEL_GRACE_S`) instead of reporting "unrecognised SysEx" over the "cancelled" status. A stereo sample (non-empty
   right wave name at payload @80, `yp.is_stereo`) is labelled "stereo" in the Samples tab.
 
-- **HANDOFF (end of session 2, 2026-10-06):** all of the A4000 work is committed on `s1000-support` (the user commits as the session
-  goes); the suite had 2006 passing tests. Read `dev_docs/a4000-editor-roadmap.md` "HANDOFF" and "Next steps" before continuing:
-  restore-from-backup, then assigning samples to programs (no object-link builder exists in the codec yet), then editable loop/wave
-  markers, then the missing tables (effects/controllers/system/banks), then native audio loading. The user's look-and-feel decisions
-  are listed there too.
+- **Restore from backup (session 3)**: Hardware > "Restore from Backup..." (`RestoreDialog` picks a `.syx` from `~/.akaisds/a4000_backups`
+  or Browse). `core/yamaha_restore.plan_restore` diffs the backup against the object as it is NOW and `controller/yamaha_restore.RestoreJob`
+  writes only the differing WRITABLE rows through `write_parameter` (so every write keeps its guards) - **a restore is NOT a bulk load**
+  (unmeasured). It saves a SNAPSHOT of the current state first (no snapshot -> nothing written), writes the coupled wave/loop address rows
+  LAST then re-reads and makes up to 3 passes, stops at once on a write the unit swallowed (Bulk Protect), and reports what it cannot put
+  back (`residual_offsets`; assignments are never restored - only slots still holding the same sample). Proven on the real unit
+  (`tools/a4000_restore_check.py`). Details: the roadmap's "Restore from backup" section.
+- **Assigning samples to programs (session 3)**: the OBJECT LINK CHANGE message (`build_object_link_change`, program upper / sample lower,
+  1 link 0 unlink), via `YamahaSession.change_link` (backup once, send, ASK the unit with the link request - the answer is the verification,
+  a change gets no reply). MEASURED: linking appends the next Easy Edit slot with defaults (receive channel -1), unlinking a middle slot
+  COMPACTS the rest (they keep their values), linking twice / an unknown name change nothing. UI: "Assign Sample..." / "Remove" under the
+  assigned-samples column (`AssignDialog`; removal asks first); both lock the window like a restore. `_select_sample_after_load` selects the
+  new slot once the program is re-read; `_counts` follows so the "has samples" filter stays right. Untested on hardware: stereo samples,
+  sample banks (the UI only assigns samples), a full program.
+- **HANDOFF (end of session 3, 2026-10-06):** sessions 1-2 are committed on `s1000-support`; session 3's work (restore + assign) may be
+  UNCOMMITTED - check `git status` and offer a commit; the suite had 2060 passing tests. Read `dev_docs/a4000-editor-roadmap.md` "HANDOFF"
+  and "Next steps" before continuing: editable loop/wave markers (coupled addresses!), then the missing tables
+  (effects/controllers/system/banks), then native audio loading; a stereo sample is needed to test assigning/restoring one (the unit was
+  cold-booted, only factory samples remain). The user's look-and-feel decisions are listed there too.
 - **Testing the Yamaha code - gotchas:** replies that must arrive over time (cancel mid-stream, progressive fill) use
   `rig.midi.paced = True` on the shared `_Midi` fake (tests/test_s950_transfers.py) - NEVER swap a test object's `__class__` (an
   intermittent PySide segfault; the one older `Twice` test still does and works, don't copy it). `dispose(window)` in
