@@ -3,8 +3,9 @@
 A `FieldPanel` owns the editing widgets of ONE parameter scope ("program", "easy_edit" or "sample"):
 it makes a widget for each `Field` a page asks for (range, enum labels and signedness all come from the
 table row, so a page can't disagree with the table), fills them all from a bulk payload in one go
-(`fill`), and emits `edited(key, value)` when the user changes one. Widgets start NOT editable
-(`set_editable`) - the first editor release is view-only and edits arrive with the write stage.
+(`fill`), and emits `edited(key, value)` when the user changes one. Widgets start NOT editable;
+`set_editable(True)` enables every widget whose row can be written at all - never a read-only, bulk-only,
+`write_ignored` or A5000-only row, nor a text readout - so the table decides, not each page.
 
 Layout helpers come from ui/editor_layout.py so the pages look like the S3000/S950 editors'.
 """
@@ -82,6 +83,7 @@ class FieldPanel(QObject):
             w.valueChanged.connect(lambda v: self._on_edit(key, int(v)))
         elif field.kind == "spin":
             w = QSpinBox()
+            w.setKeyboardTracking(False)  # typing "100" is one edit, not 1, 10, 100
             w.setRange(p.lo, p.hi)
             for value, text in (field.specials or {}).items():
                 if value == p.lo:
@@ -89,6 +91,7 @@ class FieldPanel(QObject):
             w.valueChanged.connect(lambda v: self._on_edit(key, int(v)))
         elif field.kind == "note":
             w = SpecialNoteSpinBox(field.specials or {})
+            w.setKeyboardTracking(False)
             w.setRange(p.lo, p.hi)
             w.valueChanged.connect(lambda v: self._on_edit(key, int(v)))
         elif field.kind == "combo":
@@ -109,7 +112,7 @@ class FieldPanel(QObject):
             w.setToolTip(f"{p.name} ({p.lo} to {p.hi})")
         self.widgets[key] = w
         self._fields[key] = field
-        w.setEnabled(self._editable and field.kind != "text")
+        w.setEnabled(self._can_edit(key))
         return w
 
     def knob_column(self, field):
@@ -142,10 +145,15 @@ class FieldPanel(QObject):
         if not self._filling:
             self.edited.emit(key, value)
 
+    def _can_edit(self, key):
+        p = self.param(key)
+        writable = not (p.read_only or p.bulk_only or p.write_ignored or p.a5000_only) and p.kind == "int"
+        return self._editable and writable and self._fields[key].kind != "text"
+
     def set_editable(self, editable):
         self._editable = editable
         for key, w in self.widgets.items():
-            w.setEnabled(editable and self._fields[key].kind != "text")
+            w.setEnabled(self._can_edit(key))
 
     def fill(self, data, slot=None):
         """Show the values held in the bulk payload `data` (for easy_edit panels: that slot's block)."""

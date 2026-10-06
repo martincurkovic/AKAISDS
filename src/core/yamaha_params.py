@@ -418,6 +418,22 @@ def linked_programs(sample_data):
     return out
 
 
+#: a sample's linked wave objects: the left one's name is at payload offset 64 (16 chars), the right one's at 80 -
+#: blank on a mono sample (measured: all seven factory samples; "stereo samples have independent wave data for the
+#: left and right channels" - owner's manual, "About samples"). A stereo sample's own R wave/loop addresses have no P-numbers.
+WAVE_NAME_L_OFFSET = 64
+WAVE_NAME_R_OFFSET = 80
+
+
+def wave_name_right(sample_data):
+    """The right channel's wave object name, or "" for a mono sample."""
+    return bytes(sample_data[WAVE_NAME_R_OFFSET : WAVE_NAME_R_OFFSET + 16]).decode("ascii", "replace").strip(" \x00")
+
+
+def is_stereo(sample_data):
+    return bool(wave_name_right(sample_data))
+
+
 def store(param, data, value, slot=None):
     """Write `value` into the bulk payload `data` (a bytearray) the way the table lays `param` out - the
     inverse of `extract`. Does NOT model the unit's side effects (mirrored bytes, derived EQ coefficients,

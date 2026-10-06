@@ -111,6 +111,9 @@ class SamplerController(QObject):
         # path used to log nothing between the header and the final
         # error, so a stall at packet N left no clue what the sampler did
         self._receive_started_at = 0.0
+        # when the user last cancelled a receive: packets the sampler already had on the wire still arrive after
+        # our CANCEL, and must not be reported as "unrecognised SysEx" over the "Transfer cancelled" status
+        self._receive_cancelled_at = None
         self._receive_last_packet_at = None
         self._receive_stray_handshakes = 0
         # last resort after the ACK/NAK nudges fail (see _resume_stalled_receive):
@@ -384,6 +387,8 @@ class SamplerController(QObject):
     _RECEIVE_LOG_FIRST_PACKETS = 8
     _RECEIVE_LOG_EVERY_NTH_PACKET = 50
     _RECEIVE_LOG_MAX_STRAY_HANDSHAKES = 5
+    # how long after a user cancel a late SDS header/data packet is silently dropped instead of reported
+    _RECEIVE_CANCEL_GRACE_S = 3.0
 
     def _reset_receive_diagnostics(self):
         self._receive_started_at = time.monotonic()
@@ -801,6 +806,17 @@ class SamplerController(QObject):
                 if handshake is not None:
                     self._on_receive_handshake_message(handshake, data_bytes)
                     return
+            if (
+                not self._receiving
+                and sub_id in (0x01, 0x02)
+                and self._receive_cancelled_at is not None
+                and time.monotonic() - self._receive_cancelled_at < self._RECEIVE_CANCEL_GRACE_S
+            ):
+                debug_log.get_logger().info(
+                    f"SamplerController: ignored an SDS {'header' if sub_id == 0x01 else 'data packet'} that was "
+                    "already on the wire when the receive was cancelled"
+                )
+                return
 
         handshake = sds_encoder.classify_response(data_bytes)
         if handshake is not None:
@@ -1710,6 +1726,8 @@ class SamplerController(QObject):
         self._awaiting_sample_info = False
 
         was_receiving = self._receiving or bool(self._receive_queue)
+        if self._receiving:
+            self._receive_cancelled_at = time.monotonic()
         self._receiving = False
         self._receive_queue = []
         self._receive_header_info = None

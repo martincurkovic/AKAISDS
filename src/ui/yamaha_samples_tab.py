@@ -1,4 +1,4 @@
-"""The Samples tab of the Yamaha A4000 editor - VIEW-ONLY in this first release.
+"""The Samples tab of the Yamaha A4000 editor.
 
 Laid out like the S3000/S950 editors' Samples tab (a sample list on the left, a waveform card and a column
 of parameter cards on the right, from the same `ui/editor_layout.py` pieces), but for the A4000's data
@@ -9,16 +9,18 @@ use the selected sample ("Used in programs ...").
 One bulk dump (`SP`) per sample fills every card (`FieldPanel.fill`); dumps are cached for the editor's
 session in `sample_cache` (shared with the Programs tab, which needs each sample's key range).
 
-Not editable yet: the wave/loop start-length-end addresses are shown as text only (they are coupled -
-writing one moves others - see dev_docs/a4000-editor-roadmap.md), as are the sampling frequency, wave
-length and wave end (the unit ignored writes to them).
+EDITING (when the host passes a `WriteCoordinator`): a changed control is written to the sample through
+`YamahaSession.write_parameter` (backup first, read back - see ui/yamaha_writer.py). A sample is SHARED by every
+program that uses it, so the header says so. Not editable: the wave/loop start-length-end addresses are shown as
+text only (they are coupled - writing one moves others - see dev_docs/a4000-editor-roadmap.md), as are the
+sampling frequency, wave length and wave end (the unit ignored writes to them).
 
 THE WAVEFORM comes over plain Sample Dump Standard through the Dashboard's `SamplerController`
 (`receive_sample_generic`), on request (double-click the waveform - a long sample takes a while at MIDI
 speed). MEASURED on a real A4000: an SDS dump request's number is the sample's POSITION in the sample list
 (0-based): the seven factory waveforms are 0-6 and a sample sent later came back as 7, not as the number it
 was sent as (100) and not as the number in its name ("MIDI 00101"); a number with no sample gets a CANCEL.
-Because that is measured only on a unit with no deleted samples, every received dump is CHECKED against the
+The number keeps following the CURRENT position after a delete (measured: later samples move down, no gaps). Every received dump is still CHECKED against the
 sample's own parameters (frames == wave length or wave end, rate within 2 Hz) and refused if it doesn't
 match, rather than showing the wrong sample's audio.
 """
@@ -287,10 +289,11 @@ class YamahaSamplesTab(QWidget):
     _RETRY_MS = 150
     _AUDIO_RETRIES = 40  # x _RETRY_MS: how long a load waits for the session to go idle
 
-    def __init__(self, controller, session, sample_cache, parent=None):
+    def __init__(self, controller, session, sample_cache, writer=None, parent=None):
         super().__init__(parent)
         self._controller = controller
         self._session = session
+        self._writer = writer  # None = view only
         self._cache = sample_cache  # {sample name: bulk payload} - shared with the Programs tab
         self._names = []
         self._selected = None
@@ -302,6 +305,9 @@ class YamahaSamplesTab(QWidget):
         self._audio_samples = None
         self.panel = FieldPanel("sample")
         self._build()
+        if writer is not None:
+            self.panel.set_editable(True)
+            self.panel.edited.connect(self._on_edited)
         self._connected = True
         controller.sample_received.connect(self._on_audio_file)
         controller.receive_finished.connect(self._on_receive_finished)
@@ -336,6 +342,11 @@ class YamahaSamplesTab(QWidget):
         zoom_row.addWidget(zoom_in)
         zoom_row.addWidget(zoom_fit)
         zoom_row.addStretch()
+        self.cancel_load_button = QPushButton("Cancel load")
+        self.cancel_load_button.setToolTip("Stop receiving this sample's audio (a long sample takes minutes at MIDI speed)")
+        self.cancel_load_button.clicked.connect(self._cancel_load)
+        self.cancel_load_button.setVisible(False)
+        zoom_row.addWidget(self.cancel_load_button)
         scrollbar_container, self.waveform_scrollbar = build_waveform_scrollbar()
         self.waveform_scrollbar.valueChanged.connect(self.waveform_view.set_view_start)
         self.waveform_view.view_changed.connect(
@@ -439,21 +450,71 @@ class YamahaSamplesTab(QWidget):
                 self._show_placeholder(f"Couldn't read {name!r} from the sampler")
                 self.status_message.emit(f"Couldn't read sample {name!r}")
             return
-        self._cache[name] = bytes(dump.data)
+        self._cache[name] = bytearray(dump.data)
         if token == self._token:
             self._show(name)
 
     def _show(self, name):
         data = self._cache[name]
+        self._show_values(name)
+        self.placeholder.setVisible(False)
+        self.cards_scroll.setVisible(True)
+        self._show_waveform(name, data)
+
+    def _show_values(self, name):
+        """The cards and the header, from the cached payload (the waveform is left alone)."""
+        data = self._cache[name]
         self.panel.fill(data)
         rate = yp.extract(yp.get("sample", "sampling_frequency_l"), data)
         frames = yp.extract(yp.get("sample", "wave_length"), data)
         self.name_label.setText(name)
-        self.summary_label.setText(f"{format_hz(rate)}, {frames:,} frames ({format_duration(frames, rate)})")
-        self.used_label.setText(format_used_in(yp.linked_programs(data)))
-        self.placeholder.setVisible(False)
-        self.cards_scroll.setVisible(True)
-        self._show_waveform(name, data)
+        summary = f"{format_hz(rate)}, {frames:,} frames ({format_duration(frames, rate)})"
+        if yp.is_stereo(data):
+            summary += " - stereo (the right channel's wave is not shown)"
+        self.summary_label.setText(summary)
+        programs = yp.linked_programs(data)
+        used = format_used_in(programs)
+        if programs and self._writer is not None:
+            used += " - a change here affects all of them"
+        self.used_label.setText(used)
+
+    # -- editing -------------------------------------------------------------------------------------------
+
+    def _on_edited(self, key, value):
+        name = self._selected
+        if name is None or name not in self._cache:
+            return
+        row = yp.get("sample", key)
+        done = lambda result, n=name, r=row: self._on_write_done(n, r, result)  # noqa: E731
+        if not self._writer.edit(row, value, name, None, done):
+            self._show_values(name)  # declined the warning: put the widget back
+            return
+        yp.store(row, self._cache[name], value)  # shown at once; the read-back confirms it
+        self._after_cache_change(name, row)
+
+    def _on_write_done(self, name, row, result):
+        if not self._connected or name not in self._cache:
+            return
+        if result.readback is not None:
+            yp.store(row, self._cache[name], result.readback)  # whatever the unit really holds
+        if name == self._selected and not result.ok:
+            self._show_values(name)
+        self._after_cache_change(name, row)
+        if result.edit_sent:
+            self._writer.schedule_reread("SP", name, lambda dump, n=name: self._on_reread(n, dump))
+
+    def _on_reread(self, name, dump):
+        if not self._connected or dump is None:
+            return
+        self._cache[name] = bytearray(dump.data)
+        if name == self._selected:
+            self._show_values(name)
+            self._show_waveform(name, self._cache[name])
+
+    def _after_cache_change(self, name, row):
+        # the loop mode decides whether the loop markers are shown
+        if name == self._selected and row.key == "loop_mode":
+            self._show_waveform(name, self._cache[name])
 
     def _show_waveform(self, name, data):
         view = self.waveform_view
@@ -496,10 +557,20 @@ class YamahaSamplesTab(QWidget):
         os.close(fd)
         self._wave_name, self._wave_path = name, path
         self.waveform_view.set_loading(True)
+        self.cancel_load_button.setVisible(True)
         _log(f"loading audio of {name!r} as SDS number {row}")
         self.status_message.emit(f"Receiving {name!r}...")
         # the SDS number is the sample's POSITION in the list (measured - see the module docstring)
         self._controller.receive_sample_generic(row, path)
+
+    def _cancel_load(self):
+        if self._wave_path is None:
+            return
+        _log(f"audio load of {self._wave_name!r} cancelled by the user")
+        # tells the unit to stop (SDS CANCEL) and reports receive_finished(False), which ends the load below
+        self._controller.cancel_transfer()
+        self.status_message.emit(f"Cancelled loading {self._wave_name!r}")
+        self._finish_load()
 
     def _on_receive_progress(self, received, total):
         if self._wave_path is not None and total:
@@ -539,6 +610,7 @@ class YamahaSamplesTab(QWidget):
         self._discard_temp_file()
         self._wave_name = self._wave_path = None
         self.waveform_view.set_loading(False)
+        self.cancel_load_button.setVisible(False)
 
     def _discard_temp_file(self):
         if self._wave_path:

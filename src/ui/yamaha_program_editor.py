@@ -1,4 +1,4 @@
-"""Yamaha A4000/A5000 program editor - VIEW-ONLY in this first release.
+"""Yamaha A4000/A5000 program editor.
 
 Laid out like the S3000 editor (Programs | assigned samples | cards, plus a Samples tab) but for the
 A4000's data model, which differs from an Akai's: a PROGRAM holds program-level settings and a list of
@@ -14,11 +14,16 @@ A program is read with ONE bulk dump (`PG`), a sample with one (`SP`); the progr
 background scan of every program's name and assigned-sample count (~7 s), and programs with nothing
 assigned are hidden unless "Show empty programs" is ticked (there are always 128).
 
-Nothing is written to the unit: every control is shown disabled. Editing arrives with the write stage.
+EDITING: a changed control is written to the sampler's memory (RAM - nothing is saved to its disk) one parameter
+at a time through `ui/yamaha_writer.WriteCoordinator` -> `YamahaSession.write_parameter`, which saves a `.syx`
+backup of the object before the first write to it, proves the right object is selected, and reads every value
+back. The local cache is patched at once and the object is re-read once its writes settle, because the unit has
+side effects an edit's own read-back can't show (mirrored bytes, derived EQ coefficients). A row the table marks
+unwritable stays disabled (`FieldPanel`). The window refuses to close or refresh while a write is on its way.
 """
 
-from PySide6.QtCore import Qt, QTimer
-from PySide6.QtGui import QAction
+from PySide6.QtCore import Qt, QTimer, QUrl
+from PySide6.QtGui import QAction, QDesktopServices
 from PySide6.QtWidgets import (
     QCheckBox,
     QHBoxLayout,
@@ -40,6 +45,7 @@ from core import yamaha_sysex as ysx
 from core.midi_notes import midi_note_to_name
 from ui import theme, tooltips as tt
 from ui.diagnostics_ui import add_open_log_folder_action
+from ui.yamaha_writer import WriteCoordinator
 from ui.editor_layout import (
     add_keygroup_row,
     build_content_row,
@@ -121,6 +127,8 @@ class YamahaProgramEditorWindow(QMainWindow):
 
         self.program_panel = FieldPanel("program")
         self.easy_panel = FieldPanel("easy_edit")
+        self._writer = WriteCoordinator(self._session, self)
+        self._writer.message.connect(lambda m: self.status_bar.showMessage(m, 8000))
         self._build_ui()
         self._build_menus()
         self._controller.status_changed.connect(self._on_controller_status)
@@ -168,7 +176,7 @@ class YamahaProgramEditorWindow(QMainWindow):
 
         programs_tab = QWidget()
         programs_tab.setLayout(build_content_row(programs_container, assigned_container, right_container))
-        self.samples_tab = YamahaSamplesTab(self._controller, self._session, self._sample_cache)
+        self.samples_tab = YamahaSamplesTab(self._controller, self._session, self._sample_cache, self._writer)
         self.samples_tab.status_message.connect(lambda m: self.status_bar.showMessage(m, 8000))
         self.main_tabs = QTabWidget()
         self.main_tabs.setTabBar(FullWidthTabBar(self.main_tabs))
@@ -195,9 +203,12 @@ class YamahaProgramEditorWindow(QMainWindow):
         self.status_bar = QStatusBar()
         self.status_bar.setSizeGripEnabled(False)
         self.setStatusBar(self.status_bar)
-        note = QLabel("Experimental - view only: nothing is written to the sampler")
+        note = QLabel("Experimental - edits go to the sampler's memory (backed up first)")
         note.setObjectName("mutedLabel")
         self.status_bar.addPermanentWidget(note)
+        for panel, handler in ((self.program_panel, self._on_program_edited), (self.easy_panel, self._on_easy_edited)):
+            panel.set_editable(True)
+            panel.edited.connect(handler)
 
     def _build_program_page(self):
         p = self.program_panel
@@ -355,6 +366,17 @@ class YamahaProgramEditorWindow(QMainWindow):
         self._refresh_action.setShortcut("Ctrl+R")
         self._refresh_action.triggered.connect(self._refresh)
         hardware.addAction(self._refresh_action)
+        self._unchanged_action = QAction("Write Program Back Unchanged (test)", self)
+        self._unchanged_action.setToolTip(
+            "Writes the selected program's Level back to the value it already has, then checks that the program "
+            "dump is byte for byte what it was - the safest first test of writing"
+        )
+        self._unchanged_action.triggered.connect(self._write_back_unchanged)
+        hardware.addAction(self._unchanged_action)
+        backups = QAction("Open Backup Folder", self)
+        backups.setToolTip(f"Opens {self._session.backup_dir} - the .syx saved before the first change to each object")
+        backups.triggered.connect(self._open_backup_folder)
+        hardware.addAction(backups)
         hardware.addSeparator()
         add_open_log_folder_action(hardware, self)
 
@@ -381,6 +403,8 @@ class YamahaProgramEditorWindow(QMainWindow):
         on_samples = index == self._samples_tab_index
         _log(f"tab: {'Samples' if on_samples else 'Programs'}")
         self.samples_tab.set_active(on_samples)
+        if not on_samples:
+            self._recompute_ranges()  # a sample's key range may have been edited there
 
     # -- loading ------------------------------------------------------------------------------------------
 
@@ -396,6 +420,10 @@ class YamahaProgramEditorWindow(QMainWindow):
         self.detail_stack.setVisible(True)
 
     def _refresh(self):
+        self._writer.flush()
+        if self._writer.busy:
+            self.status_bar.showMessage("Still writing to the sampler - try again in a moment", 5000)
+            return
         _log("refresh")
         self._scan_generation += 1
         self._scanning = False
@@ -540,7 +568,7 @@ class YamahaProgramEditorWindow(QMainWindow):
             if number == self._selected:
                 self._show_placeholder(f"Couldn't read program {number:03d} from the sampler.")
             return
-        self._program_data[number] = bytes(dump.data)
+        self._program_data[number] = bytearray(dump.data)
         if number == self._selected:
             self._show_program(number)
 
@@ -584,7 +612,7 @@ class YamahaProgramEditorWindow(QMainWindow):
     def _on_range_dump(self, number, name, dump):
         if not self._connected or dump is None:
             return
-        self._sample_cache[name] = bytes(dump.data)
+        self._sample_cache[name] = bytearray(dump.data)
         self._on_sample_for_range(number, name, self._sample_cache[name])
 
     def _on_sample_for_range(self, number, name, sample_data):
@@ -629,9 +657,11 @@ class YamahaProgramEditorWindow(QMainWindow):
         number = self._selected
         if number is None or number not in self._program_data or not 0 <= row < len(self._assigned):
             return
-        data = self._program_data[number]
+        self.easy_panel.fill(self._program_data[number], slot=row)
+        self._update_assigned_info(row)
+
+    def _update_assigned_info(self, row):
         name, otype = self._assigned[row]
-        self.easy_panel.fill(data, slot=row)
         self.assigned_name.setText(name or "(empty slot)")
         rng = self._range_rows[row]
         if otype != ysx.OBJECT_TYPES["sample"]:
@@ -652,6 +682,117 @@ class YamahaProgramEditorWindow(QMainWindow):
             self.main_tabs.setCurrentIndex(self._samples_tab_index)
             self.samples_tab.select_sample(self._assigned[row][0])
 
+    # -- editing -------------------------------------------------------------------------------------------------
+
+    def _on_program_edited(self, key, value):
+        self._edit(yp.get("program", key), value, None)
+
+    def _on_easy_edited(self, key, value):
+        row = self.assigned_list.currentRow()
+        if row >= 0:
+            self._edit(yp.get("easy_edit", key), value, row)
+
+    def _edit(self, row, value, slot):
+        number = self._selected
+        if number is None or number not in self._program_data:
+            return
+        name = ysx.program_object_name(number)
+        done = lambda result, n=number, r=row, s=slot: self._on_write_done(n, r, s, result)  # noqa: E731
+        if not self._writer.edit(row, value, name, slot, done):
+            self._show_program_values(number)  # declined the warning: put the widget back
+            return
+        yp.store(row, self._program_data[number], value, slot)  # shown at once; the read-back confirms it
+        self._recompute_ranges()
+
+    def _on_write_done(self, number, row, slot, result):
+        if not self._connected:
+            return
+        data = self._program_data.get(number)
+        if data is not None and result.readback is not None:
+            yp.store(row, data, result.readback, slot)  # whatever the unit really holds
+        if number == self._selected:
+            if not result.ok:
+                self._show_program_values(number)
+            self._recompute_ranges()
+        if result.edit_sent:
+            self._writer.schedule_reread("PG", ysx.program_object_name(number), lambda d, n=number: self._on_program_reread(n, d))
+
+    def _on_program_reread(self, number, dump):
+        if not self._connected or dump is None:
+            return
+        self._program_data[number] = bytearray(dump.data)
+        if number == self._selected:
+            self._show_program_values(number)
+            self._recompute_ranges()
+
+    def _show_program_values(self, number):
+        """Refill both panels from the cached payload (no list rebuild, selection unchanged)."""
+        data = self._program_data[number]
+        self.program_panel.fill(data)
+        row = self.assigned_list.currentRow()
+        if 0 <= row < len(self._assigned):
+            self.easy_panel.fill(data, slot=row)
+
+    def _recompute_ranges(self):
+        """Each assigned sample's effective key range from the cached payloads (they change with edits)."""
+        number = self._selected
+        if number is None or number not in self._program_data:
+            return
+        data = self._program_data[number]
+        for slot, (name, otype) in enumerate(self._assigned):
+            sample = self._sample_cache.get(name)
+            if otype == ysx.OBJECT_TYPES["sample"] and sample is not None:
+                self._range_rows[slot] = effective_key_range(sample, data, slot)
+                self._set_row_text(slot)
+        self._update_range_bar()
+        row = self.assigned_list.currentRow()
+        if 0 <= row < len(self._assigned):
+            self._update_assigned_info(row)
+
+    def _write_back_unchanged(self):
+        """The first thing to try on a real unit: write Level back to its own value, then require the whole program
+        dump to be unchanged (apart from the unit's "edited" flag, which any edit sets)."""
+        number = self._selected
+        if number is None or number not in self._program_data:
+            self.status_bar.showMessage("Select a program first", 5000)
+            return
+        row = yp.get("program", "program_level")
+        name = ysx.program_object_name(number)
+        before = bytes(self._program_data[number])
+        _log(f"write-back-unchanged test on program {number:03d}")
+
+        def written(result):
+            if not result.ok:
+                self.status_bar.showMessage(f"Write-back test FAILED: {result.message}", 12000)
+                return
+            self._session.request_bulk("PG", name, lambda dump: compared(result, dump))
+
+        def compared(result, dump):
+            if dump is None:
+                self.status_bar.showMessage("Write-back test: the sampler didn't send the program back", 12000)
+                return
+            differing = [i for i, (a, b) in enumerate(zip(before, bytes(dump.data))) if (a ^ b) & (0xFE if i == 1 else 0xFF)]
+            same = not differing and len(before) == len(dump.data)
+            _log(f"write-back-unchanged test: {'identical' if same else f'DIFFERENT at {differing[:20]}'}")
+            where = f"Backup: {result.backup_path}"
+            self.status_bar.showMessage(
+                (f"Write-back test passed - program {number:03d} is byte for byte unchanged. " if same
+                 else f"Write-back test: program {number:03d} DIFFERS at bytes {differing[:10]}. ") + where,
+                15000,
+            )
+            if self._connected:
+                self._program_data[number] = bytearray(dump.data)
+                if number == self._selected:
+                    self._show_program_values(number)
+
+        self._writer.flush()
+        self._session.write_parameter(row, yp.extract(row, before), name, written)
+
+    def _open_backup_folder(self):
+        folder = self._session.backup_dir
+        folder.mkdir(parents=True, exist_ok=True)
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(folder)))
+
     # -- status / closing --------------------------------------------------------------------------------------
 
     def _on_controller_status(self, message):
@@ -665,7 +806,13 @@ class YamahaProgramEditorWindow(QMainWindow):
             )
             event.ignore()
             return
+        self._writer.flush()
+        if self._writer.busy:
+            self.status_bar.showMessage("Still writing to the sampler - try closing again in a moment", 5000)
+            event.ignore()
+            return
         _log("closed")
+        self._writer.close()
         self._scan_generation += 1
         self._session.cancel()
         if not self._connected:

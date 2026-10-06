@@ -104,6 +104,18 @@ def get_yamaha_device_number():
     return value if isinstance(value, int) and not isinstance(value, bool) and 0 <= value <= 15 else 0
 
 
+def get_yamaha_write_warning_acknowledged():
+    # the one-time "editing a Yamaha A4000/A5000 is experimental" warning, shown before the first
+    # parameter write (ui/yamaha_writer.py)
+    return bool(load_config().get("yamaha_write_warning_acknowledged", False))
+
+
+def save_yamaha_write_warning_acknowledged(acknowledged=True):
+    config = load_config()
+    config["yamaha_write_warning_acknowledged"] = bool(acknowledged)
+    save_config(config)
+
+
 def get_s1000_editor_warning_acknowledged():
     # whether the user has already clicked through the one-time "S1000
     # editing is experimental" warning (shown by the Dashboard before the

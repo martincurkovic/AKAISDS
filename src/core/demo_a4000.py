@@ -115,6 +115,9 @@ class FakeA4000:
         self.device_number_off = device_number_off
         #: when True edits are silently ignored (GUESS - see the module docstring)
         self.bulk_protect = bulk_protect
+        #: when True an object select is lost (the previous object stays current) - for testing that nothing is
+        #: written to the wrong object; the real unit has not been seen to do this
+        self.drop_selects = False
         #: {program number 1..128: bytearray payload}
         self.programs = {n: make_program_payload(n) for n in range(1, PROGRAM_COUNT + 1)}
         #: {sample name: bytearray payload}, in object-list order
@@ -279,6 +282,9 @@ class FakeA4000:
         return None
 
     def _select(self, m):
+        if self.drop_selects:
+            self.ignored_ops.append("select dropped")
+            return
         msg = y.parse_parameter_message(m)
         self.current = self._lookup_object(msg.object_name, msg.object_type)
         if self.current is None:
