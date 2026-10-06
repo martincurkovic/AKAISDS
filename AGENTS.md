@@ -455,7 +455,7 @@ samples | cards, and a Samples tab; every writable control edits the unit) all e
   collapsible cards (which can't be pinned equal) after trying both. Pairs are chosen so a row's cards are about the same height
   (Programs: Program/Portamento, LFO/Audio Input, Step Wave full width; Samples: Pitch/Key, Level/Loop, Filter/Filter Envelope,
   Amplitude/Pitch Envelope, LFO/Controllers, Output/EQ). `Knob.setBipolar` (opt-in; `FieldPanel` turns it on for any range
-  spanning zero) grows the arc from zero with a tick there; `=Sample` combos/spinboxes get an `inherited` property that a QSS rule
+  spanning zero) grows the arc from zero (no tick mark - the user didn't want one); `=Sample` combos/spinboxes get an `inherited` property that a QSS rule
   dims; read-only text rows (`Field(muted=True)`) are grey; every labelled row uses `yamaha_fields.LABEL_WIDTH` so values line up;
   hovering a knob's NAME shows the same tooltip as the knob.
 - **The Transfer Dashboard lists and receives natively too** (`controller/yamaha_transfers.py`, built lazily by `SamplerController`):
