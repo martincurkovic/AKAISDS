@@ -23,7 +23,10 @@ Wire facts (A4000, device number 0, all measured unless marked "manual"):
   (A4000; "...0475" is the A5000, manual), a 2-char format, and the 16-char object name. A span holds at
   most 4096 bytes (so the first block carries 4070 data bytes, later ones 4096 - the first split is
   measured, anything beyond two blocks is the manual's rule, unmeasured).
-- Object select `43 1n 58 00 <name16> <type>` makes an object current; the unit ECHOES it back.
+- Object select `43 1n 58 00 <name16> <type>` makes an object current. The unit does NOT answer it (measured,
+  2026-10-06) - what looked like an echo is the unit ANNOUNCING its current object (the same message shape) just
+  before it answers a parameter request, as the manual says ("transmitted when a parameter value request is
+  received"). Confirm a selection by requesting a parameter and reading the announced object.
   Parameter request `43 3n 58 01 P1..P6` (object) / `... 02 P1..P6` (system) is answered with
   `43 1n 58 01|02 P1..P6 <nibbled data>`. Parameter messages have no checksum.
 """
@@ -298,7 +301,8 @@ def parse_object_list(data):
 
 
 def build_object_select(device, name, object_type):
-    """Make an object current for later parameter requests/edits. Changes no data; the unit echoes it."""
+    """Make an object current for later parameter requests/edits. Changes no data; the unit does not reply (it announces
+    the current object when it answers a parameter request)."""
     _check_device(device)
     if isinstance(object_type, str):
         object_type = OBJECT_TYPES[object_type]
@@ -351,7 +355,7 @@ class ParameterMessage:
 
 
 def parse_parameter_message(message):
-    """A parameter change/reply (kind 1): an object select (incl. the unit's echo of ours), or an object /
+    """A parameter change/reply (kind 1): an object select (the unit sends one to announce the current object before a parameter reply), or an object /
     system parameter with its value."""
     m = _strip(message)
     if len(m) < 4 or m[0] != MANUFACTURER or m[2] != MODEL_PARAM or m[1] >> 4 != KIND_PARAMETER_CHANGE:

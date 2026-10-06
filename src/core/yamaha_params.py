@@ -12,6 +12,11 @@ offset) and prints any disagreement. Run it after touching this file. `tests/tes
 pins the table's internal consistency and decodes the real captures in `tests/fixtures/a4000/`.
 Anything the verifier has not been run over is only "as good as the manual".
 
+WRITE-VERIFIED: `tools/a4000_write_verify.py` proved every program, Easy Edit and sample row by writing a
+distinctive value and diffing the dumps (RAM only, throwaway objects) - see dev_docs/a4000-editor-roadmap.md
+for the results and the side effects it found (mirrored bytes, derived EQ coefficients, the unit's "edited" flag
+in byte 1 of the common block, wave/loop coupling). Rows flagged `write_ignored` accepted a write and did nothing.
+
 Not covered yet (deliberately): the program's effect blocks (P2=21) and controls (P2=22), the
 MIDI-channel bitmaps (P2=1, 2), the "linked to program" / bank-member flags of a sample, stereo R
 addresses (the manual gives no P-numbers for them), and the system parameters (the manual documents
@@ -54,6 +59,9 @@ class Param:
     a5000_only: bool = False
     enum: str = None  # name of a table in ENUMS
     bulk_only: bool = False  # in the bulk dump but has no P-number (can't be requested/changed singly)
+    #: a parameter change was ACCEPTED silently but changed nothing (observed on the built-in sample "pulse 3";
+    #: unverified on a user sample) - an editor should not offer these as editable until that is known
+    write_ignored: bool = False
 
     @property
     def bulk_size(self):
@@ -183,8 +191,8 @@ def _sample_rows():
         S("pitch_bend_range", "pitch bend range", 5, 0, 24, 44),
         S("original_key_l", "original key L", 6, 0, 127, 46),
         S("original_key_r", "original key R", 6, 0, 127, 47, p3=1),
-        S("sampling_frequency_l", "sampling frequency L (Hz)", 7, 1, 65535, 48, size=2),
-        S("sampling_frequency_r", "sampling frequency R (Hz)", 7, 1, 65535, 50, p3=1, size=2),
+        S("sampling_frequency_l", "sampling frequency L (Hz)", 7, 1, 65535, 48, size=2, write_ignored=True),
+        S("sampling_frequency_r", "sampling frequency R (Hz)", 7, 1, 65535, 50, p3=1, size=2, write_ignored=True),
         S("fine_tune_l", "fine tune L", 8, -63, 63, 52),
         S("fine_tune_r", "fine tune R", 8, -63, 63, 53, p3=1),
         S("coarse_tune", "coarse tune", 9, -127, 127, 45),
@@ -192,8 +200,8 @@ def _sample_rows():
         S("key_range_low", "key range low (-1 = original)", 11, -1, 127, 59),
         S("loop_mode", "loop mode", 12, 0, 5, 61),
         S("wave_start_address", "wave start address (L)", 13, 0, 16777215, 64, size=4),
-        S("wave_length", "wave length (end - start + 1) (L)", 14, 0, 16777215, 72, size=4),
-        S("wave_end_address", "wave end address", 15, 0, 16777215, 180, size=4),
+        S("wave_length", "wave length (end - start + 1) (L)", 14, 0, 16777215, 72, size=4, write_ignored=True),
+        S("wave_end_address", "wave end address", 15, 0, 16777215, 180, size=4, write_ignored=True),
         S("loop_start_address", "loop start address (L)", 16, 0, 16777215, 80, size=4),
         S("loop_length", "loop length (end - start + 1) (L)", 17, 0, 16777215, 88, size=4),
         S("loop_end_address", "loop end address", 18, 0, 16777215, 184, size=4),
