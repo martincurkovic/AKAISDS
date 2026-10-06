@@ -4,7 +4,7 @@ Started 2026-10-06. For whoever picks this up (human or agent). Read the repo's 
 the S1000/S950 precedents this plan leans on), then this file. **The research is done and the protocol is proven on
 real hardware; the codec exists and is tested; nothing else is built yet.**
 
-## START HERE - status at a glance (updated 2026-10-06, end of session 1)
+## START HERE - status at a glance (updated 2026-10-06, session 1 - the view-only editor now exists)
 
 | Piece | State |
 |---|---|
@@ -14,16 +14,22 @@ real hardware; the codec exists and is tested; nothing else is built yet.**
 | `src/core/yamaha_params.py` - the P1..P6 parameter tables | **DONE for program / Easy Edit / sample** (204 rows, `tests/test_yamaha_params.py`); effects, controls, system params NOT covered - see "Parameter tables" below |
 | `tools/a4000_verify_params.py` - checks every table row against the live unit (read-only) | done; **959/959 agree** (see "Parameter tables") |
 | `tools/a4000_write_verify.py` - proves each row by writing a value and diffing the dump (WRITES, RAM only) | done; **program 44/44, Easy Edit 29/29, sample 118/124 rows exact-or-explained** - the table's offsets are now write-proven |
-| `core/demo_a4000.py` - `FakeA4000` | not started |
-| `core/yamaha_bridge.py` - single-thread worker over the shared MIDI transport | not started |
-| Sampler Type entry + Dashboard "Open Editor" gating | not started |
-| `ui/yamaha_program_editor.py` | not started |
+| `src/core/demo_a4000.py` - `FakeA4000` (+ `demo_a4000_data.py`, real seed bytes) | **DONE** (`tests/test_demo_a4000.py`; reproduces the captured dumps byte for byte) |
+| `src/controller/yamaha_session.py` - the conversation engine (replaces the planned `yamaha_bridge.py`/worker thread) | **DONE** (`tests/test_yamaha_session.py`); event-driven on the GUI thread like `S950Transfers`, owned lazily by `SamplerController` |
+| Sampler Type entry "Yamaha A4000/A5000 (experimental)" (`yamaha_a4000`, protocol family `generic`) + Dashboard gating/tooltips | **DONE** |
+| `src/ui/yamaha_program_editor.py`, `yamaha_samples_tab.py`, `yamaha_fields.py` - the editor | **DONE, VIEW-ONLY**: Programs tab (programs | assigned samples | cards) + Samples tab; every control disabled. Verified end to end against the real A4000 (offscreen screenshot) |
+| Waveform in the Samples tab | **placeholder** - SDS audio fetch by sample name is unproven on this unit (next task) |
+| Editing (writes from the UI) | **NOT STARTED** - the widgets are built and bind to `FieldPanel.edited(key, value)`; no write path exists in `YamahaSession` yet |
 | Any write to the unit | **done 2026-10-06 with the user's go-ahead** (throwaway objects, RAM only, all restored; see "Verification"). The app/codec has no write path yet |
 
-Git: the earlier S1000/S950 work is committed (HEAD `68aeeab`). **Uncommitted at time of writing:**
-`src/core/yamaha_params.py`, `tests/test_yamaha_params.py`, `tools/a4000_verify_params.py` (the codec, its tests, the
-fixtures, `dev_docs/` and `tools/` were committed by the user before this session's parameter work).
-Full suite passes (`uv run pytest tests/ -q`, ~40 s).
+Git: earlier work (codec, params, verify tools) was committed by the user; **everything for the editor (fake, session,
+models entry, UI, tests, `tools/a4000_session_smoke.py`, `tools/a4000_write_verify.py`) may be uncommitted** - check
+`git status`. Full suite passes (`uv run pytest tests/ -q`, ~1 min).
+
+**How to run it:** set Settings > Sampler Type to "Yamaha A4000/A5000 (experimental)", pick the MIDI ports, press Open
+Editor. SDS sample transfers use the same entry (generic family). The unit's Device Number is read from config.json's
+`yamaha_device_number` (default 0; no Settings UI). `tools/a4000_session_smoke.py` exercises the session against the real
+unit read-only and times the scan.
 
 Hardware at the user's desk: Yamaha **A4000**, cold-booted, only the factory built-in waveforms loaded (sine wave,
 saw up, triangle, square, pulse 1/2/3), **Device Number 0**, Bulk Protect off, connected through a **PreSonus Studio 26**
@@ -326,31 +332,63 @@ sample). Other manual quirks kept as-is and confirmed harmless: Table 2 calls LF
 (Table 1 says SC; we treat it signed); sample `velocity offset`/`PEG range` are SC in Table 2 but UC in Table 1 (signed
 used).
 
+## What was built in the editor session, and what it taught us
+
+**Architecture (differs from the Akai editors - on purpose):** no `BridgeWorker`/thread. `SamplerController.yamaha_session()`
+builds a `YamahaSession` (QObject on the GUI thread) that sends through `midi_manager.send_sysex` and is fed every incoming
+0x43 SysEx by `SamplerController._on_sysex_received_impl` (so the generic parser never logs Yamaha traffic as "unrecognised";
+SDS 0x7E traffic still takes the normal path). One operation on the wire at a time (a select is stateful), FIFO queue, every
+op reports through a callback with the result or `None` on timeout. API: `request_object_list(cb)`, `request_bulk(fmt, name,
+cb)`, `request_parameters(object_type, name, [P...], cb)`, `cancel()`.
+
+**Hard-won facts (don't regress):**
+- **A parameter reply is only trusted if the unit ANNOUNCED the right object after the request went out.** The unit sends a
+  select-shaped announce before EVERY parameter reply (verified, even for repeated requests on one object). A value with no
+  fresh announce is ignored. This exists because of a real bug: `SamplerController` already connects itself to
+  `MidiManager.sysex_received`, and a tool that connected it a second time delivered every message twice - the duplicated
+  reply to program 1 became the "answer" for program 2 (a bogus "1 sample assigned"). The session can no longer be fooled by a
+  duplicate. **Never connect `controller.on_sysex_received` yourself.**
+- **No settle time is needed between a select and its request** (0-200 ms sweeps, 10 reads each, all correct); the session keeps
+  30 ms as a margin. Scan of all 128 programs' assigned-sample counts: ~6.5 s. Object list 2.3 s, program dump 1.2 s, sample
+  dump 0.9 s (MIDI wire speed).
+- The Programs tab's "hide empty programs" is a background scan: pass 1 reads each program's `assigned_samples` (one small
+  request each), pass 2 reads names only for non-empty programs. The scan enqueues ONE op at a time (each result enqueues the
+  next), so a click is never stuck behind more than one scan request. Late results are dropped by a generation counter.
+- A sample's `[Sample Parameter]` block holds a 128-bit "linked to program" map (+24..+39, four big-endian 32-bit words, bit 0 =
+  program 001) - verified on the unit; `yp.linked_programs()`. Shown as "Used in programs ...".
+- The effective key range of an assigned sample = the sample's own range (low -1 / high 128 = "Original" -> keyboard ends)
+  moved by the Easy Edit key range shift and cut by the key low/high limits (owner's manual p.99).
+- All widgets are generated from `core/yamaha_params.py` rows by `FieldPanel` (range, enum labels, signedness come from the
+  row). Pages are lists of `Field`s - adding/changing a control is a one-line change and can't disagree with the table.
+- `FakeA4000` marks the link map on `assign()` and sets the edited flag, like the unit; it deliberately does NOT model the
+  unit's other side effects (see its docstring).
+
 ## Next steps (in order)
 
-1. ~~`core/yamaha_params.py`~~ done (above). Remaining table work, lower priority: effect blocks + controls (read page 39 first),
-   system parameters (single-value only), sample banks, the MIDI-channel bitmaps.
-2. **`core/demo_a4000.py` - `FakeA4000`** on rtmidi-style ports like `FakeS950`/`FakeS1000`: object store seeded from the
-   fixtures (128 programs, built-in samples), answers identity / dump requests / object select (no reply) / parameter requests (reply = an announce-select message, then the value)
-   requests; togglable device-number-off and bulk-protect behaviours. Docstring: what is measured vs guessed (the
-   behaviour on write and on a wrong device number is NOT measured - guess and label it).
-3. **`core/yamaha_bridge.py`**: one persistent `QThread` + queue (the `BridgeWorker` rules in `AGENTS.md`), select-then-
-   request sequences serialised, consume the announce-select that precedes each parameter reply, reuse `core/midi_transport.py`'s shared ports. Add a **Sampler
-   Type** entry in `core/sampler_models.py` (transfer family stays `generic`; new editor family) and extend the Dashboard's
-   Open Editor gating (`_update_open_editor_enabled` / `open_program_editor`).
-4. **Read-only editor window** `ui/yamaha_program_editor.py` (design question for the user: program-centric - program ->
-   assigned samples -> Easy Edit - or sample-centric, or both; samples' own parameters are shared by every program using
-   them, so say so in the UI). Build from `ui/editor_layout.py`.
-5. **Writes** (Phase 3): per-parameter select -> edit -> request read-back -> compare; refuse unless a `.syx` backup of the
-   object was saved first (S950 `write_program` precedent); first-write experimental warning; a "write back unchanged" test
-   action. First hardware write test: write the Level offset (+30) back to itself on program 001, read it back, then
-   change it to another value, then restore. Add an `AGENTS.md` section for this feature as soon as code lands.
-6. Later/maybe: create/delete/link objects (object-link-change message exists; create/delete have no known opcode - a bulk
+1. **Waveform in the Samples tab.** The A4000 supports standard SDS, so the Dashboard's receive path should work, but
+   *which SDS sample number is which sample name* is unmeasured: send an SDS Dump Request (`F0 7E <ch> 03 ss ss F7`) for a few
+   numbers and see which sample comes back (the manual says a received sample is kept as "MIDI nnnnn"). Probe read-only with
+   `tools/a4000_discovery.py` first (a `sds` subcommand would be natural), then wire `SamplerController.receive_samples` into
+   `YamahaSamplesTab` like `S950SamplesTab` does (async receive into a temp WAV, shown only if still selected).
+2. **Writes (the big one).** Add `YamahaSession.write_parameter(object_type, name, params, value_bytes, callback)`: select, settle,
+   object edit, then read back (select + request, announce-checked) and compare; refuse unless a `.syx` backup of the object
+   was saved first (S950 `write_program` precedent); first-write experimental warning (`app_config` flag); then enable the
+   widgets (`FieldPanel.set_editable`) and connect `FieldPanel.edited` (note: it passes the table value, e.g. a signed int).
+   Start with Easy Edit rows (program-local, safe), then program rows, then sample rows with a "affects N programs" warning
+   using `linked_programs`. Skip `write_ignored` rows (shown disabled) and the coupled wave/loop address rows until there is a
+   geometry-aware writer. Expect the unit's side effects (mirrored bytes, derived EQ bytes, the edited flag) - re-read after a
+   write rather than trusting a local copy. `tools/a4000_write_verify.py` is the reference for the exact wire sequence.
+3. **UI polish:** sample list rows (use `build_sample_list_row_widget` + a duration like the other editors); program-card
+   whitespace; show program names for empty programs on demand; remember the last selected program/tab.
+4. **Table gaps:** effect blocks + controls (read manual page 39 first), system parameters (single-value only - no bulk layout is
+   documented), sample banks, the MIDI-channel bitmaps, stereo R wave/loop addresses.
+5. Later/maybe: create/delete/link objects (object-link-change message exists; create/delete have no known opcode - a bulk
    load of a new object may create it; don't guess, test on a throwaway).
 
-### Open questions for the user
-1. Editor organisation: program-centric, sample-centric, or both (step 4)?
-2. A4000 only, or keep A5000-only parameters present-but-hidden for later?
+### Decisions made with the user (2026-10-06)
+- Editor layout: BOTH program-centric (Programs | assigned samples | cards) and a Samples tab, like the S3000 editor.
+- Empty programs hidden by default, with a "Show empty programs" checkbox; the Samples tab shows a waveform (placeholder for now).
+- A4000 only for now: A5000-only rows are in the table (`a5000_only`) but unused by the editor.
 
 ## Safety / working rules
 
