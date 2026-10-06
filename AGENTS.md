@@ -437,7 +437,11 @@ samples | cards, and a Samples tab; every writable control edits the unit) all e
   the session DRAIN - it stays busy (`idle` False) until the stream has been quiet for `drain_idle_ms`, which after a cancel at 7 s
   of a 2 s stereo sample was ~70 s. Everything queued behind it (the Programs tab's reads, a Dashboard refresh) waits that long.
 - **The Samples tab shows both channels** (two `WaveformView`s at 90 px each for a stereo sample, one at 180 for mono, kept in step
-  by `set_view_state`), draws progressively (`begin_live_capture`/`append_live_samples`, fed by the session's `on_chunk`), and has a
+  by `set_view_state`, and drawn as ONE display: zero layout spacing, `WaveformView.set_stack_position("top"/"bottom")` drops the seam border,
+  continues the dashed marker lines across it and gives boundary-marker handles to the top half and loop-marker handles to the bottom), draws progressively (`begin_live_capture`/`append_live_samples`, fed by the session's `on_chunk`) - SMOOTHLY: the unit's ~1.5 s
+  lumps are queued and released ~30x/s at a pace that would just drain them by the next chunk (gap estimate refined from the real
+  ones; measured on the unit: 11 chunks -> 451 growth steps, biggest jump 30 frames; display only, the load finishes once the
+  queue has drained) - and has a
   Cancel button. The loaded audio is checked against the sample's own `wave_length` and refused if it doesn't match.
 - **The Transfer Dashboard lists and receives natively too** (`controller/yamaha_transfers.py`, built lazily by `SamplerController`):
   Refresh = the object list's samples (`sample_list_updated`, index == number == SDS position - measured to stay true after a
