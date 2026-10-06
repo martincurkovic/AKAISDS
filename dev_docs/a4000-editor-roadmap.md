@@ -11,7 +11,8 @@ real hardware; the codec exists and is tested; nothing else is built yet.**
 | Protocol research (service manual p.32-42) | done; **verified against the real A4000** (see "Phase 0 results") |
 | `src/core/yamaha_sysex.py` - the codec | **DONE, 35 tests** (`tests/test_yamaha_sysex.py`), real captures as fixtures in `tests/fixtures/a4000/` |
 | `tools/a4000_discovery.py` - read-only hardware probe | done and used; tracked in git (moved out of the gitignored `test_scripts/`) |
-| `core/yamaha_params.py` - the P1..P6 parameter tables | **NOT STARTED - next task** (seed data below) |
+| `src/core/yamaha_params.py` - the P1..P6 parameter tables | **DONE for program / Easy Edit / sample** (204 rows, `tests/test_yamaha_params.py`); effects, controls, system params NOT covered - see "Parameter tables" below |
+| `tools/a4000_verify_params.py` - checks every table row against the live unit (read-only) | done; **959/959 agree** (see "Parameter tables") |
 | `core/demo_a4000.py` - `FakeA4000` | not started |
 | `core/yamaha_bridge.py` - single-thread worker over the shared MIDI transport | not started |
 | Sampler Type entry + Dashboard "Open Editor" gating | not started |
@@ -19,8 +20,8 @@ real hardware; the codec exists and is tested; nothing else is built yet.**
 | Any write to the unit | **never done** - nothing has ever been written to the A4000 |
 
 Git: the earlier S1000/S950 work is committed (HEAD `68aeeab`). **Uncommitted at time of writing:**
-`src/core/yamaha_sysex.py`, `tests/test_yamaha_sysex.py`, `tests/fixtures/a4000/` (8 small `.syx` captures, 36 KB),
-the `AGENTS.md` A4000 section, and the new `dev_docs/` + `tools/` folders (this file moved here from the user's Desktop).
+`src/core/yamaha_params.py`, `tests/test_yamaha_params.py`, `tools/a4000_verify_params.py` (the codec, its tests, the
+fixtures, `dev_docs/` and `tools/` were committed by the user before this session's parameter work).
 Full suite passes (`uv run pytest tests/ -q`, ~40 s).
 
 Hardware at the user's desk: Yamaha **A4000**, cold-booted, only the factory built-in waveforms loaded (sine wave,
@@ -272,34 +273,48 @@ block; first block = 26-byte header + 4070 data bytes; the unit echoes object-se
 `0x60` with nothing assigned and `0x61` once a sample is (unexplained - preserve, never "fix"); assigning a sample
 changes ONLY byte 1, the count @95 and Easy Edit block 0; Easy Edit Level offset change = exactly one byte (block 0 +22).
 
-## Seed data for `core/yamaha_params.py` (the next task)
+## Parameter tables - `src/core/yamaha_params.py` (done for program / Easy Edit / sample)
 
-The parameter tables are the manual's Table 2 (pages 40-42; read them again from the page images - everything below
-was verified on the real unit, the rest of the table is unverified). A parameter is addressed by `P1..P6`; its value
-also lives in the object's bulk at a Table 1 offset. Each row below was read BOTH ways and matched (value from a
-`3n 58 01` request == value decoded from the bulk):
+One `Param` row per editable value ties its parameter-request address (P1..P6, Table 2) to its bulk-dump offset
+(Table 1): `Param(key, name, scope, p, size, signed, lo, hi, offset, bits, kind, read_only, a5000_only, enum, bulk_only)`.
+Scopes: `"program"` (offset absolute in the PG payload), `"easy_edit"` (56-byte block per assigned sample at bulk 408; a
+request needs the slot: P2*100+P3), `"sample"` (the `[Sample Parameter]` block, bulk offset 112 of the SP payload).
+Access: `get(scope, key)`, `rows(scope)`, `request_params(param, slot)`, `bulk_offset(param, slot)`, `extract(param, bulk_data, slot)`,
+`decode_reply(param, reply.data)`, `in_range`. Bitfields use `bits=(shift, width)` (manual "b5-3" = shift 3, width 3; a signed
+2-bit field gives Easy Edit's -1/0/1). Enums: filter types (17), output1/output2 assignment (12 each; 10-12 A5000-only).
+**204 rows:** 47 program, 31 Easy Edit, 126 sample (incl. sample controls 1-6).
 
-Program object (select type 20 with the program number as its name; bulk offsets absolute):
-`level P=(1,10) @83 UC` | `transpose (1,13) @86 SC` | `LFO reset MIDI ch (1,25) @87 SC (-2=off)` | `portamento type (1,16)
-@88` | `rate (1,17) @89` | `time (1,18) @90` | `S/H speed (1,19) @91` | `LFO tempo (1,14) @92 UC 25-250` | `LFO reset note
-(1,26) @93 SC (-1=all)` | `assigned samples (1,20) @94 US` | `AD-in L pan (1,5) @78 SC`.
-Easy Edit (program; block `i` at bulk `408 + 56*i`; request `P=(2, i//100, i%100, <param>, 0, 0)`): `@0 name (16)` P4=0 |
-`@20 object type` (0x10 = sample) | `@21 receive channel assign SC` (P4=2; 0 = ch01, -1 = "=sample") | `@22 level offset SC`
-P4=3 | `@24 pan offset` P4=4 (verified read-only: 0) | `fine tune offset` P4=5 (verified read-only: 0). `@16-19` = 4 opaque bytes
-(`01 44 3c 48`; the sample bulk holds `01 44 3c 30` - treat as an id, preserve).
-Sample object (select type 16 by name; `[Sample Parameter]` starts at bulk offset **112**, offsets below are relative to it):
-`MIDI rx channel P=(2,3) +42` | `pitch bend type (2,4) +43` | `bend range (2,5) +44` | `coarse tune (2,9) +45 SC` |
-`original key L (2,6,0) +46` | `sampling freq L (2,7,0) +48 US` | `fine tune L (2,8,0) +52 SC` | `key range high (2,10) +58 (128=orig)` |
-`key range low (2,11) +59 SC` | `loop mode (2,12) +61` | `wave start L (2,13) +64 UL` | `wave length L (2,14) +72 UL` |
-`filter type (2,21) +97` | `filter cutoff (2,22) +98` | `filter Q (2,23) +99` | `sample level (2,33) +110` | `pan (2,34) +111 SC`.
-Rule of thumb: for the L/R pairs P3 = 0 (L) / 1 (R); programs' Easy Edit and everything else follows Table 2's P1..P6
-columns. Build the table as data (name, P-tuple, size/signed, range, enum, bulk offset, object type, A5000-only flag) and
-**test it against the fixtures** (decode every listed field from `tests/fixtures/a4000/*.syx` and assert the values above).
+**Not covered:** the program's effect blocks (P2=21, 40 bytes x3 at bulk 96; page 39 was never read) and controls (P2=22,
+4 bytes x4 at bulk 216); the MIDI-channel bitmaps (P2=1, 2); a sample's "linked to program" / bank-member bits; stereo R
+addresses of wave/loop (the manual gives no P-numbers); **system parameters** - the manual gives P-numbers (p.42) but
+documents NO bulk layout for the `SY` dump, so they can only be read/written one at a time; sample bank objects.
+
+**Verification, and its limits (read before trusting an offset):**
+- `uv run python tools/a4000_verify_params.py [--sample NAME ...]` reads every row two ways (parameter request vs bulk
+  offset), flags DIFF / SIZE / RANGE / NO REPLY. Result on the real A4000: program 001 + its Easy Edit slot 0 + all seven
+  built-in samples = **959 of 959 agree** (203 distinct rows).
+- **That is weaker than it sounds.** The unit is cold-booted with factory values, and the seven built-in waveforms have
+  identical parameters, so every row has only ever shown ONE value. A bulk offset that points at a neighbouring byte
+  holding the same default (0, 127...) would still agree. Measured on the fixtures: only ~12 of 201 rows have a value
+  that no other byte of their block shares (so only those are pinned by value alone - mostly the non-default ones found
+  earlier: sampling frequency 48000, fine tune -20, original key 66, level 100, Q 4, bend range 2, loop mode 1, program
+  level/LFO tempo/portamento values, the Easy Edit level offset). The rest are verified only as "request address and
+  transcribed offset are consistent" plus the offline test that no two rows overlap and nothing runs past its block.
+- **The strong check is a write test** (Phase 3): on a throwaway object, write a distinctive value to each row with a
+  parameter change, dump the object, confirm EXACTLY that byte (or those bits) changed, restore. That proves every
+  offset, size and bit position. It needs the first-ever write to the unit - do it only with the user's go-ahead, a
+  `.syx` backup first, and on a throwaway program/sample.
+
+**Corrections to the manual found this way:** `P2=66` (sample AEG sustain) is a 4-byte array at +151..+154 - the manual
+says "P3 0-1" but the real sustain level is **P3=2 (+153)**; P3=0/1/3 are reserved bytes (values 8, 127, 0 on a default
+sample). Other manual quirks kept as-is and confirmed harmless: Table 2 calls LFO reset note UC though it includes -1
+(Table 1 says SC; we treat it signed); sample `velocity offset`/`PEG range` are SC in Table 2 but UC in Table 1 (signed
+used).
 
 ## Next steps (in order)
 
-1. **`core/yamaha_params.py`** from Table 2 (+ the seed data above), with a fixture-driven test. Include value enums
-   (filter types p.42, output assignment p.41-42, control functions) and the A5000-only flags (effects 4-6, MIDI ch 17-32).
+1. ~~`core/yamaha_params.py`~~ done (above). Remaining table work, lower priority: effect blocks + controls (read page 39 first),
+   system parameters (single-value only), sample banks, the MIDI-channel bitmaps.
 2. **`core/demo_a4000.py` - `FakeA4000`** on rtmidi-style ports like `FakeS950`/`FakeS1000`: object store seeded from the
    fixtures (128 programs, built-in samples), answers identity / dump requests / object select (+ echo) / parameter
    requests; togglable device-number-off and bulk-protect behaviours. Docstring: what is measured vs guessed (the
