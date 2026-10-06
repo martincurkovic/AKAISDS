@@ -53,5 +53,11 @@ from controller import yamaha_session as _yamaha_session
 _yamaha_session.BACKUP_DIR = _TEST_LOG_DIR / "a4000_backups"
 
 
+# And the program-file backups made before an S1000 keygroup delete-by-rebuild.
+from core import program_editor_bridge as _program_editor_bridge
+
+_program_editor_bridge.PROGRAM_BACKUP_DIR = _TEST_LOG_DIR / "program_backups"
+
+
 def pytest_sessionfinish(session, exitstatus):
     shutil.rmtree(_TEST_LOG_DIR, ignore_errors=True)

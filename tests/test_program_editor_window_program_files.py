@@ -95,6 +95,13 @@ def test_load_with_a_clashing_name_asks_for_another_and_adds_a_program(
     editor._load_program_from_file()
     _pump_until(qapp, lambda: editor.program_list.count() == 3)
 
+    # the follow-up sample-list reload must not snap the selection back to row 0
+    _idle(qapp, editor)
+    editor._worker.wait_until_idle()
+    for _ in range(20):
+        qapp.processEvents()
+    assert editor.program_list.currentRow() == 2
+
     assert len(prompts) == 1  # DRUMS is resident, so it had to be renamed
     assert editor.program_list.item(2).text() == "DRUMS NEW"
     assert fake.deleted_by_name_clash == []  # nothing was deleted by the load
