@@ -939,11 +939,30 @@ def yamaha_dashboard(dashboard):
     return dashboard
 
 
-def test_yamaha_transfers_are_generic_sds_but_the_editor_is_enabled(yamaha_dashboard):
+def test_yamaha_sends_are_generic_sds_but_the_editor_and_the_sample_list_are_enabled(yamaha_dashboard):
     d = yamaha_dashboard
-    assert d.sampler_controller.device_type == "generic"  # sample transfers: plain SDS
+    assert d.sampler_controller.device_type == "generic"  # SENDING samples: plain SDS
     assert d.btn_open_editor.isEnabled() is True
-    assert "Yamaha" in d.btn_open_editor.toolTip() and "view only" in d.btn_open_editor.toolTip()
+    assert "Yamaha" in d.btn_open_editor.toolTip() and "experimental" in d.btn_open_editor.toolTip()
+    # ...but listing and receiving use the unit's own protocol, so the hardware list is live (unlike Generic SDS)
+    assert d.list_hardware.isEnabled() and d.btn_refresh.isEnabled()
+    assert d.btn_delete_selected.isEnabled() is False and d.memory_avail_prog_bar.isHidden()
+
+
+def test_yamaha_without_a_midi_input_cant_refresh_or_receive(dashboard):
+    dashboard.midi_manager.input_name = None
+    dashboard.sampler_controller.set_device_type("yamaha_a4000")
+    dashboard._update_device_type_ui()
+    assert dashboard.btn_refresh.isEnabled() is False and dashboard.btn_receive.isEnabled() is False
+    assert "MIDI input" in dashboard.empty_hardware_label.text()
+
+
+def test_generic_sds_still_cant_browse(dashboard):
+    dashboard.midi_manager.input_name = "Fake In"
+    dashboard.sampler_controller.set_device_type("generic")
+    dashboard._update_device_type_ui()
+    assert dashboard.btn_refresh.isEnabled() is False and dashboard.list_hardware.isEnabled() is False
+    assert "Generic SDS" in dashboard.empty_hardware_label.text()
 
 
 def test_yamaha_editor_needs_both_ports(yamaha_dashboard):

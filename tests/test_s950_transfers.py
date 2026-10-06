@@ -43,6 +43,9 @@ class _Midi(QObject):
         self.output_name = "Fake Out"
         self.sent = []
         self.fail_sends = False
+        #: when True replies arrive ONE message per event-loop turn instead of a whole conversation inside one call, so a
+        #: transfer is really in flight for a while (the way it is at MIDI speed) - used to test cancelling mid-stream
+        self.paced = False
 
     def send_sysex(self, data):
         if self.fail_sends:
@@ -52,6 +55,12 @@ class _Midi(QObject):
         QTimer.singleShot(0, self._deliver)
 
     def _deliver(self):
+        if self.paced:
+            got = self.fake.inp.get_message()
+            if got is not None:
+                self.sysex_received.emit(bytes(got[0][1:-1]))
+                QTimer.singleShot(0, self._deliver)
+            return
         while (got := self.fake.inp.get_message()) is not None:
             self.sysex_received.emit(bytes(got[0][1:-1]))
 

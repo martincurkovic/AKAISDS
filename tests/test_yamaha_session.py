@@ -8,7 +8,6 @@ import os
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
-
 from controller.sampler_controller import SamplerController
 from core import demo_a4000 as demo
 from core import yamaha_params as yp
@@ -36,6 +35,8 @@ def build(fake, model="yamaha_a4000"):
         rig.session.bulk_timeout_ms = 400
         rig.session.select_settle_ms = 1
         rig.session.edit_settle_ms = 1
+        rig.session.wave_chunk_timeout_ms = 300
+        rig.session.drain_idle_ms = 60
     return rig
 
 
@@ -346,3 +347,99 @@ def test_cancel_reports_a_pending_write_as_not_written(rig):
     assert rig.session.writes_pending
     rig.session.cancel()
     assert len(got) == 1 and not got[0].ok and not rig.session.writes_pending
+
+
+# --- waves (the native WD dump) -----------------------------------------------------------------------------------
+
+
+def frames_of(n, seed=0):
+    return [((i * 37 + seed) % 30000) - 15000 for i in range(n)]
+
+
+def fetch_wave(rig, name, on_chunk=None):
+    return collect(rig, lambda cb: rig.session.request_wave(name, cb, on_chunk=on_chunk))
+
+
+def test_a_wave_is_assembled_from_its_messages_and_reported_chunk_by_chunk(rig):
+    audio = frames_of(5000)
+    rig.fake.add_sample("big", audio=audio)
+    chunks = []
+    frames = fetch_wave(rig, "big", on_chunk=lambda new, total: chunks.append((len(new), total)))
+    assert frames == audio
+    assert len(chunks) >= 3 and all(total == 5000 for _n, total in chunks)
+    assert sum(n for n, _t in chunks) == 5000
+    assert rig.session.idle  # a finished wave leaves nothing to drain
+
+
+def test_a_factory_wave_and_a_tiny_one(rig):
+    assert len(fetch_wave(rig, "sine wave")) == 128
+    rig.fake.add_sample("tiny", audio=[1, 2, 3])
+    assert fetch_wave(rig, "tiny") == [1, 2, 3]
+
+
+def test_a_stereo_sample_has_two_wave_objects_each_fetched_by_its_own_name(rig):
+    left, right = frames_of(3000), frames_of(3000, seed=500)
+    rig.fake.add_sample("st", audio=left, audio_right=right)
+    names = [e.name for e in collect(rig, rig.session.request_object_list) if e.kind == "wave"]
+    assert "st-L" in names and "st-R" in names
+    assert fetch_wave(rig, "st-L") == left and fetch_wave(rig, "st-R") == right
+
+
+def test_an_unknown_wave_times_out_without_draining(rig):
+    assert fetch_wave(rig, "no such wave") is None
+    assert rig.session.idle  # nothing was streaming, so there is nothing to wait out
+
+
+def test_a_wave_that_stops_mid_stream_fails_and_the_wire_is_then_drained(qapp):  # noqa: F811
+    class Stalls(demo.FakeA4000):
+        def _say(self, message):
+            if len(self._outbox) >= 2 and message[:4] == bytes([0x43, 0x00, 0x7A, 0x1F]):
+                return  # drop everything after the first two messages
+            super()._say(message)
+
+    fake = Stalls()
+    fake.add_sample("big", audio=frames_of(9000))
+    rig = build(fake)
+    assert fetch_wave(rig, "big") is None
+    assert any("Yamaha" in s or "No reply" in s for s in rig.statuses)
+
+
+def test_a_corrupt_wave_message_fails_the_operation(qapp):  # noqa: F811
+    class Corrupt(demo.FakeA4000):
+        def _say(self, message):
+            if message[:3] == bytes([0x43, 0x00, 0x7A]) and message[26:28] != b"":
+                message = bytes(message[:-3]) + bytes([message[-3] ^ 0x01]) + bytes(message[-2:])
+            super()._say(message)
+
+    fake = Corrupt()
+    fake.add_sample("big", audio=frames_of(3000))
+    rig = build(fake)
+    assert fetch_wave(rig, "big") is None
+    assert any("corrupt" in s for s in rig.statuses)
+
+
+def test_cancelling_a_wave_drains_the_stream_before_the_next_request_runs(qapp):  # noqa: F811
+    fake = demo.FakeA4000()
+    fake.add_sample("big", audio=frames_of(20000))  # ~10 messages
+    rig = build(fake)
+    rig.midi.paced = True
+    seen, order = [], []
+    done = []
+    rig.session.request_wave("big", done.append, on_chunk=lambda new, total: seen.append(len(new)))
+    assert wait_until(lambda: len(seen) >= 2)
+    rig.session.cancel()
+    assert done == [None] and not rig.session.idle  # draining: the unit is still streaming at us
+    after = len(seen)
+    rig.session.request_object_list(lambda entries: order.append(("list", entries is not None)))
+    assert wait_until(lambda: bool(order), timeout=10)
+    assert len(seen) == after  # the abandoned wave's late messages never reached the callback
+    assert order == [("list", True)]  # and the next request got ITS answer, not the wave's tail
+    assert rig.session.idle
+
+
+def test_a_cancel_does_not_make_the_session_forget_its_backups(rig):
+    first = write(rig, "program", "program_level", 50, "001")
+    rig.session.cancel()
+    second = write(rig, "program", "program_level", 60, "001")
+    assert second.backup_path == first.backup_path  # the ORIGINAL stays the backup after a cancel/refresh
+    assert [k for k, _m in rig.fake.received].count("dump_request") == 1
