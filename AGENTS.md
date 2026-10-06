@@ -416,13 +416,13 @@ behaviours were hardware-verified; `dxzl/akai-s950` has NO licence, so don't cop
   looks like the S950's own request-sample-dump (`F0 7E 00 nn 00 F7`). Generic SDS mode against
   an S950 gives nonsense, not a clean failure.
 
-## Yamaha A4000/A5000 editing (IN PROGRESS - codec only)
+## Yamaha A4000/A5000 editing (IN PROGRESS - codec + parameter tables)
 
 Goal: a program/sample editor for the user's Yamaha A4000 (transfers already work through Generic SDS and stay
 there). Plan, handoff and every measured fact: **`dev_docs/a4000-editor-roadmap.md`** (read it before
-touching anything here). State: `core/yamaha_sysex.py` (the codec, pure, "bytes between F0 and F7")
-and `tests/test_yamaha_sysex.py` exist; no params table, fake, bridge, UI or Sampler Type entry yet, and
-**nothing has ever been written to a real A4000**.
+touching anything here). State: `core/yamaha_sysex.py` (the codec, pure, "bytes between F0 and F7") and
+`core/yamaha_params.py` (204 program/Easy Edit/sample parameter rows: P-address + bulk offset) exist with tests; no fake,
+bridge, UI or Sampler Type entry yet, and **nothing has ever been written to a real A4000**.
 
 - Verified on a real A4000 (2026-10-06, device number 0): the service manual (MIDI DATA FORMAT, p.32-42) is accurate,
   with one correction - the bulk byte count is **MSB-first** and a dump is **several blocks inside one F0..F7**
@@ -431,6 +431,10 @@ and `tests/test_yamaha_sysex.py` exist; no params table, fake, bridge, UI or Sam
 - `tests/fixtures/a4000/*.syx` are REAL captures; the tests rebuild them byte for byte. Never regenerate them from
   the codec. `tools/a4000_discovery.py` is the read-only probe
   that captured them; it refuses to send anything but identity / dump / parameter requests and object select.
+- `tools/a4000_verify_params.py` checks every table row against a live unit (request vs bulk offset). All 959 comparisons
+  agree, **but every value was a factory default, so a wrong offset onto an equal neighbour byte would pass** - only a
+  write-and-diff test proves each offset (see the roadmap). The manual is wrong about sample `P2=66` (AEG sustain is
+  `P3=2`, not 0-1); don't "fix" that back.
 - Same house rules as the Akai editors apply when the rest is built: one persistent worker thread (stateful
   select-then-request), the shared MIDI transport, a `.syx` backup before any write, an experimental warning.
 
