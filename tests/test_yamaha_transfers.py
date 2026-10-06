@@ -7,12 +7,13 @@ import os
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
-from PySide6.QtCore import QCoreApplication, QEvent
+from PySide6.QtCore import QCoreApplication, QEvent, QTimer
 from PySide6.QtWidgets import QCheckBox
 
 from controller.sampler_controller import SamplerController
 from core import demo_a4000 as demo
 from core import dropped_files, sds_encoder
+from core import yamaha_params as yp
 
 from test_s950_transfers import qapp, wait_until  # noqa: F401
 from test_yamaha_session import build
@@ -215,3 +216,259 @@ def test_the_dashboard_lists_the_unit_samples_and_receives_the_checked_ones(dash
     stereo, _ = read(str(tmp_path / "ST.wav"))
     assert len(mono) == 1 and len(mono[0]) == 3000 and len(stereo) == 2
     assert dash.progress_bar_current_smpl.isHidden() and dash.btn_send.isEnabled()
+
+
+# --- sending (the unit's native bulk load) -----------------------------------------------------------------------
+
+
+class SendRecorder:
+    def __init__(self, controller):
+        self.finished, self.transferred, self.progress, self.units, self.lists = [], [], [], [], []
+        controller.transfer_finished.connect(self.finished.append)
+        controller.file_transferred.connect(self.transferred.append)
+        controller.transfer_progress.connect(lambda s, t: self.progress.append((s, t)))
+        controller.unit_progress.connect(self.units.append)
+        controller.sample_list_updated.connect(self.lists.append)
+
+
+@pytest.fixture
+def sender(qapp):  # noqa: F811
+    rig = build(demo.FakeA4000())
+    rig.rec = Recorder(rig.controller)
+    rig.send = SendRecorder(rig.controller)
+    rig.session.send_baud = 10_000_000  # a message "takes" microseconds, not 1.3 s
+    rig.session.send_gap_ms = 0
+    rig.session.send_tick_ms = 5
+    rig.controller._yamaha_transfers.verify_delay_ms = 0
+    rig.controller._yamaha_transfers.verify_retry_ms = 20
+    return rig
+
+
+def wav(tmp_path, name, left, right=None, rate=22050):
+    path = str(tmp_path / f"{name}.wav")
+    if right is None:
+        sds_encoder.write_wav_file(path, left, rate, 16)
+    else:
+        sds_encoder.write_wav_file_stereo(path, left, right, rate, 16)
+    return path
+
+
+def entry(path, **kw):
+    return {"filepath": path, "name": None, "bit_depth": 16, "sample_rate": None, "mono": False, **kw}
+
+
+def finish(rig):
+    assert wait_until(lambda: bool(rig.send.finished), timeout=20)
+    return rig.send.finished[-1]
+
+
+def test_a_mono_file_becomes_a_new_sample_with_its_audio(sender, tmp_path):
+    audio = [(i * 31) % 20000 - 10000 for i in range(6000)]
+    path = wav(tmp_path, "kick", audio)
+    assert sender.controller.send_file_queue([entry(path)])
+    assert finish(sender) is True
+    fake = sender.fake
+    assert "kick" in fake.samples and fake.audio["kick"] == audio and "kick" not in fake.audio_right
+    data = fake.samples["kick"]
+    assert yp.extract(yp.get("sample", "wave_length"), data) == 6000 and yp.extract(yp.get("sample", "sampling_frequency_l"), data) == 22050
+    assert sender.send.transferred == [path]
+    assert wait_until(lambda: bool(sender.send.lists) and "kick" in sender.send.lists[-1])  # the Dashboard's list is refreshed
+    assert not sender.controller.is_transfer_busy()
+    assert not [m for k, m in fake.received if m[:1] == b"\x7e"]  # no Sample Dump Standard anywhere
+
+
+def test_a_stereo_file_becomes_one_real_stereo_sample(sender, tmp_path):
+    left, right = [i % 500 - 250 for i in range(5000)], [250 - i % 500 for i in range(5000)]
+    path = wav(tmp_path, "pad", left, right)
+    sender.controller.send_file_queue([entry(path)])
+    assert finish(sender) is True
+    fake = sender.fake
+    assert fake.audio["pad"] == left and fake.audio_right["pad"] == right
+    assert yp.is_stereo(fake.samples["pad"])
+    assert len([o for o in fake.bulk_loads if o[0] == "WD"]) >= 2  # two wave objects
+    assert sender.send.transferred == [path]
+
+
+def test_mono_option_sends_only_the_left_channel(sender, tmp_path):
+    left, right = [100] * 2000, [-100] * 2000
+    sender.controller.send_file_queue([entry(wav(tmp_path, "x", left, right), mono=True)])
+    assert finish(sender) is True
+    assert sender.fake.audio["x"] == left and "x" not in sender.fake.audio_right
+
+
+def test_a_name_already_on_the_unit_is_never_overwritten(sender, tmp_path):
+    sender.fake.add_sample("kick", audio=[7] * 300)
+    path = wav(tmp_path, "kick", [5] * 2000)
+    sender.controller.send_file_queue([entry(path)])
+    assert finish(sender) is True
+    fake = sender.fake
+    assert fake.audio["kick"] == [7] * 300 and fake.audio["kick 2"] == [5] * 2000
+    assert any("'kick 2'" in s and "already on the sampler" in s for s in sender.rec.statuses)
+
+
+def test_the_name_typed_in_the_queue_is_used(sender, tmp_path):
+    sender.controller.send_file_queue([entry(wav(tmp_path, "file", [1] * 800), name="My Snare")])
+    assert finish(sender) is True
+    assert "My Snare" in sender.fake.samples
+
+
+def test_a_rate_override_resamples_and_is_what_the_sample_says(sender, tmp_path):
+    sender.controller.send_file_queue([entry(wav(tmp_path, "r", [i % 100 for i in range(4000)], rate=22050), sample_rate=11025)])
+    assert finish(sender) is True
+    data = sender.fake.samples["r"]
+    assert yp.extract(yp.get("sample", "sampling_frequency_l"), data) == 11025
+    assert abs(yp.extract(yp.get("sample", "wave_length"), data) - 2000) <= 1
+
+
+def test_several_files_load_in_order_and_progress_reaches_the_end(sender, tmp_path):
+    paths = [wav(tmp_path, n, [i % 90 for i in range(3000 + 500 * k)]) for k, n in enumerate(("a", "b", "c"))]
+    sender.controller.send_file_queue([entry(p) for p in paths])
+    assert finish(sender) is True
+    assert sender.send.transferred == paths
+    assert [n for n in sender.fake.samples if n in "abc"] == ["a", "b", "c"]
+    sent, total = sender.send.progress[-1]
+    assert sent == total and all(s <= t for s, t in sender.send.progress)
+    assert sender.send.units[-1] == 1.0 and any(0 < u < 1 for u in sender.send.units)
+    assert any("Sent 3 samples" in s for s in sender.rec.statuses)
+
+
+def test_an_unreadable_file_is_skipped_and_the_rest_still_load(sender, tmp_path):
+    bad = str(tmp_path / "bad.wav")
+    open(bad, "wb").write(b"not a wav")
+    good = wav(tmp_path, "good", [3] * 1500)
+    sender.controller.send_file_queue([entry(bad), entry(good)])
+    assert finish(sender) is True
+    assert sender.send.transferred == [good] and "good" in sender.fake.samples
+    assert any("Skipping bad.wav" in s for s in sender.rec.statuses) and any("skipped 1" in s for s in sender.rec.statuses)
+
+
+def test_a_unit_that_refuses_the_load_is_reported_not_trusted(sender, tmp_path):
+    sender.fake.bulk_protect = True  # the unit swallows the load without a word
+    sender.controller.send_file_queue([entry(wav(tmp_path, "a", [1] * 900)), entry(wav(tmp_path, "b", [1] * 900))])
+    assert finish(sender) is False
+    assert sender.send.transferred == [] and "a" not in sender.fake.samples
+    assert any("was not loaded" in s and "Bulk Protect" in s for s in sender.rec.statuses)
+    assert not sender.controller.is_transfer_busy()
+
+
+def test_cancelling_mid_load_stops_sending_and_frees_the_wire(sender, tmp_path):
+    sender.session.send_baud = 150_000  # ~30 ms per message: long enough to cancel in the middle
+    path = wav(tmp_path, "long", [i % 700 for i in range(40000)])
+    sender.controller.send_file_queue([entry(path)])
+    assert wait_until(lambda: bool(sender.fake.bulk_loads))
+    assert sender.controller.is_transfer_busy()
+    sender.controller.cancel_transfer()
+    assert sender.send.finished == [False] and not sender.controller.is_transfer_busy()
+    sent_then = len(sender.fake.bulk_loads)
+    QCoreApplication.processEvents()
+    assert wait_until(lambda: sender.session.idle)
+    assert len(sender.fake.bulk_loads) == sent_then and "long" not in sender.fake.samples
+    assert sender.send.transferred == [] and any("cancelled" in s.lower() for s in sender.rec.statuses)
+
+
+def test_sending_needs_a_midi_input_and_one_transfer_at_a_time(sender, tmp_path):
+    path = wav(tmp_path, "a", [1] * 500)
+    sender.midi.input_name = None
+    assert sender.controller.send_file_queue([entry(path)]) is False
+    assert any("needs a MIDI input" in s for s in sender.rec.statuses)
+    sender.midi.input_name = "Fake In"
+    assert sender.controller.send_file_queue([entry(path)]) is True
+    assert sender.controller.send_file_queue([entry(path)]) is False  # busy
+    finish(sender)
+
+
+def test_the_dashboard_sends_a_queued_file_natively_with_one_stereo_unit_and_no_packet_text(dash, tmp_path):
+    rig = dash.rig
+    rig.session.send_baud, rig.session.send_gap_ms, rig.session.send_tick_ms = 10_000_000, 0, 5
+    rig.controller._yamaha_transfers.verify_delay_ms = 0
+    path = wav(tmp_path, "pad", [i % 400 for i in range(4000)], [-(i % 400) for i in range(4000)])
+    dash.create_local_row(path)
+    dash._update_queue_buttons_state()
+    assert dash.btn_send.isEnabled()
+    dash.btn_send.click()
+    assert wait_until(lambda: "pad" in rig.fake.samples and dash.list_local.count() == 0, timeout=20)
+    assert yp.is_stereo(rig.fake.samples["pad"])  # a stereo file is ONE stereo sample, not two mono ones
+    assert dash.progress_bar_overall.isHidden()  # one unit: no second bar
+    assert wait_until(lambda: dash.btn_cancel.isEnabled() is False and dash.progress_bar_current_smpl.isHidden())
+    assert wait_until(lambda: dash.list_hardware.count() == 10)  # the list refreshed itself: 7 factory + MIDI 00101 + ST + pad
+    assert "packet" not in dash.status_bar.currentMessage()
+
+
+def test_the_send_button_needs_a_midi_input_for_a_yamaha(dash, tmp_path):
+    from ui import tooltips
+
+    dash.create_local_row(wav(tmp_path, "a", [1] * 500))
+    dash._update_queue_buttons_state()
+    assert dash.btn_send.isEnabled()
+    dash.rig.midi.input_name = None
+    dash._update_queue_buttons_state()
+    assert not dash.btn_send.isEnabled() and dash.btn_send.toolTip() == tooltips.YAMAHA_SEND_NEEDS_MIDI_INPUT
+
+
+# --- the memory bar (an estimate) -----------------------------------------------------------------------------------
+
+
+def test_the_memory_estimate_adds_up_every_samples_words(rig, monkeypatch):
+    from core import app_config
+
+    monkeypatch.setattr(app_config, "get_yamaha_wave_memory_kb", lambda: 1024)  # 1 MB = 524,288 words
+    rig.fake.add_sample("mono", audio=[1] * 10000)
+    rig.fake.add_sample("st", audio=[1] * 20000, audio_right=[2] * 20000)
+    infos = []
+    rig.controller.memory_status_updated.connect(infos.append)
+    rig.controller.refresh_sample_list(silent=True)
+    assert wait_until(lambda: bool(infos), timeout=15)
+    info = infos[-1]
+    assert info["estimated"] and info["max_num_samp_words"] == 524_288
+    # the 7 factory waves (132 words each), the mono sample's wave and the stereo sample's two (each + 4 guard words)
+    assert info["max_num_samp_words"] - info["num_words_free"] == 7 * 132 + 10004 + 2 * 20004
+
+
+def test_without_a_known_memory_size_there_is_no_estimate_and_no_bar(rig, dash, monkeypatch):
+    from core import app_config
+
+    monkeypatch.setattr(app_config, "get_yamaha_wave_memory_kb", lambda: None)  # (the real config may have one)
+    infos = []
+    rig.controller.memory_status_updated.connect(infos.append)
+    rig.controller.refresh_sample_list(silent=True)
+    assert wait_until(lambda: bool(rig.rec.lists))
+    assert infos == []
+    dash._update_device_type_ui()
+    assert dash.memory_avail_prog_bar.isHidden()
+
+
+def test_a_dropped_first_read_after_a_load_is_retried_not_reported_as_a_failure(sender, tmp_path):
+    # measured on the real unit: the first request after a load is sometimes simply not answered
+    session = sender.session
+    real = session.request_object_list
+    state = {"calls": 0}
+
+    def flaky(callback):
+        state["calls"] += 1
+        if state["calls"] == 2:  # the first call is the pre-send name check; the second is the post-load check
+            QTimer.singleShot(0, lambda: callback(None))
+            return
+        real(callback)
+
+    session.request_object_list = flaky
+    sender.controller.send_file_queue([entry(wav(tmp_path, "r", [1] * 900))])
+    assert finish(sender) is True and state["calls"] >= 4  # (the retry, then the refresh)
+    assert sender.send.transferred and "r" in sender.fake.samples
+
+
+def test_a_load_whose_checks_never_get_an_answer_fails_after_the_retries(sender, tmp_path):
+    sender.controller._yamaha_transfers.verify_retries = 1
+    session = sender.session
+    real = session.request_object_list
+    state = {"calls": 0}
+
+    def dead_after_the_first(callback):
+        state["calls"] += 1
+        if state["calls"] == 1:
+            real(callback)
+        else:
+            QTimer.singleShot(0, lambda: callback(None))
+
+    session.request_object_list = dead_after_the_first
+    sender.controller.send_file_queue([entry(wav(tmp_path, "r", [1] * 900))])
+    assert finish(sender) is False and any("was not loaded" in s for s in sender.rec.statuses)

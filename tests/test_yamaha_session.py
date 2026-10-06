@@ -8,6 +8,7 @@ import os
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
+from PySide6.QtCore import QCoreApplication
 from controller.sampler_controller import SamplerController
 from core import demo_a4000 as demo
 from core import yamaha_params as yp
@@ -537,3 +538,33 @@ def test_a_link_waits_for_a_sample_transfer_like_every_other_operation(rig):
     assert not wait_until(lambda: bool(got), timeout=0.15) and rig.fake.received == []
     rig.controller._receiving = False
     assert wait_until(lambda: bool(got)) and got[0].ok
+
+
+# --- sending bulk messages (a native sample load) -------------------------------------------------------------------
+
+
+def test_send_messages_sends_each_in_order_paced_and_reports_progress(rig):
+    rig.session.send_baud, rig.session.send_gap_ms, rig.session.send_tick_ms = 10_000_000, 0, 5
+    messages = [bytes([0x43, 0x00, 0x7A, 1, 2, 3]), bytes([0x43, 0x00, 0x7A, 4, 5]), bytes([0x43, 0x00, 0x7A, 6])]
+    progress = []
+    assert collect(rig, lambda cb: rig.session.send_messages(messages, cb, on_progress=lambda s, t: progress.append((s, t)))) is True
+    assert [bytes(m) for m in rig.midi.sent] == messages
+    total = sum(len(m) + 2 for m in messages)
+    assert progress[0] == (0, total) and progress[-1] == (total, total) and [p[0] for p in progress] == sorted(p[0] for p in progress)
+
+
+def test_a_request_made_during_a_send_waits_for_it_and_cancel_stops_it(rig):
+    rig.session.send_baud, rig.session.send_gap_ms = 100_000, 20  # each message ~ 25 ms
+    done, bulk = [], []
+    rig.session.send_messages([bytes([0x43, 0x00, 0x7A, i]) + bytes(2000) for i in range(6)], done.append)
+    rig.session.request_bulk("SP", "sine wave", bulk.append)
+    assert rig.session.writes_pending and not bulk  # a load counts as a write: a window must not close under it
+    assert wait_until(lambda: bool(bulk), timeout=10)
+    assert done == [True]  # the request was only sent once the whole load had gone out
+    rig.session.send_messages([bytes([0x43, 0x00, 0x7A, 9]) + bytes(2000) for _ in range(40)], done.append)
+    assert wait_until(lambda: len(rig.midi.sent) > 7)
+    rig.session.cancel()
+    sent = len(rig.midi.sent)
+    assert done[-1] is False and rig.session.idle
+    QCoreApplication.processEvents()
+    assert len(rig.midi.sent) == sent
