@@ -454,8 +454,8 @@ samples | cards, and a Samples tab; every writable control edits the unit) all e
   (`equalize_card_heights`), so left and right line up top and bottom - the user rejected independent columns ("un-aligned") and
   collapsible cards (which can't be pinned equal) after trying both. Pairs are chosen so a row's cards are about the same height
   (Programs: Program/Portamento, LFO/Audio Input, Step Wave full width; Samples: Pitch/Key, Level/Loop, Filter/Filter Envelope,
-  Amplitude/Pitch Envelope, LFO/Controllers, Output/EQ). `Knob.setBipolar` (opt-in; `FieldPanel` turns it on for any range
-  spanning zero) grows the arc from zero (no tick mark - the user didn't want one); `=Sample` combos/spinboxes get an `inherited` property that a QSS rule
+  Amplitude/Pitch Envelope, LFO/Controllers, Output/EQ). `Knob`'s value arc grows from ZERO for any range that spans zero - in EVERY editor (S3000/S1000/S950/Yamaha;
+  the user loves it; `setBipolar(False)` opts a knob out; no tick mark - the user didn't want one), and from the minimum otherwise, exactly as before; `=Sample` combos/spinboxes get an `inherited` property that a QSS rule
   dims; read-only text rows (`Field(muted=True)`) are grey; every labelled row uses `yamaha_fields.LABEL_WIDTH` so values line up;
   hovering a knob's NAME shows the same tooltip as the knob.
 - **The Transfer Dashboard lists and receives natively too** (`controller/yamaha_transfers.py`, built lazily by `SamplerController`):
