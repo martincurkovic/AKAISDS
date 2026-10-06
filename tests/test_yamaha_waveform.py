@@ -77,6 +77,8 @@ def window(qapp):  # noqa: F811
     window = build_window(qapp, fake)
     window._session.wave_chunk_timeout_ms = 300
     window._session.drain_idle_ms = 60
+    window.samples_tab._REVEAL_INITIAL_INTERVAL_S = 0.05  # real chunks are ~1.5 s apart; the fake's are instant
+    window.samples_tab._REVEAL_FINISH_S = 0.05
     assert wait_until(lambda: len(window._counts) == 128 and not window._scanning, timeout=20)
     yield window
     dispose(window)
@@ -270,3 +272,76 @@ def test_yamaha_operations_wait_while_a_sds_transfer_owns_the_wire(qapp):  # noq
     busy["on"] = False
     assert wait_until(lambda: bool(got))
     assert len(got[0]) == 142
+
+
+def test_the_two_channels_touch_with_no_gap_between_them(window):
+    window.fake.add_sample("ST", audio=[i % 300 for i in range(3000)], audio_right=[-(i % 300) for i in range(3000)])
+    window.samples_tab.set_samples(list(window.fake.samples))
+    tab = window.samples_tab
+    tab.select_sample("ST")
+    assert wait_until(lambda: tab._selected == "ST" and "ST" in tab._cache and not tab.cards_scroll.isHidden())
+    left, right = tab.waveform_view, tab.waveform_view_right
+    assert (left._stack_role, right._stack_role) == ("top", "bottom")
+    # one layout holds both with no spacing, so they touch
+    assert tab.channel_stack.spacing() == 0 and tab.channel_stack.indexOf(left) == 0 and tab.channel_stack.indexOf(right) == 1
+    assert tab.channel_stack.contentsMargins().top() == tab.channel_stack.contentsMargins().bottom() == 0
+    # a mono sample is a normal stand-alone view again
+    tab.select_sample("pulse 1")
+    assert wait_until(lambda: tab._selected == "pulse 1" and tab.name_label.text() == "pulse 1")
+    assert left._stack_role is None and right._stack_role is None
+
+
+# --- the smooth reveal ---------------------------------------------------------------------------------------------
+
+
+def _reveal_rig(window, interval=0.4):
+    tab = window.samples_tab
+    tab._REVEAL_INITIAL_INTERVAL_S = interval
+    tab._reset_reveal()
+    view = tab.waveform_view
+    view.set_header(10000, 0, 100, 9000, 9999)
+    view.begin_live_capture()
+    return tab, view
+
+
+def test_a_chunk_is_revealed_gradually_not_all_at_once(window):
+    tab, view = _reveal_rig(window)
+    tab._queue_for_reveal(view, list(range(3000)))
+    sizes = []
+    assert wait_until(lambda: (sizes.append(len(view._samples)), len(view._samples) == 3000)[1], timeout=5)
+    steps = sorted(set(sizes))
+    assert len(steps) >= 5 and steps[0] < 3000  # it grew in several steps...
+    assert view._samples == list(range(3000))  # ...and never showed anything but the received frames, in order
+    assert not tab._reveal_timer.isActive() and tab._reveal_pending == 0
+
+
+def test_the_pace_follows_the_measured_gap_between_chunks(window):
+    tab, view = _reveal_rig(window, interval=0.5)
+    tab._queue_for_reveal(view, [1] * 1000)
+    assert abs(tab._reveal_speed - 2000) < 1  # 1000 frames over the estimated 0.5 s
+    tab._reveal_last_chunk -= 0.1  # pretend the last chunk came 0.1 s ago: the next gap measured is ~0.1 s
+    tab._queue_for_reveal(view, [1] * 1000)
+    assert tab._reveal_interval_s < 0.5  # the estimate moved towards the shorter real gap
+    tab._reset_reveal()
+
+
+def test_finishing_waits_for_the_display_to_catch_up(window):
+    tab, view = _reveal_rig(window)
+    done = []
+    tab._when_revealed(lambda: done.append("immediately"))  # nothing queued: runs at once
+    assert done == ["immediately"]
+    tab._queue_for_reveal(view, list(range(4000)))
+    tab._when_revealed(lambda: done.append(len(view._samples)))
+    assert done == ["immediately"]  # not yet
+    assert wait_until(lambda: len(done) == 2, timeout=5)
+    assert done[1] == 4000  # it ran only once everything had been shown
+
+
+def test_cancelling_drops_what_was_still_waiting_to_be_shown(window):
+    tab, view = _reveal_rig(window, interval=2.0)
+    tab._queue_for_reveal(view, list(range(5000)))
+    assert wait_until(lambda: len(view._samples) > 0, timeout=3)
+    shown = len(view._samples)
+    tab._reset_reveal()
+    assert not wait_until(lambda: len(view._samples) > shown + 5, timeout=0.3)  # nothing more trickles in
+    assert tab._reveal_pending == 0 and not tab._reveal_queue

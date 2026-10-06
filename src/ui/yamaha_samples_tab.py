@@ -23,9 +23,18 @@ on a unit whose SDS dumps stalled. A long wave takes a while at MIDI speed (~620
 dump can't be aborted on the unit, so the session drains the rest of its stream before its next request (see
 controller/yamaha_session.py). The loaded audio is checked against the sample's own parameters (frames == wave length or
 wave end) and refused if it doesn't match, rather than showing the wrong sample's audio.
+
+SMOOTH FILL: the unit sends ~4 KB messages (one every ~1.5 s) and the OS hands each over only when complete, so frames really
+do arrive in lumps. To draw a continuous growth instead, each chunk's frames wait in a queue and are released to the waveform ~30
+times a second, at a pace that would just drain them by the time the next chunk is expected (estimated from the gaps measured so
+far). It is display only - what is shown is always real, received data, slightly behind; the load completes (and the final
+waveform lands) only once the queue has drained.
 """
 
-from PySide6.QtCore import Signal
+import collections
+import time
+
+from PySide6.QtCore import QTimer, Signal
 from PySide6.QtWidgets import (
     QGridLayout,
     QHBoxLayout,
@@ -88,7 +97,9 @@ def format_duration(frames, rate):
 
 #: loop modes that actually loop (owner's manual p.123): continuous loop and loop-to-release
 _LOOPING_MODES = (1, 2)
-_LOAD_HINT = "Double-click the waveform to load the sample's audio."
+#: said INSIDE the waveform (once, centered across a stereo pair) - the label under it stays empty until it has more to say
+_LOAD_HINT = ""
+_WAVEFORM_HINT = "Double-click to load the audio waveform"
 #: the waveform area is 180 px tall: one mono view, or a stereo pair at half height each
 _MONO_VIEW_HEIGHT = 180
 _STEREO_VIEW_HEIGHT = 90
@@ -300,6 +311,17 @@ class YamahaSamplesTab(QWidget):
         self._audio_samples = None  # the left (or only) channel of the sample whose audio is loaded
         self._audio_samples_right = None
         self._syncing = False
+        # smooth reveal of arriving chunks (see the module docstring)
+        self._reveal_queue = collections.deque()  # [view, frames, offset] segments, oldest first
+        self._reveal_pending = 0  # frames queued
+        self._reveal_speed = 0.0  # frames per second
+        self._reveal_interval_s = self._REVEAL_INITIAL_INTERVAL_S  # estimated gap between chunks (refined from the real ones)
+        self._reveal_last_chunk = None
+        self._reveal_last_tick = None
+        self._reveal_when_done = None
+        self._reveal_timer = QTimer(self)
+        self._reveal_timer.setSingleShot(True)
+        self._reveal_timer.timeout.connect(self._reveal_tick)
         self.panel = FieldPanel("sample")
         self._build()
         if writer is not None:
@@ -320,6 +342,7 @@ class YamahaSamplesTab(QWidget):
         for view in (self.waveform_view, self.waveform_view_right):
             view.set_markers_locked(True)
             view.set_placeholder_text("Select a sample on the left")
+            view.set_header_hint(_WAVEFORM_HINT)
             view.load_requested.connect(self._load_audio)
         self.waveform_view_right.setVisible(False)
         self.waveform_view.view_changed.connect(lambda *_a: self._follow(self.waveform_view, self.waveform_view_right))
@@ -367,11 +390,17 @@ class YamahaSamplesTab(QWidget):
 
         self.waveform_hint = QLabel(_LOAD_HINT)
         self.waveform_hint.setObjectName("mutedLabel")
+        # the two channels touch (no spacing) and draw as ONE display - see WaveformView.set_stack_position
+        self.channel_stack = QVBoxLayout()
+        channel_stack = self.channel_stack
+        channel_stack.setSpacing(0)
+        channel_stack.setContentsMargins(0, 0, 0, 0)
+        channel_stack.addWidget(self.waveform_view)
+        channel_stack.addWidget(self.waveform_view_right)
         waveform_card = build_section_card(
             "Waveform",
             zoom_row,
-            self._row(self.waveform_view),
-            self._row(self.waveform_view_right),
+            channel_stack,
             self._row(scrollbar_container),
             self._row(self.waveform_hint),
         )
@@ -541,6 +570,8 @@ class YamahaSamplesTab(QWidget):
         # one view at full height, or two at half height each - the waveform area keeps the same height either way
         for view in views:
             view.set_view_height(_STEREO_VIEW_HEIGHT if stereo else _MONO_VIEW_HEIGHT)
+        self.waveform_view.set_stack_position("top" if stereo else None, _STEREO_VIEW_HEIGHT, self.waveform_view_right)
+        self.waveform_view_right.set_stack_position("bottom" if stereo else None, _STEREO_VIEW_HEIGHT, self.waveform_view)
         if frames <= 0:
             for view in views:
                 view.clear()
@@ -564,6 +595,7 @@ class YamahaSamplesTab(QWidget):
     def refresh(self):
         """Forget the audio read so far (the host is about to re-read everything)."""
         self._load_token += 1  # a load in flight is abandoned (the host cancels the session)
+        self._reset_reveal()
         self._loading_name = None
         self.cancel_load_button.setVisible(False)
         self._audio_name = self._audio_samples = self._audio_samples_right = None
@@ -584,6 +616,7 @@ class YamahaSamplesTab(QWidget):
         self._loading_name = name
         self._load_token += 1
         token = self._load_token
+        self._reset_reveal()
         views = (self.waveform_view, self.waveform_view_right)
         for view in views[: len(waves)]:
             view.set_loading(True)
@@ -604,7 +637,7 @@ class YamahaSamplesTab(QWidget):
             if token != self._load_token:
                 return
             progress["frames"] += len(new)
-            view.append_live_samples(list(new))
+            self._queue_for_reveal(view, list(new))
             self.status_message.emit(f"Receiving {name!r}{side}: {100 * progress['frames'] // max(total, 1)}%")
 
         self._session.request_wave(
@@ -615,6 +648,7 @@ class YamahaSamplesTab(QWidget):
         if token != self._load_token or not self._connected:
             return
         if frames is None:
+            self._reset_reveal()
             self._finish_load()
             if name in self._cache:
                 self._show_waveform(name, self._cache[name])  # back to the header-only view
@@ -623,6 +657,12 @@ class YamahaSamplesTab(QWidget):
         got = got + [frames]
         if len(got) < len(waves):
             self._load_wave(token, name, waves, got)
+            return
+        # the last frames are still being revealed: finish once the display has caught up with what was received
+        self._when_revealed(lambda: self._complete_load(token, name, got))
+
+    def _complete_load(self, token, name, got):
+        if token != self._load_token or not self._connected:
             return
         self._finish_load()
         data = self._cache.get(name)
@@ -646,12 +686,74 @@ class YamahaSamplesTab(QWidget):
         name = self._loading_name
         _log(f"audio load of {name!r} cancelled by the user")
         self._load_token += 1  # whatever is still in flight is ignored
+        self._reset_reveal()
         # a wave dump can't be aborted on the unit: the session stays busy until its stream has gone quiet
         self._session.cancel()
         self._finish_load()
         if name == self._selected and name in self._cache:
             self._show_waveform(name, self._cache[name])  # back to the header-only view
         self.status_message.emit(f"Cancelled loading {name!r}")
+
+    # -- the smooth reveal -------------------------------------------------------------------------------------
+
+    _REVEAL_TICK_S = 1 / 30
+    _REVEAL_INITIAL_INTERVAL_S = 1.5  # the real gap between a unit's wave messages (~1.3-1.6 s at MIDI speed)
+    _REVEAL_FINISH_S = 0.4  # once the transfer is over, how long the display takes to catch up
+
+    def _queue_for_reveal(self, view, frames):
+        now = time.monotonic()
+        if self._reveal_last_chunk is not None:
+            # blend the measured gap into the estimate (never trust one outlier completely)
+            self._reveal_interval_s = 0.5 * self._reveal_interval_s + 0.5 * max(now - self._reveal_last_chunk, 0.02)
+        self._reveal_last_chunk = now
+        self._reveal_queue.append([view, frames, 0])
+        self._reveal_pending += len(frames)
+        self._reveal_speed = self._reveal_pending / max(self._reveal_interval_s, 0.05)
+        if not self._reveal_timer.isActive():
+            self._reveal_last_tick = now
+            self._reveal_timer.start(int(self._REVEAL_TICK_S * 1000))
+
+    def _when_revealed(self, callback):
+        """Run `callback` once everything queued has been shown (at once if nothing is waiting)."""
+        if not self._reveal_queue:
+            callback()
+            return
+        self._reveal_when_done = callback
+        self._reveal_speed = self._reveal_pending / self._REVEAL_FINISH_S  # no more chunks coming: catch up promptly
+
+    def _reveal_tick(self):
+        now = time.monotonic()
+        started = now
+        dt = now - (self._reveal_last_tick or now)
+        self._reveal_last_tick = now
+        budget = max(1, int(self._reveal_speed * dt))
+        while budget > 0 and self._reveal_queue:
+            segment = self._reveal_queue[0]
+            view, frames, offset = segment
+            take = frames[offset : offset + budget]
+            segment[2] += len(take)
+            budget -= len(take)
+            self._reveal_pending -= len(take)
+            view.append_live_samples(take)
+            if segment[2] >= len(frames):
+                self._reveal_queue.popleft()
+        if self._reveal_queue:
+            # redrawing costs more on a long sample: never let the reveal eat the event loop
+            cost = time.monotonic() - started
+            self._reveal_timer.start(int(max(self._REVEAL_TICK_S, 4 * cost) * 1000))
+            return
+        callback, self._reveal_when_done = self._reveal_when_done, None
+        if callback is not None:
+            callback()
+
+    def _reset_reveal(self):
+        self._reveal_timer.stop()
+        self._reveal_queue.clear()
+        self._reveal_pending = 0
+        self._reveal_speed = 0.0
+        self._reveal_interval_s = self._REVEAL_INITIAL_INTERVAL_S
+        self._reveal_last_chunk = self._reveal_last_tick = None
+        self._reveal_when_done = None
 
     def _finish_load(self):
         self._loading_name = None
@@ -670,6 +772,7 @@ class YamahaSamplesTab(QWidget):
         if not self._connected:
             return
         self._connected = False
+        self._reset_reveal()
         if self._loading_name is not None:
             self._load_token += 1
             self._session.cancel()

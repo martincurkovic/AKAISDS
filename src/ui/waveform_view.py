@@ -2,7 +2,7 @@ import sys
 
 from PySide6.QtWidgets import QApplication, QWidget, QSizePolicy
 from PySide6.QtGui import QCursor, QPainter, QPen, QColor, QPolygonF
-from PySide6.QtCore import Qt, QEvent, QRectF, QPointF, QTimer, Signal
+from PySide6.QtCore import Qt, QEvent, QRect, QRectF, QPointF, QTimer, Signal
 
 from core import debug_log
 from ui import theme
@@ -329,6 +329,13 @@ class WaveformView(QWidget):
         # be grabbed, hovered or dragged - see set_markers_locked
         self._markers_locked = False
         self._placeholder_text = _PLACEHOLDER_TEXT
+        # part of a stacked pair drawn as ONE display (the Yamaha Samples tab's left/right channels): "top",
+        # "bottom" or None - see set_stack_position
+        self._stack_role = None
+        self._stack_dash_offset_px = 0.0
+        self._stack_partner = None
+        # what the header-only state says (markers known, no audio yet) - see set_header_hint
+        self._header_hint = _PLACEHOLDER_TEXT
         # click-to-preview visual feedback (set_playhead/clear_playhead) -
         # None whenever nothing is currently sounding
         self._playhead_frame = None
@@ -445,6 +452,41 @@ class WaveformView(QWidget):
         # a stereo sample shows two of these stacked at half height each (the Yamaha Samples tab)
         self.setFixedHeight(height)
 
+    def set_header_hint(self, text):
+        # the centered text shown while the markers are known but no audio is: the default (S3000 editor) promises a slow,
+        # interface-freezing load, which isn't true of every caller
+        self._header_hint = text
+        self.update()
+
+    def set_stack_position(self, role, other_height=0, partner=None):
+        """Draw this view as the "top" or "bottom" half of a stacked pair (None = a stand-alone view). The pair then reads
+        as one display: no border across the seam, marker lines running on through it (their dashes continue from the
+        other view's height), and each marker's handle only on the half that owns it - boundary markers' triangles at
+        the very top, loop markers' at the very bottom - plus a faint hairline along the seam and one centered hint."""
+        if role not in (None, "top", "bottom"):
+            raise ValueError(f"unknown stack role {role!r}")
+        self._stack_role = role
+        self._stack_dash_offset_px = float(other_height) if role == "bottom" else 0.0
+        # the other half: a centered hint is drawn once ACROSS the pair, and only while neither half has a waveform
+        self._stack_partner = partner if role else None
+        self.update()
+
+    def _draw_hint(self, painter, text):
+        """Centered text - for a stacked pair, laid out over the whole pair and clipped to this half, so the two halves
+        together show it ONCE, centered on the seam. Nothing is drawn while the partner already shows a waveform."""
+        if self._stack_role is not None and self._stack_partner is not None and self._stack_partner._envelope:
+            return
+        rect = self.rect()
+        if self._stack_role == "top":
+            rect = QRect(0, 0, rect.width(), rect.height() * 2)
+        elif self._stack_role == "bottom":
+            rect = QRect(0, -rect.height(), rect.width(), rect.height() * 2)
+        painter.drawText(rect, Qt.AlignmentFlag.AlignCenter | Qt.TextFlag.TextWordWrap, text)
+
+    def _repaint_partner(self):
+        if self._stack_partner is not None:
+            self._stack_partner.update()  # its hint depends on whether this half has a waveform
+
     def view_state(self):
         """(zoom, view_start) - what `set_view_state` of a linked view needs to show the same stretch of the wave."""
         return self._zoom, self._view_start
@@ -541,6 +583,7 @@ class WaveformView(QWidget):
         self._zoom = _MIN_ZOOM
         self._view_start = 0
         self.update()
+        self._repaint_partner()
         self._emit_view_changed()
 
     def set_header(self, frame_count, start, loop_start, loop_end, end):
@@ -565,6 +608,7 @@ class WaveformView(QWidget):
         self._zoom = _MIN_ZOOM
         self._view_start = 0
         self.update()
+        self._repaint_partner()
         self._emit_markers_changed()
         self._emit_view_changed()
 
@@ -599,6 +643,7 @@ class WaveformView(QWidget):
             self._view_start = 0
         self._rebuild_envelope()
         self.update()
+        self._repaint_partner()
         self._emit_markers_changed()
         self._emit_view_changed()
 
@@ -618,6 +663,7 @@ class WaveformView(QWidget):
         self._samples = []
         self._rebuild_envelope()
         self.update()
+        self._repaint_partner()
 
     def append_live_samples(self, chunk):
         """Extends the in-progress waveform with newly-arrived sample
@@ -637,6 +683,7 @@ class WaveformView(QWidget):
         self._samples.extend(chunk)
         self._rebuild_envelope()
         self.update()
+        self._repaint_partner()
 
     def set_marker(self, name, frame):
         """Move one marker directly (not via a mouse drag) - what the
@@ -903,6 +950,13 @@ class WaveformView(QWidget):
         palette = theme.current_palette()
 
         rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        # a stacked half pushes the edge it shares with its partner outside the widget, so no border (or rounded corner)
+        # shows at the seam
+        reach = _BORDER_RADIUS * 2 + 2
+        if self._stack_role == "top":
+            rect.setBottom(rect.bottom() + reach)
+        elif self._stack_role == "bottom":
+            rect.setTop(rect.top() - reach)
         painter.fillRect(rect, QColor(palette["bg_input"]))
         painter.setPen(QColor(palette["border"]))
         painter.drawRoundedRect(rect, _BORDER_RADIUS, _BORDER_RADIUS)
@@ -911,11 +965,7 @@ class WaveformView(QWidget):
             # nothing known at all yet (no header, no audio) - the big
             # centered placeholder
             painter.setPen(QColor(palette["text_disabled"]))
-            painter.drawText(
-                self.rect(),
-                Qt.AlignmentFlag.AlignCenter | Qt.TextFlag.TextWordWrap,
-                _LOADING_TEXT if self._loading else self._placeholder_text,
-            )
+            self._draw_hint(painter, _LOADING_TEXT if self._loading else self._placeholder_text)
             return
 
         self._draw_zero_crossing_line(painter, palette)
@@ -1006,8 +1056,12 @@ class WaveformView(QWidget):
             pen = QPen(color)
             pen.setWidthF(2.0 if is_active else 1.5)
             pen.setStyle(Qt.PenStyle.SolidLine if is_active else Qt.PenStyle.DashLine)
+            if self._stack_dash_offset_px and not is_active:
+                pen.setDashOffset(self._stack_dash_offset_px / pen.widthF())  # carry on from the half above
             painter.setPen(pen)
             painter.drawLine(QPointF(x, 0), QPointF(x, self.height()))
+            if (self._stack_role == "top" and is_loop) or (self._stack_role == "bottom" and not is_loop):
+                continue  # the other half draws this marker's handle
             painter.setBrush(color)
             painter.setPen(Qt.PenStyle.NoPen)
             handle_y = self.height() if is_loop else 0
@@ -1035,11 +1089,18 @@ class WaveformView(QWidget):
             # triangle handles), so a centered single line doesn't run
             # into them
             painter.setPen(QColor(palette["text_disabled"]))
-            painter.drawText(
-                self.rect(),
-                Qt.AlignmentFlag.AlignCenter,
-                _LOADING_TEXT if self._loading else _PLACEHOLDER_TEXT,
-            )
+            self._draw_hint(painter, _LOADING_TEXT if self._loading else self._header_hint)
+
+        if self._stack_role == "bottom" and (
+            self._envelope or (self._stack_partner is not None and self._stack_partner._envelope)
+        ):
+            # a faint hairline where the left channel ends and the right begins (not through the centered hint text)
+            line = QColor(palette["border"])
+            line.setAlpha(150)
+            pen = QPen(line)
+            pen.setWidthF(1.0)
+            painter.setPen(pen)
+            painter.drawLine(QPointF(0, 0.5), QPointF(self.width(), 0.5))
 
         self._draw_playhead(painter, palette, view_start, view_length)
 
