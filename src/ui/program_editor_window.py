@@ -616,6 +616,7 @@ class ProgramEditorWindow(QMainWindow):
             )
         )
         self._worker.keygroup_deleted.connect(self._on_keygroup_deleted)
+        self._worker.program_rebuilt.connect(self._on_program_rebuilt)
         self._worker.keygroup_delete_failed.connect(self._on_keygroup_delete_failed)
         self._worker.program_created.connect(self._on_program_created)
         self._worker.program_create_failed.connect(
@@ -3838,11 +3839,6 @@ class ProgramEditorWindow(QMainWindow):
     def _program_file_directory(self):
         return getattr(self, "_last_program_file_dir", "") or os.path.expanduser("~")
 
-    @staticmethod
-    def _safe_file_stem(name):
-        stem = "".join(c if c.isalnum() or c in "-_ #+." else "_" for c in name).strip()
-        return stem or "PROGRAM"
-
     def _save_program_to_file(self):
         item = self.program_list.currentItem()
         if item is None:
@@ -3859,7 +3855,7 @@ class ProgramEditorWindow(QMainWindow):
         extension = program_file.extension
         default_path = os.path.join(
             self._program_file_directory(),
-            self._safe_file_stem(program_file.name) + extension,
+            akai_program_file.safe_file_stem(program_file.name) + extension,
         )
         path, _filter = QFileDialog.getSaveFileName(
             self,
@@ -4010,18 +4006,30 @@ class ProgramEditorWindow(QMainWindow):
         self.status_bar.showMessage(f'Deleting program "{program_name}"…')
         self._worker.submit_delete_program(program_index)
 
+    @staticmethod
+    def _s1000_keygroup_delete_enabled():
+        # either way of deleting a keygroup on an S1000 (the DELK one is off
+        # for good; the rebuild one is behind its own flag)
+        return (
+            s1000_bridge_module.KEYGROUP_DELETE_SUPPORTED
+            or s1000_bridge_module.KEYGROUP_DELETE_BY_REBUILD
+        )
+
     def _keygroup_delete_unavailable_message(self):
         """Why Delete Keygroup can't be offered on this sampler (text for the user), or None if it can."""
         if not self._is_s1000:
             return None
-        if not s1000_bridge_module.KEYGROUP_DELETE_SUPPORTED:
+        if not self._s1000_keygroup_delete_enabled():
             return (
                 "Deleting keygroups on an Akai S1000 series sampler is not reliable at this time, so the delete "
                 "feature is disabled for now.\n\n"
                 "The S1000's delete command leaves the program's keygroup count wrong and the sampler refuses the "
                 "fix, which can corrupt the program. To remove a keygroup, delete it on the sampler's front panel."
             )
-        if self._worker.s1000_keygroup_delete_blocked:
+        if self._worker.s1000_keygroup_delete_blocked or (
+            s1000_bridge_module.KEYGROUP_DELETE_BY_REBUILD
+            and self._worker.program_import_blocked
+        ):
             return (
                 "Keygroup deleting has been switched off for this session after an earlier delete failed its safety "
                 "check. Check that program on the sampler, or restart the editor to try again."
@@ -4034,8 +4042,12 @@ class ProgramEditorWindow(QMainWindow):
         # S1000: can't empty a program (the flag / session block are explained by
         # _keygroup_delete_unavailable_message)
         return (
-            s1000_bridge_module.KEYGROUP_DELETE_SUPPORTED
+            self._s1000_keygroup_delete_enabled()
             and not self._worker.s1000_keygroup_delete_blocked
+            and not (
+                s1000_bridge_module.KEYGROUP_DELETE_BY_REBUILD
+                and self._worker.program_import_blocked
+            )
             and self.keygroup_list.count() > 1
         )
 
@@ -4058,10 +4070,7 @@ class ProgramEditorWindow(QMainWindow):
             f"Delete keygroup {keygroup_index + 1} ({range_text})?\n\n"
             "This cannot be undone."
             + (
-                "\n\nS1000 support for this is experimental: afterwards the "
-                "editor re-reads every program to check nothing else changed."
-                if self._is_s1000
-                else ""
+                self._s1000_delete_confirm_note() if self._is_s1000 else ""
             ),
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,
@@ -4070,6 +4079,29 @@ class ProgramEditorWindow(QMainWindow):
             return
         self.status_bar.showMessage(f"Deleting keygroup {keygroup_index + 1}…")
         self._worker.submit_delete_keygroup(program_index, keygroup_index)
+
+    @staticmethod
+    def _s1000_delete_confirm_note():
+        if s1000_bridge_module.KEYGROUP_DELETE_BY_REBUILD:
+            return (
+                "\n\nThe S1000 can't delete a keygroup itself, so this rebuilds "
+                "the program: a backup (.p1) is saved first, the program is "
+                "copied without this keygroup, and only when the copy checks out "
+                "is the original replaced. It takes about a minute, the program "
+                "ends up last in the list, and this is experimental."
+            )
+        return (
+            "\n\nS1000 support for this is experimental: afterwards the "
+            "editor re-reads every program to check nothing else changed."
+        )
+
+    def _on_program_rebuilt(self, old_index, keygroup_index, new_index):
+        self.status_bar.showMessage(
+            f"Keygroup {keygroup_index + 1} deleted (the program was rebuilt and is now last in the list)"
+        )
+        # select the rebuilt program once the reload lands
+        self._pending_program_selection_index = new_index
+        self._worker.submit_program_list()
 
     def _on_program_deleted(self, program_index):
         self.status_bar.showMessage("Program deleted")
@@ -4084,7 +4116,12 @@ class ProgramEditorWindow(QMainWindow):
         # a failed S1000 delete may have blocked further ones this session
         # (BridgeWorker._delete_keygroup_s1000), and the programs may no
         # longer match what's on screen - say so in full, and reload
-        if self._is_s1000 and self._worker.s1000_keygroup_delete_blocked:
+        # (a rebuild failure always needs the full message: it may name a
+        # leftover program and a backup file)
+        if self._is_s1000 and (
+            self._worker.s1000_keygroup_delete_blocked
+            or s1000_bridge_module.KEYGROUP_DELETE_BY_REBUILD
+        ):
             QMessageBox.warning(self, "Delete Keygroup", error)
             self._update_list_context_actions_enabled()
             self._worker.submit_program_list()
@@ -6499,7 +6536,11 @@ class ProgramEditorWindow(QMainWindow):
                 lambda _, f=field, z=zone_idx: self._on_zone_sample_changed(f, z)
             )
 
-        if self.program_list.count() > 0:
+        # only when nothing is selected yet (the first load). Every program-list
+        # reload is followed by a sample-list reload, and an unconditional reset
+        # here sent the selection back to row 0 after a duplicate/load/rebuild had
+        # just selected the new program
+        if self.program_list.count() > 0 and self.program_list.currentRow() < 0:
             self.program_list.setCurrentRow(
                 0
             )  # this is what triggers keygroup loading for the first program

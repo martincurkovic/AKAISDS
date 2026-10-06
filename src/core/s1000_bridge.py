@@ -83,6 +83,15 @@ _S1000_BLOCK_SIZES = {"program": 72, "keygroup": 149, "sample": 141}
 #: DELK"); the repair-and-verify code is kept and still tested.
 KEYGROUP_DELETE_SUPPORTED = False
 
+#: Delete Keygroup on an S1000 by REBUILDING the program instead of sending DELK
+#: (BridgeWorker._delete_keygroup_s1000_rebuild): export the program, drop the
+#: keygroup on the computer, load the rest as a new program under a temporary
+#: name, and only after that checks out DELP the original and rename the copy.
+#: OFF until a real S1000 has run the program-file load it is built on (see
+#: tests/akai_program_file_test_plan.md); when on it takes precedence over the
+#: DELK path above, which stays disabled.
+KEYGROUP_DELETE_BY_REBUILD = False
+
 #: first byte of each block type ("PRIDENT"/"KGIDENT"/"SHIDENT")
 _BLOCK_IDENT = {"program": 1, "keygroup": 2, "sample": 3}
 

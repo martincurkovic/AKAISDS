@@ -1,14 +1,17 @@
 import dataclasses
+import datetime
 import os
 import threading
 import time
 from collections import deque
+from pathlib import Path
 
 from core import akai_sysex, app_config, debug_log, sampler_models
 from core import midi_manager as midi_manager_module
 from s3k.bridge import DeviceError, S3kBridge, ThrottledOut
 from PySide6.QtCore import QThread, Signal
 import s3k.messages as m
+from s3k.messages import NAME_LENGTH
 import s3k.params as p
 from core import akai_program_file
 from core.s1000_bridge import S1000Bridge
@@ -441,6 +444,11 @@ _PROGRAM_LEVEL_FIELDS = [
 ]
 
 
+#: where a program's .p1/.p3 backup goes before anything destructive is done to it
+#: (the S1000 delete-keygroup rebuild). tests/conftest.py points it at a temp dir.
+PROGRAM_BACKUP_DIR = Path.home() / ".akaisds" / "program_backups"
+
+
 class _ImportSafetyError(DeviceError):
     """A program load stopped or failed its own check (message is user-facing)."""
 
@@ -557,6 +565,9 @@ class BridgeWorker(QThread):
     # duplicate flow uses
     program_exported = Signal(int, object)  # program_index, akai_program_file.ProgramFile
     program_export_failed = Signal(int, str)  # program_index, error
+    # an S1000 keygroup delete done by rebuilding the program: the program MOVED
+    # (the rebuilt copy is last in the list)
+    program_rebuilt = Signal(int, int, int)  # old program_index, deleted keygroup_index, new program_index
     program_imported = Signal(int, str)  # new_index, name
     program_import_failed = Signal(str, str)  # name, error
 
@@ -1027,12 +1038,20 @@ class BridgeWorker(QThread):
 
     def _handle_delete_keygroup(self, program_index, keygroup_index):
         try:
-            if self._s1000:
+            if self._s1000 and s1000_bridge_module.KEYGROUP_DELETE_BY_REBUILD:
+                new_index = self._delete_keygroup_s1000_rebuild(
+                    program_index, keygroup_index
+                )
+            elif self._s1000:
                 self._delete_keygroup_s1000(program_index, keygroup_index)
             else:
                 self._bridge.delete_keygroup(program_index, keygroup_index)
         except Exception as e:
             self.keygroup_delete_failed.emit(program_index, keygroup_index, str(e))
+            return
+        if self._s1000 and s1000_bridge_module.KEYGROUP_DELETE_BY_REBUILD:
+            self._programs_renumbered = False
+            self.program_rebuilt.emit(program_index, keygroup_index, new_index)
             return
         self.keygroup_deleted.emit(program_index, keygroup_index)
 
@@ -1422,29 +1441,32 @@ class BridgeWorker(QThread):
         self._programs_renumbered = False
         self.program_created.emit(source_index, new_index)
 
+    def _read_program_file(self, program_index):
+        # 192 is what an S2000/S3000 block is; an S1000 adapter clips the
+        # read to the real (150-byte) block, so the same call serves both
+        program = bytes(
+            self._bridge.get_header_bytes("program", program_index, 0, 192)
+        )
+        if len(program) <= akai_program_file._GROUPS_OFFSET:
+            raise DeviceError(f"program block is only {len(program)} bytes")
+        groups = program[akai_program_file._GROUPS_OFFSET]
+        keygroups = [
+            bytes(
+                self._bridge.get_header_bytes(
+                    "keygroup", program_index, 0, 192, selector=k
+                )
+            )
+            for k in range(groups)
+        ]
+        return akai_program_file.ProgramFile(
+            block_size=akai_program_file.validate_blocks(program, keygroups),
+            program=program,
+            keygroups=keygroups,
+        )
+
     def _handle_export_program(self, program_index):
         try:
-            # 192 is what an S2000/S3000 block is; an S1000 adapter clips the
-            # read to the real (150-byte) block, so the same call serves both
-            program = bytes(
-                self._bridge.get_header_bytes("program", program_index, 0, 192)
-            )
-            if len(program) <= akai_program_file._GROUPS_OFFSET:
-                raise DeviceError(f"program block is only {len(program)} bytes")
-            groups = program[akai_program_file._GROUPS_OFFSET]
-            keygroups = [
-                bytes(
-                    self._bridge.get_header_bytes(
-                        "keygroup", program_index, 0, 192, selector=k
-                    )
-                )
-                for k in range(groups)
-            ]
-            program_file = akai_program_file.ProgramFile(
-                block_size=akai_program_file.validate_blocks(program, keygroups),
-                program=program,
-                keygroups=keygroups,
-            )
+            program_file = self._read_program_file(program_index)
         except Exception as e:
             debug_log.get_logger().error(
                 "export program %d failed: %s", program_index, e, exc_info=True
@@ -1452,6 +1474,141 @@ class BridgeWorker(QThread):
             self.program_export_failed.emit(program_index, str(e))
             return
         self.program_exported.emit(program_index, program_file)
+
+    # -- S1000 Delete Keygroup by rebuilding the program ---------------------------
+    #
+    # DELK on a real S1000 only unlinks the keygroup and leaves GROUPS and the
+    # chain inconsistent, and the sampler refuses the GROUPS fix (see
+    # _delete_keygroup_s1000). So never DELK: copy the program without the
+    # keygroup through the program-file load, then swap. Every step leaves a
+    # COMPLETE program: the original is deleted only after the copy has loaded
+    # and passed the load's own checks, and the backup .p1 is written first.
+
+    @staticmethod
+    def _rebuild_temp_name(name, existing):
+        # distinct from every resident name (a clash would make the sampler delete
+        # that program) and from the original's; hyphen because AKAI_CHARSET has
+        # no underscore. Truncates the original to leave room for the suffix.
+        base = name.rstrip()[: NAME_LENGTH - 4]
+        for suffix in ("-TMP", "-TM2", "-TM3", "-TM4", "-TM5", "-TM6", "-TM7", "-TM8", "-TM9"):
+            candidate = base + suffix
+            if candidate not in existing:
+                return candidate
+        raise DeviceError("couldn't find an unused temporary program name")
+
+    def _save_program_backup(self, program_file, name):
+        PROGRAM_BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+        path = PROGRAM_BACKUP_DIR / (
+            f"{akai_program_file.safe_file_stem(name)}-{stamp}{program_file.extension}"
+        )
+        path.write_bytes(
+            akai_program_file.build_file(program_file.program, program_file.keygroups)
+        )
+        return path
+
+    def _delete_keygroup_s1000_rebuild(self, program_index, keygroup_index):
+        """Returns the rebuilt program's new index. Raises (with a user-facing message) otherwise."""
+        logger = debug_log.get_logger()
+        if self.program_import_blocked:
+            raise DeviceError(
+                "program loading is disabled for this session after an earlier "
+                "load failed its safety check - check the sampler's programs "
+                "directly, then restart the editor"
+            )
+        names = self._bridge.program_list()
+        original_name = names[program_index]
+        original = self._read_program_file(program_index)
+        groups = len(original.keygroups)
+        if not 0 <= keygroup_index < groups:
+            raise ValueError(
+                f"keygroup {keygroup_index} is out of range (program has {groups})"
+            )
+        if groups <= 1:
+            raise ValueError(
+                "can't delete a program's only keygroup (delete the program instead)"
+            )
+
+        backup = self._save_program_backup(original, original_name)  # no backup, no change
+        logger.info(
+            "S1000 delete keygroup %d of program %d %r by rebuild: backup %s",
+            keygroup_index, program_index, original_name, backup,
+        )
+        header = bytearray(original.program)
+        self._patch_field(header, "GROUPS", "program", groups - 1)
+        edited = akai_program_file.ProgramFile(
+            block_size=original.block_size,
+            program=bytes(header),
+            keygroups=[k for i, k in enumerate(original.keygroups) if i != keygroup_index],
+        )
+        temp_name = self._rebuild_temp_name(original_name, names)
+
+        # 1. the copy. Until it is verified the original is untouched.
+        try:
+            self._import_program(edited, temp_name, logger)
+        except Exception as e:
+            if isinstance(e, _ImportSafetyError):
+                self.program_import_blocked = True
+            raise DeviceError(
+                f"{e}\n\nThe original program \"{original_name}\" was NOT changed "
+                f"(a backup is in {backup}). A partly loaded copy named "
+                f'"{temp_name}" may be on the sampler - delete it if so.'
+            ) from e
+        copy_index = self._imported_index
+
+        # 2. delete the original, then check the others came through
+        stage = f'"{original_name}" was deleted but'
+        try:
+            names_now = self._bridge.program_list()
+            before = self._s1000_snapshot(copy_index)
+            self._bridge.delete_program(program_index)
+            expected = [n for i, n in enumerate(names_now) if i != program_index]
+            if self._bridge.program_list() != expected:
+                raise _ImportSafetyError(
+                    "the program list after the delete is not what was expected"
+                )
+            copy_index -= 1  # the original was before it in the list
+            after = self._s1000_snapshot(copy_index)
+            problems = []
+            for old_index, was in before.items():
+                if old_index == program_index:
+                    continue
+                now = after.get(old_index - (1 if old_index > program_index else 0))
+                if now is None:
+                    continue
+                if (
+                    now["groups"] != was["groups"]
+                    or now["program"] != was["program"]
+                    or now["keygroups"] != was["keygroups"]
+                ):
+                    problems.append(f"program {old_index} changed")
+                elif now["pointers"] != was["pointers"]:
+                    logger.info(
+                        "S1000 rebuild: program %d's addresses moved after DELP "
+                        "(content intact)", old_index,
+                    )
+            if problems:
+                raise _ImportSafetyError("; ".join(problems))
+
+            # 3. the copy takes the original's name (the original is gone, so
+            # no clash for the sampler to act on)
+            self._bridge.set_parameter(
+                p.lookup("PRNAME", "program"), copy_index, original_name
+            )
+            if self._bridge.program_list()[copy_index] != original_name:
+                raise _ImportSafetyError("the rename did not take")
+        except Exception as e:
+            self.program_import_blocked = True
+            raise DeviceError(
+                f"{stage} the check afterwards failed ({e}). The program without "
+                f'that keygroup is on the sampler as "{temp_name}"; a backup of '
+                f"the original is in {backup}. Check the sampler's programs; loading "
+                "is disabled for this session."
+            ) from e
+        logger.info(
+            "S1000 delete keygroup by rebuild done: %r is now program %d", original_name, copy_index
+        )
+        return copy_index
 
     # -- import a program file as a NEW program --------------------------------
     #

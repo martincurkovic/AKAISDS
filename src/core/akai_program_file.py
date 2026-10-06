@@ -183,3 +183,9 @@ def zone_sample_names(program_file):
             if name and name not in names:
                 names.append(name)
     return names
+
+
+def safe_file_stem(name):
+    """A file name stem from a program name (Akai names allow characters some file systems don't)."""
+    stem = "".join(c if c.isalnum() or c in "-_ #+." else "_" for c in name).strip()
+    return stem or "PROGRAM"
