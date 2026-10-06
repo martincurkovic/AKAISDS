@@ -416,7 +416,7 @@ behaviours were hardware-verified; `dxzl/akai-s950` has NO licence, so don't cop
   looks like the S950's own request-sample-dump (`F0 7E 00 nn 00 F7`). Generic SDS mode against
   an S950 gives nonsense, not a clean failure.
 
-## Yamaha A4000/A5000 editing (IN PROGRESS - parameter editing works; no create/delete/link)
+## Yamaha A4000/A5000 editing (IN PROGRESS - parameter editing, native wave dumps and Dashboard list/receive work; no assign/create/delete/restore yet)
 
 Goal: a program/sample editor for the user's Yamaha A4000 (sending samples works through plain SDS, which the Yamaha
 Sampler Type keeps; listing/receiving samples and the editor use the unit's own protocol). Plan, handoff and every measured fact: **`dev_docs/a4000-editor-roadmap.md`** (read it before
@@ -486,8 +486,9 @@ samples | cards, and a Samples tab; every writable control edits the unit) all e
   (an "edited" flag); sample controls are mirrored into the first 24 bytes of the sample block; EQ writes update derived
   coefficient bytes; `sampling_frequency`/`wave_length`/`wave_end_address` writes are accepted and ignored (on a built-in
   sample); wave/loop addresses are coupled (writing one moves others). Details: `dev_docs/a4000-editor-roadmap.md`.
-- Same house rules as the Akai editors apply when the rest is built: one persistent worker thread (stateful
-  select-then-request), the shared MIDI transport, a `.syx` backup before any write, an experimental warning.
+- House rules the Yamaha work follows (same intent as the Akai editors, different mechanism): ONE operation on the wire at a time
+  because a select is stateful - done by `YamahaSession`'s FIFO queue on the GUI thread, NOT a worker thread (don't add one); the
+  shared MIDI transport; a `.syx` backup before any write; an experimental warning.
 
 - **Writes (2026-10-06)**: `YamahaSession.write_parameter(row, value, object_name, cb, slot=)` - ONE parameter per op, guarded:
   (1) the first write to an object per session dumps it and saves a `.syx` backup (`backup_dir`, default
@@ -508,6 +509,22 @@ samples | cards, and a Samples tab; every writable control edits the unit) all e
 - The controller drops SDS header/data packets that were already on the wire for 3 s after a user cancel of an SDS receive
   (`_RECEIVE_CANCEL_GRACE_S`) instead of reporting "unrecognised SysEx" over the "cancelled" status. A stereo sample (non-empty
   right wave name at payload @80, `yp.is_stereo`) is labelled "stereo" in the Samples tab.
+
+- **HANDOFF (end of session 2, 2026-10-06):** all of the A4000 work is committed on `s1000-support` (the user commits as the session
+  goes); the suite had 2006 passing tests. Read `dev_docs/a4000-editor-roadmap.md` "HANDOFF" and "Next steps" before continuing:
+  restore-from-backup, then assigning samples to programs (no object-link builder exists in the codec yet), then editable loop/wave
+  markers, then the missing tables (effects/controllers/system/banks), then native audio loading. The user's look-and-feel decisions
+  are listed there too.
+- **Testing the Yamaha code - gotchas:** replies that must arrive over time (cancel mid-stream, progressive fill) use
+  `rig.midi.paced = True` on the shared `_Midi` fake (tests/test_s950_transfers.py) - NEVER swap a test object's `__class__` (an
+  intermittent PySide segfault; the one older `Twice` test still does and works, don't copy it). `dispose(window)` in
+  tests/test_yamaha_program_editor.py calls `samples_tab.disconnect_controller()`; without it a pending duration-scan timer touches
+  deleted row widgets. The `window`/`win` fixtures shorten `_REVEAL_INITIAL_INTERVAL_S`/`_REVEAL_FINISH_S` (real chunks are ~1.5 s
+  apart, the fake's are instant) and an autouse fixture patches the one-time write warning so no test opens a dialog or writes the
+  real config. An unshown window has no layout geometry: `resize()` then `layout().activate()` before measuring positions. A pixel
+  test of a custom-painted widget must call `set_view_height` (WaveformView is fixed at 180 px; `resize` alone does nothing).
+  Never let a bulk string replace touch more than one place in `yamaha_session.py` (one did, and silently cleared `_backups` in
+  `cancel()` - there is a regression test now).
 
 ## Theme preference (Settings > Settings tab > Appearance)
 
