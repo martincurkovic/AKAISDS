@@ -39,8 +39,21 @@ can address them), and `pulse 3` carries two stray right-channel mirror bytes (p
 Bulk Protect is OFF (it was on once and silently broke edits and SDS sends). Backups of every object written are in
 `~/.akaisds/a4000_backups/` (plain `.syx`; a restore also saves a snapshot of what it replaces).
 
-**Do next, in this order** (full notes under "Next steps"): (1) editable loop/wave markers via a coupling-aware writer; (2) the missing
-parameter tables (effects, controllers, system, banks); (3) native audio loading; (4) a stereo sample to test assigning/restoring one.
+**Session 4 (2026-10-06, UNCOMMITTED - the user commits): editable loop/wave markers + click-to-preview are BUILT and proven on the real
+unit** (`tools/a4000_marker_check.py`, user sample `MIDI 00102`: every marker alone and several at once, loop and no-loop mode, the loop
+pushed by the end, the start above the loop, byte-level restore; the preview played mono, held loop stopped by a second click). New:
+`src/core/yamaha_markers.py` (+ `tests/test_yamaha_markers.py`), `tools/a4000_marker_probe.py`, `tools/a4000_marker_check.py`,
+`tests/test_yamaha_markers_ui.py`; edits to `yamaha_samples_tab.py`, `waveform_view.py` (`apply_markers`), `audio_preview.py` (optional
+`right_samples`), `demo_a4000.py` (`_edit_geometry`), `yamaha_params.py` (wave length/end no longer `write_ignored`), `yamaha_restore.py`
+(address rows in planner order, lengths never written). Full measured rules: the docstring of `yamaha_markers.py` and AGENTS.md.
+**Still unproven: STEREO markers/preview** (linked views + two-channel playback are implemented and fake-tested, but no stereo sample is on
+the unit - record one: RECORD > SETUP: input StOut, type New, Stereo; TRIGGER Manual/Manual; RECORD > GO > START > FINISH - then run
+`QT_QPA_PLATFORM=offscreen uv run python tools/a4000_marker_check.py "<name>" --preview`, which also prints whether both channel views
+agree) and **whether the unit moves a stereo sample's right-channel address twins itself**.
+
+**Do next, in this order** (full notes under "Next steps"): (1) the missing
+parameter tables (effects, controllers, system, banks); (2) native audio loading; (3) a stereo sample to test assigning/restoring one AND
+the stereo markers/preview (above).
 
 **What the user likes / has decided (don't undo without asking):** aligned side-by-side card pairs, each pinned to equal height - they
 rejected independent columns and collapsible cards after trying both; the stereo waveform as ONE display (two half-height views, no
@@ -493,13 +506,7 @@ Already done (do not redo): writes (incl. Easy Edit), the waveform Cancel button
 stereo loading, Dashboard list + receive, sample list durations, envelope graphs, layout/styling pass, **restore from backup** and
 **assigning/removing samples** (both described in the sections below).
 
-1. **Editable loop/wave markers** (the Samples tab shows them locked). They map to `wave_start_address`, `loop_start_address`,
-   `loop_length`, `loop_end_address` (+ `wave_length`/`wave_end_address`, which the unit ignores on built-ins - re-test on a USER
-   sample), which are COUPLED (writing one moves others; the R channel has mirror bytes with no P-number, so an experiment can leave
-   stray bytes until a power cycle - the restore job's geometry order and extra passes are the model, and `tools/a4000_restore_check.py`
-   has a COUPLED round trip). Needs a geometry-aware writer: decide the order of writes, read back everything, verify against a full dump;
-   measure on a throwaway USER sample (send one with `tools/a4000_sds_numbering.py send`; factory samples ignore some writes) before wiring
-   the UI. The `WaveformView` marker machinery from the S3000 editor can be reused (`set_markers_locked(False)` + `marker_committed`).
+1. ~~Editable loop/wave markers~~ - DONE in session 4 (see the HANDOFF); only the stereo check remains.
 2. **Missing parameter tables:** effect blocks (P2=21, 40 bytes x3 at bulk 96; read owner's/service manual page 39 first), the four
    controllers (P2=22, 4 bytes x4 at bulk 216), the MIDI-channel bitmaps (P2=1, 2), system parameters (single reads/writes only - no bulk
    layout is documented), sample banks, stereo R wave/loop addresses. Same method as before: add rows, `tools/a4000_verify_params.py`
