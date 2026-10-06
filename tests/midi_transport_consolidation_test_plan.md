@@ -61,16 +61,15 @@ default.
       shared transport is active and is specifically what Test 7 covers -
       see that test's own description for what it's checking.
 - [ ] Run the automated suite once first as a sanity check before touching
-      hardware: `uv run pytest tests/ -q` should show all tests passing
-      (874 at the time of writing). If this fails, stop - something's
-      wrong before hardware is even involved.
+      hardware: `uv run pytest tests/ -q` should show all tests passing.
+      If this fails, stop - something's wrong before hardware is even
+      involved.
 
 ## How to launch with the flag on
 
 ```sh
 export AKAISDS_SHARED_MIDI_TRANSPORT=1
-cd /home/martin/Development/AKAISDS
-uv run python src/main.py
+uv run python src/main.py   # from the repo root
 ```
 
 Then in the app: **Settings → Settings tab** (or the dashboard's own MIDI
