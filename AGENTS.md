@@ -443,6 +443,21 @@ samples | cards, and a Samples tab; every writable control edits the unit) all e
   ones; measured on the unit: 11 chunks -> 451 growth steps, biggest jump 30 frames; display only, the load finishes once the
   queue has drained) - and has a
   Cancel button. The loaded audio is checked against the sample's own `wave_length` and refused if it doesn't match.
+- **Samples tab list + envelope graphs**: rows use the shared `build_sample_list_row_widget` (name left, grey `0.45s` duration right,
+  taller than a plain row; the item has NO text of its own, the name is in `Qt.UserRole` - use `tab.sample_names()`). Durations come
+  from each sample's SP dump, read by a background scan that only issues a request while `session.idle` (so it never gets in front
+  of a user action) and skips what the host already cached (`note_cached`). The three envelope cards each have a shape-only graph:
+  amplitude reuses the S3000's `ADSREnvelopeGraph` through `envelope_graph.yamaha_adsr_values` (the A4000's attack/decay/release are
+  RATES - higher is FASTER, owner's manual - so they become times; factory sample = instant stages), filter and pitch use the new
+  bipolar `LevelEnvelopeGraph` (init/attack/sustain/release levels -127..+127). No calibrated timing, like the originals.
+- **Layout/styling pass** (Yamaha pages): cards sit in ALIGNED side-by-side pairs, each pair pinned to equal heights
+  (`equalize_card_heights`), so left and right line up top and bottom - the user rejected independent columns ("un-aligned") and
+  collapsible cards (which can't be pinned equal) after trying both. Pairs are chosen so a row's cards are about the same height
+  (Programs: Program/Portamento, LFO/Audio Input, Step Wave full width; Samples: Pitch/Key, Level/Loop, Filter/Filter Envelope,
+  Amplitude/Pitch Envelope, LFO/Controllers, Output/EQ). `Knob.setBipolar` (opt-in; `FieldPanel` turns it on for any range
+  spanning zero) grows the arc from zero with a tick there; `=Sample` combos/spinboxes get an `inherited` property that a QSS rule
+  dims; read-only text rows (`Field(muted=True)`) are grey; every labelled row uses `yamaha_fields.LABEL_WIDTH` so values line up;
+  hovering a knob's NAME shows the same tooltip as the knob.
 - **The Transfer Dashboard lists and receives natively too** (`controller/yamaha_transfers.py`, built lazily by `SamplerController`):
   Refresh = the object list's samples (`sample_list_updated`, index == number == SDS position - measured to stay true after a
   delete); Receive = SP dump + the wave dump(s) -> a mono or STEREO WAV at the sample's rate. Delete/rename/info are refused (no
