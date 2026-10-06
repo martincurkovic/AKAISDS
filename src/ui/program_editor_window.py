@@ -43,12 +43,14 @@ from PySide6.QtWidgets import (
     QStackedWidget,
     QDoubleSpinBox,
     QButtonGroup,
+    QFileDialog,
     QSpinBox,
     QStatusBar,
     QTabWidget,
     QProgressBar,
 )
 from s3k.messages import AKAI_CHARSET, NAME_LENGTH
+from core import akai_program_file
 from ui.diagnostics_ui import add_open_log_folder_action
 from ui.knob import Knob
 from ui.note_spinbox import NoteSpinBox
@@ -621,6 +623,10 @@ class ProgramEditorWindow(QMainWindow):
                 f"Couldn't duplicate program: {e}"
             )
         )
+        self._worker.program_exported.connect(self._on_program_exported)
+        self._worker.program_export_failed.connect(self._on_program_export_failed)
+        self._worker.program_imported.connect(self._on_program_imported)
+        self._worker.program_import_failed.connect(self._on_program_import_failed)
         self._worker.keygroup_created.connect(self._on_keygroup_created)
         self._worker.keygroup_create_failed.connect(
             lambda _p, e: self.status_bar.showMessage(
@@ -748,7 +754,38 @@ class ProgramEditorWindow(QMainWindow):
 
         self.keygroup_range_bar = KeygroupRangeBar()
 
-        programs_container = build_list_column("Programs", self.program_list)
+        # Save/Load a whole program as an Akai .p1/.p3 file (samples are NOT
+        # included - zones refer to them by name). Both are also in the
+        # program list's context menu.
+        self._save_program_action = QAction("Save Program to File...", self.program_list)
+        self._save_program_action.triggered.connect(self._save_program_to_file)
+        self._save_program_action.setEnabled(False)
+        self.program_list.addAction(self._save_program_action)
+        self._load_program_action = QAction("Load Program from File...", self.program_list)
+        self._load_program_action.setToolTip(tt.LOAD_PROGRAM_DEMO_MODE)
+        self._load_program_action.triggered.connect(self._load_program_from_file)
+        self._load_program_action.setEnabled(False)
+        self.program_list.addAction(self._load_program_action)
+
+        self.save_program_button = QPushButton("Save...")
+        self.save_program_button.setToolTip(tt.SAVE_PROGRAM_BUTTON)
+        self.save_program_button.clicked.connect(self._save_program_action.trigger)
+        self.save_program_button.setEnabled(False)
+        self.load_program_button = QPushButton("Load...")
+        self.load_program_button.setToolTip(tt.LOAD_PROGRAM_BUTTON)
+        self.load_program_button.clicked.connect(self._load_program_action.trigger)
+        self.load_program_button.setEnabled(False)
+        program_file_row = QHBoxLayout()
+        program_file_row.setContentsMargins(0, 0, 0, 0)
+        program_file_row.setSpacing(6)
+        program_file_row.addWidget(self.save_program_button)
+        program_file_row.addWidget(self.load_program_button)
+        program_file_widget = QWidget()
+        program_file_widget.setLayout(program_file_row)
+
+        programs_container = build_list_column(
+            "Programs", self.program_list, program_file_widget
+        )
         keygroups_container = build_list_column(
             "Keygroups", self.keygroup_range_bar, self.keygroup_list
         )
@@ -3614,6 +3651,12 @@ class ProgramEditorWindow(QMainWindow):
         has_program = self.program_list.currentRow() >= 0
         self._rename_program_action.setEnabled(has_program)
         self._duplicate_program_action.setEnabled(has_program and not demo_mode)
+        # loading needs no selection (it makes a new program) but, like
+        # duplicating, has no demo-mode equivalent; saving only reads
+        self._save_program_action.setEnabled(has_program)
+        self._load_program_action.setEnabled(not demo_mode)
+        self.save_program_button.setEnabled(has_program)
+        self.load_program_button.setEnabled(not demo_mode)
         self._delete_program_action.setEnabled(
             has_program and self.program_list.count() > 1
         )
@@ -3788,6 +3831,150 @@ class ProgramEditorWindow(QMainWindow):
         # full reload, not a targeted insert - same reasoning
         # _on_program_deleted's own comment gives for doing the same on
         # delete
+        self._worker.submit_program_list()
+
+    # -- save / load a program as an Akai .p1/.p3 file --------------------------
+
+    def _program_file_directory(self):
+        return getattr(self, "_last_program_file_dir", "") or os.path.expanduser("~")
+
+    @staticmethod
+    def _safe_file_stem(name):
+        stem = "".join(c if c.isalnum() or c in "-_ #+." else "_" for c in name).strip()
+        return stem or "PROGRAM"
+
+    def _save_program_to_file(self):
+        item = self.program_list.currentItem()
+        if item is None:
+            return
+        index = self.program_list.currentRow()
+        self._pending_program_export = index
+        self.status_bar.showMessage(f'Reading program "{item.text()}" from the sampler…')
+        self._worker.submit_export_program(index)
+
+    def _on_program_exported(self, program_index, program_file):
+        if getattr(self, "_pending_program_export", None) != program_index:
+            return
+        self._pending_program_export = None
+        extension = program_file.extension
+        default_path = os.path.join(
+            self._program_file_directory(),
+            self._safe_file_stem(program_file.name) + extension,
+        )
+        path, _filter = QFileDialog.getSaveFileName(
+            self,
+            "Save Program",
+            default_path,
+            f"Akai program (*{extension});;All files (*)",
+        )
+        if not path:
+            self.status_bar.showMessage("Save cancelled")
+            return
+        try:
+            data = akai_program_file.build_file(
+                program_file.program, program_file.keygroups
+            )
+            with open(path, "wb") as handle:
+                handle.write(data)
+        except (OSError, akai_program_file.ProgramFileError) as e:
+            QMessageBox.warning(self, "Save Program", f"Couldn't save the program:\n\n{e}")
+            self.status_bar.showMessage(f"Couldn't save program: {e}")
+            return
+        self._last_program_file_dir = os.path.dirname(path)
+        self.status_bar.showMessage(
+            f'Saved "{program_file.name}" ({len(program_file.keygroups)} keygroups) '
+            f"to {os.path.basename(path)}"
+        )
+
+    def _on_program_export_failed(self, program_index, error):
+        if getattr(self, "_pending_program_export", None) != program_index:
+            return
+        self._pending_program_export = None
+        self.status_bar.showMessage(f"Couldn't read program: {error}")
+        QMessageBox.warning(self, "Save Program", f"Couldn't read the program:\n\n{error}")
+
+    def _load_program_from_file(self):
+        path, _filter = QFileDialog.getOpenFileName(
+            self,
+            "Load Program",
+            self._program_file_directory(),
+            "Akai programs (*.p1 *.p3);;All files (*)",
+        )
+        if not path:
+            return
+        self._last_program_file_dir = os.path.dirname(path)
+        try:
+            with open(path, "rb") as handle:
+                program_file = akai_program_file.parse_file(handle.read())
+        except (OSError, akai_program_file.ProgramFileError) as e:
+            QMessageBox.warning(self, "Load Program", f"Couldn't read this file:\n\n{e}")
+            return
+        expected = "s1000" if self._is_s1000 else "s2000_s3000"
+        if program_file.family != expected:
+            mine = "S1000" if self._is_s1000 else "S2000/S3000"
+            theirs = "S1000 (.p1)" if program_file.family == "s1000" else "S2000/S3000 (.p3)"
+            QMessageBox.warning(
+                self,
+                "Load Program",
+                f"This is an {theirs} program, but the sampler type is set to "
+                f"{mine}. The two use different block sizes, so it can't be "
+                "loaded as it is.",
+            )
+            return
+
+        existing = [
+            self.program_list.item(i).text() for i in range(self.program_list.count())
+        ]
+        name = program_file.name or "PROGRAM"
+        while name in existing:
+            # same reasoning as _confirm_duplicate_program: a name matching a
+            # resident program would delete it first (PDATA's own spec)
+            name = self._prompt_akai_name(
+                "Load Program",
+                f'A program named "{name}" is already on the sampler (loading '
+                "one with the same name would delete it).\n\nNew program name:",
+                _duplicate_default_name(name),
+            )
+            if name is None:
+                return
+
+        samples = akai_program_file.zone_sample_names(program_file)
+        missing = [n for n in samples if n not in self._sample_list]
+        text = (
+            f'Load "{name}" ({len(program_file.keygroups)} keygroups) onto the '
+            "sampler as a new program?"
+        )
+        if samples:
+            text += (
+                "\n\nSamples are not part of a program file; its zones look "
+                "them up by name."
+            )
+            if missing:
+                text += "\nNot on the sampler right now:\n  " + "\n  ".join(missing)
+            else:
+                text += "\nAll of them are on the sampler."
+        answer = QMessageBox.question(
+            self,
+            "Load Program",
+            text,
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        self.status_bar.showMessage(f'Loading program "{name}"…')
+        self._worker.submit_import_program(program_file, name)
+
+    def _on_program_imported(self, new_index, name):
+        self.status_bar.showMessage(f'Loaded program "{name}"')
+        # same select-after-reload path a duplicate uses
+        self._pending_program_selection_index = new_index
+        self._worker.submit_program_list()
+
+    def _on_program_import_failed(self, name, error):
+        self.status_bar.showMessage(f'Couldn\'t load program "{name}": {error}')
+        QMessageBox.warning(self, "Load Program", f'Couldn\'t load "{name}":\n\n{error}')
+        # whatever got through is on the sampler - show it
         self._worker.submit_program_list()
 
     def _on_keygroup_created(self, program_index, new_keygroup_index):

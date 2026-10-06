@@ -10,6 +10,7 @@ from s3k.bridge import DeviceError, S3kBridge, ThrottledOut
 from PySide6.QtCore import QThread, Signal
 import s3k.messages as m
 import s3k.params as p
+from core import akai_program_file
 from core.s1000_bridge import S1000Bridge
 import core.s1000_bridge as s1000_bridge_module
 
@@ -440,6 +441,10 @@ _PROGRAM_LEVEL_FIELDS = [
 ]
 
 
+class _ImportSafetyError(DeviceError):
+    """A program load stopped or failed its own check (message is user-facing)."""
+
+
 class BridgeWorker(QThread):
     # S3kBridge documents itself as unsafe for concurrent calls, and a real
     # crash (Qt aborting via QThread::~QThread() when a stale loader's
@@ -545,6 +550,15 @@ class BridgeWorker(QThread):
     # just that the frames were sent.
     program_created = Signal(int, int)  # source_index, new_index
     program_create_failed = Signal(int, str)  # source_index, error
+
+    # whole-program save/load (.p1/.p3 files, core/akai_program_file.py): the
+    # export reads every raw block of one program, the import writes a parsed
+    # file back as a NEW program with the same PDATA/KDATA sequence the
+    # duplicate flow uses
+    program_exported = Signal(int, object)  # program_index, akai_program_file.ProgramFile
+    program_export_failed = Signal(int, str)  # program_index, error
+    program_imported = Signal(int, str)  # new_index, name
+    program_import_failed = Signal(str, str)  # name, error
 
     keygroup_created = Signal(int, int)  # program_index, new_keygroup_index
     keygroup_create_failed = Signal(int, str)  # program_index, error
@@ -669,6 +683,12 @@ class BridgeWorker(QThread):
 
     def submit_create_program(self, source_index, new_name, first_keygroup_only=False):
         self._submit(("create_program", source_index, new_name, first_keygroup_only))
+
+    def submit_export_program(self, program_index):
+        self._submit(("export_program", program_index))
+
+    def submit_import_program(self, program_file, new_name):
+        self._submit(("import_program", program_file, new_name))
 
     def submit_create_keygroup(self, program_index, source_keygroup_index):
         self._submit(("create_keygroup", program_index, source_keygroup_index))
@@ -1401,6 +1421,284 @@ class BridgeWorker(QThread):
         # guaranteed
         self._programs_renumbered = False
         self.program_created.emit(source_index, new_index)
+
+    def _handle_export_program(self, program_index):
+        try:
+            # 192 is what an S2000/S3000 block is; an S1000 adapter clips the
+            # read to the real (150-byte) block, so the same call serves both
+            program = bytes(
+                self._bridge.get_header_bytes("program", program_index, 0, 192)
+            )
+            if len(program) <= akai_program_file._GROUPS_OFFSET:
+                raise DeviceError(f"program block is only {len(program)} bytes")
+            groups = program[akai_program_file._GROUPS_OFFSET]
+            keygroups = [
+                bytes(
+                    self._bridge.get_header_bytes(
+                        "keygroup", program_index, 0, 192, selector=k
+                    )
+                )
+                for k in range(groups)
+            ]
+            program_file = akai_program_file.ProgramFile(
+                block_size=akai_program_file.validate_blocks(program, keygroups),
+                program=program,
+                keygroups=keygroups,
+            )
+        except Exception as e:
+            debug_log.get_logger().error(
+                "export program %d failed: %s", program_index, e, exc_info=True
+            )
+            self.program_export_failed.emit(program_index, str(e))
+            return
+        self.program_exported.emit(program_index, program_file)
+
+    # -- import a program file as a NEW program --------------------------------
+    #
+    # Bytes 1-2 of a program block (FIRSTKG) and of a keygroup block (NXTKG) are
+    # ADDRESSES in the sampler's memory that the sampler assigns and links
+    # itself (the spec calls them "internal use"). A program file carries
+    # file-relative stand-ins (150, 300, ...) which on a sampler are addresses
+    # of OTHER programs' blocks - and a wrong pointer is exactly what scrambled
+    # programs on a real S1000 after DELK (see _delete_keygroup_s1000). Whether a
+    # sampler honours the pointer bytes of an incoming PDATA/KDATA is not known
+    # (measured only: an appended keygroup keeps the NXTKG it was sent). So
+    # nothing here ever sends a pointer value the sampler did not itself hand us:
+    # every block goes out with the pointer bytes that slot ALREADY holds, read
+    # back from the sampler, and the load stops - before writing any keygroup
+    # content - if the sampler's own addresses for the new program alias another
+    # program's. Everything is then re-read and compared with a before snapshot.
+
+    #: bytes the sampler is free to compute itself, so a content comparison skips
+    #: them: program KGRP1@ (1-2) and TPNUM (43); keygroup NXTKG@ (1-2) and, per
+    #: zone, LVXF/HVXF (crossfade factors) and SBADD (the calculated sample
+    #: header address) at 54-57 (+24 per zone)
+    _IMPORT_PROGRAM_INTERNAL = frozenset({1, 2, 43})
+    _IMPORT_KEYGROUP_INTERNAL = frozenset(
+        {1, 2} | {54 + 24 * z + d for z in range(4) for d in range(4)}
+    )
+
+    #: set after a load failed its safety check; further loads are refused for
+    #: the session (like s1000_keygroup_delete_blocked) so a tester can't pile
+    #: a second load on top of a damaged state
+    program_import_blocked = False
+
+    @staticmethod
+    def _address(pointer_bytes):
+        return pointer_bytes[0] | (pointer_bytes[1] << 8)
+
+    def _read_block_fresh(self, region, index, selector=0):
+        invalidate = getattr(self._bridge, "invalidate", None)
+        if invalidate is not None:
+            invalidate()
+        return bytes(
+            self._bridge.get_header_bytes(region, index, 0, 192, selector=selector)
+        )
+
+    @staticmethod
+    def _with_pointer(block, pointer_bytes):
+        out = bytearray(block)
+        out[1:3] = pointer_bytes
+        return bytes(out)
+
+    @staticmethod
+    def _differences(expected, actual, internal):
+        return [
+            i
+            for i in range(max(len(expected), len(actual)))
+            if i not in internal
+            and (i >= len(expected) or i >= len(actual) or expected[i] != actual[i])
+        ]
+
+    def _handle_import_program(self, program_file, new_name):
+        logger = debug_log.get_logger()
+        name = new_name or program_file.name
+        try:
+            self._import_program(program_file, name, logger)
+        except Exception as e:
+            logger.error("import program %r failed: %s", name, e, exc_info=True)
+            if isinstance(e, _ImportSafetyError):
+                self.program_import_blocked = True
+                message = str(e)
+            else:
+                message = (
+                    f"{e} - a partly loaded program may now be on the sampler; "
+                    "refresh and delete it if so"
+                )
+            self.program_import_failed.emit(name, message)
+            return
+        self._programs_renumbered = False
+        self.program_imported.emit(self._imported_index, name)
+
+    def _import_program(self, program_file, name, logger):
+        if self.program_import_blocked:
+            raise DeviceError(
+                "loading programs is disabled for this session after an earlier "
+                "load failed its safety check - check the sampler's programs "
+                "directly (and send the log), then restart the editor"
+            )
+        if not hasattr(self._bridge, "send_and_receive"):
+            raise RuntimeError(
+                "loading a program needs a real hardware connection "
+                "(not available in demo mode)"
+            )
+        existing = self._bridge.program_list()
+        if name in existing:
+            # PDATA deletes a resident program with the same name first
+            raise DeviceError(f'a program named "{name}" is already on the sampler')
+
+        # nothing has been written yet: if the sampler can't be read, refuse
+        before = self._s1000_snapshot(0)
+        taken = {
+            self._address(pointer)
+            for snap in before.values()
+            for pointer in snap["pointers"][: snap["groups"]]
+        }
+        new_index = len(existing)
+        keygroups = program_file.keygroups
+        block_size = program_file.block_size
+
+        def header_for(groups, first_pointer):
+            header = bytearray(program_file.program)
+            self._patch_field(header, "PRNAME", "program", name)
+            self._patch_field(header, "GROUPS", "program", groups)
+            if first_pointer is not None:
+                header[1:3] = first_pointer
+            return bytes(header)
+
+        # 1. create the program (GROUPS=1, as the measured duplicate flow does).
+        # Its pointer bytes are the file's - the one write where there is
+        # nothing of the sampler's to carry yet - so check what came of them
+        # before any keygroup data follows.
+        self._send_and_check(
+            akai_sysex.build_pdata_request(new_index, header_for(1, None)),
+            f"creating program {new_index}",
+        )
+        created = self._read_block_fresh("program", new_index)
+        if len(created) != block_size:
+            raise _ImportSafetyError(
+                f"the sampler's program block is {len(created)} bytes, the file's "
+                f"is {block_size} - nothing was loaded, but an empty program "
+                f'"{name}" may remain; delete it'
+            )
+        first_pointer = created[1:3]
+        logger.info(
+            "program load: new program %d FIRSTKG sent %s, sampler holds %s",
+            new_index, program_file.program[1:3].hex(), first_pointer.hex(),
+        )
+        own = {self._address(first_pointer)}
+        if self._address(first_pointer) in taken:
+            raise _ImportSafetyError(
+                f"the sampler gave the new program the first-keygroup address "
+                f"{self._address(first_pointer)}, which another program already "
+                "uses. Loading stopped BEFORE any keygroup was written. An empty "
+                f'program "{name}" may remain - do not edit it; check the other '
+                "programs and delete it."
+            )
+
+        # 2. keygroup 0 replaces the dummy the sampler made: keep ITS pointer
+        slot0 = self._read_block_fresh("keygroup", new_index, selector=0)
+        self._send_and_check(
+            akai_sysex.build_kdata_request(
+                new_index, 0, self._with_pointer(keygroups[0], slot0[1:3])
+            ),
+            f"creating keygroup 0 of program {new_index}",
+        )
+
+        # 3. each further keygroup is appended; its NXTKG is the terminator the
+        # previous slot holds (a sampler-made value, not ours), and the previous
+        # keygroup's own pointer is re-read afterwards: that is the address the
+        # sampler gave the new block - it must not collide with anything
+        for index in range(1, len(keygroups)):
+            previous = self._read_block_fresh("keygroup", new_index, selector=index - 1)
+            self._send_and_check(
+                akai_sysex.build_kdata_request(
+                    new_index, index, self._with_pointer(keygroups[index], previous[1:3])
+                ),
+                f"creating keygroup {index} of program {new_index}",
+            )
+            linked = self._read_block_fresh("keygroup", new_index, selector=index - 1)
+            address = self._address(linked[1:3])
+            logger.info(
+                "program load: keygroup %d placed at %d (previous terminator %d)",
+                index, address, self._address(previous[1:3]),
+            )
+            if address in taken or address in own:
+                raise _ImportSafetyError(
+                    f"keygroup {index + 1} was linked at address {address}, which "
+                    f"{'this program' if address in own else 'another program'} "
+                    "already uses. Loading stopped; the new program is incomplete "
+                    f'("{name}") - do not edit it; check the other programs and '
+                    "delete it."
+                )
+            own.add(address)
+            current = self._read_block_fresh("program", new_index)
+            self._send_and_check(
+                akai_sysex.build_pdata_request(
+                    new_index, header_for(index + 1, current[1:3])
+                ),
+                f"updating program {new_index} groups={index + 1}",
+            )
+
+        # 4. read everything back and compare
+        after = self._s1000_snapshot(new_index)
+        problems = []
+        mine = after.get(new_index)
+        if mine is None:
+            problems.append("the new program can't be read back")
+        else:
+            if mine["groups"] != len(keygroups):
+                problems.append(
+                    f"it has {mine['groups']} keygroups, the file has {len(keygroups)}"
+                )
+            actual_program = self._read_block_fresh("program", new_index)
+            # the name (3-14) is ours, possibly renamed at load time
+            name_bytes = frozenset(range(3, 15))
+            diffs = self._differences(
+                program_file.program,
+                actual_program,
+                self._IMPORT_PROGRAM_INTERNAL | name_bytes,
+            )
+            if diffs:
+                problems.append(f"the program header differs at bytes {diffs}")
+            for index in range(min(len(keygroups), mine["groups"])):
+                actual = self._read_block_fresh("keygroup", new_index, selector=index)
+                diffs = self._differences(
+                    keygroups[index], actual, self._IMPORT_KEYGROUP_INTERNAL
+                )
+                if diffs:
+                    problems.append(f"keygroup {index + 1} differs at bytes {diffs}")
+                logger.info(
+                    "program load: keygroup %d NXTKG %s, zone SBADD read back %s "
+                    "(file had %s)",
+                    index, actual[1:3].hex(),
+                    [actual[56 + 24 * z : 58 + 24 * z].hex() for z in range(4)],
+                    [keygroups[index][56 + 24 * z : 58 + 24 * z].hex() for z in range(4)],
+                )
+            chain = [self._address(pointer) for pointer in mine["pointers"][: mine["groups"]]]
+            if chain != sorted(set(chain)):
+                problems.append(f"its keygroup addresses are not in order: {chain}")
+            if set(chain) & taken:
+                problems.append("its keygroup addresses overlap another program's")
+        for index, was in before.items():
+            now = after.get(index)
+            if now is None:
+                continue
+            if (
+                now["groups"] != was["groups"]
+                or now["keygroups"] != was["keygroups"]
+                or now["program"] != was["program"]
+                or now["pointers"] != was["pointers"]
+            ):
+                problems.append(f"program {index} was changed by the load")
+        if problems:
+            raise _ImportSafetyError(
+                f'"{name}" was loaded but did not check out afterwards: '
+                + "; ".join(problems)
+                + ". Do not trust it or the other programs until you have "
+                "checked them on the sampler; loading is disabled for this session."
+            )
+        self._imported_index = new_index
 
     def _handle_create_keygroup(self, program_index, source_keygroup_index):
         try:
