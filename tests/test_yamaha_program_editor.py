@@ -535,10 +535,11 @@ def test_an_inherited_value_is_dimmed_and_an_override_is_not(win, fake):
     assert combo.property("inherited") is True
 
 
-def test_knobs_over_a_range_spanning_zero_are_bipolar_and_the_rest_are_not(win):
-    assert win.easy_panel.widgets["pan_offset"]._bipolar and win.program_panel.widgets["ad_in_l_pan"]._bipolar
-    assert not win.program_panel.widgets["program_level"]._bipolar  # 0..127: nothing to centre
-    assert win.samples_tab.panel.widgets["pan"]._bipolar and not win.samples_tab.panel.widgets["filter_cutoff"]._bipolar
+def test_knobs_over_a_range_spanning_zero_get_the_centre_origin_arc_and_the_rest_do_not(win):
+    assert win.easy_panel.widgets["pan_offset"]._origin_fraction() > 0 and win.program_panel.widgets["ad_in_l_pan"]._origin_fraction() > 0
+    assert win.program_panel.widgets["program_level"]._origin_fraction() == 0  # 0..127: nothing to centre
+    panel = win.samples_tab.panel
+    assert panel.widgets["pan"]._origin_fraction() > 0 and panel.widgets["filter_cutoff"]._origin_fraction() == 0
 
 
 def test_hovering_a_knobs_name_explains_it_like_hovering_the_knob(win):

@@ -616,15 +616,27 @@ def test_the_value_arc_starts_at_the_minimum_by_default_and_at_zero_when_bipolar
     assert span > 0
 
 
-def test_only_a_range_spanning_zero_can_be_bipolar(qapp):
+def test_a_range_spanning_zero_is_bipolar_by_default_and_the_rest_are_not(qapp):
     from ui.knob import Knob
 
     k = Knob()
     k.setRange(-63, 63)
-    assert k._origin_fraction() == 0.0  # off until asked for
-    k.setBipolar(True)
-    assert abs(k._origin_fraction() - 0.5) < 1e-9
-    k.setRange(0, 127)  # asked for, but zero is the minimum: nothing to centre
+    assert abs(k._origin_fraction() - 0.5) < 1e-9  # no opt-in needed: every editor's pan/tune/offset knobs get it
+    k.setRange(0, 127)  # zero is the minimum: nothing to centre, the arc runs from the minimum as it always did
     assert k._origin_fraction() == 0.0
     k.setRange(-24, 96)
     assert abs(k._origin_fraction() - 24 / 120) < 1e-9
+    k.setBipolar(False)  # and it can be switched off
+    assert k._origin_fraction() == 0.0
+
+
+def test_a_non_negative_knobs_arc_is_unchanged_from_before(qapp):
+    from ui.knob import START_ANGLE_DEG, SWEEP_DEG, Knob, arc_start_and_span
+
+    k = Knob()
+    k.setRange(0, 99)
+    for value in (0, 1, 33, 50, 99):
+        fraction = k._value_to_fraction(value)
+        start, span = arc_start_and_span(fraction, k._origin_fraction())
+        assert int(start * 16) == START_ANGLE_DEG * 16
+        assert int(span * 16) == -int(SWEEP_DEG * fraction * 16)  # exactly what paintEvent drew before bipolar knobs existed

@@ -4584,3 +4584,10 @@ def test_every_page_of_cards_uses_the_shared_spacing_and_margins(editor):
     samples_page = editor.main_tabs.widget(editor._samples_tab_index)
     scroll_area = samples_page.layout().itemAt(1).widget()
     _assert_card_page_layout(scroll_area.widget().layout())
+
+
+def test_the_s3000_editors_signed_knobs_draw_their_arc_from_zero_and_the_unsigned_ones_do_not(editor):
+    # every Knob whose range spans zero grows its arc from the centre (a centred pan shows no arc); the rest are unchanged
+    assert editor.pan_knob.minimum() == -50 and abs(editor.pan_knob._origin_fraction() - 0.5) < 1e-9
+    assert abs(editor.key_filter_track_knob._origin_fraction() - 0.5) < 1e-9  # -24..+24
+    assert editor.attack1_knob.minimum() == 0 and editor.attack1_knob._origin_fraction() == 0.0

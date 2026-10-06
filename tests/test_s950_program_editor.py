@@ -641,3 +641,14 @@ def test_both_pages_use_the_shared_card_spacing_and_margins(win):
         assert layout.spacing() == CARD_SPACING
         m = layout.contentsMargins()
         assert (m.left(), m.top(), m.right(), m.bottom()) == CARD_PAGE_MARGINS
+
+
+def test_the_s950_editors_signed_knobs_draw_their_arc_from_zero_too(win):
+    from ui.knob import Knob
+
+    knobs = [w for w in win._editors.values() if isinstance(w, Knob)]
+    signed = [k for k in knobs if k.minimum() < 0 < k.maximum()]
+    unsigned = [k for k in knobs if k.minimum() >= 0]
+    assert signed and unsigned  # the editor has both kinds
+    assert all(0.0 < k._origin_fraction() < 1.0 for k in signed)
+    assert all(k._origin_fraction() == 0.0 for k in unsigned)

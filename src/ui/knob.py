@@ -74,7 +74,7 @@ class Knob(QDial):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setEnabled(False)  # read-only for now
-        self._bipolar = False  # see setBipolar
+        self._bipolar = True  # see setBipolar
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self._drag_anchor_y = None
         self._drag_fraction = None  # float accumulator, in [0, 1] fraction
@@ -102,8 +102,9 @@ class Knob(QDial):
         )
 
     def setBipolar(self, bipolar=True):
-        """For a range that spans zero (pan, tune offsets, ...): the value arc grows from the knob's ZERO instead of from its
-        minimum. Off by default - the S3000 editor's knobs are unchanged."""
+        """On by default, and only ever matters for a range that SPANS zero (pan, tune, offsets, ...): the value arc grows from
+        the knob's ZERO instead of from its minimum, so a centred value shows no arc and the arc's length reads as the distance
+        from centre. A knob whose range starts at zero or above is unaffected. Pass False for the old minimum-origin arc."""
         self._bipolar = bool(bipolar)
         self.update()
 

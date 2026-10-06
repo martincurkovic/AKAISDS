@@ -84,7 +84,6 @@ class FieldPanel(QObject):
             w = Knob()
             w.setRange(p.lo, p.hi)
             w.setDefaultValue(min(max(0, p.lo), p.hi))
-            w.setBipolar(p.lo < 0 < p.hi)  # the arc grows from zero, with a tick there (pan, tune and offset knobs)
             w.setFixedSize(field.size, field.size)
             w.valueChanged.connect(lambda v: self._on_edit(key, int(v)))
         elif field.kind == "spin":
