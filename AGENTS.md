@@ -303,6 +303,18 @@ saved** (zones reference them by NAME; the Load confirmation lists the ones not 
   has `program load:` INFO lines (FIRSTKG sent vs held, where each keygroup was placed, NXTKG and zone SBADD read back vs the file's) - ask a
   tester for them. **No DELK anywhere**; a failed load can leave a partial program (the message says so) - never deleted automatically.
   The duplicate flows were NOT changed and still send the template's pointers (never failed in the logs; same unknown applies).
+- **S1000 Delete Keygroup by REBUILD (`s1000_bridge.KEYGROUP_DELETE_BY_REBUILD`, OFF until a real S1000 has run the load above)**:
+  `BridgeWorker._delete_keygroup_s1000_rebuild`: save a `.p1` backup (`PROGRAM_BACKUP_DIR`, `~/.akaisds/program_backups`; no backup, no
+  change) -> drop the keygroup on the computer (GROUPS-1) -> load it through `_import_program` under a TEMP name (`-TMP`; never the
+  original's, so the sampler's delete-on-name-clash rule can't fire) -> only after that passes its checks DELP the original, compare the other
+  programs by name (before/after snapshot) -> rename the copy to the original name. Every step leaves a complete program; a failure before the
+  DELP says the original was not changed, one after it names the temp program and the backup. The program ends up LAST in the list
+  (`program_rebuilt` signal, the window selects it). No DELK, no name-collision override (an override would let the sampler delete the original
+  before the copy is verified). Takes the same `program_import_blocked` session block as a failed load. When on it takes precedence over the
+  dead DELK path (`KEYGROUP_DELETE_SUPPORTED`, still False). Unmeasured on hardware: DELP on a real S1000 (whether others' addresses move),
+  free room for a second copy. Tests: `tests/test_s1000_keygroup_delete_rebuild.py`.
+- **Fixed on the way**: `_on_samples_loaded` reset the program list to row 0 after EVERY program reload (each is followed by a sample reload),
+  undoing "select the new program" for Duplicate/Load/rebuild; it now only selects row 0 when nothing is selected (first load).
 - **Load = a NEW program** through the duplicate flow's order (PDATA GROUPS=1, KDATA 0, then KDATA + PDATA(GROUPS+1)). A name
   matching a resident program is never sent (PDATA would delete it) - the window prompts for another. A `.p1` is refused on an
   S2000/S3000 setting and vice versa (different block lengths; padding a 150-byte block would invent neutral values we can't vouch for).
