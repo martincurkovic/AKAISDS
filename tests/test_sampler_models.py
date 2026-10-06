@@ -1,4 +1,4 @@
-# tests for core/sampler_models.py - the four Settings "Sampler Type"
+# tests for core/sampler_models.py - the five Settings "Sampler Type"
 # choices and what each implies
 
 from core import sampler_models
@@ -11,6 +11,7 @@ def test_choices_are_alphabetical_by_label():
         "Akai S2000/S3000",
         "Akai S900/S950 (experimental)",
         "Generic SDS",
+        "Yamaha A4000/A5000 (experimental)",
     ]
     assert labels == sorted(labels)
 
@@ -70,3 +71,14 @@ def test_unrecognised_selection_falls_back_to_s2000_s3000():
     )
     assert sampler_models.normalize(None) == "akai_s2000_s3000"
     assert sampler_models.protocol_family(None) == "akai"
+
+
+def test_yamaha_transfers_are_plain_sds_but_it_is_its_own_model():
+    # the A4000's sample transfers are standard SDS (the generic path), so the PROTOCOL FAMILY is "generic"...
+    assert sampler_models.YAMAHA_A4000 == "yamaha_a4000"
+    assert sampler_models.protocol_family("yamaha_a4000") == "generic"
+    # ...but the full model is how the Dashboard knows to offer the Yamaha editor
+    assert sampler_models.is_yamaha("yamaha_a4000")
+    assert not sampler_models.is_yamaha("generic")
+    assert not sampler_models.is_s950("yamaha_a4000") and not sampler_models.is_s1000("yamaha_a4000")
+    assert sampler_models.normalize("yamaha_a4000") == "yamaha_a4000"

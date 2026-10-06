@@ -301,3 +301,13 @@ def test_ensure_defaults_saved_keeps_a_saved_theme(monkeypatch, tmp_path):
     app_config.save_theme("dark")
     app_config.ensure_defaults_saved()
     assert app_config.load_config()["theme"] == "dark"
+
+
+def test_yamaha_device_number_defaults_to_zero_and_rejects_nonsense(monkeypatch, tmp_path):
+    import json
+
+    _use_temp_config(monkeypatch, tmp_path)
+    assert app_config.get_yamaha_device_number() == 0
+    for value, expected in [(5, 5), (15, 15), (16, 0), (-1, 0), ("3", 0), (True, 0), (None, 0)]:
+        (tmp_path / "test_config.json").write_text(json.dumps({"yamaha_device_number": value}))
+        assert app_config.get_yamaha_device_number() == expected, value

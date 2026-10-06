@@ -173,6 +173,18 @@ def test_signed_two_bit_fields_read_minus_one():
     assert yp.extract(yp.get("easy_edit", "key_xfade_on"), data, 0) == -1
 
 
+def test_every_enum_row_has_a_label_for_each_value_the_a4000_can_hold():
+    # values above 16 on the channel enums are the A5000's MIDI-B channels - the only labels allowed to be missing
+    for scope, param in ALL:
+        if not param.enum:
+            continue
+        labels = yp.ENUMS[param.enum]
+        missing = [v for v in range(param.lo, param.hi + 1) if v not in labels]
+        assert all(v > 16 for v in missing), (param.key, missing)
+        if "channel" not in param.enum:
+            assert not missing, (param.key, missing)
+
+
 def test_rows_the_unit_ignored_writes_to_are_flagged():
     flagged = {p.key for p in yp.rows("sample") if p.write_ignored}
     assert flagged == {"sampling_frequency_l", "sampling_frequency_r", "wave_length", "wave_end_address"}
@@ -185,3 +197,39 @@ def test_range_check_and_enums():
     assert not yp.in_range(yp.get("program", "assigned_samples"), 1)  # read-only
     assert yp.ENUMS["filter_type"][0] == "Bypass" and len(yp.ENUMS["filter_type"]) == 17
     assert yp.ENUMS["output1"][1] == "stereo out" and yp.ENUMS["output2"][6] == "stereo out"
+
+
+def test_store_is_the_inverse_of_extract():
+    data = bytearray(yp.PROGRAM_EASY_EDIT_BASE + 2 * yp.EASY_EDIT_BLOCK_SIZE)
+    for scope_key, slot, value in [
+        (("program", "program_level"), None, 77),
+        (("program", "transpose"), None, -12),
+        (("program", "lfo_cycle"), None, 3),  # a bitfield sharing its byte with others
+        (("program", "lfo_wave"), None, 5),
+        (("easy_edit", "level_offset"), 1, -40),
+        (("easy_edit", "portamento"), 1, -1),  # signed 2-bit
+        (("easy_edit", "assigned_name"), 1, "snare"),
+    ]:
+        param = yp.get(*scope_key)
+        yp.store(param, data, value, slot)
+        assert yp.extract(param, data, slot) == value, scope_key
+    # the two LFO bitfields share a byte and must not disturb each other
+    assert yp.extract(yp.get("program", "lfo_cycle"), data) == 3
+    # ...nor the neighbours
+    assert yp.extract(yp.get("easy_edit", "level_offset"), data, 0) == 0
+
+
+def test_store_refuses_to_run_past_the_payload():
+    with pytest.raises(ValueError):
+        yp.store(yp.get("program", "program_level"), bytearray(10), 1)
+
+
+def test_linked_programs_reads_the_128_bit_map():
+    data = bytearray(112 + 224)
+    assert yp.linked_programs(data) == []
+    data[112 + 24 : 112 + 28] = (1).to_bytes(4, "big")  # program 001 - what the real unit showed for "sine wave"
+    assert yp.linked_programs(data) == [1]
+    data[112 + 28 : 112 + 32] = (1 << 31 | 2).to_bytes(4, "big")  # words are programs 33-64: bit 0 = 33, bit 31 = 64
+    data[112 + 36 : 112 + 40] = (1 << 31).to_bytes(4, "big")  # program 128
+    assert yp.linked_programs(data) == [1, 34, 64, 128]
+    assert yp.ENUMS["lfo_reset_channel"][-2] == "Off"

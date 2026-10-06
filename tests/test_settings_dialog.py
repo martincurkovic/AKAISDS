@@ -142,7 +142,7 @@ def test_dialog_width_ignores_which_tab_is_currently_shown(qapp):
 # --- Sampler Type combo (S1000 / S2000/S3000 / Generic) ----------------------
 
 
-def test_sampler_type_combo_lists_the_four_models_alphabetically(qapp):
+def test_sampler_type_combo_lists_the_five_models_alphabetically(qapp):
     dialog = MidiSettingsDialog(_FakeMidiManager(["In A"], ["Out A"]), _FakeSamplerController())
     labels = [
         dialog.combo_device_type.itemText(i)
@@ -153,13 +153,15 @@ def test_sampler_type_combo_lists_the_four_models_alphabetically(qapp):
         "Akai S2000/S3000",
         "Akai S900/S950 (experimental)",
         "Generic SDS",
+        "Yamaha A4000/A5000 (experimental)",
     ]
     assert labels == sorted(labels)
-    assert [dialog.combo_device_type.itemData(i) for i in range(4)] == [
+    assert [dialog.combo_device_type.itemData(i) for i in range(5)] == [
         "akai_s1000",
         "akai_s2000_s3000",
         "akai_s900_s950",
         "generic",
+        "yamaha_a4000",
     ]
 
 
@@ -178,6 +180,7 @@ def test_hardware_test_speaks_the_akai_protocol_for_the_s1000(qapp):
         ("akai_s2000_s3000", "akai"),
         ("akai_s900_s950", "s950"),
         ("generic", "generic"),
+        ("yamaha_a4000", "generic"),
     ]:
         dialog.combo_device_type.setCurrentIndex(
             dialog.combo_device_type.findData(selection)

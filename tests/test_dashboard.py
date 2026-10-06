@@ -924,3 +924,71 @@ def test_other_sampler_types_never_see_the_s950_warning(dashboard, monkeypatch):
         QMessageBox, "warning", lambda *a, **k: pytest.fail("warned a non-S950 user")
     )
     assert dashboard._confirm_s950_experimental() is True
+
+
+# --- Yamaha A4000/A5000: SDS transfers (the generic family) + its own editor -------------------------
+
+
+@pytest.fixture
+def yamaha_dashboard(dashboard):
+    dashboard.midi_manager.input_name = "Fake In"
+    dashboard.midi_manager.output_name = "Fake Out"
+    dashboard.sampler_controller.set_device_type("yamaha_a4000")
+    dashboard._update_device_type_ui()
+    dashboard._update_open_editor_enabled()
+    return dashboard
+
+
+def test_yamaha_transfers_are_generic_sds_but_the_editor_is_enabled(yamaha_dashboard):
+    d = yamaha_dashboard
+    assert d.sampler_controller.device_type == "generic"  # sample transfers: plain SDS
+    assert d.btn_open_editor.isEnabled() is True
+    assert "Yamaha" in d.btn_open_editor.toolTip() and "view only" in d.btn_open_editor.toolTip()
+
+
+def test_yamaha_editor_needs_both_ports(yamaha_dashboard):
+    yamaha_dashboard.midi_manager.input_name = None
+    yamaha_dashboard._update_open_editor_enabled()
+    assert yamaha_dashboard.btn_open_editor.isEnabled() is False
+    assert "Settings" in yamaha_dashboard.btn_open_editor.toolTip()
+
+
+def test_generic_sds_still_has_no_editor(dashboard):
+    dashboard.midi_manager.input_name = "Fake In"
+    dashboard.midi_manager.output_name = "Fake Out"
+    dashboard.sampler_controller.set_device_type("generic")
+    dashboard._update_open_editor_enabled()
+    assert dashboard.btn_open_editor.isEnabled() is False
+
+
+def test_yamaha_opens_its_editor_on_the_shared_controller_not_a_bridge(yamaha_dashboard, monkeypatch):
+    from ui import dashboard as dashboard_module
+
+    opened = []
+
+    class _StubEditor:
+        def __init__(self, main_window, controller):
+            opened.append((main_window, controller))
+
+        def show(self):
+            pass
+
+    monkeypatch.setattr(dashboard_module, "YamahaProgramEditorWindow", _StubEditor)
+    monkeypatch.setattr(
+        dashboard_module.program_editor_bridge,
+        "connect",
+        lambda *a, **k: pytest.fail("the Yamaha editor has no S3kBridge"),
+    )
+    yamaha_dashboard.open_program_editor()
+    assert len(opened) == 1 and opened[0][1] is yamaha_dashboard.sampler_controller
+
+
+def test_yamaha_editor_refuses_without_a_midi_input(yamaha_dashboard, monkeypatch):
+    from ui import dashboard as dashboard_module
+
+    monkeypatch.setattr(
+        dashboard_module, "YamahaProgramEditorWindow", lambda *a, **k: pytest.fail("opened with no MIDI input")
+    )
+    yamaha_dashboard.midi_manager.input_name = None  # every answer comes back on the input
+    yamaha_dashboard.open_program_editor()
+    assert "MIDI input" in yamaha_dashboard.status_bar.currentMessage()
