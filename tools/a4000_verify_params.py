@@ -56,7 +56,7 @@ def fetch_dump(pin, pout, device, fmt, name):
 
 def select(pin, pout, device, name, otype):
     quiet_send(pout, ysx.build_object_select(device, name, otype))
-    await_message(pin, lambda m: ysx.classify(m) == "parameter", 1.0)  # the unit echoes the select
+    await_message(pin, lambda m: ysx.classify(m) == "parameter", 1.0)  # no reply expected; tolerate the unit's announcement if it comes
 
 
 def request(pin, pout, device, p):
