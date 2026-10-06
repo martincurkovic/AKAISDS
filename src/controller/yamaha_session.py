@@ -49,6 +49,8 @@ class YamahaSession(QObject):
         # measured: the unit answers correctly even with NO pause after a select (a 0-200 ms sweep, 10 reads each,
         # all right); a small margin stays, and the announce check (see handle_sysex) is what guards correctness
         self.select_settle_ms = 30
+        #: while a Sample Dump transfer (e.g. a waveform load) owns the wire, queued operations wait and retry
+        self.busy_retry_ms = 150
         #: the unit's Device Number (SysEx is addressed to it); manual-edit-only config
         self.device = app_config.get_yamaha_device_number()
 
@@ -60,6 +62,9 @@ class YamahaSession(QObject):
         self._settle = QTimer(self)
         self._settle.setSingleShot(True)
         self._settle.timeout.connect(self._send_next_parameter_request)
+        self._busy = QTimer(self)
+        self._busy.setSingleShot(True)
+        self._busy.timeout.connect(self._start_next)
 
     # -- public API ---------------------------------------------------------------------------------
 
@@ -92,6 +97,7 @@ class YamahaSession(QObject):
         self._op = None
         self._timeout.stop()
         self._settle.stop()
+        self._busy.stop()
         for op in ops:
             self._finish(op, failed=True, quiet=True)
 
@@ -104,6 +110,12 @@ class YamahaSession(QObject):
 
     def _start_next(self):
         if self._op is not None or not self._queue:
+            return
+        if self._c.is_transfer_busy():
+            # a Sample Dump transfer is mid-flight on the same wire: Yamaha requests slipped in between its packets
+            # can be dropped (and a stray reply would confuse the transfer) - wait for it
+            if not self._busy.isActive():
+                self._busy.start(self.busy_retry_ms)
             return
         op = self._queue.pop(0)
         self._op = op

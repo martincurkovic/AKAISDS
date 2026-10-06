@@ -17,8 +17,16 @@ MEASURED on the real unit (the behaviours below are copied from it):
  - an object edit applies to the last selected object, gets no reply, and sets bit 0 of byte 1 of the
    object's common block (an "edited" flag)
  - rows flagged `write_ignored` in core/yamaha_params.py accept a write and change nothing
+ - a Sample Dump Standard request (F0 7E ch 03 nn nn F7) is answered by the sample at POSITION nn in the
+   sample list (0-based; the factory waveforms are 0-6 and a sample sent later is 7 - NOT the number it was
+   sent as, and not the number in its name), as a standard SDS header + 120-byte packets, each sent after the
+   previous one's ACK; a number with no sample gets a CANCEL (7D). The header's rate is rounded the way the
+   unit's is (48000 -> 48001 Hz, the period in whole nanoseconds)
 
-GUESSED (not measured - the first real conversation that disagrees wins): silence for a dump request
+GUESSED (not measured - the first real conversation that disagrees wins): what a stereo sample or a sample bank
+sends over SDS (one mono waveform here), the audio itself (a deterministic test tone unless a test sets
+`audio[name]`), what SDS does after a deleted sample (positions shifting is assumed), that a wrong SDS
+channel is silence, silence for a dump request
 or a select of an object that doesn't exist, silence for a parameter request with no current object
 or an unknown P-number, that a wrong device number (or "off") is simply silence, that Bulk Protect
 makes edits silently ignored, that sample banks / system parameters / wave data / sequences are not
@@ -30,7 +38,10 @@ exactly the table's bytes here - and timing.
 
 from collections import deque
 
+import math
+
 from core import demo_a4000_data as seed
+from core import sds_encoder
 from core import yamaha_params as yp
 from core import yamaha_sysex as y
 
@@ -115,6 +126,9 @@ class FakeA4000:
         self.out = _FakeOut(self)
         self.inp = _FakeIn(self)
         self._outbox = deque()
+        #: {sample name: list of int16 words} - the audio an SDS dump sends (default: a tone, see `_audio_for`)
+        self.audio = {}
+        self._sds_packets = []  # the data packets still to send, each after an ACK
         #: the object edits and parameter requests apply to: (type, key) or None
         self.current = None
         #: every frame received, decoded as (label, message-without-F0/F7)
@@ -172,6 +186,8 @@ class FakeA4000:
         self.received.append((kind, message))
         if len(message) >= 4 and message[0] == 0x7E and message[2:4] == b"\x06\x01":
             self._identity()
+        elif len(message) >= 4 and message[0] == 0x7E:
+            self._sds(message)
         elif message[:1] == b"\x43" and len(message) >= 4:
             if self.device_number_off or (message[1] & 0x0F) != self.device:
                 self.ignored_ops.append("wrong device number")
@@ -179,6 +195,42 @@ class FakeA4000:
             self._yamaha(message)
         else:
             self.ignored_ops.append(kind)
+
+    # -- Sample Dump Standard (the editor's waveform) -----------------------------------------------------
+
+    def _audio_for(self, name):
+        """The int16 words the unit would send for sample `name` (wave length frames)."""
+        if name in self.audio:
+            return list(self.audio[name])
+        frames = yp.extract(yp.get("sample", "wave_length"), self.samples[name])
+        cycles = 1 + list(self.samples).index(name)  # a different tone per sample, deterministic
+        return [round(20000 * math.sin(2 * math.pi * cycles * i / max(frames, 1))) for i in range(frames)]
+
+    def _sds(self, m):
+        channel, kind = m[1], m[2]
+        if channel not in (self.device, 0x7F):
+            self.ignored_ops.append("SDS message for another channel")
+            return
+        if kind == 0x03:  # dump request
+            self._sds_packets = []
+            index = m[3] | (m[4] << 7)
+            names = list(self.samples)
+            if index >= len(names):
+                self._say(bytes([0x7E, channel, sds_encoder.CANCEL, 0]))
+                return
+            name = names[index]
+            words = self._audio_for(name)
+            rate = yp.extract(yp.get("sample", "sampling_frequency_l"), self.samples[name])
+            header, *packets = sds_encoder.build_sds_dump(words, rate, index, channel)
+            self._sds_packets = [p[1:-1] for p in packets]
+            self._say(header[1:-1])
+        elif kind == sds_encoder.ACK:
+            if self._sds_packets:
+                self._say(self._sds_packets.pop(0))
+        elif kind in (sds_encoder.CANCEL, sds_encoder.NAK):
+            self._sds_packets = []
+        else:
+            self.ignored_ops.append(f"SDS message {kind:#04x}")
 
     def _identity(self):
         self._say(bytes([0x7E, 0x00, 0x06, 0x02, 0x43, 0x00, 0x41, 0x5A, 0x03, 0x16, 0x00, 0x00, 0x7F]))

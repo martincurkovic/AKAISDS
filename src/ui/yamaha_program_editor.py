@@ -168,7 +168,7 @@ class YamahaProgramEditorWindow(QMainWindow):
 
         programs_tab = QWidget()
         programs_tab.setLayout(build_content_row(programs_container, assigned_container, right_container))
-        self.samples_tab = YamahaSamplesTab(self._session, self._sample_cache)
+        self.samples_tab = YamahaSamplesTab(self._controller, self._session, self._sample_cache)
         self.samples_tab.status_message.connect(lambda m: self.status_bar.showMessage(m, 8000))
         self.main_tabs = QTabWidget()
         self.main_tabs.setTabBar(FullWidthTabBar(self.main_tabs))
@@ -404,6 +404,7 @@ class YamahaProgramEditorWindow(QMainWindow):
         self._names.clear()
         self._program_data.clear()
         self._sample_cache.clear()
+        self.samples_tab.refresh()
         self._selected = None
         self.program_list.blockSignals(True)
         self.program_list.clear()
@@ -672,6 +673,7 @@ class YamahaProgramEditorWindow(QMainWindow):
             self._main_window.show()
             return
         self._connected = False
+        self.samples_tab.disconnect_controller()
         for signal, slot in (
             (self._controller.status_changed, self._on_controller_status),
             (theme.notifier.changed, self._refresh_themed_swatches),
