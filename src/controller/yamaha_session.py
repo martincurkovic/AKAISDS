@@ -20,6 +20,12 @@ Wire facts this relies on (all measured on a real A4000, 2026-10-06 - see dev_do
  - a short pause between a select and the request that follows it (`select_settle_ms`) is kept for safety, but
    measured not to be needed.
 
+WAVES (`request_wave`): a wave object's audio as the unit's native "WD" bulk dump (core/yamaha_wave.py) - several
+complete messages per wave, joined by `WaveAssembler`, each reported to `on_chunk` as it lands so a window can draw the
+wave progressively. A bulk dump can't be aborted: after a cancel (or a failure mid-stream) the unit keeps sending the
+rest, which would swamp the next request, so the session DRAINS - it stays busy until the stream has been quiet for
+`drain_idle_ms` and only then starts the next operation.
+
 WRITING (`write_parameter`): one parameter of one object per operation, and every write is guarded three ways -
  1. the FIRST write to an object in a session first dumps it and saves the dump as a `.syx` backup
     (`backup_dir`, default ~/.akaisds/a4000_backups); if that backup can't be saved NOTHING is written;
@@ -43,6 +49,7 @@ from PySide6.QtCore import QObject, QTimer
 from core import app_config, debug_log
 from core import yamaha_params as yp
 from core import yamaha_sysex as ysx
+from core import yamaha_wave
 
 BACKUP_DIR = Path.home() / ".akaisds" / "a4000_backups"
 
@@ -74,6 +81,9 @@ class _Op:
         self.edit_sent = False
         self.backup_path = None
         self.results_value = None
+        # wave bookkeeping
+        self.assembler = None
+        self.request_sent = False
 
 
 class YamahaSession(QObject):
@@ -86,6 +96,10 @@ class YamahaSession(QObject):
         # measured: the unit answers correctly even with NO pause after a select (a 0-200 ms sweep, 10 reads each,
         # all right); a small margin stays, and the announce check (see handle_sysex) is what guards correctness
         self.select_settle_ms = 30
+        #: a wave arrives in ~4 KB messages, one every ~1.3 s at MIDI speed: how long between two before giving up
+        self.wave_chunk_timeout_ms = 6000
+        #: after a wave stream is abandoned, how long the wire must be quiet before the next operation may start
+        self.drain_idle_ms = 2500
         #: how long after an object edit (which gets no reply) before the value is read back
         self.edit_settle_ms = 120
         #: where a pre-write backup of an object is saved (tests point this at a temp dir)
@@ -107,12 +121,16 @@ class YamahaSession(QObject):
         self._busy = QTimer(self)
         self._busy.setSingleShot(True)
         self._busy.timeout.connect(self._start_next)
+        self._draining = False
+        self._drain = QTimer(self)
+        self._drain.setSingleShot(True)
+        self._drain.timeout.connect(self._end_drain)
 
     # -- public API ---------------------------------------------------------------------------------
 
     @property
     def idle(self):
-        return self._op is None and not self._queue
+        return self._op is None and not self._queue and not self._draining
 
     def request_object_list(self, callback):
         """callback(list[ObjectEntry] | None)."""
@@ -121,6 +139,12 @@ class YamahaSession(QObject):
     def request_bulk(self, fmt, name, callback):
         """callback(BulkDump | None) - fmt "PG" (a program, name "001") or "SP" (a sample, by name)."""
         self._enqueue(_Op("bulk", callback, fmt=fmt, name=name))
+
+    def request_wave(self, name, callback, on_chunk=None):
+        """A wave object's audio frames (list of int16; `name` is the WAVE object's name - a sample's linked wave,
+        see yamaha_params.WAVE_NAME_*_OFFSET). callback(frames | None). `on_chunk(new_frames, total_frames)` is called
+        for every message that adds frames, as it arrives (total_frames is known from the first one)."""
+        self._enqueue(_Op("wave", callback, name=name, on_chunk=on_chunk))
 
     def request_parameters(self, object_type, name, params_list, callback):
         """Select one object, then read each P1..P6 in `params_list` (one at a time).
@@ -185,12 +209,14 @@ class YamahaSession(QObject):
     def cancel(self):
         """Drop everything queued and abandon the operation in flight (each callback gets None)."""
         ops = ([self._op] if self._op else []) + self._queue
+        in_flight = self._op
         self._queue = []
         self._op = None
-        self._backups = {}  # (object type, name) -> the .syx saved before this session's first write to it
         self._timeout.stop()
         self._settle.stop()
         self._busy.stop()
+        if in_flight is not None:
+            self._maybe_drain(in_flight, only_if_streaming=False)
         for op in ops:
             self._finish(op, failed=True, quiet=True)
 
@@ -201,10 +227,25 @@ class YamahaSession(QObject):
         if self._op is None:
             self._start_next()
 
+    def _maybe_drain(self, op, *, only_if_streaming):
+        """A wave request that didn't finish may still have the unit streaming at us: keep the wire reserved. After a
+        user cancel the unit may be about to start (`request_sent`); after a failure only a stream that had started
+        (a first message arrived) is worth waiting for - a unit that never answered won't suddenly send."""
+        started = op.assembler is not None and op.assembler.started
+        if op.kind == "wave" and op.request_sent and (started or not only_if_streaming) and not (op.assembler and op.assembler.done):
+            self._draining = True
+            self._drain.start(self.drain_idle_ms)
+            # measured: nothing sent mid-dump (identity request, SDS CANCEL) makes the unit stop - it sends the whole wave
+            self._c.status_changed.emit("Waiting for the sampler to finish sending the wave (it can't be stopped)...")
+
+    def _end_drain(self):
+        self._draining = False
+        self._start_next()
+
     def _start_next(self):
-        if self._op is not None or not self._queue:
+        if self._op is not None or not self._queue or self._draining:
             return
-        if self._c.is_transfer_busy():
+        if self._c.is_sds_transfer_busy():
             # a Sample Dump transfer is mid-flight on the same wire: Yamaha requests slipped in between its packets
             # can be dropped (and a stray reply would confuse the transfer) - wait for it
             if not self._busy.isActive():
@@ -215,6 +256,11 @@ class YamahaSession(QObject):
         try:
             if op.kind == "bulk":
                 self._send(ysx.build_dump_request(self.device, op.kw["fmt"], op.kw["name"]))
+                self._timeout.start(self.bulk_timeout_ms)
+            elif op.kind == "wave":
+                op.assembler = yamaha_wave.WaveAssembler(op.kw["name"])
+                self._send(ysx.build_dump_request(self.device, "WD", op.kw["name"]))
+                op.request_sent = True
                 self._timeout.start(self.bulk_timeout_ms)
             elif op.kind == "write" and op.kw["target"] not in self._backups:
                 op.phase = "backup"  # the first write to this object: save it as it is now
@@ -328,6 +374,8 @@ class YamahaSession(QObject):
         op, self._op = self._op, None
         self._timeout.stop()
         self._settle.stop()
+        if op is not None and failed:
+            self._maybe_drain(op, only_if_streaming=True)
         if message:
             self._c.status_changed.emit(message)
         if op is not None:
@@ -336,7 +384,7 @@ class YamahaSession(QObject):
 
     def _finish(self, op, *, failed, quiet=False):
         try:
-            if op.kind == "bulk":
+            if op.kind in ("bulk", "wave"):
                 op.callback(None if failed else op.results_value)
             elif op.kind == "write":
                 op.callback(self._write_result(op, failed))
@@ -351,7 +399,11 @@ class YamahaSession(QObject):
         op = self._op
         if op is None:
             return
-        if op.kind == "bulk" or op.phase == "backup":
+        if op.kind == "wave":
+            what = f"WD dump of {op.kw['name']!r}" + (
+                f" after {op.assembler.blocks} message(s)" if op.assembler and op.assembler.blocks else ""
+            )
+        elif op.kind == "bulk" or op.phase == "backup":
             what = f"{op.kw['fmt']} dump of {op.kw['name']!r}"
         else:
             what = f"parameter {op.kw['params'][min(op.index, len(op.kw['params']) - 1)]} of {op.kw['name']!r}"
@@ -364,14 +416,47 @@ class YamahaSession(QObject):
             ),
         )
 
+    def _handle_wave_message(self, op, data, kind):
+        if kind != "bulk_dump":
+            return
+        try:
+            dump = ysx.parse_bulk_dump(data)
+        except ysx.YamahaSysexError as e:
+            debug_log.get_logger().error(f"YamahaSession: bad wave message: {e}")
+            self._complete(failed=True, message=f"The sampler's wave dump was corrupt ({e})")
+            return
+        if dump.fmt != "WD" or dump.name != op.kw["name"].rstrip():
+            return  # someone else's dump
+        try:
+            new = op.assembler.feed(dump)
+        except ysx.YamahaSysexError as e:
+            debug_log.get_logger().warning(f"YamahaSession: wave message ignored: {e}")
+            return
+        callback = op.kw.get("on_chunk")
+        if callback is not None and new:
+            try:
+                callback(new, op.assembler.total_frames)
+            except Exception:
+                debug_log.get_logger().error("YamahaSession: a wave chunk callback raised", exc_info=True)
+        if op.assembler.done:
+            op.results_value = list(op.assembler.frames)
+            self._complete()
+        else:
+            self._timeout.start(self.wave_chunk_timeout_ms)
+
     # -- incoming ---------------------------------------------------------------------------------------
 
     def handle_sysex(self, data):
         """Every 0x43 message the controller receives (bytes between F0 and F7)."""
         op = self._op
-        if op is None:
-            return  # a stray/late message, or our own announce arriving after a timeout
         kind = ysx.classify(data)
+        if op is None:
+            if self._draining and kind == "bulk_dump":
+                self._drain.start(self.drain_idle_ms)  # the abandoned wave is still streaming: keep waiting
+            return  # a stray/late message, or our own announce arriving after a timeout
+        if op.kind == "wave":
+            self._handle_wave_message(op, data, kind)
+            return
         if op.kind == "bulk" or (op.kind == "write" and op.phase == "backup"):
             if kind != "bulk_dump":
                 return

@@ -441,6 +441,26 @@ class WaveformView(QWidget):
         self._loading = loading
         self.update()
 
+    def set_view_height(self, height):
+        # a stereo sample shows two of these stacked at half height each (the Yamaha Samples tab)
+        self.setFixedHeight(height)
+
+    def view_state(self):
+        """(zoom, view_start) - what `set_view_state` of a linked view needs to show the same stretch of the wave."""
+        return self._zoom, self._view_start
+
+    def set_view_state(self, zoom, view_start):
+        # copies another view's zoom/pan (see the Yamaha Samples tab, which keeps a left and a right view in step);
+        # emits view_changed like any other zoom/pan, so a listener must guard against echoing it back
+        if self._frame_count == 0:
+            return
+        self._zoom = max(_MIN_ZOOM, min(self._max_zoom(), zoom))
+        self._view_start = view_start
+        self._clamp_view_start()
+        self._rebuild_envelope()
+        self.update()
+        self._emit_view_changed()
+
     def set_placeholder_text(self, text):
         # the centered text shown while nothing at all is known about a sample - the default
         # (S1000/S2000/S3000) promises a slow, interface-freezing load, which isn't true of

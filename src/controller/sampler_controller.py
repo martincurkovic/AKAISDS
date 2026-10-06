@@ -63,6 +63,7 @@ class SamplerController(QObject):
         self.device_type = "akai"
         self.sampler_model = sampler_models.AKAI_S2000_S3000
         self._s950_engine = None  # built on first use - see _s950
+        self._yamaha_transfers_engine = None  # the Dashboard's Yamaha list/receive - see _yamaha_transfers
         self._yamaha_engine = None  # built on first use - see _yamaha
 
         self._open_loop_delay_ms = 40  # pacing for open loop sending
@@ -219,6 +220,16 @@ class SamplerController(QObject):
             self._yamaha_engine = YamahaSession(self)
         return self._yamaha_engine
 
+    @property
+    def _yamaha_transfers(self):
+        # listing and receiving samples for the Yamaha A4000/A5000 (controller/yamaha_transfers.py), built the first
+        # time they're needed. SENDING samples to it is still plain SDS (device_type "generic")
+        if self._yamaha_transfers_engine is None:
+            from controller.yamaha_transfers import YamahaTransfers
+
+            self._yamaha_transfers_engine = YamahaTransfers(self)
+        return self._yamaha_transfers_engine
+
     def is_yamaha_model(self):
         return sampler_models.is_yamaha(self.sampler_model)
 
@@ -247,6 +258,9 @@ class SamplerController(QObject):
         return True
 
     def refresh_sample_list(self, silent=False):
+        if self.is_yamaha_model():
+            self._yamaha_transfers.refresh_list(silent)
+            return
         if self.device_type == "generic":
             return
         if self._is_s950():
@@ -292,7 +306,17 @@ class SamplerController(QObject):
             return
         self._s950.write_program(slot, baseline, edited)
 
+    def _yamaha_not_supported(self, what):
+        # the Yamaha has no known delete/rename opcode, and the Akai commands below would be misread by it
+        if not self.is_yamaha_model():
+            return False
+        debug_log.get_logger().info(f"SamplerController: refused {what} - not available for the Yamaha A4000/A5000")
+        self.status_changed.emit(f"{what} isn't available for the Yamaha A4000/A5000 - use its front panel")
+        return True
+
     def delete_sample(self, sample_number, channel=None):
+        if self._yamaha_not_supported("Deleting samples"):
+            return
         if self._s950_not_supported(
             "Deleting samples (the S900/S950 can't do it over MIDI - use its front panel)"
         ):
@@ -306,6 +330,8 @@ class SamplerController(QObject):
         QTimer.singleShot(300, self.refresh_sample_list)
 
     def rename_sample(self, sample_number, new_name, channel=None):
+        if self._yamaha_not_supported("Renaming samples"):
+            return
         if self._is_s950():
             self._s950.rename_sample(sample_number, new_name)
             return
@@ -322,6 +348,8 @@ class SamplerController(QObject):
         QTimer.singleShot(300, self.refresh_sample_list)
 
     def request_sample_info(self, sample_number, channel=None):
+        if self.is_yamaha_model():
+            return
         if self._is_s950():
             self._s950.request_sample_info(sample_number)
             return
@@ -1218,6 +1246,9 @@ class SamplerController(QObject):
         # SDS) and get renamed correctly afterward instead.
         if not file_entries:
             return False
+        if self._yamaha_transfers_engine is not None and self._yamaha_transfers_engine.busy:
+            self.status_changed.emit("A transfer is already in progress - please wait for it to finish")
+            return False
         if (
             self._send_queue
             or self._stereo_queue
@@ -1415,6 +1446,10 @@ class SamplerController(QObject):
     def receive_samples(self, sample_requests, channel=None):
         if self._is_s950():
             self._s950.receive_samples(sample_requests)
+            return
+        if self.is_yamaha_model():
+            # the unit's native wave dumps (both channels of a stereo sample) instead of Sample Dump Standard
+            self._yamaha_transfers.receive_samples(sample_requests)
             return
         if channel is None:
             channel = self.channel
@@ -1682,6 +1717,8 @@ class SamplerController(QObject):
         # should be safe to call at any time i think
         if self._s950_engine is not None and self._s950_engine.cancel():
             return
+        if self._yamaha_transfers_engine is not None and self._yamaha_transfers_engine.cancel():
+            return
         in_progrss = (
             bool(self._send_queue)
             or bool(self._stereo_queue)
@@ -1749,6 +1786,18 @@ class SamplerController(QObject):
         # public version of _is_open_loop() - safe for UI layer to call directly
         return self._is_open_loop()
 
+    def is_sds_transfer_busy(self):
+        # a Sample Dump Standard / Akai transfer owns the wire - what the Yamaha session waits out before its own
+        # requests (its own wave downloads are NOT counted here: they go through that same session)
+        return bool(
+            self._send_queue
+            or self._stereo_queue
+            or self._file_queue
+            or self._receiving
+            or self._receive_queue
+            or self._awaiting_sample_info
+        )
+
     def is_transfer_busy(self):
         # public check for "would receive_samples()/receive_sample_generic()/
         # send_file_queue() etc. just reject this right now" - same condition
@@ -1758,13 +1807,9 @@ class SamplerController(QObject):
         # first rather than fire a request that's guaranteed to be silently
         # ignored with only a status_changed string to notice by
         return bool(
-            self._send_queue
-            or self._stereo_queue
-            or self._file_queue
-            or self._receiving
-            or self._receive_queue
-            or self._awaiting_sample_info
+            self.is_sds_transfer_busy()
             or (self._s950_engine is not None and self._s950_engine.busy)
+            or (self._yamaha_transfers_engine is not None and self._yamaha_transfers_engine.busy)
         )
 
     def _send_current_packet(self):

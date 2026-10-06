@@ -23,6 +23,10 @@ MEASURED on the real unit (the behaviours below are copied from it):
    previous one's ACK; a number with no sample gets a CANCEL (7D). The header's rate is rounded the way the
    unit's is (48000 -> 48001 Hz, the period in whole nanoseconds)
 
+WAVE DATA: a wave object (named by its sample's payload @64 / @80) is served as the native "WD" bulk dump - several
+complete messages per wave, laid out exactly as the real unit's (core/yamaha_wave.py). A stereo sample (`add_sample(...,
+audio_right=...)`) has a right wave object. MEASURED layout; the pacing is not (every message is sent at once).
+
 GUESSED (not measured - the first real conversation that disagrees wins): what a stereo sample or a sample bank
 sends over SDS (one mono waveform here), the audio itself (a deterministic test tone unless a test sets
 `audio[name]`), what SDS does after a deleted sample (positions shifting is assumed), that a wrong SDS
@@ -44,6 +48,7 @@ from core import demo_a4000_data as seed
 from core import sds_encoder
 from core import yamaha_params as yp
 from core import yamaha_sysex as y
+from core import yamaha_wave
 
 SOX = 0xF0
 EOX = 0xF7
@@ -131,6 +136,8 @@ class FakeA4000:
         self._outbox = deque()
         #: {sample name: list of int16 words} - the audio an SDS dump sends (default: a tone, see `_audio_for`)
         self.audio = {}
+        #: {sample name: list of int16 words} - a STEREO sample's right channel (see `add_sample`)
+        self.audio_right = {}
         self._sds_packets = []  # the data packets still to send, each after an ACK
         #: the object edits and parameter requests apply to: (type, key) or None
         self.current = None
@@ -164,13 +171,41 @@ class FakeA4000:
             self.samples[sample_name][:] = bits
         return slot
 
-    def add_sample(self, name, payload=None):
-        self.samples[name] = bytearray(payload) if payload is not None else make_sample_payload(name)
+    def add_sample(self, name, payload=None, *, audio=None, audio_right=None):
+        """Add a sample. `audio` (int16 words) sets its length; `audio_right` makes it STEREO (equal length)."""
+        data = bytearray(payload) if payload is not None else make_sample_payload(name)
+        if audio is not None:
+            self.audio[name] = list(audio)
+            for key in ("wave_length", "wave_end_address"):
+                yp.store(yp.get("sample", key), data, len(audio))
+        if audio_right is not None:
+            self.audio_right[name] = list(audio_right)
+            data[yp.WAVE_NAME_L_OFFSET : yp.WAVE_NAME_L_OFFSET + 16] = y.pad_name(f"{name}-L")
+            data[yp.WAVE_NAME_R_OFFSET : yp.WAVE_NAME_R_OFFSET + 16] = y.pad_name(f"{name}-R")
+        self.samples[name] = data
+
+    def _wave_names(self, name):
+        data = self.samples[name]
+        names = [bytes(data[yp.WAVE_NAME_L_OFFSET : yp.WAVE_NAME_L_OFFSET + 16]).decode("ascii").strip(" \x00")]
+        if yp.is_stereo(data):
+            names.append(yp.wave_name_right(data))
+        return names
+
+    def _wave_frames(self, wave_name):
+        """The int16 frames of a wave object (by ITS name), or None."""
+        for sample in self.samples:
+            names = self._wave_names(sample)
+            if wave_name in names:
+                if names.index(wave_name) == 0:
+                    return self._audio_for(sample)
+                return list(self.audio_right.get(sample) or [-w for w in self._audio_for(sample)])
+        return None
 
     def object_list(self):
         entries = [bytes([y.OBJECT_TYPES["program"]]) + y.pad_name(y.program_object_name(n)) for n in sorted(self.programs)]
         for name in self.samples:
-            entries.append(bytes([y.OBJECT_TYPES["wave"]]) + y.pad_name(name))
+            for wave in self._wave_names(name):
+                entries.append(bytes([y.OBJECT_TYPES["wave"]]) + y.pad_name(wave))
             entries.append(bytes([y.OBJECT_TYPES["sample"]]) + y.pad_name(name))
         return b"".join(entries)
 
@@ -269,6 +304,13 @@ class FakeA4000:
                 self._say(y.build_bulk_dump(self.device, "SP", y.pad_name(name), bytes(self.samples[name])))
             else:
                 self.ignored_ops.append(f"SP dump of unknown sample {name!r}")
+        elif fmt == "WD":
+            frames = self._wave_frames(name)
+            if frames is not None:
+                for message in yamaha_wave.build_wave_messages(self.device, name, frames):
+                    self._say(message)
+            else:
+                self.ignored_ops.append(f"WD dump of unknown wave {name!r}")
         else:
             self.ignored_ops.append(f"{fmt} dump request")
 

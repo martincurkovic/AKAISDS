@@ -486,8 +486,14 @@ class TransferDashboard(QWidget):
     def _update_empty_queue_placeholder(self):
         self.empty_queue_label.setVisible(self.list_local.count() == 0)
 
+    def _is_yamaha(self):
+        return sampler_models.is_yamaha(self.sampler_controller.sampler_model)
+
     def _update_empty_hardware_placeholder(self):
-        if self.sampler_controller.device_type in ("akai", sampler_models.FAMILY_S950):
+        if self._is_yamaha() or self.sampler_controller.device_type in (
+            "akai",
+            sampler_models.FAMILY_S950,
+        ):
             if self.sampler_controller.is_open_loop():
                 self.empty_hardware_label.setText(
                     "No MIDI Input selected - can't refresh or receive samples\n"
@@ -578,6 +584,25 @@ class TransferDashboard(QWidget):
             self.memory_avail_prog_bar.setVisible(False)
             if is_open_loop:
                 self.empty_hardware_label.setText(tooltips.S950_NEEDS_MIDI_INPUT)
+                self.empty_hardware_label.setVisible(self.list_hardware.count() == 0)
+            else:
+                self._update_empty_hardware_placeholder()
+            self._update_queue_buttons_state()
+            return
+
+        if self._is_yamaha():
+            # Yamaha A4000/A5000: its sample list and downloads use the unit's own protocol (the object list and
+            # wave dumps - controller/yamaha_transfers.py), so browsing and receiving work like the Akai family but
+            # need a MIDI input; there is no memory-status request (no bar) and no known delete opcode. SENDING
+            # samples is still plain Sample Dump Standard.
+            self.list_hardware.setEnabled(True)
+            self.btn_select_all.setEnabled(has_samples)
+            self.btn_refresh.setEnabled(not is_open_loop)
+            self.btn_receive.setEnabled(not is_open_loop and has_samples)
+            self.btn_delete_selected.setEnabled(False)
+            self.memory_avail_prog_bar.setVisible(False)
+            if is_open_loop:
+                self.empty_hardware_label.setText(tooltips.YAMAHA_LIST_NEEDS_MIDI_INPUT)
                 self.empty_hardware_label.setVisible(self.list_hardware.count() == 0)
             else:
                 self._update_empty_hardware_placeholder()
@@ -1075,7 +1100,7 @@ class TransferDashboard(QWidget):
         self.sampler_controller.cancel_transfer()
 
     def on_receive_clicked(self):
-        if self.sampler_controller.device_type == "generic":
+        if self.sampler_controller.device_type == "generic" and not self._is_yamaha():
             self.receive_sample_by_number_dialog()
         else:
             self.receive_selected_samples()
@@ -1508,10 +1533,11 @@ class TransferDashboard(QWidget):
             if checkbox and checkbox.isChecked():
                 any_checked = True
                 break
-        # nothing is ever deletable on an S900/S950 (no such opcode)
+        # nothing is ever deletable on an S900/S950 (no such opcode), nor on a Yamaha A4000/A5000 (none known)
         self.btn_delete_selected.setEnabled(
             any_checked
             and self.sampler_controller.device_type != sampler_models.FAMILY_S950
+            and not self._is_yamaha()
         )
 
     def create_hardware_row(self, filename, sample_number):
@@ -1549,6 +1575,11 @@ class TransferDashboard(QWidget):
         if self.sampler_controller.device_type == sampler_models.FAMILY_S950:
             btn_del.setEnabled(False)
             btn_del.setToolTip(tooltips.S950_CANT_DELETE)
+        if self._is_yamaha():
+            btn_del.setEnabled(False)
+            btn_del.setToolTip(tooltips.YAMAHA_CANT_DELETE)
+            btn_edit.setEnabled(False)
+            btn_edit.setToolTip(tooltips.YAMAHA_NO_SAMPLE_INFO)
 
         # assemble row layout horizontally
         row_layout.addWidget(checkbox, stretch=1)

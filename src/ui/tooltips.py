@@ -35,12 +35,25 @@ OPEN_EDITOR_NEEDS_AKAI_DEVICE_TYPE = (
     'Set Sampler Type to Akai S1000, Akai S2000/S3000, Akai S900/S950 or Yamaha A4000/A5000 in Settings first'
 )
 OPEN_EDITOR_YAMAHA = (
-    "Opens the Yamaha A4000/A5000 program editor (experimental - view only for now)"
+    "Opens the Yamaha A4000/A5000 program editor (experimental - edits go straight to the sampler's memory)"
 )
 # Yamaha A4000/A5000 (see controller/yamaha_session.py): every answer comes back on the MIDI input
 YAMAHA_NEEDS_MIDI_INPUT = (
     "The Yamaha A4000/A5000 answers on your MIDI input, so the editor needs\n"
     "one - select it in Settings."
+)
+# ...and so does listing/receiving samples (controller/yamaha_transfers.py); it has no known delete opcode
+YAMAHA_LIST_NEEDS_MIDI_INPUT = (
+    "The Yamaha A4000/A5000 answers on your MIDI input, so browsing and\n"
+    "receiving samples needs one - select it in Settings."
+)
+YAMAHA_CANT_DELETE = (
+    "Deleting samples over MIDI isn't supported for the Yamaha A4000/A5000 -\n"
+    "use its front panel (COMMAND > DELETE)."
+)
+YAMAHA_NO_SAMPLE_INFO = (
+    "Sample details and renaming aren't available here for the Yamaha A4000/A5000 -\n"
+    "use the Program Editor's Samples tab."
 )
 OPEN_EDITOR_S950 = (
     "Opens the Akai S900/S950 program editor (experimental - writes are untested on hardware)"
