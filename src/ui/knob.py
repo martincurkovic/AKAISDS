@@ -63,10 +63,18 @@ class _TypeEdit(QLineEdit):
         self._knob._finish_type_edit(self, self._cancelled)
 
 
+def arc_start_and_span(fraction, origin_fraction=0.0):
+    """(start angle, span) in degrees of the value arc, from `origin_fraction` (0 = the knob's minimum, the default; a bipolar
+    knob passes the fraction of its zero) to `fraction`. Angles run the way the knob's own arcs do: the span is negative going
+    clockwise."""
+    return START_ANGLE_DEG - SWEEP_DEG * origin_fraction, -SWEEP_DEG * (fraction - origin_fraction)
+
+
 class Knob(QDial):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setEnabled(False)  # read-only for now
+        self._bipolar = False  # see setBipolar
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self._drag_anchor_y = None
         self._drag_fraction = None  # float accumulator, in [0, 1] fraction
@@ -92,6 +100,18 @@ class Knob(QDial):
         QApplication.instance().applicationStateChanged.connect(
             self._on_application_state_changed
         )
+
+    def setBipolar(self, bipolar=True):
+        """For a range that spans zero (pan, tune offsets, ...): the value arc grows from the knob's ZERO instead of from its
+        minimum, and a small tick marks where zero is. Off by default - the S3000 editor's knobs are unchanged."""
+        self._bipolar = bool(bipolar)
+        self.update()
+
+    def _origin_fraction(self):
+        lo, hi = self.minimum(), self.maximum()
+        if not self._bipolar or not lo < 0 < hi:
+            return 0.0
+        return self._value_to_fraction(0)
 
     def _value_to_fraction(self, value):
         # linear by default - LogKnob overrides this (and its inverse
@@ -330,7 +350,20 @@ class Knob(QDial):
         value_pen.setWidth(_RING_WIDTH)
         value_pen.setCapStyle(Qt.PenCapStyle.FlatCap)
         painter.setPen(value_pen)
-        painter.drawArc(rect, START_ANGLE_DEG * 16, -int(SWEEP_DEG * fraction * 16))
+        origin = self._origin_fraction()
+        start_deg, span_deg = arc_start_and_span(fraction, origin)
+        painter.drawArc(rect, int(start_deg * 16), int(span_deg * 16))
+        if origin:
+            # a bipolar knob: a small tick on the ring where zero sits
+            zero_rad = math.radians(START_ANGLE_DEG - SWEEP_DEG * origin)
+            zcx, zcy, zr = rect.center().x(), rect.center().y(), rect.width() / 2
+            tick = QPen(QColor(palette["text_disabled"] if not enabled else palette["text"]))
+            tick.setWidthF(1.5)
+            painter.setPen(tick)
+            painter.drawLine(
+                QPointF(zcx + (zr + _RING_WIDTH / 2 + 1) * math.cos(zero_rad), zcy - (zr + _RING_WIDTH / 2 + 1) * math.sin(zero_rad)),
+                QPointF(zcx + (zr + _RING_WIDTH / 2 + 3) * math.cos(zero_rad), zcy - (zr + _RING_WIDTH / 2 + 3) * math.sin(zero_rad)),
+            )
 
         # pointer line - same underlying angle as the arc's current
         # endpoint, converted to an (x, y) point via trig. Screen y grows

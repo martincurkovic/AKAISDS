@@ -21,6 +21,10 @@ from ui.knob import Knob
 from ui.note_spinbox import NoteSpinBox
 
 
+#: the width of every "Label  [widget]" row's label, so the values line up in the same column in every card
+LABEL_WIDTH = 124
+
+
 @dataclasses.dataclass(frozen=True)
 class Field:
     key: str  # the row's key within the panel's scope
@@ -30,6 +34,7 @@ class Field:
     tip: str = ""
     fmt: object = None  # text kind: callable(value) -> str
     specials: object = None  # {value: text} shown instead of the number/note name (e.g. {-1: "Original"})
+    muted: bool = False  # text kind: shown in the theme's grey "secondary info" colour (read-only values nobody edits)
 
 
 class SpecialNoteSpinBox(NoteSpinBox):
@@ -79,6 +84,7 @@ class FieldPanel(QObject):
             w = Knob()
             w.setRange(p.lo, p.hi)
             w.setDefaultValue(min(max(0, p.lo), p.hi))
+            w.setBipolar(p.lo < 0 < p.hi)  # the arc grows from zero, with a tick there (pan, tune and offset knobs)
             w.setFixedSize(field.size, field.size)
             w.valueChanged.connect(lambda v: self._on_edit(key, int(v)))
         elif field.kind == "spin":
@@ -88,7 +94,7 @@ class FieldPanel(QObject):
             for value, text in (field.specials or {}).items():
                 if value == p.lo:
                     w.setSpecialValueText(text)  # e.g. -1 = "=Sample"
-            w.valueChanged.connect(lambda v: self._on_edit(key, int(v)))
+            w.valueChanged.connect(lambda v, w=w: (self._on_edit(key, int(v)), self._style_inherited(w)))
         elif field.kind == "note":
             w = SpecialNoteSpinBox(field.specials or {})
             w.setKeyboardTracking(False)
@@ -98,12 +104,14 @@ class FieldPanel(QObject):
             w = QComboBox()
             for value, text in sorted(yp.ENUMS[p.enum].items()):
                 w.addItem(text, value)
-            w.activated.connect(lambda _i, w=w: self._on_edit(key, w.currentData()))
+            w.activated.connect(lambda _i, w=w: (self._on_edit(key, w.currentData()), self._style_inherited(w)))
         elif field.kind == "check":
             w = QCheckBox()
             w.toggled.connect(lambda v: self._on_edit(key, int(bool(v))))
         elif field.kind == "text":
             w = QLabel("-")
+            if field.muted:
+                w.setObjectName("mutedLabel")
         else:
             raise ValueError(f"unknown field kind {field.kind!r}")
         if field.tip:
@@ -120,6 +128,9 @@ class FieldPanel(QObject):
         knob = self.widget(field)
         column, value_label = build_knob_column(field.label, knob)
         knob.setProperty("valueReadout", value_label)  # a knob set to 0 on a fresh widget emits nothing
+        label = column.itemAt(0).widget()
+        if label is not None and knob.toolTip():
+            label.setToolTip(knob.toolTip())  # hovering the NAME explains the abbreviation too ("Att lvl" -> the full name)
         return column
 
     def knob_row(self, fields, spacing=10):
@@ -129,11 +140,14 @@ class FieldPanel(QObject):
             row.addLayout(self.knob_column(field))
         return row
 
-    def labeled_row(self, field, label_width=110):
+    def labeled_row(self, field, label_width=LABEL_WIDTH):
         """"Label  [widget]" on one line, like the S3000 editor's Note Range / Tune rows."""
         row = QHBoxLayout()
         label = QLabel(field.label)
         label.setFixedWidth(label_width)
+        widget = self.widget(field)
+        if widget.toolTip():
+            label.setToolTip(widget.toolTip())
         row.addWidget(label)
         row.addWidget(self.widget(field))
         row.addStretch()
@@ -175,6 +189,7 @@ class FieldPanel(QObject):
                 w.addItem(f"{value} (unexpected)", value)
                 index = w.findData(value)
             w.setCurrentIndex(index)
+            self._style_inherited(w)
         elif isinstance(w, QCheckBox):
             w.setChecked(bool(value))
         else:  # knob / spin / note: show a value the unit holds even if the manual's range says otherwise
@@ -183,9 +198,25 @@ class FieldPanel(QObject):
             if value > w.maximum():
                 w.setMaximum(value)
             w.setValue(value)
+            self._style_inherited(w)
             readout = w.property("valueReadout")
             if readout is not None:
                 readout.setText(str(value))
+
+    @staticmethod
+    def _style_inherited(w):
+        """Dim a value that is INHERITED - "=Sample" (the program doesn't override the sample's own setting) - so overrides
+        stand out. A QSS rule keyed on the `inherited` property does the colouring."""
+        if isinstance(w, QComboBox):
+            inherited = w.currentText().startswith("=")
+        elif isinstance(w, QSpinBox) and w.specialValueText():
+            inherited = w.value() == w.minimum()
+        else:
+            return
+        if bool(w.property("inherited")) != inherited:
+            w.setProperty("inherited", inherited)
+            w.style().unpolish(w)
+            w.style().polish(w)
 
     def value(self, key):
         w = self.widgets[key]

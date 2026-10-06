@@ -184,6 +184,11 @@ QLabel#sectionHeader {
     background: transparent;
 }
 
+/* a value that is INHERITED ("=Sample": the program doesn't override the sample's own setting) reads dimmer than an override */
+QComboBox[inherited="true"], QSpinBox[inherited="true"] {
+    color: ${text_disabled};
+}
+
 /* placeholder text shown when file transfer queue is empty */
 #emptyQueueLabel {
   color: ${text_disabled};

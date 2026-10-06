@@ -599,3 +599,32 @@ def test_disabled_log_knob_paints_without_error(qapp):
     knob.resize(56, 56)
     pixmap = knob.grab()
     assert not pixmap.isNull()
+
+
+# --- bipolar knobs (the Yamaha editor's pan / offset knobs) -----------------------------------------------------------
+
+
+def test_the_value_arc_starts_at_the_minimum_by_default_and_at_zero_when_bipolar():
+    from ui.knob import START_ANGLE_DEG, SWEEP_DEG, arc_start_and_span
+
+    assert arc_start_and_span(0.25) == (START_ANGLE_DEG, -SWEEP_DEG * 0.25)  # unchanged: from the minimum
+    start, span = arc_start_and_span(0.5, 0.5)  # a bipolar knob at its zero draws nothing
+    assert span == 0 and start == START_ANGLE_DEG - SWEEP_DEG * 0.5
+    start, span = arc_start_and_span(0.75, 0.5)  # above zero: clockwise from zero
+    assert span < 0 and start == START_ANGLE_DEG - SWEEP_DEG * 0.5
+    start, span = arc_start_and_span(0.25, 0.5)  # below zero: counter-clockwise from zero
+    assert span > 0
+
+
+def test_only_a_range_spanning_zero_can_be_bipolar(qapp):
+    from ui.knob import Knob
+
+    k = Knob()
+    k.setRange(-63, 63)
+    assert k._origin_fraction() == 0.0  # off until asked for
+    k.setBipolar(True)
+    assert abs(k._origin_fraction() - 0.5) < 1e-9
+    k.setRange(0, 127)  # asked for, but zero is the minimum: nothing to centre
+    assert k._origin_fraction() == 0.0
+    k.setRange(-24, 96)
+    assert abs(k._origin_fraction() - 24 / 120) < 1e-9

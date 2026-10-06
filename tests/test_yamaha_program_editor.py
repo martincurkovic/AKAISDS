@@ -9,7 +9,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
 from PySide6.QtCore import QCoreApplication, QEvent, Qt
-from PySide6.QtWidgets import QCheckBox, QComboBox, QLabel, QMainWindow, QMessageBox, QSpinBox
+from PySide6.QtWidgets import QCheckBox, QComboBox, QLabel, QMainWindow, QMessageBox, QSpinBox, QWidget
 
 from controller.sampler_controller import SamplerController
 from core import demo_a4000 as demo
@@ -93,6 +93,7 @@ def build_window(qapp, fake):  # noqa: F811
 
 
 def dispose(window):
+    window.samples_tab.disconnect_controller()
     window._writer.close()
     window._scan_generation += 1
     window._session.cancel()
@@ -218,7 +219,7 @@ def test_edit_sample_jumps_to_the_samples_tab_and_selects_it(win):
 
 def test_the_samples_tab_lists_samples_and_fills_every_card(win):
     tab = win.samples_tab
-    assert [tab.sample_list_widget.item(i).text() for i in range(tab.sample_list_widget.count())] == list(
+    assert tab.sample_names() == list(
         demo.FACTORY_SAMPLES
     )
     tab.select_sample("sine wave")
@@ -441,3 +442,183 @@ def test_a_stereo_sample_says_only_its_left_wave_is_covered(win, fake):
     win.samples_tab.select_sample("pulse 2")
     assert wait_until(lambda: win.samples_tab.name_label.text() == "pulse 2")
     assert "stereo" not in win.samples_tab.summary_label.text()
+
+
+# --- the sample list rows and the envelope graphs ----------------------------------------------------------------
+
+
+def test_format_list_duration_matches_the_other_editors_lists():
+    assert samples_module.format_list_duration(22050, 44100) == "0.50s"
+    assert samples_module.format_list_duration(3996, 44100) == "0.09s"
+    assert samples_module.format_list_duration(100, 0) == ""
+
+
+def test_sample_rows_show_the_name_and_a_grey_duration_filled_in_by_a_background_scan(qapp):  # noqa: F811
+    fake = demo.FakeA4000()
+    fake.add_sample("one second", audio=[0] * 48000)  # the fake's rate is 48 kHz
+    fake.add_sample("quarter", audio=[0] * 12000)
+    window = build_window(qapp, fake)
+    try:
+        tab = window.samples_tab
+        assert wait_until(lambda: tab.sample_names() and len(tab._rows) == 9, timeout=20)
+        # every row's duration arrives without the user selecting anything
+        assert wait_until(lambda: all(label.text() for label in tab._rows.values()), timeout=40)
+        assert tab._rows["one second"].text() == "1.00s" and tab._rows["quarter"].text() == "0.25s"
+        assert tab._rows["sine wave"].text() == "0.00s"  # 128 frames
+        assert tab._rows["quarter"].objectName() == "mutedLabel"  # the theme's grey "secondary info" text
+        item = tab.sample_list_widget.item(0)
+        assert item.text() == "" and item.data(Qt.ItemDataRole.UserRole) == "sine wave"  # no double-painted text
+        assert item.sizeHint().height() > 20  # taller than a plain text row (the row widget's own 6 px margins)
+    finally:
+        dispose(window)
+
+
+def test_the_duration_scan_waits_while_the_wire_is_busy_and_skips_what_is_cached(win, fake):
+    tab = win.samples_tab
+    tab._cache.clear()
+    tab._scan_failed = set()
+    before = len([k for k, m in fake.received if k == "dump_request"])
+    busy = {"on": True}
+    real_idle = type(win._session).idle
+    try:
+        type(win._session).idle = property(lambda self: not busy["on"] and real_idle.fget(self))
+        tab._SCAN_RETRY_MS = 20
+        tab._start_duration_scan()
+        assert not wait_until(lambda: len([k for k, m in fake.received if k == "dump_request"]) > before, timeout=0.3)
+        busy["on"] = False
+        assert wait_until(lambda: len([k for k, m in fake.received if k == "dump_request"]) > before, timeout=5)
+    finally:
+        type(win._session).idle = real_idle
+    assert wait_until(lambda: all(n in tab._cache for n in tab.sample_names()), timeout=30)
+
+
+def test_the_envelope_graphs_follow_the_values_on_load_and_on_edit(win):
+    tab = win.samples_tab
+    tab.select_sample("sine wave")
+    assert wait_until(lambda: tab.name_label.text() == "sine wave" and not tab.cards_scroll.isHidden())
+    graphs = tab.panel.envelope_graphs
+    assert set(graphs) == {"aeg", "feg", "peg"}
+    # the factory sample: instant attack and decay (rate 127), a release rate of 126 (a hair over instant), full sustain
+    assert (graphs["aeg"]._attack, graphs["aeg"]._decay) == (0, 0)
+    assert tab.panel.value("aeg_release_rate") == 126 and graphs["aeg"]._release == pytest.approx(99 / 127)
+    assert graphs["aeg"]._sustain == pytest.approx(99.0 * tab.panel.value("aeg_sustain_level") / 127)
+    assert graphs["feg"]._values[:4] == tuple(
+        tab.panel.value(f"feg_{k}_level") for k in ("init", "attack", "sustain", "release")
+    )
+    # editing a knob redraws at once (before any read-back)
+    tab.panel.widgets["aeg_attack_rate"].setValue(10)
+    assert graphs["aeg"]._attack == pytest.approx((127 - 10) * 99 / 127)
+    tab.panel.widgets["peg_decay_rate"].setValue(20)
+    assert graphs["peg"]._values[5] == 20
+
+
+# --- the layout/styling pass ---------------------------------------------------------------------------------------------
+
+
+def test_an_inherited_value_is_dimmed_and_an_override_is_not(win, fake):
+    yp.store(yp.get("easy_edit", "output1"), fake.programs[1], 2, 0)  # slot 0 overrides output 1...
+    win._program_data.pop(1)
+    win._on_program_selected(win.program_list.currentItem(), None)
+    assert wait_until(lambda: 1 in win._program_data and win.assigned_list.count() == 2)
+    win.assigned_list.setCurrentRow(0)
+    panel = win.easy_panel
+    assert panel.widgets["output1"].currentText() != "=Sample" and not panel.widgets["output1"].property("inherited")
+    assert panel.widgets["output2"].currentText() == "=Sample" and panel.widgets["output2"].property("inherited") is True
+    assert panel.widgets["alternate_group"].property("inherited") is True  # a spinbox's "=Sample" special value too
+    # choosing an override by hand un-dims it at once, choosing "=Sample" again dims it
+    combo = panel.widgets["output2"]
+    combo.setCurrentIndex(combo.count() - 1)
+    combo.activated.emit(combo.count() - 1)
+    assert not combo.property("inherited")
+    combo.setCurrentIndex(0)
+    combo.activated.emit(0)
+    assert combo.property("inherited") is True
+
+
+def test_knobs_over_a_range_spanning_zero_are_bipolar_and_the_rest_are_not(win):
+    assert win.easy_panel.widgets["pan_offset"]._bipolar and win.program_panel.widgets["ad_in_l_pan"]._bipolar
+    assert not win.program_panel.widgets["program_level"]._bipolar  # 0..127: nothing to centre
+    assert win.samples_tab.panel.widgets["pan"]._bipolar and not win.samples_tab.panel.widgets["filter_cutoff"]._bipolar
+
+
+def test_hovering_a_knobs_name_explains_it_like_hovering_the_knob(win):
+    from ui.yamaha_fields import LABEL_WIDTH  # noqa: F401
+
+    knob = win.samples_tab.panel.widgets["feg_attack_level"]
+    assert "FEG attack level" in knob.toolTip()
+    label = knob.parentWidget().findChildren(QLabel)
+    assert any(l.text() == "Att lvl" and l.toolTip() == knob.toolTip() for l in label)
+
+
+def test_every_labelled_row_uses_the_same_label_width_so_values_line_up(win):
+    from ui.yamaha_fields import LABEL_WIDTH
+
+    widths = set()
+    for panel in (win.program_panel, win.easy_panel, win.samples_tab.panel):
+        for w in panel.widgets.values():
+            parent = w.parentWidget()
+            for label in (parent.findChildren(QLabel) if parent is not None else []):
+                if label.minimumWidth() == label.maximumWidth() and label.minimumWidth() > 60:
+                    widths.add(label.minimumWidth())
+    assert widths == {LABEL_WIDTH}
+
+
+def test_the_read_only_sample_values_are_grey_and_the_program_name_is_not(win):
+    tab = win.samples_tab
+    for key in ("sampling_frequency_l", "wave_start_address", "wave_length", "loop_end_address", "loop_tempo"):
+        assert tab.panel.widgets[key].objectName() == "mutedLabel"
+    assert win.program_panel.widgets["program_name"].objectName() != "mutedLabel"
+
+
+def _card_titled(page, title):
+    for card in page.findChildren(QWidget):
+        if card.objectName() == "sectionCard":
+            heads = [l.text() for l in card.findChildren(QLabel) if l.objectName() == "sectionHeader"]
+            if title in heads:
+                return card
+    raise AssertionError(f"no card titled {title!r}")
+
+
+def _left_edge(card, page):
+    return card.mapTo(page, card.rect().topLeft()).x()
+
+
+def _geometry(card, page):
+    top_left = card.mapTo(page, card.rect().topLeft())
+    return top_left.x(), top_left.y(), card.height()
+
+
+def _assert_pairs_line_up(page, pairs):
+    page.layout().activate()
+    previous_bottom = -1
+    for left_title, right_title in pairs:
+        (lx, ly, lh), (rx, ry, rh) = (_geometry(_card_titled(page, t), page) for t in (left_title, right_title))
+        assert ly == ry and lh == rh, (left_title, right_title)  # the pair lines up at the top AND the bottom
+        assert rx > lx
+        assert ly > previous_bottom  # and the rows run down the page in order
+        previous_bottom = ly + lh
+
+
+def test_the_programs_page_is_aligned_pairs_of_cards(win):
+    page = win.detail_stack.widget(0).widget()
+    page.resize(1000, 1500)
+    _assert_pairs_line_up(page, [("Program", "Portamento & S/H"), ("LFO", "Audio Input")])
+    assert _geometry(_card_titled(page, "LFO Step Wave"), page)[1] > _geometry(_card_titled(page, "LFO"), page)[1]
+
+
+def test_the_sample_page_is_aligned_pairs_with_no_collapsible_parts(win):
+    from PySide6.QtWidgets import QToolButton
+
+    tab = win.samples_tab
+    tab.select_sample("sine wave")
+    assert wait_until(lambda: tab.name_label.text() == "sine wave" and not tab.cards_scroll.isHidden())
+    page = tab.cards_page
+    page.resize(1000, 2600)
+    _assert_pairs_line_up(
+        page,
+        [("Pitch", "Key & Velocity Range"), ("Level & Pan", "Loop & Wave"), ("Filter", "Filter Envelope"),
+         ("Amplitude Envelope", "Pitch Envelope"), ("LFO", "Controllers"), ("Output", "EQ")],
+    )
+    # everything is simply shown: nothing hides behind a header
+    assert not [b for b in tab.cards_scroll.widget().findChildren(QToolButton) if b.text().startswith(("▸", "▾"))]
+    assert not tab.panel.widgets["level_key_scaling_break_1"].isHidden()

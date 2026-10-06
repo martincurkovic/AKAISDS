@@ -141,3 +141,73 @@ class Envelope2Graph(QWidget):
         pen.setWidth(2)
         painter.setPen(pen)
         painter.drawPolyline(QPolygonF([QPointF(x, y) for x, y in points]))
+
+
+# -- the Yamaha A4000/A5000's envelopes (ui/yamaha_samples_tab.py) ---------------------------------------------
+#
+# Its amplitude EG is an ADSR whose attack/decay/release are RATES - the HIGHER the value, the FASTER the stage (owner's
+# manual, "Amplitude EG") - while the S3000's ADSR knobs are times. `yamaha_adsr_values` turns one into the other so the
+# S3000's ADSREnvelopeGraph can draw it (shape only, no calibrated timing, like the originals). Its filter and pitch EGs are
+# 4-LEVEL generators - init level, attack level, sustain level, release level, each -127..+127, joined by an attack, a decay
+# and a release rate - so they get a bipolar graph of their own.
+
+YAMAHA_RATE_MAX = 127
+YAMAHA_LEVEL_MAX = 127
+
+
+def yamaha_adsr_values(attack_rate, decay_rate, sustain_level, release_rate):
+    """(attack, decay, sustain, release) on the 0-99 scale ADSREnvelopeGraph expects: rates become TIMES (a rate of 127 is an
+    instant stage, 0 the slowest), the sustain level just rescales."""
+
+    def time(rate):
+        return (YAMAHA_RATE_MAX - min(max(rate, 0), YAMAHA_RATE_MAX)) * 99 / YAMAHA_RATE_MAX
+
+    level = min(max(sustain_level, 0), YAMAHA_LEVEL_MAX) * 99 / YAMAHA_LEVEL_MAX
+    return time(attack_rate), time(decay_rate), level, time(release_rate)
+
+
+def _level_envelope_points(init, attack_level, sustain_level, release_level, attack_rate, decay_rate, release_rate, w, h, margin=3):
+    # Plain (x, y) tuples in draw order, like _adsr_points. Levels are -127..+127 around a centre line; each stage has its own
+    # fixed width budget scaled only by ITS rate (never by its siblings' - the same rule _adsr_points follows), the higher the
+    # rate the narrower the stage.
+    stage_max = (1 - SUSTAIN_HOLD_FRACTION) / 3
+
+    def width(rate):
+        return (YAMAHA_RATE_MAX - min(max(rate, 0), YAMAHA_RATE_MAX)) / YAMAHA_RATE_MAX * stage_max * w
+
+    def y_for(level):
+        level = min(max(level, -YAMAHA_LEVEL_MAX), YAMAHA_LEVEL_MAX)
+        return h / 2 - level / YAMAHA_LEVEL_MAX * (h / 2 - margin)
+
+    x1 = width(attack_rate)
+    x2 = x1 + width(decay_rate)
+    x3 = x2 + SUSTAIN_HOLD_FRACTION * w
+    x4 = x3 + width(release_rate)
+    return [(0, y_for(init)), (x1, y_for(attack_level)), (x2, y_for(sustain_level)), (x3, y_for(sustain_level)), (x4, y_for(release_level))]
+
+
+class LevelEnvelopeGraph(QWidget):
+    # A 4-level envelope (init -> attack -> sustain, then release) drawn around a faint zero line - the Yamaha filter and pitch EGs.
+    def __init__(self, color="#d97757", parent=None):
+        super().__init__(parent)
+        self._color = color
+        self._values = (0, 0, 0, 0, YAMAHA_RATE_MAX, YAMAHA_RATE_MAX, YAMAHA_RATE_MAX)
+
+    def set_values(self, init, attack_level, sustain_level, release_level, attack_rate, decay_rate, release_rate):
+        self._values = (init, attack_level, sustain_level, release_level, attack_rate, decay_rate, release_rate)
+        self.update()
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        w, h = self.width(), self.height()
+        _draw_border(painter, w, h)
+        zero = QPen(QColor(theme.current_palette()["border"]))
+        zero.setWidth(1)
+        painter.setPen(zero)
+        painter.drawLine(QPointF(1, h / 2), QPointF(w - 1, h / 2))
+        points = _level_envelope_points(*self._values, w, h)
+        pen = QPen(QColor(self._color))
+        pen.setWidth(2)
+        painter.setPen(pen)
+        painter.drawPolyline(QPolygonF([QPointF(x, y) for x, y in points]))

@@ -233,8 +233,6 @@ class YamahaProgramEditorWindow(QMainWindow):
             row(note),
             row(c("lfo_reset_midi_channel", "Reset channel")),
         )
-        equalize_card_heights(program, lfo)
-
         porta = build_section_card(
             "Portamento & S/H",
             row(s("portamento_type", "Type")),
@@ -252,8 +250,6 @@ class YamahaProgramEditorWindow(QMainWindow):
             knobs([k("ad_in_l_output1_level", "L out 1"), k("ad_in_l_output2_level", "L out 2"),
                    k("ad_in_r_output1_level", "R out 1"), k("ad_in_r_output2_level", "R out 2")]),
         )
-        equalize_card_heights(porta, audio)
-
         steps = [k(f"lfo_step_value_{n}", str(n), 28) for n in range(1, 17)]
         step_card = build_section_card(
             "LFO Step Wave",
@@ -265,10 +261,15 @@ class YamahaProgramEditorWindow(QMainWindow):
         effects_note = QLabel("Effects and controllers are not shown yet.")
         effects_note.setObjectName("mutedLabel")
 
+        # aligned pairs, each pinned to equal heights: the two short cards together (Program, Portamento) and the two tall
+        # ones together (LFO, Audio Input), the wide Step Wave across the bottom
+        equalize_card_heights(program, porta)
+        equalize_card_heights(lfo, audio)
+
         layout = QVBoxLayout()
         style_card_page_layout(layout)
-        layout.addLayout(build_paired_row(program, lfo))
-        layout.addLayout(build_paired_row(porta, audio))
+        layout.addLayout(build_paired_row(program, porta))
+        layout.addLayout(build_paired_row(lfo, audio))
         layout.addWidget(step_card)
         layout.addWidget(effects_note)
         layout.addStretch()
@@ -336,17 +337,26 @@ class YamahaProgramEditorWindow(QMainWindow):
         )
         equalize_card_heights(aeg, xfade)
 
-        out = build_section_card(
-            "Output & Playback",
-            row(c("output1", "Output 1")),
-            row(c("output2", "Output 2")),
-            knobs([k("output1_level_offset", "Out 1 level"), k("output2_level_offset", "Out 2 level")]),
-            row(c("receive_channel", "MIDI channel")),
-            row(c("mono_mode", "Mono mode")),
-            row(c("key_xfade_on", "Key crossfade")),
-            row(Field("alternate_group", "Alternate group", "spin", specials={-1: "=Sample"})),
-            row(ck("midi_control_on", "MIDI control")),
-        )
+        # two columns: where the sound goes (outputs and their levels) beside how it plays
+        routing, playback = QVBoxLayout(), QVBoxLayout()
+        routing.setSpacing(10)
+        playback.setSpacing(10)
+        for rows, column in (
+            ((row(c("output1", "Output 1")), row(c("output2", "Output 2")),
+              knobs([k("output1_level_offset", "Out 1 level"), k("output2_level_offset", "Out 2 level")])), routing),
+            ((row(c("receive_channel", "MIDI channel")), row(c("mono_mode", "Mono mode")),
+              row(c("key_xfade_on", "Key crossfade")),
+              row(Field("alternate_group", "Alternate group", "spin", specials={-1: "=Sample"})),
+              row(ck("midi_control_on", "MIDI control"))), playback),
+        ):
+            for r in rows:
+                column.addLayout(r)
+            column.addStretch()
+        out_columns = QHBoxLayout()
+        out_columns.setSpacing(20)
+        out_columns.addLayout(routing, 1)
+        out_columns.addLayout(playback, 1)
+        out = build_section_card("Output & Playback", out_columns)
 
         layout = QVBoxLayout()
         style_card_page_layout(layout)
@@ -613,6 +623,7 @@ class YamahaProgramEditorWindow(QMainWindow):
         if not self._connected or dump is None:
             return
         self._sample_cache[name] = bytearray(dump.data)
+        self.samples_tab.note_cached(name)
         self._on_sample_for_range(number, name, self._sample_cache[name])
 
     def _on_sample_for_range(self, number, name, sample_data):

@@ -34,7 +34,7 @@ waveform lands) only once the queue has drained.
 import collections
 import time
 
-from PySide6.QtCore import QTimer, Signal
+from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtWidgets import (
     QGridLayout,
     QHBoxLayout,
@@ -50,14 +50,17 @@ from core import debug_log
 from core import yamaha_params as yp
 from ui import tooltips as tt
 from ui.editor_layout import (
+    build_centered_row,
     build_list_column,
     build_paired_row,
+    build_sample_list_row_widget,
+    equalize_card_heights,
     build_samples_page,
     build_waveform_scrollbar,
-    equalize_card_heights,
     style_card_page_layout,
     sync_waveform_scrollbar,
 )
+from ui.envelope_graph import ADSREnvelopeGraph, LevelEnvelopeGraph, yamaha_adsr_values
 from ui.qt_helpers import build_scroll_area, build_section_card
 from ui.waveform_view import WaveformView
 from ui.yamaha_fields import Field, FieldPanel
@@ -95,12 +98,18 @@ def format_duration(frames, rate):
     return f"{frames / rate:.3f} s" if rate > 0 else ""
 
 
+def format_list_duration(frames, rate):
+    """'0.45s' - the grey duration at the right of a sample list row (the same format the S3000/S950 lists use)."""
+    return f"{frames / rate:.2f}s" if rate > 0 else ""
+
+
 #: loop modes that actually loop (owner's manual p.123): continuous loop and loop-to-release
 _LOOPING_MODES = (1, 2)
 #: said INSIDE the waveform (once, centered across a stereo pair) - the label under it stays empty until it has more to say
 _LOAD_HINT = ""
 _WAVEFORM_HINT = "Double-click to load the audio waveform"
 #: the waveform area is 180 px tall: one mono view, or a stereo pair at half height each
+_GRAPH_SIZE = (200, 80)  # the envelope graphs (the S3000 editor's are 200 x 90)
 _MONO_VIEW_HEIGHT = 180
 _STEREO_VIEW_HEIGHT = 90
 
@@ -147,7 +156,8 @@ def _check(key, label):
 
 
 def _text(key, label, fmt):
-    return Field(key, label, "text", fmt=fmt)
+    # read-only values (the wave/loop addresses, the sample rate): grey, so they read differently from the ones you can edit
+    return Field(key, label, "text", fmt=fmt, muted=True)
 
 
 def build_sample_cards(panel):
@@ -159,7 +169,7 @@ def build_sample_cards(panel):
 
     pitch = build_section_card(
         "Pitch",
-        row(note("original_key_l", "Original key"), 110),
+        row(note("original_key_l", "Original key")),
         knobs([k("coarse_tune", "Coarse"), k("fine_tune_l", "Fine")]),
         row(s("detune", "Detune")),
         row(s("random_pitch", "Random pitch")),
@@ -168,8 +178,8 @@ def build_sample_cards(panel):
     )
     key_range = build_section_card(
         "Key & Velocity Range",
-        row(note("key_range_low", "Key low", _SPECIAL_ORIGINAL), 110),
-        row(note("key_range_high", "Key high", _SPECIAL_ORIGINAL), 110),
+        row(note("key_range_low", "Key low", _SPECIAL_ORIGINAL)),
+        row(note("key_range_high", "Key high", _SPECIAL_ORIGINAL)),
         row(s("velocity_range_low", "Velocity low")),
         row(s("velocity_range_high", "Velocity high")),
         row(s("velocity_low_limit", "Velocity limit")),
@@ -177,7 +187,6 @@ def build_sample_cards(panel):
         row(ck("mono_mode", "Mono mode")),
         row(ck("fixed_pitch_on", "Fixed pitch")),
     )
-    equalize_card_heights(pitch, key_range)
 
     level = build_section_card(
         "Level & Pan",
@@ -198,7 +207,6 @@ def build_sample_cards(panel):
         row(t("loop_length", "Loop length", format_address)),
         row(t("loop_end_address", "Loop end", format_address)),
     )
-    equalize_card_heights(level, loop)
 
     filt = build_section_card(
         "Filter",
@@ -210,27 +218,35 @@ def build_sample_cards(panel):
         row(s("cutoff_key_scaling_level_1", "Scale level 1")),
         row(s("cutoff_key_scaling_level_2", "Scale level 2")),
     )
+    graphs = panel.envelope_graphs = {
+        "aeg": ADSREnvelopeGraph(),
+        "feg": LevelEnvelopeGraph("#d97757"),  # theme-independent colours, like the S3000's graphs
+        "peg": LevelEnvelopeGraph("#5aa9e6"),
+    }
+    for graph in graphs.values():
+        graph.setFixedSize(*_GRAPH_SIZE)
     feg = build_section_card(
         "Filter Envelope",
+        build_centered_row(graphs["feg"]),
         knobs([k("feg_attack_rate", "Attack"), k("feg_decay_rate", "Decay"), k("feg_release_rate", "Release")]),
         knobs([k("feg_init_level", "Init"), k("feg_attack_level", "Att lvl"), k("feg_sustain_level", "Sustain"), k("feg_release_level", "Rel lvl")]),
         knobs([k("feg_rate_key_scaling", "Key scale"), k("feg_rate_velocity_sensitivity", "Vel rate"), k("feg_attack_level_velocity_sensitivity", "Vel att"), k("feg_level_velocity_sensitivity", "Vel lvl")]),
     )
-    equalize_card_heights(filt, feg)
 
     aeg = build_section_card(
         "Amplitude Envelope",
         row(c("aeg_attack_mode", "Attack mode")),
+        build_centered_row(graphs["aeg"]),
         knobs([k("aeg_attack_rate", "Attack"), k("aeg_decay_rate", "Decay"), k("aeg_sustain_level", "Sustain"), k("aeg_release_rate", "Release")]),
         knobs([k("aeg_rate_key_scaling", "Key scale"), k("aeg_rate_velocity_sensitivity", "Vel rate")]),
     )
     peg = build_section_card(
         "Pitch Envelope",
+        build_centered_row(graphs["peg"]),
         knobs([k("peg_attack_rate", "Attack"), k("peg_decay_rate", "Decay"), k("peg_release_rate", "Release")]),
         knobs([k("peg_init_level", "Init"), k("peg_attack_level", "Att lvl"), k("peg_sustain_level", "Sustain"), k("peg_release_level", "Rel lvl")]),
         knobs([k("peg_range", "Range"), k("peg_rate_key_scaling", "Key scale"), k("peg_rate_velocity_sensitivity", "Vel rate"), k("peg_level_velocity_sensitivity", "Vel lvl")]),
     )
-    equalize_card_heights(aeg, peg)
 
     lfo = build_section_card(
         "LFO",
@@ -248,7 +264,6 @@ def build_sample_cards(panel):
         row(s("eq_gain", "Gain")),
         row(s("eq_width", "Width")),
     )
-    equalize_card_heights(lfo, eq)
 
     out = build_section_card(
         "Output",
@@ -257,11 +272,14 @@ def build_sample_cards(panel):
         knobs([k("output1_level", "Out 1 level"), k("output2_level", "Out 2 level")]),
     )
     controls = _controls_card(panel)
-    equalize_card_heights(out, controls)
 
+    # Side-by-side pairs, each pinned to equal heights so the two cards line up top and bottom. The pairs are chosen so the
+    # cards in a row are about the same height (the least empty space inside a card): Pitch/Key, Level/Loop, Filter/Filter
+    # Envelope, the two other envelopes, then LFO/Controllers and Output/EQ.
     layout = QVBoxLayout()
     style_card_page_layout(layout)
-    for left, right in ((pitch, key_range), (level, loop), (filt, feg), (aeg, peg), (lfo, eq), (out, controls)):
+    for left, right in ((pitch, key_range), (level, loop), (filt, feg), (aeg, peg), (lfo, controls), (out, eq)):
+        equalize_card_heights(left, right)
         layout.addLayout(build_paired_row(left, right))
     layout.addStretch()
     page = QWidget()
@@ -290,6 +308,7 @@ def _controls_card(panel):
 
 
 class YamahaSamplesTab(QWidget):
+    _SCAN_RETRY_MS = 400  # how often the duration scan checks whether the wire is free
     #: a short message for the host window's status bar
     status_message = Signal(str)
     #: the user asked to jump to a program that uses the sample
@@ -311,6 +330,9 @@ class YamahaSamplesTab(QWidget):
         self._audio_samples = None  # the left (or only) channel of the sample whose audio is loaded
         self._audio_samples_right = None
         self._syncing = False
+        self._rows = {}  # sample name -> the duration label of its list row
+        self._scan_token = 0  # bumped by every refresh/list change so a late scan result is dropped
+        self._scan_failed = set()
         # smooth reveal of arriving chunks (see the module docstring)
         self._reveal_queue = collections.deque()  # [view, frames, offset] segments, oldest first
         self._reveal_pending = 0  # frames queued
@@ -390,6 +412,7 @@ class YamahaSamplesTab(QWidget):
 
         self.waveform_hint = QLabel(_LOAD_HINT)
         self.waveform_hint.setObjectName("mutedLabel")
+        self.waveform_hint.setVisible(bool(_LOAD_HINT))
         # the two channels touch (no spacing) and draw as ONE display - see WaveformView.set_stack_position
         self.channel_stack = QVBoxLayout()
         channel_stack = self.channel_stack
@@ -445,14 +468,74 @@ class YamahaSamplesTab(QWidget):
         self._names = list(names)
         self.sample_list_widget.blockSignals(True)
         self.sample_list_widget.clear()
+        self._rows = {}
         for name in self._names:
-            QListWidgetItem(name, self.sample_list_widget)
+            # a row widget (name left, grey duration right - the S3000 editor's list), so the ITEM gets no text of its own
+            # (it would double-paint - AGENTS.md); the name lives in the item's data
+            item = QListWidgetItem(self.sample_list_widget)
+            item.setData(Qt.ItemDataRole.UserRole, name)
+            row_widget, name_label, duration_label = build_sample_list_row_widget(name)
+            item.setSizeHint(row_widget.sizeHint())
+            self.sample_list_widget.setItemWidget(item, row_widget)
+            self._rows[name] = duration_label
+            self._show_duration(name)
         self.sample_list_widget.blockSignals(False)
         if previous in self._names:
             self.select_sample(previous)
         else:
             self._selected = None
             self._show_placeholder("Select a sample on the left" if self._names else "No samples on the unit")
+        self._start_duration_scan()
+
+    # -- the durations in the list ---------------------------------------------------------------------------
+
+    def sample_names(self):
+        """The names in the list, in order."""
+        return [self.sample_list_widget.item(i).data(Qt.ItemDataRole.UserRole) for i in range(self.sample_list_widget.count())]
+
+    def _show_duration(self, name):
+        label, data = self._rows.get(name), self._cache.get(name)
+        if label is not None and data is not None:
+            frames = max(yp.extract(yp.get("sample", "wave_length"), data), 0)
+            try:
+                label.setText(format_list_duration(frames, yp.extract(yp.get("sample", "sampling_frequency_l"), data)))
+            except RuntimeError:  # the row was deleted under us (the list was rebuilt or the window is going away)
+                self._rows.pop(name, None)
+
+    def note_cached(self, name):
+        """The host cached a sample's dump (the Programs tab needs each assigned sample's key range): show its duration."""
+        self._show_duration(name)
+
+    def _start_duration_scan(self):
+        """Read the dump of every sample not yet read, one at a time and only while the wire is otherwise idle, so the
+        list can show each one's length without ever getting in front of something the user asked for."""
+        self._scan_token += 1
+        self._scan_failed = set()
+        self._scan_next(self._scan_token)
+
+    def _scan_next(self, token):
+        if token != self._scan_token or not self._connected:
+            return
+        for name in self._names:
+            self._show_duration(name)
+        todo = [n for n in self._names if n not in self._cache and n not in self._scan_failed]
+        if not todo:
+            return
+        if not self._session.idle:
+            QTimer.singleShot(self._SCAN_RETRY_MS, lambda: self._scan_next(token))
+            return
+        name = todo[0]
+        self._session.request_bulk("SP", name, lambda dump, n=name: self._on_scan_dump(token, n, dump))
+
+    def _on_scan_dump(self, token, name, dump):
+        if token != self._scan_token or not self._connected:
+            return
+        if dump is None:
+            self._scan_failed.add(name)  # never retried until the next refresh
+        elif name not in self._cache:
+            self._cache[name] = bytearray(dump.data)
+        self._show_duration(name)
+        QTimer.singleShot(0, lambda: self._scan_next(token))
 
     def select_sample(self, name):
         if name in self._names:
@@ -468,6 +551,11 @@ class YamahaSamplesTab(QWidget):
         finally:
             self._syncing = False
 
+    def _set_hint(self, text):
+        """The line under the waveform; hidden while empty so it doesn't leave a blank row in the card."""
+        self.waveform_hint.setText(text)
+        self.waveform_hint.setVisible(bool(text))
+
     def _show_placeholder(self, text):
         self.waveform_view.clear()
         self.waveform_view_right.clear()
@@ -478,7 +566,7 @@ class YamahaSamplesTab(QWidget):
     def _on_selected(self, current, _previous):
         if current is None:
             return
-        name = current.text()
+        name = current.data(Qt.ItemDataRole.UserRole)
         self._selected = name
         self._token += 1
         token = self._token
@@ -496,6 +584,7 @@ class YamahaSamplesTab(QWidget):
                 self.status_message.emit(f"Couldn't read sample {name!r}")
             return
         self._cache[name] = bytearray(dump.data)
+        self._show_duration(name)
         if token == self._token:
             self._show(name)
 
@@ -522,6 +611,18 @@ class YamahaSamplesTab(QWidget):
         if programs and self._writer is not None:
             used += " - a change here affects all of them"
         self.used_label.setText(used)
+        self._update_graphs()
+
+    def _update_graphs(self):
+        """Redraw the three envelope graphs from the panel's current widget values (shape only - no calibrated timing)."""
+        v = self.panel.value
+        graphs = self.panel.envelope_graphs
+        graphs["aeg"].set_values(*yamaha_adsr_values(v("aeg_attack_rate"), v("aeg_decay_rate"), v("aeg_sustain_level"), v("aeg_release_rate")))
+        for kind, prefix in (("feg", "feg"), ("peg", "peg")):
+            graphs[kind].set_values(
+                v(f"{prefix}_init_level"), v(f"{prefix}_attack_level"), v(f"{prefix}_sustain_level"), v(f"{prefix}_release_level"),
+                v(f"{prefix}_attack_rate"), v(f"{prefix}_decay_rate"), v(f"{prefix}_release_rate"),
+            )
 
     # -- editing -------------------------------------------------------------------------------------------
 
@@ -535,6 +636,7 @@ class YamahaSamplesTab(QWidget):
             self._show_values(name)  # declined the warning: put the widget back
             return
         yp.store(row, self._cache[name], value)  # shown at once; the read-back confirms it
+        self._update_graphs()
         self._after_cache_change(name, row)
 
     def _on_write_done(self, name, row, result):
@@ -584,7 +686,7 @@ class YamahaSamplesTab(QWidget):
                 view.set_waveform(samples, start, loop_start, loop_end, end)
             else:
                 view.set_header(frames, start, loop_start, loop_end, end)
-        self.waveform_hint.setText(
+        self._set_hint(
             "The markers are shown for reference - they can't be edited yet." if loaded else _LOAD_HINT
         )
 
@@ -595,6 +697,7 @@ class YamahaSamplesTab(QWidget):
     def refresh(self):
         """Forget the audio read so far (the host is about to re-read everything)."""
         self._load_token += 1  # a load in flight is abandoned (the host cancels the session)
+        self._scan_token += 1  # ...and so is the duration scan (set_samples starts a new one)
         self._reset_reveal()
         self._loading_name = None
         self.cancel_load_button.setVisible(False)
@@ -622,7 +725,7 @@ class YamahaSamplesTab(QWidget):
             view.set_loading(True)
             view.begin_live_capture()  # the wave draws itself in as it arrives
         self.cancel_load_button.setVisible(True)
-        self.waveform_hint.setText("Receiving the wave - it fills in as it arrives. Cancel stops waiting for it.")
+        self._set_hint("Receiving the wave - it fills in as it arrives. Cancel stops waiting for it.")
         _log(f"loading audio of {name!r}: wave object(s) {waves}")
         self.status_message.emit(f"Receiving {name!r}...")
         self._load_wave(token, name, waves, [])
@@ -760,7 +863,7 @@ class YamahaSamplesTab(QWidget):
         for view in (self.waveform_view, self.waveform_view_right):
             view.set_loading(False)
         self.cancel_load_button.setVisible(False)
-        self.waveform_hint.setText(_LOAD_HINT)
+        self._set_hint(_LOAD_HINT)
 
     @property
     def loading(self):
@@ -772,6 +875,7 @@ class YamahaSamplesTab(QWidget):
         if not self._connected:
             return
         self._connected = False
+        self._scan_token += 1
         self._reset_reveal()
         if self._loading_name is not None:
             self._load_token += 1
