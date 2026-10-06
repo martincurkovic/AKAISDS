@@ -1,7 +1,7 @@
 # tests for core/midi_transport.py - the shared raw-rtmidi transport behind
 # AKAISDS_SHARED_MIDI_TRANSPORT (see its own module docstring). Real port
 # opening needs a real rtmidi backend/hardware and is NOT exercised here -
-# see test_scripts/midi_transport_consolidation_test_plan.md for that.
+# see tests/midi_transport_consolidation_test_plan.md for that.
 # Everything here is the pure/near-pure logic this module was deliberately
 # split out to make testable without either: _MessageFanout (the callback/
 # poll dual-delivery), and SharedMidiInput/SharedMidiOutput's own wiring,
@@ -100,7 +100,7 @@ def test_fanout_handles_many_pushes_without_losing_or_duplicating_any():
     # the same process) - not a bug in this class, but a genuine, confirmed
     # instability from mixing raw OS threads with this suite's own Qt
     # threading in this environment. Real concurrent-hardware correctness
-    # needs to be proven on real hardware anyway (see test_scripts/
+    # needs to be proven on real hardware anyway (see tests/
     # midi_transport_consolidation_test_plan.md), so this stays sequential.
     fanout = _MessageFanout()
     messages_per_thread = 200
@@ -273,7 +273,7 @@ def test_shared_midi_output_send_message_acquires_the_write_lock():
     # this suite's own Qt/QThread-heavy tests, was found to trigger a real,
     # reproducible interpreter segfault elsewhere in the suite - isolated
     # by bisection, not theoretical; see git history for this test's own
-    # prior version and test_scripts/midi_transport_consolidation_test_
+    # prior version and tests/midi_transport_consolidation_test_
     # plan.md, which is exactly where genuine concurrent-hardware
     # correctness needs to be proven instead). A real threading.Lock
     # substituted for a spy proves the code path acquires it - the
@@ -303,7 +303,7 @@ def test_shared_midi_output_send_message_acquires_the_write_lock():
 
 # --- list_input_names / list_output_names (need a real rtmidi backend) -----
 # skipped rather than asserted on if no backend is available on this host -
-# see test_scripts/midi_transport_consolidation_test_plan.md for the real,
+# see tests/midi_transport_consolidation_test_plan.md for the real,
 # hardware-backed version of this check
 
 

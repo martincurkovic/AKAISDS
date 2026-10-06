@@ -61,8 +61,8 @@ def test_connect_opens_saved_output_port_when_not_demo(monkeypatch):
 # --- connect(): AKAISDS_SHARED_MIDI_TRANSPORT=1 (see core/midi_transport.py) -
 # builds the Program Editor's own S3kBridge from a MidiManager's already-open
 # raw ports instead of opening a second, independent connection - one real
-# connection instead of two. See test_scripts/midi_transport_consolidation_
-# test_plan.md - this path is not yet validated on real hardware.
+# connection instead of two. See tests/midi_transport_consolidation_
+# test_plan.md - validated on real hardware and now the default.
 
 
 class _FakeMidiManagerWithRawPorts:
