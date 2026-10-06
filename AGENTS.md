@@ -416,18 +416,17 @@ behaviours were hardware-verified; `dxzl/akai-s950` has NO licence, so don't cop
   looks like the S950's own request-sample-dump (`F0 7E 00 nn 00 F7`). Generic SDS mode against
   an S950 gives nonsense, not a clean failure.
 
-## Yamaha A4000/A5000 editing (IN PROGRESS - view-only editor works)
+## Yamaha A4000/A5000 editing (IN PROGRESS - parameter editing works; no create/delete/link)
 
 Goal: a program/sample editor for the user's Yamaha A4000 (transfers already work through Generic SDS and stay
 there). Plan, handoff and every measured fact: **`dev_docs/a4000-editor-roadmap.md`** (read it before
 touching anything here). State: `core/yamaha_sysex.py` (codec) + `core/yamaha_params.py` (204 program/Easy Edit/sample
 rows: P-address + bulk offset) + `core/demo_a4000.py` (`FakeA4000`) + `controller/yamaha_session.py` (conversation
-engine) + `ui/yamaha_program_editor.py`/`yamaha_samples_tab.py`/`yamaha_fields.py` (a VIEW-ONLY editor: Programs | assigned
-samples | cards, and a Samples tab) all exist with tests and were checked against the real unit. The Sampler Type is
+engine) + `ui/yamaha_program_editor.py`/`yamaha_samples_tab.py`/`yamaha_fields.py`/`yamaha_writer.py` (Programs | assigned
+samples | cards, and a Samples tab; every writable control edits the unit) all exist with tests and were checked against the real unit. The Sampler Type is
 `yamaha_a4000` ("Yamaha A4000/A5000 (experimental)"): its PROTOCOL FAMILY is `generic` (sample transfers are plain SDS) but
 `sampler_models.is_yamaha()` makes the Dashboard offer the Yamaha editor. The Samples tab shows the WAVEFORM (double-click;
-plain SDS). Not done: any write from the UI, effects/controls/system params. Writes to a real A4000 have only ever come from `tools/a4000_write_verify.py`
-(throwaway objects, RAM, 2026-10-06).
+plain SDS). Not done: effects/controls/system params, create/delete/link objects, wave/loop address editing.
 
 - **SDS number == the sample's POSITION in the sample list** (measured on the real unit: factory samples 0-6, a sample sent as
   number 100 came back as 7). `YamahaSamplesTab` fetches by list row and REFUSES a dump whose frames/rate don't match the
@@ -455,6 +454,29 @@ plain SDS). Not done: any write from the UI, effects/controls/system params. Wri
 - Same house rules as the Akai editors apply when the rest is built: one persistent worker thread (stateful
   select-then-request), the shared MIDI transport, a `.syx` backup before any write, an experimental warning.
 
+- **Writes (2026-10-06)**: `YamahaSession.write_parameter(row, value, object_name, cb, slot=)` - ONE parameter per op, guarded:
+  (1) the first write to an object per session dumps it and saves a `.syx` backup (`backup_dir`, default
+  `~/.akaisds/a4000_backups`; conftest points `controller.yamaha_session.BACKUP_DIR` at a temp dir) - **no backup, no write**;
+  (2) an edit applies to whichever object was selected LAST and a select gets no reply, so the edit is sent only after a
+  parameter request (the "probe", which also reads the old value) was answered with an announce naming the right object;
+  (3) after the edit (no reply exists) a read-back must equal the value. Refuses read-only/bulk-only/`write_ignored`/A5000-only
+  rows and out-of-range values without touching the unit. `WriteCoordinator` (`ui/yamaha_writer.py`) throttles widget edits
+  (150 ms, latest value per row), shows the one-time experimental warning (`yamaha_write_warning_acknowledged`), and re-reads
+  the object once its writes settle (side effects the read-back can't show). `FieldPanel.set_editable` enables only rows the
+  table says are writable; spinboxes have keyboard tracking OFF (typing "100" is one edit). The window refuses to close/refresh
+  under a write. Hardware menu: "Write Program Back Unchanged (test)" and "Open Backup Folder".
+  **Proven on the real A4000** with `tools/a4000_session_write_check.py` (the session's own write path): 13/13 program + sample
+  rows EXACT, a write of a row's own value leaves the dump identical, every original restored, backups equal the pre-write object.
+  Easy Edit rows through the session: 6/6 EXACT on program 001 slot 0 too.
+- **A write is refused silently by Bulk Protect** (UTILITY > MIDI bulk page): edits get no reply, the read-back shows the old value
+  and the message says so. **Bulk Protect also makes the unit CANCEL incoming SDS sample sends** (WAIT then CANCEL at packet 0) -
+  that looked like a mystery send failure on 2026-10-06; check it first.
+- **Waveform load has a "Cancel load" button** (`SamplerController.cancel_transfer()`); the controller now drops SDS header/data
+  packets that were already on the wire for 3 s after a user cancel (`_RECEIVE_CANCEL_GRACE_S`) instead of reporting
+  "unrecognised SysEx" over the "cancelled" status. SDS number == the sample's CURRENT list position, also after a delete
+  (measured by audio fingerprint, `tools/a4000_sds_numbering.py`: deleting one made all later ones move down). A Dashboard stereo send
+  becomes two unrelated mono samples on the unit. A stereo sample (non-empty right wave name at payload @80,
+  `yp.is_stereo`) is labelled in the Samples tab; what SDS sends for one is unmeasured.
 ## Theme preference (Settings > Settings tab > Appearance)
 
 `config.json`'s `"theme"` is `"system"` (default - follows the OS light/dark setting live, as
