@@ -417,16 +417,25 @@ wave object by name (SP payload @64) and, for a STEREO sample, a right one (@80)
   samples) stalled after the header (WAIT, then a checksum error / silence) while WD kept working. Cause of the SDS stall unknown.
 - A bulk dump can't be aborted: after a cancel the unit keeps streaming the remaining messages, which occupy the wire (the session
   must keep draining until the stream goes quiet before sending the next request).
-- NOT yet used by the editor (the Samples tab still loads waveforms over SDS).
+- **IMPLEMENTED (session 2, later)**: the Samples tab loads waveforms this way (both channels, progressive, Cancel), and the
+  Dashboard lists samples (object list) and receives them as mono/stereo WAVs this way (`controller/yamaha_transfers.py`).
+  Verified on the real unit: the 12-sample list; `_NewSample` received as a 2-channel 44,540-frame WAV at 22,050 Hz (~70 s per
+  channel); the editor drew it progressively, Cancel worked and the session recovered once the unit finished its stream.
+- **MEASURED: nothing aborts a bulk dump** - an identity request and an SDS CANCEL sent mid-stream did not stop it (the stream
+  ran to the end at ~1.6 s per 4 KB message). So Cancel can only stop WAITING: `YamahaSession` drains (stays busy) until the
+  stream has been quiet for `drain_idle_ms`; a queued request waits out the rest of the wave (~70 s worst case on a 2 s stereo
+  sample). Untried: other mid-dump messages (e.g. a bulk dump request for another object).
+- Sending samples to the unit is still SDS (the native route for LOADING audio is unmeasured - bulk-loading a WD/SP pair
+  would be the candidate; test on a throwaway).
 
 ## Next steps (in order)
 
 DONE 2026-10-06 (session 2): writes (see "Writes" below), the waveform Cancel button, the delete-numbering check, stereo
-detection/labelling. Next:
+detection, then the native wave dump: both-channel progressive waveform, Dashboard list + receive. Next:
 
 1. ~~Easy Edit writes on the real unit~~ DONE (see Writes).
-2. **A genuine stereo sample**: record one on the unit (RECORD mode, Sample Type "Stereo"), then `tools/a4000_sds_numbering.py
-   list` and `probe` to see what SDS sends for it (one mono dump? two numbers?) and make the waveform load handle it.
+2. ~~A genuine stereo sample~~ DONE (WD reaches both channels; SDS only sent the left header and stalled).
+   New: native LOADING of audio onto the unit (bulk-load a wave + sample object) so Sampler Type Yamaha need not use SDS to send.
 3. Waveform polish: remember a loaded waveform per sample for the session (only the last is kept).
 4. UI polish: sample list rows with durations, program-card whitespace, program names for empty programs on demand, remember the
    last program/tab; a restore-from-backup action (the backups are plain `.syx` the unit can load; no in-app restore yet).
