@@ -11,6 +11,7 @@ A simple way to send and receive audio samples (WAV, AIFF, FLAC) to an Akai S100
 
 - Akai-native sample browsing & management (list, rename, delete) as well as universal generic SDS support for non-Akai hardware
 - Program, Keygroup and Sample editor for Akai S2000/S3000 series samplers, plus an experimental editor for the Akai S1000 (choose "Akai S1000" as the Sampler Type in Settings)
+- Experimental Yamaha A4000/A5000 support (choose "Yamaha A4000/A5000 (experimental)" as the Sampler Type): sample send/receive uses standard SDS like Generic SDS, and the program editor lets you browse programs, assigned samples, every sample's parameters and its waveform. It is view-only for now (nothing can be edited yet) and has only been tried on an A4000
 - Experimental Akai S900/S950 support (choose "Akai S900/S950 (experimental)" as the Sampler Type): sample send/receive plus a program editor. It uses a different protocol from the other Akai models, was written without access to the hardware and has not been tested on a real unit yet, so back up your sampler first and please report what you find
 - ReCycle style sample slicing
   - Transient detection
