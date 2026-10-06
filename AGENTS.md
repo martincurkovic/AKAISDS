@@ -284,7 +284,7 @@ family: device byte `0x40` (not `0x48`), function codes 0-11, every 8-bit value 
 TWO MIDI bytes, 10-char plain-ASCII names, XOR checksums, and a sample dump that is
 ONE SysEx (header + all blocks + a single `F7`) with 4-byte handshakes
 (`F0 7E code F7`) - the standard 6-byte SDS ACK is silently ignored. Plan and
-staging: `~/Desktop/AKAISDS-S900-S950-support-plan.md` (not in this repo).
+staging: `dev_docs/s950-support-plan.md`.
 **Nothing here has been run against hardware.** Ported from
 [s950tools](https://github.com/diemonster/s950tools) (MIT - see
 `THIRD_PARTY_NOTICES.md`; keep the notice when porting more). Its comments say which
@@ -406,7 +406,7 @@ behaviours were hardware-verified; `dxzl/akai-s950` has NO licence, so don't cop
 - **Known unmeasured risk**: a receive is ONE message of up to ~1 MB. macOS CoreMIDI assembles
   it; backends that split long SysEx would lose it, because `MidiManager._on_raw_message` drops
   any fragment not starting with F0. A timeout there says so; ask for `~/.akaisds/akaisds.log`.
-- `test_scripts/s950_demo.py` opens the real Dashboard on a `FakeS950` (no hardware; Settings
+- `tools/s950_demo.py` opens the real Dashboard on a `FakeS950` (no hardware; Settings
   doesn't work in it). `tests/test_s950_transfers.py` drives the real engine + controller
   against the fake over a fake MidiManager that delivers replies asynchronously. **Tests that
   repopulate the hardware list must flush deferred deletes** (the `dashboard` fixture does):
@@ -415,6 +415,24 @@ behaviours were hardware-verified; `dxzl/akai-s950` has NO licence, so don't cop
 - Byte-for-byte collision to remember: a standard SDS ACK on channel 0 (`F0 7E 00 pp F7`...)
   looks like the S950's own request-sample-dump (`F0 7E 00 nn 00 F7`). Generic SDS mode against
   an S950 gives nonsense, not a clean failure.
+
+## Yamaha A4000/A5000 editing (IN PROGRESS - codec only)
+
+Goal: a program/sample editor for the user's Yamaha A4000 (transfers already work through Generic SDS and stay
+there). Plan, handoff and every measured fact: **`dev_docs/a4000-editor-roadmap.md`** (read it before
+touching anything here). State: `core/yamaha_sysex.py` (the codec, pure, "bytes between F0 and F7")
+and `tests/test_yamaha_sysex.py` exist; no params table, fake, bridge, UI or Sampler Type entry yet, and
+**nothing has ever been written to a real A4000**.
+
+- Verified on a real A4000 (2026-10-06, device number 0): the service manual (MIDI DATA FORMAT, p.32-42) is accurate,
+  with one correction - the bulk byte count is **MSB-first** and a dump is **several blocks inside one F0..F7**
+  (`count(2) span xor-checksum` each; only the first span carries the 26-byte header; XOR, not a sum). Don't rewrite
+  `parse_bulk_dump` to the manual's wording. The unit also **echoes an object-select message** back.
+- `tests/fixtures/a4000/*.syx` are REAL captures; the tests rebuild them byte for byte. Never regenerate them from
+  the codec. `tools/a4000_discovery.py` is the read-only probe
+  that captured them; it refuses to send anything but identity / dump / parameter requests and object select.
+- Same house rules as the Akai editors apply when the rest is built: one persistent worker thread (stateful
+  select-then-request), the shared MIDI transport, a `.syx` backup before any write, an experimental warning.
 
 ## Theme preference (Settings > Settings tab > Appearance)
 
