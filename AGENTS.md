@@ -418,20 +418,36 @@ behaviours were hardware-verified; `dxzl/akai-s950` has NO licence, so don't cop
 
 ## Yamaha A4000/A5000 editing (IN PROGRESS - parameter editing works; no create/delete/link)
 
-Goal: a program/sample editor for the user's Yamaha A4000 (transfers already work through Generic SDS and stay
-there). Plan, handoff and every measured fact: **`dev_docs/a4000-editor-roadmap.md`** (read it before
+Goal: a program/sample editor for the user's Yamaha A4000 (sending samples works through plain SDS, which the Yamaha
+Sampler Type keeps; listing/receiving samples and the editor use the unit's own protocol). Plan, handoff and every measured fact: **`dev_docs/a4000-editor-roadmap.md`** (read it before
 touching anything here). State: `core/yamaha_sysex.py` (codec) + `core/yamaha_params.py` (204 program/Easy Edit/sample
 rows: P-address + bulk offset) + `core/demo_a4000.py` (`FakeA4000`) + `controller/yamaha_session.py` (conversation
 engine) + `ui/yamaha_program_editor.py`/`yamaha_samples_tab.py`/`yamaha_fields.py`/`yamaha_writer.py` (Programs | assigned
 samples | cards, and a Samples tab; every writable control edits the unit) all exist with tests and were checked against the real unit. The Sampler Type is
-`yamaha_a4000` ("Yamaha A4000/A5000 (experimental)"): its PROTOCOL FAMILY is `generic` (sample transfers are plain SDS) but
-`sampler_models.is_yamaha()` makes the Dashboard offer the Yamaha editor. The Samples tab shows the WAVEFORM (double-click;
-plain SDS). Not done: effects/controls/system params, create/delete/link objects, wave/loop address editing.
+`yamaha_a4000` ("Yamaha A4000/A5000 (experimental)"): its PROTOCOL FAMILY is `generic` (sample SENDS are plain SDS) but
+`sampler_models.is_yamaha()` makes the Dashboard offer the Yamaha editor, list and receive. The Samples tab shows the WAVEFORM
+(double-click; the native wave dump, both channels). Not done: effects/controls/system params, create/delete/link objects, wave/loop address editing.
 
-- **SDS number == the sample's POSITION in the sample list** (measured on the real unit: factory samples 0-6, a sample sent as
-  number 100 came back as 7). `YamahaSamplesTab` fetches by list row and REFUSES a dump whose frames/rate don't match the
-  sample's own parameters. SDS audio is slow (a 31k-frame sample takes ~2 min); the Yamaha session waits while an SDS
-  transfer is on the wire. `tools/a4000_sds_probe.py` is the read-only probe. Details: the roadmap's "The waveform".
+- **Audio comes over the unit's NATIVE wave dump ("WD"), not SDS** (`core/yamaha_wave.py`, `YamahaSession.request_wave`; layout
+  measured and verified byte for byte against SDS dumps - read that module's docstring before touching it): a sample links a left
+  wave object (SP payload @64) and, if stereo, a right one (@80); each is requested by ITS OWN name and arrives as several complete
+  ~4 KB bulk messages (block number, then the audio words), ~620 frames/s. Why: SDS stalled on the real unit after a stereo
+  recording (even for mono samples) while WD kept working, WD is faster, and SDS can't reach a stereo sample's right channel.
+  **A bulk dump CAN'T be aborted** (measured: neither an identity request nor an SDS CANCEL stops it), so a cancelled wave makes
+  the session DRAIN - it stays busy (`idle` False) until the stream has been quiet for `drain_idle_ms`, which after a cancel at 7 s
+  of a 2 s stereo sample was ~70 s. Everything queued behind it (the Programs tab's reads, a Dashboard refresh) waits that long.
+- **The Samples tab shows both channels** (two `WaveformView`s at 90 px each for a stereo sample, one at 180 for mono, kept in step
+  by `set_view_state`), draws progressively (`begin_live_capture`/`append_live_samples`, fed by the session's `on_chunk`), and has a
+  Cancel button. The loaded audio is checked against the sample's own `wave_length` and refused if it doesn't match.
+- **The Transfer Dashboard lists and receives natively too** (`controller/yamaha_transfers.py`, built lazily by `SamplerController`):
+  Refresh = the object list's samples (`sample_list_updated`, index == number == SDS position - measured to stay true after a
+  delete); Receive = SP dump + the wave dump(s) -> a mono or STEREO WAV at the sample's rate. Delete/rename/info are refused (no
+  known opcode - front panel). **SENDING samples is still plain SDS** (`device_type` "generic"; the native route for loading
+  audio is unmeasured). `is_sds_transfer_busy()` (what the session waits out) vs `is_transfer_busy()` (also counts a running
+  Yamaha receive, which goes THROUGH the session - never make the session wait on that one).
+- SDS facts that still hold (the Dashboard's sends use it): number == the sample's CURRENT list position, also after a delete
+  (measured by audio fingerprint, `tools/a4000_sds_numbering.py`); the unit trims 4 frames off a sent sample; a Dashboard stereo
+  send becomes two unrelated mono samples; **Bulk Protect ON makes the unit CANCEL incoming SDS sends**.
 - **No worker thread.** `SamplerController.yamaha_session()` -> `YamahaSession`, event-driven on the GUI thread, fed incoming
   0x43 SysEx by the controller. **Never connect `controller.on_sysex_received` to `MidiManager.sysex_received` yourself** - the
   controller already does, and a second connection delivers every message twice (that once made the next program's read
@@ -469,14 +485,11 @@ plain SDS). Not done: effects/controls/system params, create/delete/link objects
   rows EXACT, a write of a row's own value leaves the dump identical, every original restored, backups equal the pre-write object.
   Easy Edit rows through the session: 6/6 EXACT on program 001 slot 0 too.
 - **A write is refused silently by Bulk Protect** (UTILITY > MIDI bulk page): edits get no reply, the read-back shows the old value
-  and the message says so. **Bulk Protect also makes the unit CANCEL incoming SDS sample sends** (WAIT then CANCEL at packet 0) -
-  that looked like a mystery send failure on 2026-10-06; check it first.
-- **Waveform load has a "Cancel load" button** (`SamplerController.cancel_transfer()`); the controller now drops SDS header/data
-  packets that were already on the wire for 3 s after a user cancel (`_RECEIVE_CANCEL_GRACE_S`) instead of reporting
-  "unrecognised SysEx" over the "cancelled" status. SDS number == the sample's CURRENT list position, also after a delete
-  (measured by audio fingerprint, `tools/a4000_sds_numbering.py`: deleting one made all later ones move down). A Dashboard stereo send
-  becomes two unrelated mono samples on the unit. A stereo sample (non-empty right wave name at payload @80,
-  `yp.is_stereo`) is labelled in the Samples tab; what SDS sends for one is unmeasured.
+  and the message says so (it also makes the unit cancel incoming SDS sends - check it first when a send "does nothing").
+- The controller drops SDS header/data packets that were already on the wire for 3 s after a user cancel of an SDS receive
+  (`_RECEIVE_CANCEL_GRACE_S`) instead of reporting "unrecognised SysEx" over the "cancelled" status. A stereo sample (non-empty
+  right wave name at payload @80, `yp.is_stereo`) is labelled "stereo" in the Samples tab.
+
 ## Theme preference (Settings > Settings tab > Appearance)
 
 `config.json`'s `"theme"` is `"system"` (default - follows the OS light/dark setting live, as
