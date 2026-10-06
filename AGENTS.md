@@ -425,10 +425,14 @@ rows: P-address + bulk offset) + `core/demo_a4000.py` (`FakeA4000`) + `controlle
 engine) + `ui/yamaha_program_editor.py`/`yamaha_samples_tab.py`/`yamaha_fields.py` (a VIEW-ONLY editor: Programs | assigned
 samples | cards, and a Samples tab) all exist with tests and were checked against the real unit. The Sampler Type is
 `yamaha_a4000` ("Yamaha A4000/A5000 (experimental)"): its PROTOCOL FAMILY is `generic` (sample transfers are plain SDS) but
-`sampler_models.is_yamaha()` makes the Dashboard offer the Yamaha editor. Not done: waveform, any write from the UI,
-effects/controls/system params. Writes to a real A4000 have only ever come from `tools/a4000_write_verify.py`
+`sampler_models.is_yamaha()` makes the Dashboard offer the Yamaha editor. The Samples tab shows the WAVEFORM (double-click;
+plain SDS). Not done: any write from the UI, effects/controls/system params. Writes to a real A4000 have only ever come from `tools/a4000_write_verify.py`
 (throwaway objects, RAM, 2026-10-06).
 
+- **SDS number == the sample's POSITION in the sample list** (measured on the real unit: factory samples 0-6, a sample sent as
+  number 100 came back as 7). `YamahaSamplesTab` fetches by list row and REFUSES a dump whose frames/rate don't match the
+  sample's own parameters. SDS audio is slow (a 31k-frame sample takes ~2 min); the Yamaha session waits while an SDS
+  transfer is on the wire. `tools/a4000_sds_probe.py` is the read-only probe. Details: the roadmap's "The waveform".
 - **No worker thread.** `SamplerController.yamaha_session()` -> `YamahaSession`, event-driven on the GUI thread, fed incoming
   0x43 SysEx by the controller. **Never connect `controller.on_sysex_received` to `MidiManager.sysex_received` yourself** - the
   controller already does, and a second connection delivers every message twice (that once made the next program's read
