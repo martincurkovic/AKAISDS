@@ -32,6 +32,7 @@ from ui.settings_dialog import MidiSettingsDialog
 from ui.drop_list_widget import DropListWidget
 from ui.program_editor_window import ProgramEditorWindow
 from ui.s950_program_editor import S950ProgramEditorWindow
+from ui.yamaha_program_editor import YamahaProgramEditorWindow
 from ui.sample_settings_dialog import SampleSettingsDialog
 from ui.sample_info_dialog import SampleInfoDialog
 from ui.slice_editor_window import SliceEditorWindow
@@ -344,6 +345,19 @@ class TransferDashboard(QWidget):
             return
         main_window = self.window()
         sampler_model = self.sampler_controller.sampler_model
+        if sampler_models.is_yamaha(sampler_model):
+            # the Yamaha A4000/A5000 has its own editor too (not built on s3k.params). It shares this
+            # window's SamplerController - same connection, one operation at a time - and every answer
+            # comes back on the MIDI input, so there is no open-loop mode for it
+            if self.sampler_controller.is_open_loop():
+                self.status_bar.showMessage(tooltips.YAMAHA_NEEDS_MIDI_INPUT)
+                return
+            self.editor_window = YamahaProgramEditorWindow(
+                main_window, self.sampler_controller
+            )
+            self.editor_window.show()
+            main_window.hide()
+            return
         if sampler_models.is_s950(sampler_model):
             # the S900/S950 has its own small program editor (the Program
             # Editor is built on s3k.params, which has nothing for this model).
@@ -507,6 +521,7 @@ class TransferDashboard(QWidget):
         )
         is_akai = self.sampler_controller.device_type == "akai"
         is_s950 = self.sampler_controller.device_type == sampler_models.FAMILY_S950
+        is_yamaha = sampler_models.is_yamaha(self.sampler_controller.sampler_model)
         # a MIDI transfer in progress (started from here, or from the
         # Program Editor sharing this same sampler_controller) locks out
         # BOTH windows that could open a second thing on the wire - see
@@ -518,7 +533,9 @@ class TransferDashboard(QWidget):
         self.btn_settings.setToolTip(
             tooltips.BUSY_BLOCKS_OTHER_WINDOWS if busy else ""
         )
-        self.btn_open_editor.setEnabled(has_ports and (is_akai or is_s950) and not busy)
+        self.btn_open_editor.setEnabled(
+            has_ports and (is_akai or is_s950 or is_yamaha) and not busy
+        )
         if busy:
             self.btn_open_editor.setToolTip(tooltips.BUSY_BLOCKS_OTHER_WINDOWS)
         elif has_ports and is_akai:
@@ -527,6 +544,8 @@ class TransferDashboard(QWidget):
             self.btn_open_editor.setToolTip(tooltips.OPEN_EDITOR_NEEDS_MIDI_PORTS)
         elif is_s950:
             self.btn_open_editor.setToolTip(tooltips.OPEN_EDITOR_S950)
+        elif is_yamaha:
+            self.btn_open_editor.setToolTip(tooltips.OPEN_EDITOR_YAMAHA)
         else:
             self.btn_open_editor.setToolTip(
                 tooltips.OPEN_EDITOR_NEEDS_AKAI_DEVICE_TYPE

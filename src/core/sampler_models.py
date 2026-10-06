@@ -1,12 +1,14 @@
-# The four "Sampler Type" choices in Settings, and what each one implies.
+# The five "Sampler Type" choices in Settings, and what each one implies.
 #
-# A selection is one of four strings (what MidiSettingsDialog's combo stores
+# A selection is one of five strings (what MidiSettingsDialog's combo stores
 # as item data, and what app_config persists as "device_type"):
 #
 #   "akai_s2000_s3000" - Akai S2000/S3000 series
 #   "akai_s1000"       - Akai S1000 (and S1100)
 #   "akai_s900_s950"   - Akai S900/S950 (a different protocol: see core/s950_sysex.py)
 #   "generic"          - any MIDI Sample Dump Standard device
+#   "yamaha_a4000"     - Yamaha A4000/A5000: transfers are plain Sample Dump Standard (the "generic"
+#                        family), but its Program Editor speaks Yamaha SysEx (core/yamaha_sysex.py)
 #
 # Before the S1000 existed the S2000/S3000 entry was saved as plain "akai".
 # That legacy value is still ACCEPTED everywhere (normalize() maps it), and
@@ -28,6 +30,7 @@ LEGACY_AKAI = "akai"
 AKAI_S1000 = "akai_s1000"
 AKAI_S900_S950 = "akai_s900_s950"
 GENERIC_SDS = "generic"
+YAMAHA_A4000 = "yamaha_a4000"
 
 FAMILY_AKAI = "akai"
 FAMILY_GENERIC = "generic"
@@ -43,6 +46,7 @@ CHOICES = [
     ("Akai S2000/S3000", AKAI_S2000_S3000),
     ("Akai S900/S950 (experimental)", AKAI_S900_S950),
     ("Generic SDS", GENERIC_SDS),
+    ("Yamaha A4000/A5000 (experimental)", YAMAHA_A4000),
 ]
 
 _VALID = {selection for _label, selection in CHOICES}
@@ -60,7 +64,8 @@ def normalize(selection):
 def protocol_family(selection):
     # "akai", "generic" or "s950" - what SamplerController.device_type holds
     selection = normalize(selection)
-    if selection == GENERIC_SDS:
+    # the Yamaha's SAMPLE transfers are standard SDS - only its editor is Yamaha-specific (is_yamaha)
+    if selection in (GENERIC_SDS, YAMAHA_A4000):
         return FAMILY_GENERIC
     if selection == AKAI_S900_S950:
         return FAMILY_S950
@@ -73,3 +78,7 @@ def is_s1000(selection):
 
 def is_s950(selection):
     return normalize(selection) == AKAI_S900_S950
+
+
+def is_yamaha(selection):
+    return normalize(selection) == YAMAHA_A4000

@@ -32,7 +32,15 @@ OPEN_EDITOR_NEEDS_MIDI_PORTS = (
     "Select both a MIDI Input and MIDI Output in Settings first"
 )
 OPEN_EDITOR_NEEDS_AKAI_DEVICE_TYPE = (
-    'Set Sampler Type to Akai S1000 or Akai S2000/S3000 in Settings first'
+    'Set Sampler Type to Akai S1000, Akai S2000/S3000, Akai S900/S950 or Yamaha A4000/A5000 in Settings first'
+)
+OPEN_EDITOR_YAMAHA = (
+    "Opens the Yamaha A4000/A5000 program editor (experimental - view only for now)"
+)
+# Yamaha A4000/A5000 (see controller/yamaha_session.py): every answer comes back on the MIDI input
+YAMAHA_NEEDS_MIDI_INPUT = (
+    "The Yamaha A4000/A5000 answers on your MIDI input, so the editor needs\n"
+    "one - select it in Settings."
 )
 OPEN_EDITOR_S950 = (
     "Opens the Akai S900/S950 program editor (experimental - writes are untested on hardware)"

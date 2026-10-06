@@ -63,6 +63,7 @@ class SamplerController(QObject):
         self.device_type = "akai"
         self.sampler_model = sampler_models.AKAI_S2000_S3000
         self._s950_engine = None  # built on first use - see _s950
+        self._yamaha_engine = None  # built on first use - see _yamaha
 
         self._open_loop_delay_ms = 40  # pacing for open loop sending
         # replies stopped MID-send after the sampler had been handshaking: finish the sample
@@ -203,6 +204,29 @@ class SamplerController(QObject):
 
     def _is_s950(self):
         return self.device_type == sampler_models.FAMILY_S950
+
+    @property
+    def _yamaha(self):
+        # the Yamaha A4000/A5000 editor's conversation engine (controller/yamaha_session.py), built the first
+        # time it's needed. Sample TRANSFERS for that model are ordinary SDS (device_type "generic"); only the
+        # editor's own Yamaha SysEx goes through here
+        if self._yamaha_engine is None:
+            from controller.yamaha_session import YamahaSession
+
+            self._yamaha_engine = YamahaSession(self)
+        return self._yamaha_engine
+
+    def is_yamaha_model(self):
+        return sampler_models.is_yamaha(self.sampler_model)
+
+    def yamaha_session(self):
+        """The Yamaha session the editor talks through - only for the Yamaha Sampler Type."""
+        if not self.is_yamaha_model():
+            raise RuntimeError("the Yamaha session is only available for the Yamaha Sampler Type")
+        return self._yamaha
+
+    def is_yamaha_idle(self):
+        return self._yamaha_engine is None or self._yamaha_engine.idle
 
     def _s950_not_supported(self, what):
         # The S900/S950 speak neither protocol the Akai-family and generic-SDS
@@ -642,6 +666,12 @@ class SamplerController(QObject):
             # other function codes) must not reach the Akai-family parser
             # below, which would misread it
             self._s950.handle_sysex(data_bytes)
+            return
+
+        if data_bytes[0] == 0x43 and self.is_yamaha_model():
+            # Yamaha editor traffic (parameter replies, bulk dumps): not SDS, and the generic path below would
+            # log it as "unrecognised". Sample transfers (0x7E) still take the normal path.
+            self._yamaha.handle_sysex(data_bytes)
             return
 
         if data_bytes[0] == 0x47:

@@ -100,10 +100,10 @@ def _program_rows():
         P("ad_in_l_output2_level", "AD in (L) output2 level", 9, 0, 127, 376),
         P("program_level", "program level", 10, 0, 127, 83),
         P("lfo_cycle", "program LFO cycle", 11, 0, 6, 73, bits=(0, 3)),
-        P("lfo_sync", "program LFO sync", 12, 0, 1, 72, bits=(6, 2)),
+        P("lfo_sync", "program LFO sync", 12, 0, 1, 72, bits=(6, 2), enum="lfo_sync"),
         P("transpose", "program transpose", 13, -127, 127, 86),
         P("lfo_tempo", "program LFO tempo", 14, 25, 250, 92),
-        P("lfo_wave", "program LFO wave", 15, 0, 6, 73, bits=(3, 3)),
+        P("lfo_wave", "program LFO wave", 15, 0, 6, 73, bits=(3, 3), enum="program_lfo_wave"),
         P("portamento_type", "program portamento type", 16, 0, 3, 88),
         P("portamento_rate", "program portamento rate", 17, 1, 127, 89),
         P("portamento_time", "program portamento time", 18, 1, 127, 90),
@@ -111,7 +111,7 @@ def _program_rows():
         P("assigned_samples", "number of assigned samples", 20, 0, 999, 94, size=2, read_only=True),
         P("effect_connection", "effect1-3 connection", 23, 0, 4, 72, bits=(3, 3)),
         P("lfo_initial_phase", "program LFO initial phase", 24, 0, 3, 73, bits=(6, 2)),
-        P("lfo_reset_midi_channel", "program LFO reset MIDI channel", 25, -2, 32, 87),
+        P("lfo_reset_midi_channel", "program LFO reset MIDI channel", 25, -2, 32, 87, enum="lfo_reset_channel"),
         # Table 2 calls this UC but its range includes -1 ("all"); Table 1 says SC
         P("lfo_reset_note", "program LFO reset note", 26, -1, 127, 93),
         P("ad_in_r_pan", "AD in R pan", 27, -63, 63, 377),
@@ -144,7 +144,7 @@ def _easy_edit_rows():
         _text("easy_edit", "assigned_name", "assigned sample(bank) name (read only)", (2, 0, 0, 0, 0, 0), 16, 0),
         _int("easy_edit", "assigned_type", "assigned object type", (2, 0, 0, 0, 0, 0), 0, 255, 20,
              read_only=True, bulk_only=True),
-        E("receive_channel", "MIDI receive channel assign", 2, -1, 32, 21),
+        E("receive_channel", "MIDI receive channel assign", 2, -1, 32, 21, enum="easy_channel"),
         E("level_offset", "level offset", 3, -127, 127, 22),
         E("pan_offset", "pan offset", 4, -127, 127, 24),
         E("fine_tune_offset", "fine tune offset", 5, -127, 127, 26),
@@ -154,17 +154,17 @@ def _easy_edit_rows():
         E("key_range_shift", "key range shift", 9, -127, 127, 32),
         E("velocity_limit_high", "velocity limit high", 10, 0, 127, 33),
         E("velocity_limit_low", "velocity limit low", 11, 0, 127, 34),
-        E("portamento", "portamento (-1 =sample, 0 off, 1 =program)", 12, -1, 1, 35, bits=(0, 2)),
-        E("mono_mode", "mono mode (-1 =sample)", 13, -1, 1, 35, bits=(2, 2)),
-        E("key_xfade_on", "key x-fade on (-1 =sample)", 14, -1, 1, 35, bits=(4, 2)),
+        E("portamento", "portamento (-1 =sample, 0 off, 1 =program)", 12, -1, 1, 35, bits=(0, 2), enum="easy_portamento"),
+        E("mono_mode", "mono mode (-1 =sample)", 13, -1, 1, 35, bits=(2, 2), enum="easy_tristate"),
+        E("key_xfade_on", "key x-fade on (-1 =sample)", 14, -1, 1, 35, bits=(4, 2), enum="easy_tristate"),
         E("alternate_group", "alternate group number (-1 =sample)", 16, -1, 16, 36),
         E("aeg_attack_rate_offset", "AEG attack rate offset", 17, -127, 127, 37),
         E("aeg_release_rate_offset", "AEG release rate offset", 18, -127, 127, 39),
         E("filter_cutoff_offset", "filter cutoff offset", 19, -127, 127, 41),
         E("filter_q_offset", "filter Q/width offset", 20, -31, 31, 43),
-        E("output1", "output1 (-1 =sample)", 21, -1, 12, 29, enum="output1"),
+        E("output1", "output1 (-1 =sample)", 21, -1, 12, 29, enum="easy_output1"),
         E("output1_level_offset", "output1 level offset", 22, -127, 127, 47),
-        E("output2", "output2 (-1 =sample)", 23, -1, 12, 40, enum="output2"),
+        E("output2", "output2 (-1 =sample)", 23, -1, 12, 40, enum="easy_output2"),
         E("output2_level_offset", "output2 level offset", 24, -127, 127, 50),
         E("midi_control_on", "MIDI control on", 25, 0, 1, 51),
         E("aeg_decay_rate_offset", "AEG decay rate offset", 27, -127, 127, 38),
@@ -186,7 +186,7 @@ def _sample_rows():
         "sample", key, name, _pad6((2, p2, p3) if p4 is None else (2, p2, p3, p4)), lo, hi, off, **kw
     )
     rows = [
-        S("receive_channel", "MIDI receive channel", 3, 0, 32, 42),
+        S("receive_channel", "MIDI receive channel", 3, 0, 32, 42, enum="midi_channel"),
         S("pitch_bend_type", "pitch bend type", 4, 0, 13, 43),
         S("pitch_bend_range", "pitch bend range", 5, 0, 24, 44),
         S("original_key_l", "original key L", 6, 0, 127, 46),
@@ -198,7 +198,7 @@ def _sample_rows():
         S("coarse_tune", "coarse tune", 9, -127, 127, 45),
         S("key_range_high", "key range high (128 = original)", 10, 0, 128, 58, signed=False),
         S("key_range_low", "key range low (-1 = original)", 11, -1, 127, 59),
-        S("loop_mode", "loop mode", 12, 0, 5, 61),
+        S("loop_mode", "loop mode", 12, 0, 5, 61, enum="loop_mode"),
         S("wave_start_address", "wave start address (L)", 13, 0, 16777215, 64, size=4),
         S("wave_length", "wave length (end - start + 1) (L)", 14, 0, 16777215, 72, size=4, write_ignored=True),
         S("wave_end_address", "wave end address", 15, 0, 16777215, 180, size=4, write_ignored=True),
@@ -272,8 +272,8 @@ def _sample_rows():
         S("aeg_sustain_level", "AEG sustain level", 66, 0, 127, 153, p3=2),
         S("aeg_rate_key_scaling", "AEG rate key scaling", 67, -7, 7, 156),
         S("aeg_rate_velocity_sensitivity", "AEG rate velocity sensitivity", 68, -63, 63, 157),
-        S("aeg_attack_mode", "AEG attack mode", 69, 0, 2, 155),
-        S("lfo_wave", "LFO wave", 70, 0, 3, 158),
+        S("aeg_attack_mode", "AEG attack mode", 69, 0, 2, 155, enum="attack_mode"),
+        S("lfo_wave", "LFO wave", 70, 0, 3, 158, enum="sample_lfo_wave"),
         S("lfo_speed", "LFO speed", 71, 0, 127, 159),
         S("lfo_delay_time", "LFO delay time", 72, 0, 127, 160),
         S("lfo_sync_on", "LFO sync on", 73, 0, 1, 161, bits=(0, 1)),
@@ -321,10 +321,27 @@ OUTPUT1 = {0: "off", 1: "stereo out", 2: "effect1", 3: "effect2", 4: "effect3", 
            7: "assign3&4", 8: "assign5&6", 9: "DIG&OPT", 10: "effect4", 11: "effect5", 12: "effect6"}
 OUTPUT2 = {0: "off", 1: "assignL&R", 2: "assign1&2", 3: "assign3&4", 4: "assign5&6", 5: "DIG&OPT",
            6: "stereo out", 7: "effect1", 8: "effect2", 9: "effect3", 10: "effect4", 11: "effect5", 12: "effect6"}
+# MIDI receive channel: 0-15 = channels 01-16, 16 = "Bch" (the basic receive channel); 17-32 are the
+# A5000's MIDI-B channels (owner's manual p.56; the A4000 stops at 16)
+MIDI_CHANNEL = {**{n: f"{n + 1:02d}" for n in range(16)}, 16: "Basic channel"}
 ENUMS = {
     "filter_type": dict(enumerate(FILTER_TYPES)),
     "output1": OUTPUT1,
     "output2": OUTPUT2,
+    "easy_output1": {-1: "=Sample", **OUTPUT1},
+    "easy_output2": {-1: "=Sample", **OUTPUT2},
+    "midi_channel": MIDI_CHANNEL,
+    "lfo_reset_channel": {-2: "Off", -1: "Audition", **MIDI_CHANNEL},
+    "easy_channel": {-1: "=Sample", **MIDI_CHANNEL},
+    "easy_portamento": {-1: "=Sample", 0: "Off", 1: "=Program"},
+    "easy_tristate": {-1: "=Sample", 0: "Off", 1: "On"},
+    # owner's manual p.123 (loop modes), p.143 (LFO), p.137 (attack mode), p.103 (program LFO sync)
+    "loop_mode": {0: "No loop", 1: "Loop (continuous)", 2: "Loop to release", 3: "Reverse (no loop)",
+                  4: "One-shot", 5: "Reverse one-shot"},
+    "program_lfo_wave": {0: "Off", 1: "Sine", 2: "Saw", 3: "Triangle", 4: "Square", 5: "S/H", 6: "Step wave"},
+    "sample_lfo_wave": {0: "Saw", 1: "Triangle", 2: "Square", 3: "S/H"},
+    "attack_mode": {0: "Rate", 1: "Hold", 2: "Rate 2"},
+    "lfo_sync": {0: "Manual", 1: "MIDI"},
 }
 
 
@@ -383,6 +400,40 @@ def extract(param, data, slot=None):
         raw = (data[offset] >> shift) & ((1 << width) - 1)
         return _from_bits(raw, width, param.signed)
     return int.from_bytes(bytes(data[offset : offset + param.size]), "big", signed=param.signed)
+
+
+#: a sample's `[Sample Parameter]` block holds a 128-bit "linked to program" map: four big-endian 32-bit words
+#: at +24, +28, +32, +36, bit 0 of the first = program 001 (verified on a real A4000: "sine wave" assigned to
+#: program 1 read back as word0 = 1, everything else 0)
+LINKED_PROGRAMS_OFFSET = 24
+
+
+def linked_programs(sample_data):
+    """Program numbers (1-128) that use the sample, from its bulk payload (read-only information)."""
+    base = SAMPLE_PARAMETER_BASE + LINKED_PROGRAMS_OFFSET
+    out = []
+    for word in range(4):
+        value = int.from_bytes(bytes(sample_data[base + 4 * word : base + 4 * word + 4]), "big")
+        out += [1 + 32 * word + bit for bit in range(32) if value >> bit & 1]
+    return out
+
+
+def store(param, data, value, slot=None):
+    """Write `value` into the bulk payload `data` (a bytearray) the way the table lays `param` out - the
+    inverse of `extract`. Does NOT model the unit's side effects (mirrored bytes, derived EQ coefficients,
+    the "edited" flag); see the roadmap. Text rows are space padded."""
+    offset = bulk_offset(param, slot)
+    if offset + param.bulk_size > len(data):
+        raise ValueError(f"{param.key}: offset {offset} is past the end of the {len(data)}-byte payload")
+    if param.kind == "text":
+        raw = str(value).encode("ascii")[: param.size]
+        data[offset : offset + param.size] = raw + b" " * (param.size - len(raw))
+    elif param.bits:
+        shift, width = param.bits
+        mask = ((1 << width) - 1) << shift
+        data[offset] = (data[offset] & ~mask & 0xFF) | ((int(value) << shift) & mask)
+    else:
+        data[offset : offset + param.size] = int(value).to_bytes(param.size, "big", signed=param.signed)
 
 
 def decode_reply(param, reply_data):

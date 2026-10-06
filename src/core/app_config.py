@@ -96,6 +96,14 @@ def save_device_type(device_type):
     save_config(config)
 
 
+def get_yamaha_device_number():
+    # the Device Number set on a Yamaha A4000/A5000 (0-15) - what its SysEx is addressed to, separate from the
+    # SDS "exclusive channel" above. Manual-edit-only for now (no Settings UI): config.json's
+    # "yamaha_device_number"; anything missing or out of range reads as 0, the unit's usual setting
+    value = load_config().get("yamaha_device_number", 0)
+    return value if isinstance(value, int) and not isinstance(value, bool) and 0 <= value <= 15 else 0
+
+
 def get_s1000_editor_warning_acknowledged():
     # whether the user has already clicked through the one-time "S1000
     # editing is experimental" warning (shown by the Dashboard before the
