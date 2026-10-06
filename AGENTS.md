@@ -426,7 +426,7 @@ engine) + `ui/yamaha_program_editor.py`/`yamaha_samples_tab.py`/`yamaha_fields.p
 samples | cards, and a Samples tab; every writable control edits the unit) all exist with tests and were checked against the real unit. The Sampler Type is
 `yamaha_a4000` ("Yamaha A4000/A5000 (experimental)"): its PROTOCOL FAMILY is `generic` (sample SENDS are plain SDS) but
 `sampler_models.is_yamaha()` makes the Dashboard offer the Yamaha editor, list and receive. The Samples tab shows the WAVEFORM
-(double-click; the native wave dump, both channels). Not done: effects/controls/system params, create/delete objects, wave/loop address editing.
+(double-click; the native wave dump, both channels). Not done: effects/controls/system params, delete objects (creating samples = the native bulk load, below).
 
 - **Audio comes over the unit's NATIVE wave dump ("WD"), not SDS** (`core/yamaha_wave.py`, `YamahaSession.request_wave`; layout
   measured and verified byte for byte against SDS dumps - read that module's docstring before touching it): a sample links a left
@@ -545,6 +545,22 @@ samples | cards, and a Samples tab; every writable control edits the unit) all e
   loop (click again to stop), 2 loop for `_RELEASE_PREVIEW_MS`, 3/5 a reversed copy with the playhead mapped back. No pitch shift (the
   sample plays at its own rate/key). Audio must be loaded first; `audio_matches` now accepts a wave LONGER than the end address (a
   trimmed end is legal).
+- **NATIVE SAMPLE LOADING (session 4, 2026-10-06; written from `dev_docs/a4000-native-load-findings.md` - read it)**: Dashboard "Send Samples" for the
+  Yamaha Sampler Type no longer uses SDS. `core/yamaha_load.py` builds a load = the wave dump(s) (`yamaha_wave.build_wave_messages`) THEN one sample
+  dump (`SP`, from a real user sample's captured parameters with name/wave names/rate/addresses set); `YamahaSession.send_messages` sends them
+  paced by wire time + `send_gap_ms` (400); `YamahaTransfers.send_file_queue` drives it (WAV -> channels, mono/stereo, rate override) and VERIFIES
+  (wait `verify_delay_ms`, object list holds the sample + waves, SP read-back matches frames/rate/stereo; each read retried - the first read after a
+  load is sometimes unanswered). MEASURED: a bulk dump sent to the unit is never answered ("MIDI Bulk Received" on its LCD; it needs no OK pressed);
+  a WD alone is dropped - it only counts with the SP that names it (either order); a missing/short/duplicated/reordered wave message creates
+  NOTHING; a wave under an existing wave's name is overwritten IN PLACE (so our wave names are random `SMP nnnnnn`, never derived from the sample
+  name); a sample under an existing SAMPLE name is replaced in place with ALL its parameters reset (so the app never overwrites: a clash gets
+  ` 2` added - `yamaha_load.unique_name`); no frames trimmed (SDS trims 4); rates 1..65535 verbatim; ~440-590 frames/s per channel (stereo twice).
+  Stereo is two wave objects + the right name at SP @80 (works, user listened). **Open**: linking a freshly loaded sample to a program once left the
+  unit silent for 28 s / ~8 min (cause unknown - give link generous timeouts); pacing minimum, odd names, wave-memory-full and a failed REPLACE are
+  untested. `FakeA4000._bulk_load` models the measured rules (`same_name_replaces` is a guess flag). **The unit cannot report free memory over
+  MIDI**: the Dashboard's memory bar is an ESTIMATE (`YamahaTransfers._estimate_memory`: sum of the samples' word counts vs
+  `app_config.get_yamaha_wave_memory_kb`, entered in Settings > Wave memory, in kB as the unit's PLAY > PROGRAM > FREE MEMORY page shows it; the
+  user's is 102400); hidden while unknown. Sending needs a MIDI input (the check reads the unit).
 - **HANDOFF (end of session 3, 2026-10-06):** sessions 1-2 are committed on `s1000-support`; session 3's work (restore + assign) may be
   UNCOMMITTED - check `git status` and offer a commit; the suite had 2060 passing tests. Read `dev_docs/a4000-editor-roadmap.md` "HANDOFF"
   and "Next steps" before continuing: (markers + preview are DONE, see above - stereo markers still need a real stereo sample), then the missing tables
