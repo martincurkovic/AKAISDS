@@ -6,33 +6,41 @@ hardware and the editor works end to end - read AND write for program / Easy Edi
 waveform (both channels of a stereo sample), and the Transfer Dashboard lists and receives samples natively. What is left is in
 "HANDOFF" and "Next steps" below.**
 
-## HANDOFF - where session 2 stopped (read this first)
+## HANDOFF - where session 3 stopped (read this first)
 
-**Repo state:** branch `s1000-support`. **All of the A4000 work through session 2 is COMMITTED** (the user commits as the session goes -
-the last code commit at handoff was `9a793a0 update all bipolar knobs to use new indicator style`, followed by `update agents`
-commits; only the doc edits made when this handoff was written may be pending - `git status`). The new modules/tools/fixtures are
+**Repo state:** branch `s1000-support`. Sessions 1-2 are COMMITTED (the user commits as the session goes). **Session 3 (restore from backup
++ assigning samples to programs) was written at the end of 2026-10-06 and may be UNCOMMITTED - check `git status` first and offer a
+commit.** Session 3's new files: `src/core/yamaha_restore.py`, `src/core/yamaha_backups.py`, `src/controller/yamaha_restore.py`,
+`src/ui/yamaha_restore_dialog.py`, `src/ui/yamaha_assign_dialog.py`, `tools/a4000_restore_check.py`, `tools/a4000_link_probe.py`,
+`tools/a4000_assign_check.py`, `tests/test_yamaha_restore.py`, `tests/test_yamaha_restore_dialog.py`, `tests/test_yamaha_assign_dialog.py`
+(plus edits to the session, codec, fake, editor window and samples tab). The new modules/tools/fixtures are
 tracked: `src/core/yamaha_wave.py`, `src/controller/yamaha_transfers.py`, `src/ui/yamaha_writer.py`, `tools/a4000_session_write_check.py`,
 `tools/a4000_sds_numbering.py`, `tools/a4000_wave_probe.py`, `tests/test_yamaha_wave.py`, `tests/test_yamaha_transfers.py` and the real
-captures `tests/fixtures/a4000/wave_*.syx` (never regenerate those). Full suite: `uv run pytest tests/ -q` -> 2006 passed (~100 s) at
-the end of session 2.
+captures `tests/fixtures/a4000/wave_*.syx` (never regenerate those). Full suite: `uv run pytest tests/ -q` -> 2060 passed (~110 s) at
+the end of session 3.
 
 **What exists** (details in the sections below and in AGENTS.md): codec + parameter tables (204 rows) + `FakeA4000`; `YamahaSession`
 (object list, bulk dumps, parameter reads, `write_parameter`, `request_wave`, drain-after-cancel); `WriteCoordinator`; the editor
 (Programs tab + Samples tab, aligned card pairs, envelope graphs, stereo waveform that fills in smoothly, sample list with
-durations); `YamahaTransfers` (Dashboard list/receive). Proven on the real unit: 19/19 parameter writes through the session
+durations); `YamahaTransfers` (Dashboard list/receive); **RESTORE FROM BACKUP** (Hardware > "Restore from Backup..."); **ASSIGN / REMOVE
+samples** ("Assign Sample..." / "Remove" under the assigned-samples column). Proven on the real unit: 19/19 parameter writes through the session
 (program, sample, Easy Edit), write-back-unchanged byte-identical, native wave dumps == SDS dumps byte for byte, a 2-channel WAV
-received from a real stereo sample, Cancel + drain recovery.
+received from a real stereo sample, Cancel + drain recovery; (session 3) restore round trips of a program, a sample's ordinary rows AND its
+coupled wave/loop addresses, and the Easy Edit values of assigned samples; assigning three samples (slot order, the unit's own
+confirmation), removing a middle one (the rest close up and keep their values), removing all; and the whole thing driven through the real
+editor window (assign -> edit -> restore -> remove).
 
-**Unit state left behind (RAM only, a power cycle clears it; the user said nothing of value is on it):** the 7 factory waveforms
-plus user samples `MIDI 00101`, `MIDI 00103`, `MIDI 00104`, `MIDI 00105` (test tones from `tools/a4000_sds_numbering.py send`;
-`MIDI 00102` was deleted on the front panel on purpose) and `_NewSample` (a REAL stereo sample recorded from the unit's own stereo
-output, 44,540 frames at 22,050 Hz); program 001 had "sine wave" and `_NewSample` assigned (front-panel). Every parameter write test
-restored its originals. Bulk Protect is OFF (it was on for a while and silently broke edits and SDS sends - see the gotchas).
-Backups of every object written are in `~/.akaisds/a4000_backups/` (plain `.syx`).
+**Unit state at the end of session 3 (RAM only, a power cycle clears it; the user said nothing of value is on it):** it was COLD-BOOTED
+before session 3: only the 7 factory waveforms (`sine wave, saw up, triangle, square, pulse 1/2/3`) - the earlier user samples
+(`MIDI 0010x`, the stereo `_NewSample`) are GONE, so there is no stereo sample to test with (record one: see "Next steps"). Program 001 has
+no samples. Program 128 is the throwaway: nothing assigned, but its UNUSED Easy Edit blocks (slots 0 and 2) hold stale `level_offset` bytes
+(offsets 430 and 542) because the unit does not clear a vacated block's values (harmless - a re-link re-initialises the block - and no row
+can address them), and `pulse 3` carries two stray right-channel mirror bytes (payload offsets 191, 207: no P-number, can't be restored).
+Bulk Protect is OFF (it was on once and silently broke edits and SDS sends). Backups of every object written are in
+`~/.akaisds/a4000_backups/` (plain `.syx`; a restore also saves a snapshot of what it replaces).
 
-**Do next, in this order** (full notes under "Next steps"): (1) restore-from-backup (the backups exist and nothing can use them
-yet); (2) assigning/unassigning samples to programs (needs a new codec builder - none exists for the object link message);
-(3) editable loop/wave markers via a coupling-aware writer; (4) the missing parameter tables; (5) native audio loading.
+**Do next, in this order** (full notes under "Next steps"): (1) editable loop/wave markers via a coupling-aware writer; (2) the missing
+parameter tables (effects, controllers, system, banks); (3) native audio loading; (4) a stereo sample to test assigning/restoring one.
 
 **What the user likes / has decided (don't undo without asking):** aligned side-by-side card pairs, each pinned to equal height - they
 rejected independent columns and collapsible cards after trying both; the stereo waveform as ONE display (two half-height views, no
@@ -67,7 +75,8 @@ the session's `_backups` inside `cancel()` - replace ONE occurrence and read the
 | Waveform in the Samples tab | **DONE** over the unit's NATIVE wave dump ("WD"): both channels of a stereo sample, progressive and smooth, Cancel (see "The native WAVE DATA dump") |
 | Transfer Dashboard with the Yamaha Sampler Type | **DONE**: sample LIST (object list) and RECEIVE (mono/stereo WAV via wave dumps) are native; SEND is still plain SDS |
 | `tools/a4000_session_write_check.py`, `a4000_sds_numbering.py`, `a4000_wave_probe.py` | done and used (session write proof; SDS numbering/delete/stereo findings; native wave dump probe) |
-| Anything NOT built | restore-from-backup, assigning/creating/deleting objects, wave/loop address editing, effects/controls/system params, sample banks, native audio LOADING (see "Next steps") |
+| Restore from backup; assign / remove samples in a program | **DONE** (session 3; see "Restore from backup" and "Assigning samples to programs") |
+| Anything NOT built | creating/deleting objects, wave/loop address editing, effects/controls/system params, sample banks, native audio LOADING (see "Next steps") |
 
 Git: see HANDOFF above (the A4000 work is committed). Full suite passes (`uv run pytest tests/ -q`, ~100 s).
 
@@ -78,7 +87,9 @@ config.json's `yamaha_device_number` (default 0; no Settings UI). The first edit
 (read-only session smoke + scan timing), `tools/a4000_session_write_check.py` (WRITES a few rows through the session to program 128 /
 "pulse 3" / program 001 slot 0 and restores them - the proof of the write path), `tools/a4000_sds_numbering.py {send|list|probe}`
 (SDS numbering by audio fingerprint; `send` WRITES test samples), `tools/a4000_wave_probe.py "<sample>" ...` (read-only native wave
-dumps -> WAVs, fingerprints). Offscreen GUI against the fake: build a window like `tests/test_yamaha_program_editor.py::build_window`
+dumps -> WAVs, fingerprints), `tools/a4000_restore_check.py` (WRITES: mutate + restore round trips on program 128 / "pulse 3"),
+`tools/a4000_link_probe.py {status|cycle|multi}` (WRITES: object link change on program 128 + factory samples, diffs the dumps),
+`tools/a4000_assign_check.py` (WRITES: assign/remove/restore through the session on program 128). Offscreen GUI against the fake: build a window like `tests/test_yamaha_program_editor.py::build_window`
 and `.grab().save(...)`; against the real unit: `YamahaProgramEditorWindow(QMainWindow(), controller)` with a real `MidiManager`
 (patch `writer_module.app_config.get_yamaha_write_warning_acknowledged` so the modal warning doesn't block a script).
 
@@ -478,41 +489,68 @@ wave object by name (SP payload @64) and, for a STEREO sample, a right one (@80)
 
 ## Next steps (in order)
 
-Already done in session 2 (do not redo): writes (incl. Easy Edit), the waveform Cancel button, the delete-numbering check, stereo
-detection AND native stereo loading, Dashboard list + receive, sample list durations, envelope graphs, layout/styling pass.
+Already done (do not redo): writes (incl. Easy Edit), the waveform Cancel button, the delete-numbering check, stereo detection AND native
+stereo loading, Dashboard list + receive, sample list durations, envelope graphs, layout/styling pass, **restore from backup** and
+**assigning/removing samples** (both described in the sections below).
 
-1. **Restore from backup** (the safety net is half built: backups exist, nothing reads them). Design: a Hardware-menu action "Restore
-   Object from Backup..." listing `session.backup_dir`; parse the chosen `.syx` with `ysx.parse_bulk_dump`; dump the object now; for
-   every writable row of the object's scope(s) (`yp.rows`, for a program all Easy Edit slots too) whose backup value differs, write the
-   backup value with `write_parameter` (the first write already has its backup, so this adds none); finish by dumping again and
-   comparing with the backup, ignoring the edited flag (byte 1 bit 0) and the known side effects (mirrored sample-control bytes,
-   derived EQ coefficients, the R-channel mirror bytes with no P-number). `tools/a4000_write_verify.py restore` is the model. A real
-   bulk LOAD of the `.syx` back is the alternative but is unmeasured (don't guess - test on a throwaway first).
-2. **Assign / unassign samples in a program** (the user can't do this from the editor yet). The manual's "5.3.7 Object Link Change"
-   (`F0 43 1n 58 04 <upper name 16> <upper type> <lower name 16> <lower type> <0/1> F7`, owner's manual p.277-279 in the printed
-   numbering) is NOT in `core/yamaha_sysex.py` yet (it has select/parameter/bulk only): add the builder + tests, then try it on a
-   throwaway program with a throwaway sample, diffing the program dump before/after (assignment changes the count @95, Easy Edit
-   block N, byte 1 of [Common] and the sample's "linked to program" map). Extend the fake. UI: an "Assign sample..." button on the
-   assigned-samples column.
-3. **Editable loop/wave markers** (the Samples tab shows them locked). They map to `wave_start_address`, `loop_start_address`,
+1. **Editable loop/wave markers** (the Samples tab shows them locked). They map to `wave_start_address`, `loop_start_address`,
    `loop_length`, `loop_end_address` (+ `wave_length`/`wave_end_address`, which the unit ignores on built-ins - re-test on a USER
    sample), which are COUPLED (writing one moves others; the R channel has mirror bytes with no P-number, so an experiment can leave
-   stray bytes until a power cycle). Needs a geometry-aware writer: decide the order of writes, read back everything, and verify against
-   a full dump; measure on a throwaway user sample (e.g. `MIDI 00103`) before wiring the UI. The `WaveformView` marker machinery from
-   the S3000 editor can be reused (`set_markers_locked(False)` + `marker_committed`).
-4. **Missing parameter tables:** effect blocks (P2=21, 40 bytes x3 at bulk 96; read owner's/service manual page 39 first), the four
+   stray bytes until a power cycle - the restore job's geometry order and extra passes are the model, and `tools/a4000_restore_check.py`
+   has a COUPLED round trip). Needs a geometry-aware writer: decide the order of writes, read back everything, verify against a full dump;
+   measure on a throwaway USER sample (send one with `tools/a4000_sds_numbering.py send`; factory samples ignore some writes) before wiring
+   the UI. The `WaveformView` marker machinery from the S3000 editor can be reused (`set_markers_locked(False)` + `marker_committed`).
+2. **Missing parameter tables:** effect blocks (P2=21, 40 bytes x3 at bulk 96; read owner's/service manual page 39 first), the four
    controllers (P2=22, 4 bytes x4 at bulk 216), the MIDI-channel bitmaps (P2=1, 2), system parameters (single reads/writes only - no bulk
    layout is documented), sample banks, stereo R wave/loop addresses. Same method as before: add rows, `tools/a4000_verify_params.py`
-   (read-only) then `tools/a4000_write_verify.py` on throwaways.
-5. **Native audio LOADING** so the Yamaha Sampler Type need not send over SDS (which the unit cancels with Bulk Protect on and which
+   (read-only) then `tools/a4000_write_verify.py` on throwaways. NOTE the restore job restores whatever rows exist, so new rows are
+   restored for free.
+3. **Native audio LOADING** so the Yamaha Sampler Type need not send over SDS (which the unit cancels with Bulk Protect on and which
    stalled once). Likely a bulk load of a wave + sample object pair; completely unmeasured - capture what the unit accepts on a
    throwaway first. Also gives "Send" a stereo option (the Dashboard's stereo send makes two unrelated mono samples).
-6. **Create / delete objects.** No known opcode for delete (front panel: COMMAND > DELETE > OneSample, Knob 5 picks, Knob 1 EXEC);
-   creation may be a bulk load (see 6). Don't guess.
-7. **Polish backlog:** remember a loaded waveform per sample for the session (only the last is kept), program names for empty programs
+4. **A stereo sample to test with**: assigning one and restoring a program that uses one are UNTESTED (no stereo sample after the cold
+   boot). Record one on the unit (RECORD > SETUP: input StOut, type New, Stereo; TRIGGER: Manual/Manual; RECORD > GO > START >
+   FINISH - see session 2 notes), then `a4000_link_probe.py multi --stereo "<name>"`.
+5. **Create / delete objects.** No known opcode for delete (front panel: COMMAND > DELETE > OneSample, Knob 5 picks, Knob 1 EXEC);
+   creation may be a bulk load (see 3). Don't guess. Sample BANKS can be linked by the same message (lower type 17) but the UI only
+   assigns samples.
+6. **Polish backlog:** remember a loaded waveform per sample for the session (only the last is kept), program names for empty programs
    on demand, remember the last program/tab, a Device Number field in Settings (config.json only today), the Level & Pan card on the
    assigned-sample page has empty space under its knobs (it is pinned equal to Key), the Samples page is long (the user rejected
-   collapsible cards - cut/merge cards instead if it bothers them), A5000 gating.
+   collapsible cards - cut/merge cards instead if it bothers them), A5000 gating, a "maximum samples per program" check (the limit is
+   unknown; the unit just ignores a link it can't make and the editor says "didn't assign"), restoring a program's ASSIGNMENTS (the restore
+   only restores values - re-assign by hand, it tells the user).
+
+### Restore from backup (session 3) - how it works and what was measured
+`core/yamaha_restore.py` (pure: `plan_restore`, `residual_offsets`, `load_backup`), `core/yamaha_backups.py` (list the `.syx`s newest
+first), `controller/yamaha_restore.py` (`RestoreJob.prepare` / `.run` / `.cancel`), `ui/yamaha_restore_dialog.py` + the window's
+`_restore_from_backup` (Hardware menu). **A restore is a series of guarded parameter writes, NOT a bulk load** (a bulk load into the
+unit is unmeasured): every writable row (`yr.writable`) that differs between the backup and the object now is written through
+`write_parameter`, geometry rows last in a fixed order (`GEOMETRY_ORDER`), then the object is re-read and anything still different is
+written again (up to 3 passes - the coupled wave/loop addresses). A SNAPSHOT of the current state is saved first (so restoring an old
+backup never loses the edits since, and a restore can itself be undone); if it can't be saved NOTHING is written. A write the unit
+swallowed (read-back == the old value: Bulk Protect) stops the run at once; a read-back that is merely a different value is retried.
+A confirmation lists what will change (current -> backup). Limits, all reported to the user: assignments are not restored (only slots
+that still hold the SAME sample; a changed count is a note), read-only/ignored rows and bytes no row covers stay (`residual_offsets`;
+for a sample the R-channel mirror bytes, for a program the Easy Edit blocks of samples assigned since). A sample can only be restored
+onto the same sample (its wave names must match). **Measured on the real unit** (`tools/a4000_restore_check.py`): program 128 (6 rows),
+sample "pulse 3" (6 rows) and its COUPLED wave/loop rows all restore to a byte-identical dump (apart from the edited flag and the two
+unrestorable R mirror bytes 191/207); Easy Edit values of 3 assigned slots restore exactly (`a4000_assign_check.py`).
+
+### Assigning samples to programs (session 3) - the object link change
+Codec: `build_object_link_change` / `build_object_link_request` / `ParameterMessage.kind == "link"` (manual 5.3.7 / 5.3.8: program UPPER,
+sample LOWER, `1` link / `0` unlink). `YamahaSession.change_link(program, sample, linked, cb, sample_type="sample")` backs the program up
+(once per session), sends the change, waits `edit_settle_ms`, then ASKS the unit (link request) - **that answer is the verification** (a
+change gets no reply). UI: "Assign Sample..." (`AssignDialog`: samples not already in the program) and "Remove" (confirmation: its
+per-program values are discarded, later slots move up) under the assigned-samples column; both lock the window like a restore (no
+edits/refresh/close meanwhile) and re-read the program and the sample afterwards. **MEASURED on the real unit** (`tools/a4000_link_probe.py
+cycle|multi`, throwaway program 128 + factory samples): the unit never replies to a change; linking APPENDS the sample as the next Easy
+Edit slot, count+1, every Easy Edit value at its default, receive channel byte -1 ("=sample" - NOT 0 like the front panel's assign), the
+block's 4 id bytes = the sample's own id (payload @60) + 0x18 (two samples seen), the sample's "linked to program" map bit set, edited
+flag set; unlinking a MIDDLE slot COMPACTS (later slots shift down and KEEP their values), clears the bit, and leaves stale value bytes
+in the vacated last block; linking twice and linking a name the unit doesn't have change nothing (a request for a missing sample gets no
+answer); unlink restores a program/sample dump byte for byte when no values were edited. Untested: stereo samples, sample banks, a full
+program (the slot limit). `FakeA4000` models all of the measured behaviour (not the stale bytes).
 
 ### Writes (session 2) - what was built and measured
 `YamahaSession.write_parameter` (backup first, object proven selected by an announce, read-back) + `ui/yamaha_writer.py`
