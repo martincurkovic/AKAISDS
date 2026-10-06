@@ -67,6 +67,7 @@ KIND_PARAMETER_REQUEST = 3
 SUB_OBJECT_SELECT = 0x00
 SUB_OBJECT_PARAMETER = 0x01
 SUB_SYSTEM_PARAMETER = 0x02
+SUB_OBJECT_LINK = 0x04
 
 
 class YamahaSysexError(ValueError):
@@ -344,14 +345,45 @@ def build_system_parameter_change(device, params, value_bytes):
     )
 
 
+def _object_type_code(object_type):
+    return OBJECT_TYPES[object_type] if isinstance(object_type, str) else object_type
+
+
+def _link_body(sub, device, kind, upper_name, upper_type, lower_name, lower_type, linked):
+    _check_device(device)
+    return (
+        bytes([MANUFACTURER, (kind << 4) | device, MODEL_PARAM, sub])
+        + pad_name(upper_name)
+        + bytes([_object_type_code(upper_type)])
+        + pad_name(lower_name)
+        + bytes([_object_type_code(lower_type), 1 if linked else 0])
+    )
+
+
+def build_object_link_change(device, upper_name, upper_type, lower_name, lower_type, linked):
+    """Link (`linked` True) or unlink two objects: a Program is UPPER over a Sample / Sample Bank, a Sample Bank is upper over a
+    Sample (manual 5.3.7, `43 1n 58 04 <upper name 16> <upper type> <lower name 16> <lower type> <0:off 1:on>`). This is how a
+    sample is assigned to / removed from a program. A WRITE: the unit does nothing for an object that can't be changed."""
+    return _link_body(SUB_OBJECT_LINK, device, KIND_PARAMETER_CHANGE, upper_name, upper_type, lower_name, lower_type, linked)
+
+
+def build_object_link_request(device, upper_name, upper_type, lower_name, lower_type):
+    """Ask whether two objects are linked (manual 5.3.8, same layout with kind 3); the unit answers with an object link CHANGE message
+    (`parse_parameter_message` kind "link") whose `linked` is the answer."""
+    return _link_body(SUB_OBJECT_LINK, device, KIND_PARAMETER_REQUEST, upper_name, upper_type, lower_name, lower_type, False)
+
+
 @dataclasses.dataclass(frozen=True)
 class ParameterMessage:
-    kind: str  # "select", "object", "system"
+    kind: str  # "select", "object", "system", "link"
     device: int
-    params: tuple  # P1..P6 (empty for a select)
-    data: bytes  # the un-nibbled value ("object"/"system"), empty for a select
-    object_name: str = ""  # a select only
-    object_type: int = None  # a select only
+    params: tuple  # P1..P6 (empty for a select / link)
+    data: bytes  # the un-nibbled value ("object"/"system"), empty for a select / link
+    object_name: str = ""  # a select / link: the object (a link: the UPPER one)
+    object_type: int = None  # a select / link
+    lower_name: str = ""  # a link only
+    lower_type: int = None  # a link only
+    linked: bool = None  # a link only
 
 
 def parse_parameter_message(message):
@@ -375,6 +407,13 @@ def parse_parameter_message(message):
             device,
             tuple(m[4:10]),
             denibble(m[10:]),
+        )
+    if sub == SUB_OBJECT_LINK:
+        if len(m) != 4 + 2 * (NAME_LENGTH + 1) + 1:
+            raise YamahaSysexError("object link message has the wrong length")
+        return ParameterMessage(
+            "link", device, (), b"", decode_name(m[4 : 4 + NAME_LENGTH]), m[4 + NAME_LENGTH],
+            decode_name(m[5 + NAME_LENGTH : 5 + 2 * NAME_LENGTH]), m[5 + 2 * NAME_LENGTH], bool(m[6 + 2 * NAME_LENGTH]),
         )
     raise YamahaSysexError(f"unknown parameter sub-status {sub:#04x}")
 

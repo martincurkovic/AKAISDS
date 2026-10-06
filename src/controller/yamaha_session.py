@@ -26,6 +26,13 @@ wave progressively. A bulk dump can't be aborted: after a cancel (or a failure m
 rest, which would swamp the next request, so the session DRAINS - it stays busy until the stream has been quiet for
 `drain_idle_ms` and only then starts the next operation.
 
+ASSIGNING (`change_link`): a sample is assigned to / removed from a program with the OBJECT LINK CHANGE message (manual 5.3.7),
+guarded like a write: the program is backed up first (once per session), the message is sent (the unit never replies to it - MEASURED
+2026-10-06 on throwaway objects), and the unit is then ASKED whether the link exists (object link REQUEST, 5.3.8) - that answer is
+the verification. Measured behaviour the UI relies on: a new sample is appended as the NEXT slot with every per-program value at its
+default (receive channel -1 = "=sample"); removing a middle one COMPACTS the slots (later ones shift down and keep their values);
+linking twice, or a name the unit doesn't have, changes nothing.
+
 WRITING (`write_parameter`): one parameter of one object per operation, and every write is guarded three ways -
  1. the FIRST write to an object in a session first dumps it and saves the dump as a `.syx` backup
     (`backup_dir`, default ~/.akaisds/a4000_backups); if that backup can't be saved NOTHING is written;
@@ -54,6 +61,17 @@ from core import yamaha_wave
 BACKUP_DIR = Path.home() / ".akaisds" / "a4000_backups"
 
 _SCOPE_TARGET = {"program": ("PG", "program"), "easy_edit": ("PG", "program"), "sample": ("SP", "sample")}
+
+
+@dataclasses.dataclass
+class LinkResult:
+    ok: bool  # the unit confirms the program now is (or isn't) linked to the sample, as asked
+    requested: bool  # True = assign, False = remove
+    program: str
+    sample: str
+    linked: object = None  # what the unit said afterwards (None = it never answered)
+    backup_path: object = None
+    message: str = ""
 
 
 @dataclasses.dataclass
@@ -159,7 +177,7 @@ class YamahaSession(QObject):
     @property
     def writes_pending(self):
         """True while a write is queued or on the wire (a window must not close/switch under it)."""
-        return any(op.kind == "write" for op in ([self._op] if self._op else []) + self._queue)
+        return any(op.kind in ("write", "link") for op in ([self._op] if self._op else []) + self._queue)
 
     def backup_of(self, object_type, name):
         """Path of the backup saved for an object this session, or None."""
@@ -190,6 +208,14 @@ class YamahaSession(QObject):
         self._enqueue(
             _Op("write", callback, otype=otype, name=object_name, fmt=fmt, target=target, row=param, slot=slot,
                 value=value, p=p, params=[p, p])  # params: [the probe read, the read-back]
+        )
+
+    def change_link(self, program_name, sample_name, linked, callback, sample_type="sample"):
+        """Assign (`linked` True) or remove (False) a sample of a program. callback(LinkResult), always called once. See the module
+        docstring for the guards and the measured behaviour (the sample is appended as the next slot; removing compacts the rest)."""
+        self._enqueue(
+            _Op("link", callback, name=program_name, sample=sample_name, linked=bool(linked), stype=sample_type,
+                otype=ysx.OBJECT_TYPES["program"], fmt="PG", target=(ysx.OBJECT_TYPES["program"], program_name.rstrip()))
         )
 
     @staticmethod
@@ -262,10 +288,12 @@ class YamahaSession(QObject):
                 self._send(ysx.build_dump_request(self.device, "WD", op.kw["name"]))
                 op.request_sent = True
                 self._timeout.start(self.bulk_timeout_ms)
-            elif op.kind == "write" and op.kw["target"] not in self._backups:
+            elif op.kind in ("write", "link") and op.kw["target"] not in self._backups:
                 op.phase = "backup"  # the first write to this object: save it as it is now
                 self._send(ysx.build_dump_request(self.device, op.kw["fmt"], op.kw["name"]))
                 self._timeout.start(self.bulk_timeout_ms)
+            elif op.kind == "link":
+                self._send_link(op)  # the program is already backed up this session
             else:
                 self._begin_select(op)
         except Exception as e:  # a closed port etc: fail now rather than wait for a timeout
@@ -283,6 +311,9 @@ class YamahaSession(QObject):
 
     def _send_next_parameter_request(self):
         op = self._op
+        if op is not None and op.kind == "link" and op.phase == "link_settle":
+            self._send_link_request(op)
+            return
         if op is None or op.kind not in ("params", "write"):
             return
         if op.index >= len(op.kw["params"]):
@@ -316,6 +347,23 @@ class YamahaSession(QObject):
         self._timeout.start(self.reply_timeout_ms + self.edit_settle_ms)
         self._settle.start(self.edit_settle_ms)
 
+    def _send_link(self, op):
+        self._send(ysx.build_object_link_change(
+            self.device, op.kw["name"], "program", op.kw["sample"], op.kw["stype"], op.kw["linked"]))
+        op.phase = "link_settle"  # no reply to a change: give it a moment, then ask
+        self._timeout.start(self.reply_timeout_ms + self.edit_settle_ms)
+        self._settle.start(self.edit_settle_ms)
+
+    def _send_link_request(self, op):
+        try:
+            self._send(ysx.build_object_link_request(self.device, op.kw["name"], "program", op.kw["sample"], op.kw["stype"]))
+        except Exception as e:
+            debug_log.get_logger().error(f"YamahaSession: send failed: {e}", exc_info=True)
+            self._complete(failed=True, message=f"Couldn't send to the sampler: {e}")
+            return
+        op.phase = "link_wait"
+        self._timeout.start(self.reply_timeout_ms)
+
     def _backup_received(self, op, dump):
         try:
             path = self._save_backup(dump)
@@ -329,7 +377,10 @@ class YamahaSession(QObject):
         self._backups[op.kw["target"]] = path
         debug_log.get_logger().info(f"YamahaSession: backed up {op.kw['name'].rstrip()!r} to {path}")
         try:
-            self._begin_select(op)
+            if op.kind == "link":
+                self._send_link(op)
+            else:
+                self._begin_select(op)
         except Exception as e:
             debug_log.get_logger().error(f"YamahaSession: send failed: {e}", exc_info=True)
             self._complete(failed=True, message=f"Couldn't send to the sampler: {e}")
@@ -349,6 +400,36 @@ class YamahaSession(QObject):
         if ysx.parse_bulk_dump(ysx.split_messages(path.read_bytes())[0]).data != dump.data:
             raise OSError("the saved file doesn't match the dump")
         return path
+
+    def save_backup(self, dump):
+        """Save `dump` (a BulkDump of an object as it is NOW) as a backup `.syx`, verified by reading it back, and return its path
+        - raises if it can't be saved. Also counts as THE backup of that object for this session if it has none yet, so the first
+        write to it doesn't dump it all over again (a Restore uses this to snapshot the state it is about to replace)."""
+        path = self._save_backup(dump)
+        kind = {"PG": "program", "SP": "sample"}.get(dump.fmt)
+        if kind is not None:
+            self._backups.setdefault((ysx.OBJECT_TYPES[kind], dump.name.rstrip()), path)
+        return path
+
+    def _link_result(self, op, failed):
+        program, sample, wanted = op.kw["name"].rstrip(), op.kw["sample"], op.kw["linked"]
+        actual = op.results_value if not failed else None
+        backup = self._backups.get(op.kw["target"])
+        if actual is not None and actual == wanted:
+            ok = True
+            message = f"Assigned {sample!r} to program {program}" if wanted else f"Removed {sample!r} from program {program}"
+        elif actual is None:
+            ok = False
+            message = f"The sampler didn't confirm the change to program {program}" + (
+                " (its backup could not be made)" if op.phase == "backup" and backup is None else ""
+            )
+        else:
+            ok = False
+            message = (
+                f"The sampler didn't assign {sample!r} to program {program} (it ignores a link it can't make)" if wanted
+                else f"The sampler still has {sample!r} assigned to program {program}"
+            )
+        return LinkResult(ok, wanted, program, sample, actual, backup, message)
 
     def _write_result(self, op, failed):
         row, value = op.kw["row"], op.kw["value"]
@@ -388,6 +469,8 @@ class YamahaSession(QObject):
                 op.callback(None if failed else op.results_value)
             elif op.kind == "write":
                 op.callback(self._write_result(op, failed))
+            elif op.kind == "link":
+                op.callback(self._link_result(op, failed))
             else:
                 params = op.kw["params"]
                 results = list(op.results) + [None] * (len(params) - len(op.results))
@@ -399,7 +482,9 @@ class YamahaSession(QObject):
         op = self._op
         if op is None:
             return
-        if op.kind == "wave":
+        if op.kind == "link":
+            what = f"object link of {op.kw['sample']!r} / {op.kw['name']!r}"
+        elif op.kind == "wave":
             what = f"WD dump of {op.kw['name']!r}" + (
                 f" after {op.assembler.blocks} message(s)" if op.assembler and op.assembler.blocks else ""
             )
@@ -457,7 +542,17 @@ class YamahaSession(QObject):
         if op.kind == "wave":
             self._handle_wave_message(op, data, kind)
             return
-        if op.kind == "bulk" or (op.kind == "write" and op.phase == "backup"):
+        if op.kind == "link" and op.phase != "backup":  # (the backup phase's bulk dump is handled below, like a write's)
+            if op.phase == "link_wait" and kind == "parameter":
+                try:
+                    msg = ysx.parse_parameter_message(data)
+                except ysx.YamahaSysexError:
+                    return
+                if msg.kind == "link" and (msg.object_name, msg.lower_name) == (op.kw["name"].rstrip(), op.kw["sample"].rstrip()):
+                    op.results_value = msg.linked
+                    self._complete()
+            return
+        if op.kind == "bulk" or (op.kind in ("write", "link") and op.phase == "backup"):
             if kind != "bulk_dump":
                 return
             try:
@@ -472,7 +567,7 @@ class YamahaSession(QObject):
             name = op.kw["name"]
             if name and dump.name != name.rstrip():
                 return  # someone else's dump
-            if op.kind == "write":
+            if op.kind in ("write", "link"):
                 self._backup_received(op, dump)
                 return
             op.results_value = dump

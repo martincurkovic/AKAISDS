@@ -27,6 +27,13 @@ WAVE DATA: a wave object (named by its sample's payload @64 / @80) is served as 
 complete messages per wave, laid out exactly as the real unit's (core/yamaha_wave.py). A stereo sample (`add_sample(...,
 audio_right=...)`) has a right wave object. MEASURED layout; the pacing is not (every message is sent at once).
 
+OBJECT LINK (MEASURED 2026-10-06 with tools/a4000_link_probe.py): an object link change (program upper, sample lower) never gets a
+reply; linking APPENDS the sample as the next Easy Edit slot with every value at its default (receive channel -1 = "=sample", the
+block's id bytes = the sample's own id + 0x18 - two samples seen), marks the program in the sample's "linked to program" map and sets
+the edited flag; unlinking REMOVES that slot and shifts the later ones down (their values kept), clears the map bit; linking twice, or a
+sample / program the unit doesn't have, changes nothing; an object link REQUEST is answered with an object link change carrying the
+state. (The real unit leaves stale bytes in the vacated block's values; this fake does not model that.)
+
 GUESSED (not measured - the first real conversation that disagrees wins): what a stereo sample or a sample bank
 sends over SDS (one mono waveform here), the audio itself (a deterministic test tone unless a test sets
 `audio[name]`), what SDS does after a deleted sample (positions shifting is assumed), that a wrong SDS
@@ -283,6 +290,8 @@ class FakeA4000:
             self._edit(m)
         elif model == y.MODEL_PARAM and kind == y.KIND_PARAMETER_REQUEST and sub == y.SUB_OBJECT_PARAMETER:
             self._param_request(m)
+        elif model == y.MODEL_PARAM and sub == y.SUB_OBJECT_LINK and kind in (y.KIND_PARAMETER_CHANGE, y.KIND_PARAMETER_REQUEST):
+            self._link(m, kind)
         else:
             self.ignored_ops.append(f"yamaha kind {kind} model {model:#04x} sub {sub:#04x}")
 
@@ -313,6 +322,70 @@ class FakeA4000:
                 self.ignored_ops.append(f"WD dump of unknown wave {name!r}")
         else:
             self.ignored_ops.append(f"{fmt} dump request")
+
+    # -- object links (assigning samples to programs) ---------------------------------------------------------
+
+    def _slot_range(self, slot):
+        base = yp.PROGRAM_EASY_EDIT_BASE + yp.EASY_EDIT_BLOCK_SIZE * slot
+        return base, base + yp.EASY_EDIT_BLOCK_SIZE
+
+    def _link_slot(self, number, sample):
+        data = self.programs[number]
+        for slot in range(yp.extract(yp.get("program", "assigned_samples"), data)):
+            if yp.extract(yp.get("easy_edit", "assigned_name"), data, slot) == sample:
+                return slot
+        return None
+
+    def _set_link_bit(self, number, sample, on):
+        data = self.samples[sample]
+        word_at = yp.SAMPLE_PARAMETER_BASE + yp.LINKED_PROGRAMS_OFFSET + 4 * ((number - 1) // 32)
+        word = int.from_bytes(data[word_at : word_at + 4], "big")
+        bit = 1 << ((number - 1) % 32)
+        data[word_at : word_at + 4] = ((word | bit) if on else (word & ~bit)).to_bytes(4, "big")
+
+    def _link(self, m, kind):
+        # a request has the same layout as a change (only the kind nibble differs): parse it as one
+        msg = y.parse_parameter_message(bytes([m[0], (y.KIND_PARAMETER_CHANGE << 4) | (m[1] & 0x0F)]) + bytes(m[2:]))
+        number = int(msg.object_name) if msg.object_name.isdigit() else None
+        known = (
+            msg.object_type == y.OBJECT_TYPES["program"] and number in self.programs
+            and msg.lower_type == y.OBJECT_TYPES["sample"] and msg.lower_name in self.samples
+        )
+        if not known:
+            self.ignored_ops.append(f"object link of an unknown {msg.object_name!r} / {msg.lower_name!r}")
+            return
+        if kind == y.KIND_PARAMETER_REQUEST:
+            linked = self._link_slot(number, msg.lower_name) is not None
+            self._say(y.build_object_link_change(self.device, msg.object_name, "program", msg.lower_name, "sample", linked))
+            return
+        if self.bulk_protect:
+            self.ignored_ops.append("object link change while bulk protect is on")
+            return
+        data = self.programs[number]
+        slot = self._link_slot(number, msg.lower_name)
+        count = yp.extract(yp.get("program", "assigned_samples"), data)
+        if msg.linked and slot is None:
+            if self._slot_range(count)[1] > len(data):
+                data += seed.EASY_EDIT_EMPTY
+            start, end = self._slot_range(count)
+            block = bytearray(seed.EASY_EDIT_EMPTY)
+            block[0:16] = y.pad_name(msg.lower_name)
+            ident = int.from_bytes(self.samples[msg.lower_name][60:64], "big") + 0x18
+            block[16:20] = ident.to_bytes(4, "big")
+            block[20] = y.OBJECT_TYPES["sample"]
+            data[start:end] = block
+            yp.store(yp.get("program", "assigned_samples"), data, count + 1)
+            self._set_link_bit(number, msg.lower_name, True)
+            data[1] |= 1
+        elif not msg.linked and slot is not None:
+            for later in range(slot + 1, count):  # the later slots shift down, keeping their values
+                src, dst = self._slot_range(later), self._slot_range(later - 1)
+                data[dst[0] : dst[1]] = data[src[0] : src[1]]
+            last = self._slot_range(count - 1)
+            data[last[0] : last[1]] = seed.EASY_EDIT_EMPTY
+            yp.store(yp.get("program", "assigned_samples"), data, count - 1)
+            self._set_link_bit(number, msg.lower_name, False)
+            data[1] |= 1
 
     # -- parameters -------------------------------------------------------------------------------------
 

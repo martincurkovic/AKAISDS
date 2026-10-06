@@ -286,3 +286,34 @@ def test_split_messages_and_classify():
     assert y.classify(y.build_parameter_request(0, [1, 1])) == "parameter_request"
     assert y.classify(b"\x7e\x7f\x09\x01") == "unknown"
     assert y.split_messages(b"\xf0\x01\x02") == []  # unterminated tail
+
+
+# --- object link change / request (manual 5.3.7 / 5.3.8) ---------------------------------------------------------------
+
+
+def test_the_object_link_messages_have_the_manuals_layout():
+    msg = y.build_object_link_change(0, "001", "program", "sine wave", "sample", True)
+    assert len(msg) == 39  # F0 and F7 not included: 43 1n 58 04 + 16 + 1 + 16 + 1 + 1
+    assert msg[:4] == bytes([0x43, 0x10, 0x58, 0x04])
+    assert msg[4:20] == b"001" + b" " * 13 and msg[20] == 0x14  # the program is UPPER...
+    assert msg[21:37] == b"sine wave" + b" " * 7 and msg[37] == 0x10  # ...the sample LOWER
+    assert msg[38] == 1  # 1 = link on
+    assert y.build_object_link_change(0, "001", "program", "sine wave", "sample", False)[38] == 0
+    request = y.build_object_link_request(3, "001", "program", "sine wave", "sample")
+    assert request[:4] == bytes([0x43, 0x33, 0x58, 0x04]) and len(request) == 39  # kind 3 = request, device 3
+    assert y.classify(request) == "parameter_request" and y.classify(msg) == "parameter"
+
+
+def test_an_object_link_message_parses_back_to_what_was_built():
+    for linked in (True, False):
+        parsed = y.parse_parameter_message(y.build_object_link_change(2, "005", 0x14, "my sample", 0x10, linked))
+        assert (parsed.kind, parsed.device, parsed.object_name, parsed.object_type) == ("link", 2, "005", 0x14)
+        assert (parsed.lower_name, parsed.lower_type, parsed.linked) == ("my sample", 0x10, linked)
+        assert parsed.params == () and parsed.data == b""
+
+
+def test_a_malformed_object_link_message_is_refused():
+    with pytest.raises(y.YamahaSysexError):
+        y.parse_parameter_message(y.build_object_link_change(0, "001", "program", "x", "sample", True)[:-1])
+    with pytest.raises(y.YamahaSysexError):
+        y.build_object_link_change(16, "001", "program", "x", "sample", True)  # a device number is 0-15

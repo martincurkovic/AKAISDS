@@ -443,3 +443,97 @@ def test_a_cancel_does_not_make_the_session_forget_its_backups(rig):
     second = write(rig, "program", "program_level", 60, "001")
     assert second.backup_path == first.backup_path  # the ORIGINAL stays the backup after a cancel/refresh
     assert [k for k, _m in rig.fake.received].count("dump_request") == 1
+
+
+# --- assigning samples to programs (object link change; measured on the real unit) -----------------------------------------
+
+
+def link(rig, program, sample, on):
+    return collect(rig, lambda cb: rig.session.change_link(program, sample, on, cb))
+
+
+def slots_of(fake, number):
+    data = fake.programs[number]
+    count = yp.extract(yp.get("program", "assigned_samples"), data)
+    return [(yp.extract(yp.get("easy_edit", "assigned_name"), data, s), yp.extract(yp.get("easy_edit", "level_offset"), data, s)) for s in range(count)]
+
+
+def test_a_sample_is_appended_as_the_next_slot_with_default_values_and_the_unit_confirms_it(rig):
+    result = link(rig, "128", "pulse 3", True)
+    assert result.ok and result.linked is True and result.requested is True
+    assert result.message == "Assigned 'pulse 3' to program 128"
+    data = rig.fake.programs[128]
+    assert slots_of(rig.fake, 128) == [("pulse 3", 0)]
+    assert yp.extract(yp.get("easy_edit", "assigned_type"), data, 0) == 16  # a sample
+    assert yp.extract(yp.get("easy_edit", "receive_channel"), data, 0) == -1  # "=sample", as the real unit left it (MEASURED)
+    sample = rig.fake.samples["pulse 3"]
+    assert yp.linked_programs(sample) == [128]  # and the sample knows which programs use it
+    block = data[yp.PROGRAM_EASY_EDIT_BASE : yp.PROGRAM_EASY_EDIT_BASE + 20]
+    assert bytes(block[16:20]) == (int.from_bytes(sample[60:64], "big") + 0x18).to_bytes(4, "big")  # the id the unit writes
+
+
+def test_the_first_change_to_a_program_backs_it_up_and_later_ones_do_not(rig):
+    before = bytes(rig.fake.programs[128])
+    first = link(rig, "128", "pulse 1", True)
+    assert first.backup_path is not None and first.backup_path.exists()
+    saved = y.parse_bulk_dump(y.split_messages(first.backup_path.read_bytes())[0])
+    assert bytes(saved.data) == before and saved.name == "128"  # the program as it was BEFORE the change
+    second = link(rig, "128", "pulse 2", True)
+    assert second.backup_path == first.backup_path
+    assert [k for k, _m in rig.fake.received].count("dump_request") == 1
+
+
+def test_samples_are_added_in_order_and_removing_a_middle_one_closes_the_gap(rig):
+    for name in ("pulse 1", "pulse 2", "pulse 3"):
+        assert link(rig, "128", name, True).ok
+    for slot, level in enumerate((11, 22, 33)):
+        assert write(rig, "easy_edit", "level_offset", level, "128", slot=slot).ok
+    assert link(rig, "128", "pulse 2", False).ok
+    # the unit compacts: later slots shift down and KEEP their values (measured)
+    assert slots_of(rig.fake, 128) == [("pulse 1", 11), ("pulse 3", 33)]
+    assert yp.linked_programs(rig.fake.samples["pulse 2"]) == []
+    assert link(rig, "128", "pulse 2", True).ok  # taking it again appends it at the end with defaults
+    assert slots_of(rig.fake, 128) == [("pulse 1", 11), ("pulse 3", 33), ("pulse 2", 0)]
+
+
+def test_linking_twice_changes_nothing_and_a_sample_can_serve_two_programs(rig):
+    assert link(rig, "128", "pulse 1", True).ok
+    edits = list(rig.fake.programs[128])
+    assert link(rig, "128", "pulse 1", True).ok and list(rig.fake.programs[128]) == edits
+    assert link(rig, "127", "pulse 1", True).ok
+    assert yp.linked_programs(rig.fake.samples["pulse 1"]) == [127, 128]
+
+
+def test_a_sample_the_unit_does_not_have_is_not_confirmed(rig):
+    result = link(rig, "128", "no such sample", True)
+    assert not result.ok and result.linked is None and "didn't confirm" in result.message
+    assert slots_of(rig.fake, 128) == []
+
+
+def test_removing_what_is_not_assigned_is_confirmed_as_already_so(rig):
+    result = link(rig, "128", "pulse 1", False)
+    assert result.ok and result.linked is False and "Removed" in result.message
+
+
+def test_bulk_protect_makes_the_unit_ignore_the_link_and_the_result_says_so(qapp):  # noqa: F811
+    rig = build(demo.FakeA4000(bulk_protect=True))
+    result = link(rig, "128", "pulse 1", True)
+    assert not result.ok and result.linked is False and "didn't assign" in result.message
+    assert yp.extract(yp.get("program", "assigned_samples"), rig.fake.programs[128]) == 0
+
+
+def test_a_link_in_the_queue_counts_as_a_pending_write(rig):
+    got = []
+    rig.session.change_link("128", "pulse 1", True, got.append)
+    assert rig.session.writes_pending
+    assert wait_until(lambda: bool(got)) and not rig.session.writes_pending
+
+
+def test_a_link_waits_for_a_sample_transfer_like_every_other_operation(rig):
+    rig.controller._receiving = True
+    rig.session.busy_retry_ms = 5
+    got = []
+    rig.session.change_link("128", "pulse 1", True, got.append)
+    assert not wait_until(lambda: bool(got), timeout=0.15) and rig.fake.received == []
+    rig.controller._receiving = False
+    assert wait_until(lambda: bool(got)) and got[0].ok
