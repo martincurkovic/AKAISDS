@@ -18,12 +18,15 @@ A sample can only be restored onto the same sample: its left (and right) wave ob
 
 import dataclasses
 
+from core import yamaha_markers as ym
 from core import yamaha_params as yp
 from core import yamaha_sysex as ysx
 
-#: the wave/loop address rows are COUPLED on the unit (writing one moves others - measured), so they are written LAST and in this
-#: order, and a second pass catches anything a write moved
-GEOMETRY_ORDER = ("wave_start_address", "loop_start_address", "loop_length", "loop_end_address")
+#: the wave/loop address rows are COUPLED on the unit (writing one moves others - measured), so they are written LAST, in the order
+#: `yamaha_markers.plan_marker_writes` works out (the unit ignores a write that would put the loop outside the wave), and a further
+#: pass catches anything a write moved. The two LENGTH rows follow the addresses on the unit, so they are never written themselves.
+GEOMETRY_ORDER = ("wave_start_address", "wave_end_address", "loop_start_address", "loop_end_address")
+DERIVED_ROWS = ("wave_length", "loop_length")
 
 
 @dataclasses.dataclass
@@ -60,9 +63,21 @@ def writable(row):
     return not (row.read_only or row.bulk_only or row.write_ignored or row.a5000_only) and row.kind == "int"
 
 
-def _ordered(items):
+def _ordered(items, old, now):
+    """The plain rows, then the wave/loop addresses in an order the unit accepts (see `GEOMETRY_ORDER`)."""
     plain = [i for i in items if i.row.key not in GEOMETRY_ORDER]
-    geometry = sorted((i for i in items if i.row.key in GEOMETRY_ORDER), key=lambda i: GEOMETRY_ORDER.index(i.row.key))
+    geometry = [i for i in items if i.row.key in GEOMETRY_ORDER]
+    if not geometry:
+        return plain
+    wanted, here = ym.read_markers(old), ym.read_markers(now)
+    if wanted.valid:
+        rows = {i.row.key: i.row for i in geometry}
+        geometry = [
+            RestoreItem(rows.get(ym.ROW_FOR[name]) or yp.get("sample", ym.ROW_FOR[name]), None, value, getattr(here, name))
+            for name, value in ym.plan_marker_writes(here, wanted)
+        ]
+    else:  # a backup whose own addresses are out of order: write what differs, in a fixed order, and let the passes settle it
+        geometry.sort(key=lambda i: GEOMETRY_ORDER.index(i.row.key))
     return plain + geometry
 
 
@@ -98,12 +113,12 @@ def plan_restore(backup, current):
         raise RestoreError(f"{backup.fmt} objects can't be restored")
     for scope, slot in scopes:
         for row in yp.rows(scope):
-            if not writable(row):
+            if not writable(row) or row.key in DERIVED_ROWS:
                 continue
             value_old, value_now = yp.extract(row, old, slot), yp.extract(row, now, slot)
             if value_old != value_now:
                 items.append(RestoreItem(row, slot, value_old, value_now))
-    return RestorePlan(backup.fmt, backup.name, _ordered(items), notes)
+    return RestorePlan(backup.fmt, backup.name, _ordered(items, old, now) if backup.fmt == "SP" else items, notes)
 
 
 def residual_offsets(backup, current):

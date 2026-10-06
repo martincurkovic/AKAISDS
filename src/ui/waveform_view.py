@@ -703,6 +703,17 @@ class WaveformView(QWidget):
         self._emit_markers_changed()
         return self._markers[name]
 
+    def apply_markers(self, start, loop_start, loop_end, end):
+        """Show all four markers exactly where given - no pushing, no clamping to each other (the caller already holds a valid set).
+        For a view that MIRRORS another one's markers (the Yamaha Samples tab's right channel). Emits markers_changed like set_marker."""
+        if self._frame_count == 0:
+            return
+        last = self._frame_count - 1
+        clamp = lambda v: max(0, min(last, v))  # noqa: E731
+        self._markers = {"start": clamp(start), "loop_start": clamp(loop_start), "loop_end": clamp(loop_end), "end": clamp(end)}
+        self.update()
+        self._emit_markers_changed()
+
     def _push_marker(self, name, frame):
         """push_marker (the module-level function), but loop_start/
         loop_end are frozen out of the cascade while the current sample's

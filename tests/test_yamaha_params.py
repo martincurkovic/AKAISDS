@@ -187,7 +187,7 @@ def test_every_enum_row_has_a_label_for_each_value_the_a4000_can_hold():
 
 def test_rows_the_unit_ignored_writes_to_are_flagged():
     flagged = {p.key for p in yp.rows("sample") if p.write_ignored}
-    assert flagged == {"sampling_frequency_l", "sampling_frequency_r", "wave_length", "wave_end_address"}
+    assert flagged == {"sampling_frequency_l", "sampling_frequency_r"}
     assert not any(p.write_ignored for p in yp.rows("program") + yp.rows("easy_edit"))
 
 

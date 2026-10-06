@@ -15,7 +15,9 @@ Anything the verifier has not been run over is only "as good as the manual".
 WRITE-VERIFIED: `tools/a4000_write_verify.py` proved every program, Easy Edit and sample row by writing a
 distinctive value and diffing the dumps (RAM only, throwaway objects) - see dev_docs/a4000-editor-roadmap.md
 for the results and the side effects it found (mirrored bytes, derived EQ coefficients, the unit's "edited" flag
-in byte 1 of the common block, wave/loop coupling). Rows flagged `write_ignored` accepted a write and did nothing.
+in byte 1 of the common block, wave/loop coupling). Rows flagged `write_ignored` accepted a write and did nothing (the wave
+length / wave end rows are NOT flagged: they are accepted on a user sample and only ignored on a built-in waveform - see
+core/yamaha_markers.py).
 
 Not covered yet (deliberately): the program's effect blocks (P2=21) and controls (P2=22), the
 MIDI-channel bitmaps (P2=1, 2), the "linked to program" / bank-member flags of a sample, stereo R
@@ -200,8 +202,8 @@ def _sample_rows():
         S("key_range_low", "key range low (-1 = original)", 11, -1, 127, 59),
         S("loop_mode", "loop mode", 12, 0, 5, 61, enum="loop_mode"),
         S("wave_start_address", "wave start address (L)", 13, 0, 16777215, 64, size=4),
-        S("wave_length", "wave length (end - start + 1) (L)", 14, 0, 16777215, 72, size=4, write_ignored=True),
-        S("wave_end_address", "wave end address", 15, 0, 16777215, 180, size=4, write_ignored=True),
+        S("wave_length", "wave length (end - start + 1) (L)", 14, 0, 16777215, 72, size=4),
+        S("wave_end_address", "wave end address", 15, 0, 16777215, 180, size=4),
         S("loop_start_address", "loop start address (L)", 16, 0, 16777215, 80, size=4),
         S("loop_length", "loop length (end - start + 1) (L)", 17, 0, 16777215, 88, size=4),
         S("loop_end_address", "loop end address", 18, 0, 16777215, 184, size=4),

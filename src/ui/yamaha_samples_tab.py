@@ -11,9 +11,20 @@ session in `sample_cache` (shared with the Programs tab, which needs each sample
 
 EDITING (when the host passes a `WriteCoordinator`): a changed control is written to the sample through
 `YamahaSession.write_parameter` (backup first, read back - see ui/yamaha_writer.py). A sample is SHARED by every
-program that uses it, so the header says so. Not editable: the wave/loop start-length-end addresses are shown as
-text only (they are coupled - writing one moves others - see dev_docs/a4000-editor-roadmap.md), as are the
-sampling frequency, wave length and wave end (the unit ignored writes to them).
+program that uses it, so the header says so. The wave/loop addresses are shown as text; they are edited by DRAGGING THE
+WAVEFORM'S MARKERS (below). The sampling frequency is shown only (the unit ignores writes to it).
+
+MARKERS (wave start/end, loop start/end): dragging one writes the addresses that changed, one at a time and in the ORDER
+core/yamaha_markers.py works out - the unit silently ignores a write that would put the loop outside the wave, and keeps the
+two lengths itself - each through the same guarded write as any control, then re-reads the sample so what is shown is what
+the unit holds. A sample's right channel has no markers of its own: the two views are linked, a drag in either moves both
+(the unit keeps one set of addresses). On a built-in waveform the unit ignores a change of the wave END (said in the status
+bar); everything else works there too.
+
+PREVIEW: a single click on the waveform (once its audio is loaded) plays the sample through the computer's audio output, like
+the S3000 editor: per the loop mode - a plain run from start to end, a looped one (held until the next click, or for a couple of
+seconds for "loop to release"), or reversed - in real stereo for a stereo sample. Click again to stop; dragging a loop marker
+while a looped preview plays moves the loop live.
 
 THE WAVEFORM comes from the unit's native WAVE DATA bulk dump (core/yamaha_wave.py), on request (double-click the waveform):
 the sample links a left wave object (and, for a STEREO sample, a right one), each fetched by its own name through the
@@ -47,7 +58,9 @@ from PySide6.QtWidgets import (
 )
 
 from core import debug_log
+from core import yamaha_markers as ym
 from core import yamaha_params as yp
+from core.audio_preview import SlicePreviewPlayer
 from ui import tooltips as tt
 from ui.editor_layout import (
     build_centered_row,
@@ -105,9 +118,13 @@ def format_list_duration(frames, rate):
 
 #: loop modes that actually loop (owner's manual p.123): continuous loop and loop-to-release
 _LOOPING_MODES = (1, 2)
+#: loop modes that play the wave backwards (3 = reverse, 5 = reverse one-shot)
+_REVERSE_MODES = (3, 5)
 #: said INSIDE the waveform (once, centered across a stereo pair) - the label under it stays empty until it has more to say
 _LOAD_HINT = ""
 _WAVEFORM_HINT = "Double-click to load the audio waveform"
+#: how long a "loop to release" sample's loop is held in a preview (there is no key to release)
+_RELEASE_PREVIEW_MS = 2000
 #: the waveform area is 180 px tall: one mono view, or a stereo pair at half height each
 _GRAPH_SIZE = (200, 80)  # the envelope graphs (the S3000 editor's are 200 x 90)
 _MONO_VIEW_HEIGHT = 180
@@ -131,9 +148,10 @@ def sample_markers(data):
 
 
 def audio_matches(sample_data, frames):
-    """Whether a received wave of `frames` frames is plausibly THIS sample's (see the module docstring)."""
+    """Whether a received wave of `frames` frames is plausibly THIS sample's (see the module docstring): it must hold at least
+    the sample's end address (the end can be pulled in from the wave's own end, so equality would refuse a trimmed sample)."""
     g = lambda key: yp.extract(yp.get("sample", key), sample_data)  # noqa: E731
-    return frames in (g("wave_length"), g("wave_end_address"))
+    return frames > 0 and (frames == g("wave_length") or frames >= g("wave_end_address"))
 
 
 # -- the cards (declared as data) ------------------------------------------------------------------------
@@ -333,6 +351,12 @@ class YamahaSamplesTab(QWidget):
         self._audio_samples = None  # the left (or only) channel of the sample whose audio is loaded
         self._audio_samples_right = None
         self._syncing = False
+        self._syncing_markers = False  # a mirrored marker move is in progress (never echo it back)
+        self._shown_markers = None  # (start, loop_start, loop_end, end) frames as last shown/committed - what a drag starts from
+        self._marker_job = None  # the marker write in progress: {"name", "steps", "index"}
+        self._marker_pending = None  # the newest drag that arrived meanwhile: (sample name, view markers)
+        self._preview = SlicePreviewPlayer(self)
+        self._preview_reversed = 0  # frames in the reversed copy being played (0 = a forward preview)
         self._rows = {}  # sample name -> the duration label of its list row
         self._scan_token = 0  # bumped by every refresh/list change so a late scan result is dropped
         self._scan_failed = set()
@@ -352,6 +376,8 @@ class YamahaSamplesTab(QWidget):
         if writer is not None:
             self.panel.set_editable(True)
             self.panel.edited.connect(self._on_edited)
+        self._preview.position_changed.connect(self._on_preview_position)
+        self._preview.finished.connect(self._clear_playheads)
         self._connected = True
 
     def _build(self):
@@ -365,10 +391,13 @@ class YamahaSamplesTab(QWidget):
         self.waveform_view = WaveformView()
         self.waveform_view_right = WaveformView()
         for view in (self.waveform_view, self.waveform_view_right):
-            view.set_markers_locked(True)
+            view.set_markers_locked(self._writer is None)
             view.set_placeholder_text("Select a sample on the left")
             view.set_header_hint(_WAVEFORM_HINT)
             view.load_requested.connect(self._load_audio)
+            view.preview_requested.connect(self._on_preview_requested)
+            view.markers_changed.connect(lambda *m, v=view: self._on_markers_changed(v, m))
+            view.marker_committed.connect(lambda which, *m, v=view: self._on_marker_committed(v, which, m))
         self.waveform_view_right.setVisible(False)
         self.waveform_view.view_changed.connect(lambda *_a: self._follow(self.waveform_view, self.waveform_view_right))
         self.waveform_view_right.view_changed.connect(lambda *_a: self._follow(self.waveform_view_right, self.waveform_view))
@@ -578,6 +607,7 @@ class YamahaSamplesTab(QWidget):
         if current is None:
             return
         name = current.data(Qt.ItemDataRole.UserRole)
+        self._preview.stop()
         self._selected = name
         self._token += 1
         token = self._token
@@ -667,7 +697,8 @@ class YamahaSamplesTab(QWidget):
         self._cache[name] = bytearray(dump.data)
         if name == self._selected:
             self._show_values(name)
-            if self._loading_name != name:  # never reset the header under a wave that is still arriving
+            # never reset the header under a wave that is still arriving, nor the markers under a drag being written
+            if self._loading_name != name and self._marker_job is None:
                 self._show_waveform(name, self._cache[name])
 
     def _after_cache_change(self, name, row):
@@ -686,10 +717,12 @@ class YamahaSamplesTab(QWidget):
         self.waveform_view.set_stack_position("top" if stereo else None, _STEREO_VIEW_HEIGHT, self.waveform_view_right)
         self.waveform_view_right.set_stack_position("bottom" if stereo else None, _STEREO_VIEW_HEIGHT, self.waveform_view)
         if frames <= 0:
+            self._shown_markers = None
             for view in views:
                 view.clear()
                 view.set_placeholder_text("This sample is empty")
             return
+        self._shown_markers = (start, loop_start, loop_end, end)
         loaded = name == self._audio_name and self._audio_samples is not None
         for view, samples in ((self.waveform_view, self._audio_samples), (self.waveform_view_right, self._audio_samples_right)):
             view.set_loop_enabled(loops)
@@ -697,22 +730,177 @@ class YamahaSamplesTab(QWidget):
                 view.set_waveform(samples, start, loop_start, loop_end, end)
             else:
                 view.set_header(frames, start, loop_start, loop_end, end)
-        self._set_hint(
-            "The markers are shown for reference - they can't be edited yet." if loaded else _LOAD_HINT
-        )
+        if not loaded:
+            self._set_hint(_LOAD_HINT)
+        elif self._writer is None:
+            self._set_hint("Click the waveform to preview it. The markers are shown for reference.")
+        else:
+            self._set_hint("Drag a marker to change it (written when you let go) - click the waveform to preview.")
 
     def set_active(self, active):
-        # nothing runs in the background here; kept so the window can treat both tabs alike
         self._active = active
+        if not active:
+            self._preview.stop()  # nothing keeps sounding behind another tab
 
     def refresh(self):
         """Forget the audio read so far (the host is about to re-read everything)."""
+        self._preview.stop()
         self._load_token += 1  # a load in flight is abandoned (the host cancels the session)
         self._scan_token += 1  # ...and so is the duration scan (set_samples starts a new one)
         self._reset_reveal()
         self._loading_name = None
         self.cancel_load_button.setVisible(False)
         self._audio_name = self._audio_samples = self._audio_samples_right = None
+
+    # -- the markers ---------------------------------------------------------------------------------------
+
+    def _apply_marker_lock(self):
+        """Markers can be dragged when the tab can write, except while the audio is arriving (the views are being filled)."""
+        locked = self._writer is None or self._loading_name is not None
+        for view in (self.waveform_view, self.waveform_view_right):
+            view.set_markers_locked(locked)
+
+    def _other_view(self, view):
+        return self.waveform_view_right if view is self.waveform_view else self.waveform_view
+
+    def _on_markers_changed(self, view, markers):
+        """Every drag step (and whenever a view is loaded): the other channel mirrors the move, and a looped preview follows the
+        loop markers live."""
+        if self._syncing_markers:
+            return
+        other = self._other_view(view)
+        if other.isVisibleTo(self) and other.frame_count() == view.frame_count():
+            self._syncing_markers = True
+            try:
+                other.apply_markers(*markers)
+            finally:
+                self._syncing_markers = False
+        if self._preview.is_playing() and not self._preview_reversed:
+            self._preview.update_loop_points(markers[1], markers[2])
+
+    def _on_marker_committed(self, view, _which, markers):
+        """A drag was let go: write whatever it changed. (`markers`: start, loop_start, loop_end, end as drawn.)"""
+        name, after = self._selected, tuple(markers)
+        if self._writer is None or name is None or name not in self._cache or self._shown_markers is None:
+            return
+        before, self._shown_markers = self._shown_markers, after
+        if self._marker_job is not None:  # one at a time: the newest drag waits (and merges with an earlier one that waited)
+            if self._marker_pending is not None:
+                before = self._marker_pending[1]
+            self._marker_pending = (name, before, after)
+            return
+        self._start_marker_edit(name, before, after)
+
+    def _start_marker_edit(self, name, before, after):
+        data = self._cache.get(name)
+        if data is None or name != self._selected:
+            return
+        loops = yp.extract(yp.get("sample", "loop_mode"), data) in _LOOPING_MODES
+        current = ym.read_markers(data)
+        try:
+            steps = ym.plan_marker_writes(current, ym.target_for_edit(current, before, after, loops))
+        except ValueError as e:
+            _log(f"marker edit of {name!r} refused: {e}")
+            self.status_message.emit("Those markers aren't in a valid order")
+            self._show_waveform(name, data)
+            return
+        if not steps:
+            return
+        _log(f"marker edit of {name!r}: " + ", ".join(f"{m} -> {a}" for m, a in steps))
+        self._marker_job = {"name": name}
+        self._run_marker_step(name, steps, 0)
+
+    def _run_marker_step(self, name, steps, index):
+        if index >= len(steps):
+            self._finish_marker_job(name, ok=True)
+            return
+        marker, address = steps[index]
+        row = yp.get("sample", ym.ROW_FOR[marker])
+        done = lambda result, r=row: self._on_marker_step_done(name, steps, index, r, result)  # noqa: E731
+        if not self._writer.edit(row, address, name, None, done):  # declined the one-time warning
+            self._finish_marker_job(name, ok=False, edit_sent=False)
+            return
+        self._writer.flush()
+
+    def _on_marker_step_done(self, name, steps, index, row, result):
+        if not self._connected:
+            return
+        if name in self._cache and result.readback is not None:
+            yp.store(row, self._cache[name], result.readback)
+        if result.ok:
+            self._run_marker_step(name, steps, index + 1)
+            return
+        message = result.message
+        if row.key == "wave_end_address" and result.edit_sent and result.readback == result.previous:
+            message = "The sampler didn't move the wave end - it can't be changed on a built-in waveform"
+        self._finish_marker_job(name, ok=False, message=message, edit_sent=result.edit_sent)
+
+    def _finish_marker_job(self, name, *, ok, message=None, edit_sent=True):
+        self._marker_job = None
+        pending, self._marker_pending = self._marker_pending, None
+        if message:
+            self.status_message.emit(message)
+        if not ok:
+            # put the markers back where the unit really has them (the re-read below then settles whatever else moved)
+            if name == self._selected and name in self._cache:
+                self._show_waveform(name, self._cache[name])
+        if edit_sent:
+            self._writer.schedule_reread("SP", name, lambda dump, n=name: self._on_reread(n, dump))
+        if ok and pending is not None:
+            # plan the next drag from what the unit holds NOW (a write can move a coupled address)
+            self._session.request_bulk("SP", name, lambda dump, p=pending: self._after_marker_reread(p, dump))
+
+    def _after_marker_reread(self, pending, dump):
+        name, before, after = pending
+        if not self._connected:
+            return
+        if dump is not None:
+            self._cache[name] = bytearray(dump.data)
+        if name == self._selected:
+            self._start_marker_edit(name, before, after)
+
+    # -- click to preview ---------------------------------------------------------------------------------------
+
+    def _on_preview_requested(self):
+        if self._preview.is_playing():
+            self._preview.stop()  # a click while something sounds stops it (the only way a held loop ends)
+            return
+        name = self._selected
+        data = self._cache.get(name)
+        if data is None or name != self._audio_name or self._audio_samples is None or self._loading_name is not None:
+            return  # nothing loaded to play
+        left = self._audio_samples
+        right = self._audio_samples_right if yp.is_stereo(data) else None
+        m = self.waveform_view.markers_with_loop_in_range()
+        rate = yp.extract(yp.get("sample", "sampling_frequency_l"), data)
+        mode = yp.extract(yp.get("sample", "loop_mode"), data)
+        if mode in _LOOPING_MODES:
+            self._preview_reversed = 0
+            self._preview.play_loop(
+                left, m["start"], m["loop_start"], m["loop_end"], m["end"], rate,
+                dwell_ms=None if mode == 1 else _RELEASE_PREVIEW_MS, right_samples=right,
+            )
+        elif mode in _REVERSE_MODES:
+            # play a reversed copy, mapping its positions back for the playhead
+            n = len(left)
+            self._preview.play(
+                left[::-1], n - 1 - m["end"], n - 1 - m["start"], rate, right_samples=None if right is None else right[::-1]
+            )
+            self._preview_reversed = n if self._preview.is_playing() else 0
+        else:
+            self._preview_reversed = 0
+            self._preview.play(left, m["start"], m["end"], rate, right_samples=right)
+
+    def _on_preview_position(self, frame):
+        if self._preview_reversed:
+            frame = self._preview_reversed - 1 - frame
+        for view in (self.waveform_view, self.waveform_view_right):
+            view.set_playhead(frame)
+
+    def _clear_playheads(self):
+        self._preview_reversed = 0
+        for view in (self.waveform_view, self.waveform_view_right):
+            view.clear_playhead()
 
     # -- loading audio (the native wave dump) ------------------------------------------------------------------
 
@@ -727,7 +915,9 @@ class YamahaSamplesTab(QWidget):
         if not waves[0]:
             self.status_message.emit(f"{name!r} has no wave to load")
             return
+        self._preview.stop()
         self._loading_name = name
+        self._apply_marker_lock()
         self._load_token += 1
         token = self._load_token
         self._reset_reveal()
@@ -871,6 +1061,7 @@ class YamahaSamplesTab(QWidget):
 
     def _finish_load(self):
         self._loading_name = None
+        self._apply_marker_lock()
         for view in (self.waveform_view, self.waveform_view_right):
             view.set_loading(False)
         self.cancel_load_button.setVisible(False)
@@ -886,6 +1077,8 @@ class YamahaSamplesTab(QWidget):
         if not self._connected:
             return
         self._connected = False
+        self._preview.stop()
+        self._marker_pending = None
         self._scan_token += 1
         self._reset_reveal()
         if self._loading_name is not None:

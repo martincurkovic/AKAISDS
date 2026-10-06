@@ -42,8 +42,13 @@ or a select of an object that doesn't exist, silence for a parameter request wit
 or an unknown P-number, that a wrong device number (or "off") is simply silence, that Bulk Protect
 makes edits silently ignored, that sample banks / system parameters / wave data / sequences are not
 answered (they land in `ignored_ops`), and that an edit's out-of-range value is stored as sent.
-NOT MODELLED: the unit's side effects of an edit (mirrored R bytes, derived EQ coefficients, control
-blocks mirrored at the start of a sample's parameters, coupled wave/loop addresses) - an edit changes
+WAVE / LOOP ADDRESSES (MEASURED 2026-10-06 with tools/a4000_marker_probe.py; see core/yamaha_markers.py): the four addresses (wave
+start, wave end, loop start, loop end) are independent and the two lengths follow them; a write that would break start <= loop
+start <= loop end <= end is accepted and ignored; the end can't pass the wave's own size; on a BUILT-IN waveform (the factory
+samples) end/length writes are accepted and ignored; while the loop mode does not loop (0, 3, 4, 5) the loop END follows the wave
+end (which can leave loop start > loop end and an underflowed loop length - the unit really did).
+NOT MODELLED: the unit's other side effects of an edit (mirrored R bytes, derived EQ coefficients, control
+blocks mirrored at the start of a sample's parameters, a stereo sample's right-channel address twins) - an edit changes
 exactly the table's bytes here - and timing.
 """
 
@@ -56,6 +61,11 @@ from core import sds_encoder
 from core import yamaha_params as yp
 from core import yamaha_sysex as y
 from core import yamaha_wave
+
+#: the sample rows that describe where the wave and loop lie (coupled - see `FakeA4000._edit_geometry`)
+_GEOMETRY_KEYS = (
+    "wave_start_address", "wave_length", "wave_end_address", "loop_start_address", "loop_length", "loop_end_address",
+)
 
 SOX = 0xF0
 EOX = 0xF7
@@ -146,6 +156,7 @@ class FakeA4000:
         #: {sample name: list of int16 words} - a STEREO sample's right channel (see `add_sample`)
         self.audio_right = {}
         self._sds_packets = []  # the data packets still to send, each after an ACK
+        self._wave_sizes = {}  # sample name -> frames in its wave (what the end address may not pass), fixed at first use
         #: the object edits and parameter requests apply to: (type, key) or None
         self.current = None
         #: every frame received, decoded as (label, message-without-F0/F7)
@@ -243,11 +254,21 @@ class FakeA4000:
 
     # -- Sample Dump Standard (the editor's waveform) -----------------------------------------------------
 
+    def _wave_size(self, name):
+        """Frames in a sample's wave: its audio if a test set one, else what its parameters said the first time anyone asked
+        (before any edit could change them)."""
+        if name not in self._wave_sizes:
+            data = self.samples[name]
+            self._wave_sizes[name] = len(self.audio[name]) if name in self.audio else max(
+                yp.extract(yp.get("sample", "wave_length"), data), yp.extract(yp.get("sample", "wave_end_address"), data)
+            )
+        return self._wave_sizes[name]
+
     def _audio_for(self, name):
         """The int16 words the unit would send for sample `name` (wave length frames)."""
         if name in self.audio:
             return list(self.audio[name])
-        frames = yp.extract(yp.get("sample", "wave_length"), self.samples[name])
+        frames = self._wave_size(name)
         cycles = 1 + list(self.samples).index(name)  # a different tone per sample, deterministic
         return [round(20000 * math.sin(2 * math.pi * cycles * i / max(frames, 1))) for i in range(frames)]
 
@@ -460,5 +481,44 @@ class FakeA4000:
         self.edits += 1
         data[1] |= 1  # edited flag (measured)
         if row.write_ignored:
-            return  # accepted and ignored, like the real unit's sampling frequency / wave length
-        yp.store(row, data, yp.decode_reply(row, msg.data), slot)
+            return  # accepted and ignored, like the real unit's sampling frequency
+        value = yp.decode_reply(row, msg.data)
+        if row.scope == "sample" and row.key in _GEOMETRY_KEYS:
+            self._edit_geometry(self.current[1], data, row.key, value)
+            return
+        yp.store(row, data, value, slot)
+
+    def _edit_geometry(self, name, data, key, value):
+        """A wave/loop address write, with the coupling and refusals measured on the real unit (see the module docstring)."""
+        size = self._wave_size(name)  # cached before the first change
+        g = lambda k: yp.extract(yp.get("sample", k), data)  # noqa: E731
+        put = lambda k, v: yp.store(yp.get("sample", k), data, v & 0xFFFFFFFF)  # noqa: E731
+        start, end, loop_start, loop_end = g("wave_start_address"), g("wave_end_address"), g("loop_start_address"), g("loop_end_address")
+        loops = g("loop_mode") in (1, 2)
+        if key == "loop_length":
+            key, value = "loop_end_address", loop_start + value
+        elif key == "wave_length":
+            key, value = "wave_end_address", start + value
+        if key == "wave_start_address":
+            if value > loop_start:
+                return
+            put("wave_start_address", value)
+            put("wave_length", end - value)
+        elif key == "wave_end_address":
+            if name in FACTORY_SAMPLES or value > size or value < start or (loops and value < loop_end):
+                return
+            put("wave_end_address", value)
+            put("wave_length", value - start)
+            if not loops:  # the loop end follows the wave end while nothing loops
+                put("loop_end_address", value)
+                put("loop_length", value - loop_start)
+        elif key == "loop_start_address":
+            if value < start or value > loop_end:
+                return
+            put("loop_start_address", value)
+            put("loop_length", loop_end - value)
+        elif key == "loop_end_address":
+            if value < loop_start or value > end:
+                return
+            put("loop_end_address", value)
+            put("loop_length", value - loop_start)

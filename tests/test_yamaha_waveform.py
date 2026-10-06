@@ -102,7 +102,7 @@ def test_double_clicking_loads_the_audio_into_the_waveform(window):
     assert wait_until(lambda: tab._audio_name == "saw up")
     assert tab._audio_samples == window.fake.audio["saw up"] and tab._audio_samples_right is None
     assert tab.waveform_view.has_waveform() and tab.waveform_view_right.isHidden()
-    assert "reference" in tab.waveform_hint.text()
+    assert "Drag a marker" in tab.waveform_hint.text()
     assert tab.cancel_load_button.isHidden() and not tab.loading
     # it asked for the sample's WAVE object by name - not for a Sample Dump Standard number
     assert len(wd_requests(window)) == 1 and bytes(wd_requests(window)[0][13:29]).rstrip() == b"saw up"

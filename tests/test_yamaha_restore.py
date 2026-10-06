@@ -10,6 +10,7 @@ import pytest
 from controller.yamaha_restore import RestoreJob
 from core import demo_a4000 as demo
 from core import yamaha_backups as yb
+from core import yamaha_markers as ym
 from core import yamaha_params as yp
 from core import yamaha_restore as yr
 from core import yamaha_sysex as y
@@ -66,8 +67,13 @@ def test_the_coupled_wave_and_loop_rows_are_written_last_in_a_fixed_order():
         yp.store(yp.get("sample", key), backup, value)
     plan = yr.plan_restore(dump_of("SP", "x", backup), dump_of("SP", "x", now))
     keys = [i.row.key for i in plan.items]
-    assert keys[-4:] == ["wave_start_address", "loop_start_address", "loop_length", "loop_end_address"]
-    assert set(keys[:-4]) == {"pan", "filter_cutoff"}
+    geometry = [k for k in keys if k.endswith("_address")]
+    assert keys[-len(geometry) :] == geometry and set(keys[: -len(geometry)]) == {"pan", "filter_cutoff"}
+    assert "loop_length" not in keys  # a length follows the addresses on the unit - never written itself
+    # the order is the one `plan_marker_writes` gives (nothing the unit would ignore): widen the loop, then narrow the wave
+    ordered = [(i.row.key, i.value) for i in plan.items if i.row.key.endswith("_address")]
+    here, wanted = ym.read_markers(now), ym.read_markers(backup)
+    assert ordered == [(ym.ROW_FOR[n], v) for n, v in ym.plan_marker_writes(here, wanted)]
 
 
 def test_a_different_object_or_a_different_wave_is_refused():
@@ -252,13 +258,13 @@ def test_cancel_stops_after_the_write_in_flight_and_reports_how_far_it_got(rig):
 
 def test_coupled_addresses_are_settled_by_a_second_pass(qapp):  # noqa: F811
     class Coupled(demo.FakeA4000):
-        """Like the real unit (measured: writing one wave/loop address moves others): writing the loop length also nudges the wave
+        """Like the real unit (measured: writing one wave/loop address moves others): writing the loop end also nudges the wave
         start - which a restore had ALREADY written (the wave start goes first)."""
 
         def _edit(self, m):
             super()._edit(m)
             msg = y.parse_parameter_message(m)
-            if self.current and msg.params == yp.get("sample", "loop_length").p:
+            if self.current and msg.params == yp.get("sample", "loop_end_address").p:
                 data = self.samples[self.current[1]]
                 row = yp.get("sample", "wave_start_address")
                 yp.store(row, data, yp.extract(row, data) + 1)
@@ -266,8 +272,9 @@ def test_coupled_addresses_are_settled_by_a_second_pass(qapp):  # noqa: F811
     fake = Coupled()
     rig = build(fake)
     backup = backup_of(rig, "SP", "pulse 2")
+    assert write(rig, "sample", "loop_start_address", 10, "pulse 2").ok  # (the unit ignores a wave start above the loop start)
     assert write(rig, "sample", "wave_start_address", 4, "pulse 2").ok
-    assert write(rig, "sample", "loop_length", 50, "pulse 2").ok
+    assert write(rig, "sample", "loop_end_address", 60, "pulse 2").ok
     assert write(rig, "sample", "pan", 9, "pulse 2").ok
     job, _ = prepare(rig, backup)
     result, _ = run(job)

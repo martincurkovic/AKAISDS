@@ -35,6 +35,23 @@ _SAMPLE_FORMAT = miniaudio.SampleFormat.SIGNED16
 _BYTES_PER_FRAME = 2  # SIGNED16, mono (1 channel) - struct.pack("<h", ...)
 
 
+def _pack_values(left, right=None):
+    """Little-endian int16 PCM for already-sliced channel lists: mono, or interleaved L R L R when `right` is given
+    (the shorter channel decides the length)."""
+    if right is None:
+        return struct.pack("<" + "h" * len(left), *left)
+    n = min(len(left), len(right))
+    interleaved = [0] * (2 * n)
+    interleaved[0::2] = left[:n]
+    interleaved[1::2] = right[:n]
+    return struct.pack("<" + "h" * len(interleaved), *interleaved)
+
+
+def _pack_region(left, right, lo, hi):
+    """The inclusive [lo, hi] frames of `left` (and `right`, for a stereo preview) as PCM bytes."""
+    return _pack_values(left[lo : hi + 1], None if right is None else right[lo : hi + 1])
+
+
 def _resample_region_for_cents(samples, lo, hi, cents):
     """The [lo, hi] (inclusive) region of samples, resampled to sound
     `cents` cents higher (positive) or lower (negative) - plain linear-
@@ -179,7 +196,7 @@ class SlicePreviewPlayer(QObject):
     def is_playing(self):
         return self._device is not None
 
-    def _open_device(self, framerate):
+    def _open_device(self, framerate, channels=1):
         # shared by play()/play_loop() - resolves the configured output
         # device/buffer size the same way for both; returns None (having
         # already logged) on failure, never raises
@@ -197,7 +214,7 @@ class SlicePreviewPlayer(QObject):
         try:
             return miniaudio.PlaybackDevice(
                 output_format=_SAMPLE_FORMAT,
-                nchannels=1,
+                nchannels=channels,
                 sample_rate=framerate,
                 buffersize_msec=buffersize_msec,
                 device_id=device_id,
@@ -207,6 +224,10 @@ class SlicePreviewPlayer(QObject):
                 "SlicePreviewPlayer: couldn't open output device", exc_info=True
             )
             return None
+
+    def _open_device_for(self, framerate, right_samples):
+        # mono keeps the one-argument call every existing caller (and test double) of _open_device() knows
+        return self._open_device(framerate) if right_samples is None else self._open_device(framerate, 2)
 
     def _start(self, device, generator_fn, start_frame):
         # primed with an empty yield first - see miniaudio's own
@@ -229,7 +250,7 @@ class SlicePreviewPlayer(QObject):
         self._finished = False
         self._timer.start()
 
-    def play(self, samples, start_frame, end_frame, framerate, pitch_shift_semitones=0):
+    def play(self, samples, start_frame, end_frame, framerate, pitch_shift_semitones=0, right_samples=None):
         """samples: the full mono int16 sample list/array already loaded for
         this sound (same list slice_bounds()' frame indices are relative
         to); start_frame/end_frame: one slice_bounds() entry, inclusive.
@@ -244,14 +265,17 @@ class SlicePreviewPlayer(QObject):
         own caller for why this exists (STUNO, the sample's own tuning
         offset, has to shift the ENTIRE preview, not just a loop region).
         """
+        # right_samples: the right channel of a STEREO sample (same length/indexing as `samples`, which is then the
+        # left one) - played as real two-channel audio. None = the mono behaviour every other caller has always had.
         self.stop()
 
         chunk = samples[start_frame : end_frame + 1]
-        if not chunk:
+        if len(chunk) == 0:
             return
-        pcm_bytes = struct.pack("<" + "h" * len(chunk), *chunk)
+        pcm_bytes = _pack_region(samples, right_samples, start_frame, end_frame)
+        bytes_per_frame = _BYTES_PER_FRAME * (1 if right_samples is None else 2)
 
-        device = self._open_device(_shifted_framerate(framerate, pitch_shift_semitones))
+        device = self._open_device_for(_shifted_framerate(framerate, pitch_shift_semitones), right_samples)
         if device is None:
             return
 
@@ -260,11 +284,11 @@ class SlicePreviewPlayer(QObject):
                 required_frames = yield b""
                 pos = 0
                 while pos < len(pcm_bytes):
-                    end = pos + required_frames * _BYTES_PER_FRAME
+                    end = pos + required_frames * bytes_per_frame
                     out = pcm_bytes[pos:end]
                     pos += len(out)
-                    self._current_frame = start_frame + pos // _BYTES_PER_FRAME
-                    if len(out) < required_frames * _BYTES_PER_FRAME:
+                    self._current_frame = start_frame + pos // bytes_per_frame
+                    if len(out) < required_frames * bytes_per_frame:
                         # the true final chunk, shorter than what was
                         # asked for - miniaudio.PlaybackDevice._data_
                         # callback only memmove()s exactly len(out) bytes
@@ -274,7 +298,7 @@ class SlicePreviewPlayer(QObject):
                         # there (stale audio from an earlier callback) to
                         # play as an audible click right at the very end
                         out = out + b"\x00" * (
-                            required_frames * _BYTES_PER_FRAME - len(out)
+                            required_frames * bytes_per_frame - len(out)
                         )
                     required_frames = yield out
                 # exhausted: from here the device just keeps calling back
@@ -312,6 +336,7 @@ class SlicePreviewPlayer(QObject):
         dwell_ms=None,
         loop_tune_cents=0,
         pitch_shift_semitones=0,
+        right_samples=None,
     ):
         """Simulates a sample's own loop settings for a single click preview
         (the Program Editor's Samples tab waveform - see
@@ -356,6 +381,9 @@ class SlicePreviewPlayer(QObject):
         WHOLE playback (attack, loop, and tail alike) via the device's own
         opened sample rate, so it stacks on top of loop_tune_cents' own
         loop-only resampling rather than replacing it.
+
+        right_samples: see play() - the right channel of a stereo sample; every segment (attack, loop, tail) is then
+        interleaved two-channel audio and both channels share the loop points.
         """
         self.stop()
 
@@ -364,14 +392,14 @@ class SlicePreviewPlayer(QObject):
             # back to playing the whole range once rather than looping an
             # empty buffer forever
             self.play(
-                samples, start_frame, end_frame, framerate, pitch_shift_semitones
+                samples, start_frame, end_frame, framerate, pitch_shift_semitones, right_samples=right_samples
             )
             return
 
-        attack = samples[start_frame : loop_end_frame + 1]
-        tail = samples[loop_end_frame : end_frame + 1]
-        attack_bytes = struct.pack("<" + "h" * len(attack), *attack) if attack else b""
-        tail_bytes = struct.pack("<" + "h" * len(tail), *tail) if tail else b""
+        channels = 1 if right_samples is None else 2
+        bytes_per_frame = _BYTES_PER_FRAME * channels
+        attack_bytes = _pack_region(samples, right_samples, start_frame, loop_end_frame)
+        tail_bytes = _pack_region(samples, right_samples, loop_end_frame, end_frame)
 
         loop_frame_budget = (
             None if dwell_ms is None else max(0, round(dwell_ms / 1000 * framerate))
@@ -385,13 +413,14 @@ class SlicePreviewPlayer(QObject):
         self._live_loop_end = loop_end_frame
         self._live_loop_tune_cents = loop_tune_cents
 
-        device = self._open_device(_shifted_framerate(framerate, pitch_shift_semitones))
+        device = self._open_device_for(_shifted_framerate(framerate, pitch_shift_semitones), right_samples)
         if device is None:
             return
 
         def _loop_region_bytes(lo, hi, cents):
             region = _resample_region_for_cents(samples, lo, hi, cents)
-            return struct.pack("<" + "h" * len(region), *region)
+            right_region = None if right_samples is None else _resample_region_for_cents(right_samples, lo, hi, cents)
+            return _pack_values(region, right_region)
 
         def _segments():
             # yields (segment_start_frame, raw_bytes) pairs in play order:
@@ -435,21 +464,16 @@ class SlicePreviewPlayer(QObject):
                     loop_bytes = _loop_region_bytes(
                         cur_loop_start, cur_loop_end, cur_loop_cents
                     )
-                looped_frames += len(loop_bytes) // _BYTES_PER_FRAME
+                looped_frames += len(loop_bytes) // bytes_per_frame
                 yield cur_loop_start, loop_bytes
 
             # release tail, once - from the loop's own last-used end point
             # (cur_loop_end), which may have moved since play_loop() was
             # first called
             tail_start = cur_loop_end
-            live_tail = (
-                samples[tail_start : end_frame + 1]
-                if cur_loop_end != loop_end_frame
-                else None
-            )
             out_bytes = (
-                struct.pack("<" + "h" * len(live_tail), *live_tail)
-                if live_tail is not None
+                _pack_region(samples, right_samples, tail_start, end_frame)
+                if cur_loop_end != loop_end_frame
                 else tail_bytes
             )
             if out_bytes:
@@ -493,14 +517,14 @@ class SlicePreviewPlayer(QObject):
 
                 _advance_segment()
                 while seg_bytes is not None:
-                    need = required_frames * _BYTES_PER_FRAME
+                    need = required_frames * bytes_per_frame
                     out = bytearray()
                     while len(out) < need and seg_bytes is not None:
                         take_n = min(len(seg_bytes) - seg_pos, need - len(out))
                         out += seg_bytes[seg_pos : seg_pos + take_n]
                         seg_pos += take_n
                         self._current_frame = (
-                            seg_start_frame + seg_pos // _BYTES_PER_FRAME
+                            seg_start_frame + seg_pos // bytes_per_frame
                         )
                         if seg_pos >= len(seg_bytes):
                             _advance_segment()
