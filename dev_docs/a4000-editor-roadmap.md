@@ -13,11 +13,12 @@ real hardware; the codec exists and is tested; nothing else is built yet.**
 | `tools/a4000_discovery.py` - read-only hardware probe | done and used; tracked in git (moved out of the gitignored `test_scripts/`) |
 | `src/core/yamaha_params.py` - the P1..P6 parameter tables | **DONE for program / Easy Edit / sample** (204 rows, `tests/test_yamaha_params.py`); effects, controls, system params NOT covered - see "Parameter tables" below |
 | `tools/a4000_verify_params.py` - checks every table row against the live unit (read-only) | done; **959/959 agree** (see "Parameter tables") |
+| `tools/a4000_write_verify.py` - proves each row by writing a value and diffing the dump (WRITES, RAM only) | done; **program 44/44, Easy Edit 29/29, sample 118/124 rows exact-or-explained** - the table's offsets are now write-proven |
 | `core/demo_a4000.py` - `FakeA4000` | not started |
 | `core/yamaha_bridge.py` - single-thread worker over the shared MIDI transport | not started |
 | Sampler Type entry + Dashboard "Open Editor" gating | not started |
 | `ui/yamaha_program_editor.py` | not started |
-| Any write to the unit | **never done** - nothing has ever been written to the A4000 |
+| Any write to the unit | **done 2026-10-06 with the user's go-ahead** (throwaway objects, RAM only, all restored; see "Verification"). The app/codec has no write path yet |
 
 Git: the earlier S1000/S950 work is committed (HEAD `68aeeab`). **Uncommitted at time of writing:**
 `src/core/yamaha_params.py`, `tests/test_yamaha_params.py`, `tools/a4000_verify_params.py` (the codec, its tests, the
@@ -212,8 +213,10 @@ as the SDS setup), **Device Number 0** (worked first time; Bulk Protect evidentl
   note @93 (-1 = all), LFO reset MIDI channel @87 (-2 = off). **Sample bulk (`SP`)** = 336 bytes, linked wave
   object name L @64 - matches.
 - **Parameter request/reply works as documented.** `1n 58 00 <name> <type>` (object select) then
-  `3n 58 01 P1..P6` returns `1n 58 01 P1..P6 <nibbled data> F7`. **The unit echoes the object-select message
-  back** (a `1n 58 00 ...` message arrives right after sending one) - expect and ignore/consume it. A batch compare
+  `3n 58 01 P1..P6` returns `1n 58 01 P1..P6 <nibbled data> F7`. **CORRECTION (2026-10-06, found while writing): the unit does NOT echo a select.** The select-shaped message that
+  arrives is the unit ANNOUNCING its current object right before it answers a parameter request (manual: "transmitted when a
+  parameter value request is received"); a select by itself gets no reply at all. Original wrong text: the unit echoes the object-select message
+  back (a `1n 58 00 ...` message arrives right after sending one) - expect and ignore/consume it. A batch compare
   of 11 program parameters (level, transpose, LFO tempo, LFO reset note/channel, portamento type/rate/time, S/H
   speed, AD-in L pan, assigned-sample count) gave **identical values via parameter request and via the bulk
   dump, 11/11** (the one "DIFF" in the run was a wrong offset in my own comparison table: AD-in source is a
@@ -269,7 +272,7 @@ input). Public surface:
 - streams: `split_messages(blob)`, `classify(msg)`. Exception: `YamahaSysexError(ValueError)`.
 
 Facts the tests pin (don't "simplify" them): byte count is MSB-first; multi-block inside ONE F0..F7; XOR checksum per
-block; first block = 26-byte header + 4070 data bytes; the unit echoes object-select; `[Common]` byte 1 of a program is
+block; first block = 26-byte header + 4070 data bytes; a select gets no reply (the unit announces its current object before a parameter reply); `[Common]` byte 1 of a program is
 `0x60` with nothing assigned and `0x61` once a sample is (unexplained - preserve, never "fix"); assigning a sample
 changes ONLY byte 1, the count @95 and Easy Edit block 0; Easy Edit Level offset change = exactly one byte (block 0 +22).
 
@@ -289,21 +292,33 @@ Access: `get(scope, key)`, `rows(scope)`, `request_params(param, slot)`, `bulk_o
 addresses of wave/loop (the manual gives no P-numbers); **system parameters** - the manual gives P-numbers (p.42) but
 documents NO bulk layout for the `SY` dump, so they can only be read/written one at a time; sample bank objects.
 
-**Verification, and its limits (read before trusting an offset):**
-- `uv run python tools/a4000_verify_params.py [--sample NAME ...]` reads every row two ways (parameter request vs bulk
-  offset), flags DIFF / SIZE / RANGE / NO REPLY. Result on the real A4000: program 001 + its Easy Edit slot 0 + all seven
-  built-in samples = **959 of 959 agree** (203 distinct rows).
-- **That is weaker than it sounds.** The unit is cold-booted with factory values, and the seven built-in waveforms have
-  identical parameters, so every row has only ever shown ONE value. A bulk offset that points at a neighbouring byte
-  holding the same default (0, 127...) would still agree. Measured on the fixtures: only ~12 of 201 rows have a value
-  that no other byte of their block shares (so only those are pinned by value alone - mostly the non-default ones found
-  earlier: sampling frequency 48000, fine tune -20, original key 66, level 100, Q 4, bend range 2, loop mode 1, program
-  level/LFO tempo/portamento values, the Easy Edit level offset). The rest are verified only as "request address and
-  transcribed offset are consistent" plus the offline test that no two rows overlap and nothing runs past its block.
-- **The strong check is a write test** (Phase 3): on a throwaway object, write a distinctive value to each row with a
-  parameter change, dump the object, confirm EXACTLY that byte (or those bits) changed, restore. That proves every
-  offset, size and bit position. It needs the first-ever write to the unit - do it only with the user's go-ahead, a
-  `.syx` backup first, and on a throwaway program/sample.
+**Verification (read this before trusting an offset):**
+- Read-only: `tools/a4000_verify_params.py` reads every row two ways (parameter request vs bulk offset): 959 of 959
+  agree on program 001 + Easy Edit slot 0 + all seven built-in samples. **That alone is weak** - everything was a factory
+  default, so a wrong offset onto an equal neighbour byte would pass (only ~12 of 201 rows had a value no other byte of the
+  block shared).
+- **Write-proven (2026-10-06, the user authorised writes: "nothing of value in memory"):** `tools/a4000_write_verify.py`
+  writes a distinctive value to ONE row of a throwaway object, dumps it, and requires exactly the expected byte (or bits)
+  to change, then restores the original. Stages: `backup` -> `noop` (write a value to itself) -> `one` -> `sweep --scope ...`.
+  Results: **program 128: 44/44 EXACT** (every bitfield position and shift proven); **program 001 Easy Edit slot 0: 29/29
+  EXACT**; **sample "pulse 3": 86 EXACT, 32 EXTRA, 2 NOCHANGE, 6 geometry rows tested by hand**. "EXTRA" = the expected
+  byte(s) changed correctly AND the unit also changed other bytes, i.e. real side effects, not table errors:
+  - original key L/R and fine tune L/R: writing L also moves the mirrored R byte and two derived bytes (rel +54/+55);
+  - the four EQ rows (frequency/gain/width/type) update ~10 derived bytes at rel +170..+179 (stored EQ coefficients);
+  - the six sample controls (device/function/type/range): the `[Control]` block at rel +188 is **mirrored into the first
+    24 bytes** of `[Sample Parameter]` (rel +0..+23) - writing either place's row changes both copies (the manual calls
+    rel +0..+23 "reserved");
+  - **every edit sets bit 0 of byte 1 of the object's `[Common]` block** (an "edited" flag, program 128: `0x40` -> `0x41`;
+    program 001: `0x60` -> `0x61`; also what flipped when the user assigned a sample). The tools mask it out when diffing.
+  - NOCHANGE: **`sampling_frequency_l/r`, `wave_length`, `wave_end_address` accept a parameter change and ignore it**
+    (readback unchanged) - observed on the BUILT-IN "pulse 3" only; flagged `write_ignored` in the table; re-test on a
+    user sample before deciding they are really read-only.
+  - wave/loop geometry is COUPLED: `wave_start_address` 0->4 also moved the loop/length low bytes of L and R; writing
+    the start back did not undo them (loop start/length had to be restored explicitly: `restore` does that). Writes to
+    loop start/length/end work. Two R-channel mirror bytes of the mono sample (rel +79, +95) could not be restored (no
+    P-number for R) - a power cycle resets the unit. **Leave the wave/loop rows to a careful, geometry-aware writer.**
+- State left on the unit: program 128, program 001 and "pulse 3" were edited and restored (edited flag set; pulse 3 has two
+  stray R bytes). Backups: `~/.akaisds/a4000_discovery/write_backups/`. Nothing was saved to disk; power-cycle to reset.
 
 **Corrections to the manual found this way:** `P2=66` (sample AEG sustain) is a 4-byte array at +151..+154 - the manual
 says "P3 0-1" but the real sustain level is **P3=2 (+153)**; P3=0/1/3 are reserved bytes (values 8, 127, 0 on a default
@@ -316,11 +331,11 @@ used).
 1. ~~`core/yamaha_params.py`~~ done (above). Remaining table work, lower priority: effect blocks + controls (read page 39 first),
    system parameters (single-value only), sample banks, the MIDI-channel bitmaps.
 2. **`core/demo_a4000.py` - `FakeA4000`** on rtmidi-style ports like `FakeS950`/`FakeS1000`: object store seeded from the
-   fixtures (128 programs, built-in samples), answers identity / dump requests / object select (+ echo) / parameter
+   fixtures (128 programs, built-in samples), answers identity / dump requests / object select (no reply) / parameter requests (reply = an announce-select message, then the value)
    requests; togglable device-number-off and bulk-protect behaviours. Docstring: what is measured vs guessed (the
    behaviour on write and on a wrong device number is NOT measured - guess and label it).
 3. **`core/yamaha_bridge.py`**: one persistent `QThread` + queue (the `BridgeWorker` rules in `AGENTS.md`), select-then-
-   request sequences serialised, consume the select echo, reuse `core/midi_transport.py`'s shared ports. Add a **Sampler
+   request sequences serialised, consume the announce-select that precedes each parameter reply, reuse `core/midi_transport.py`'s shared ports. Add a **Sampler
    Type** entry in `core/sampler_models.py` (transfer family stays `generic`; new editor family) and extend the Dashboard's
    Open Editor gating (`_update_open_editor_enabled` / `open_program_editor`).
 4. **Read-only editor window** `ui/yamaha_program_editor.py` (design question for the user: program-centric - program ->
