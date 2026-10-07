@@ -1364,6 +1364,30 @@ class BridgeWorker(QThread):
         if not result.ok:
             raise DeviceError(f"device rejected {what} (code {result.code})")
 
+    def _locate_new_program(self, names_before):
+        """Index the sampler gave a program we just created with PDATA.
+
+        A PDATA addressed one past the end does NOT necessarily append: the
+        sampler keeps its program list ordered (by PRGNUM - a clone carries
+        its template's, so it sorts right after it), and measured on a real
+        S2000 the new program landed BETWEEN two existing ones. Addressing
+        the next KDATA/PDATA at `len(list)` then hit the program that had
+        been pushed down to that slot and overwrote ITS keygroups. So re-read
+        the list and take the first position where it differs from the one
+        before the write. (Callers refuse a name that is already resident,
+        so a duplicate name can't make this ambiguous.)
+        """
+        names_after = list(self._bridge.program_list())
+        if len(names_after) != len(names_before) + 1:
+            raise DeviceError(
+                f"the sampler now lists {len(names_after)} programs, expected "
+                f"{len(names_before) + 1} - can't tell where the new program went"
+            )
+        for index, (after, before) in enumerate(zip(names_after, names_before)):
+            if after != before:
+                return index
+        return len(names_before)
+
     def _handle_create_program(self, source_index, new_name, first_keygroup_only=False):
         # first_keygroup_only: clone just the template's keygroup 0 instead
         # of every keygroup. Create-program-from-slices uses this on an
@@ -1386,25 +1410,36 @@ class BridgeWorker(QThread):
             group_count = self._bridge.get_parameter(
                 p.lookup("GROUPS", "program"), source_index
             )
-            new_index = len(self._bridge.program_list())
+            names_before = list(self._bridge.program_list())
+            # read every keygroup to clone BEFORE the first write: the
+            # insert below can shift the source program's own index
+            source_keygroups = [
+                self._bridge.get_header_bytes(
+                    "keygroup", source_index, 0, 192, selector=keygroup_index
+                )
+                for keygroup_index in range(
+                    1 if first_keygroup_only else group_count
+                )
+            ]
 
             header = bytearray(source_header)
             self._patch_field(header, "PRNAME", "program", new_name)
             self._patch_field(header, "GROUPS", "program", 1)
+            # sent as "one past the end" = append, but the sampler decides
+            # where the program really lands (see _locate_new_program) -
+            # every later KDATA/PDATA must use THAT index
             self._send_and_check(
-                akai_sysex.build_pdata_request(new_index, bytes(header)),
-                f"creating program {new_index}",
+                akai_sysex.build_pdata_request(len(names_before), bytes(header)),
+                f"creating program {len(names_before)}",
             )
+            new_index = self._locate_new_program(names_before)
 
             # keygroup 0 bootstrap - same PDATA(groups=1)-then-KDATA(0)
             # order s3000editor's own addProgram() uses for a brand new
             # program (the program has to exist before a keygroup can be
             # written under it)
-            kg0_raw = self._bridge.get_header_bytes(
-                "keygroup", source_index, 0, 192, selector=0
-            )
             self._send_and_check(
-                akai_sysex.build_kdata_request(new_index, 0, kg0_raw),
+                akai_sysex.build_kdata_request(new_index, 0, source_keygroups[0]),
                 f"creating keygroup 0 of program {new_index}",
             )
 
@@ -1413,16 +1448,10 @@ class BridgeWorker(QThread):
             # _handle_create_keygroup below (s3000editor's own "add
             # keygroup to an existing program" step pair), just reused in
             # a loop since this app clones every keygroup, not just one
-            for keygroup_index in range(1, 1 if first_keygroup_only else group_count):
-                # selector must be the SOURCE program's keygroup index here
-                # - the default is 0, which would silently clone keygroup 0
-                # over and over for a multi-keygroup source
-                kg_raw = self._bridge.get_header_bytes(
-                    "keygroup", source_index, 0, 192, selector=keygroup_index
-                )
+            for keygroup_index in range(1, len(source_keygroups)):
                 self._send_and_check(
                     akai_sysex.build_kdata_request(
-                        new_index, keygroup_index, kg_raw
+                        new_index, keygroup_index, source_keygroups[keygroup_index]
                     ),
                     f"creating keygroup {keygroup_index} of program {new_index}",
                 )
@@ -1711,7 +1740,6 @@ class BridgeWorker(QThread):
             for snap in before.values()
             for pointer in snap["pointers"][: snap["groups"]]
         }
-        new_index = len(existing)
         keygroups = program_file.keygroups
         block_size = program_file.block_size
 
@@ -1728,9 +1756,10 @@ class BridgeWorker(QThread):
         # nothing of the sampler's to carry yet - so check what came of them
         # before any keygroup data follows.
         self._send_and_check(
-            akai_sysex.build_pdata_request(new_index, header_for(1, None)),
-            f"creating program {new_index}",
+            akai_sysex.build_pdata_request(len(existing), header_for(1, None)),
+            f"creating program {len(existing)}",
         )
+        new_index = self._locate_new_program(existing)
         created = self._read_block_fresh("program", new_index)
         if len(created) != block_size:
             raise _ImportSafetyError(

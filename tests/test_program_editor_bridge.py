@@ -766,7 +766,12 @@ def test_worker_deletes_samples_are_never_coalesced():
 
 class _CreateBridge:
     def __init__(self, program_names, program_keygroups, error=None,
-                 error_on_step=None, reply_error_on_step=None):
+                 error_on_step=None, reply_error_on_step=None, insert_at=None):
+        # insert_at: where a program created by a PDATA past the end really
+        # lands. None = appended; an int simulates the sampler's PRGNUM
+        # ordering (measured on a real S2000: a clone sorts right after its
+        # template, i.e. BETWEEN two existing programs)
+        self._insert_at = insert_at
         # program_names: list[str], index = program index
         # program_keygroups: {program_index: [(lonote, hinote), ...]} - one
         # tuple per keygroup, used to build distinguishable fake keygroup
@@ -841,6 +846,15 @@ class _CreateBridge:
                 header[groups_param.offset : groups_param.offset + groups_param.size],
             )
             self.pdata_writes.append((program_index, groups, name))
+            if program_index >= len(self._program_names):
+                at = len(self._program_names) if self._insert_at is None else self._insert_at
+                self._program_names.insert(at, name)
+                shifted = {
+                    (i + 1 if i >= at else i): kgs
+                    for i, kgs in self._program_keygroups.items()
+                }
+                shifted[at] = []
+                self._program_keygroups = shifted
         elif command == m.Command.KDATA:
             program_index = payload[0] | (payload[1] << 7)
             keygroup_index = payload[2]
@@ -854,6 +868,7 @@ class _CreateBridge:
                 hi_param, header[hi_param.offset : hi_param.offset + hi_param.size]
             )
             self.kdata_writes.append((program_index, keygroup_index, lo, hi))
+            self._program_keygroups.setdefault(program_index, []).append((lo, hi))
         else:
             raise AssertionError(f"unexpected command {command:#04x}")
         return m.Reply(code=int(m.ReplyCode.OK)).encode()
@@ -887,6 +902,53 @@ def test_worker_creates_program_with_every_source_keygroup_cloned():
         (1, 1, 61, 96),
         (1, 2, 97, 108),
     ]
+
+
+def test_worker_creates_program_at_the_index_the_sampler_gave_it():
+    # real S2000 log (2026-10-07): the clone landed BETWEEN TEST PROGRAM and
+    # SKIBIDI, so the old "new_index = len(list)" sent every KDATA/PDATA to
+    # SKIBIDI and left the new program with an unwritten keygroup
+    bridge = _CreateBridge(
+        program_names=["TEST PROGRAM", "SKIBIDI"],
+        program_keygroups={0: [(24, 60), (61, 96)], 1: [(0, 127)]},
+        insert_at=1,
+    )
+    worker = BridgeWorker(bridge)
+    created, failed = [], []
+    worker.program_created.connect(lambda *a: created.append(a))
+    worker.program_create_failed.connect(lambda *a: failed.append(a))
+
+    worker.submit_create_program(0, "CW AMEN CHOP")
+    worker.process_pending()
+
+    assert failed == []
+    assert created == [(0, 1)]
+    # the first PDATA is addressed past the end; everything after it follows
+    # the new program to index 1 and never touches SKIBIDI (now index 2)
+    assert bridge.pdata_writes == [
+        (2, 1, "CW AMEN CHOP"),
+        (1, 2, "CW AMEN CHOP"),
+    ]
+    assert bridge.kdata_writes == [(1, 0, 24, 60), (1, 1, 61, 96)]
+    assert bridge.program_list() == ["TEST PROGRAM", "CW AMEN CHOP", "SKIBIDI"]
+
+
+def test_worker_refuses_to_guess_when_the_program_list_did_not_grow():
+    bridge = _CreateBridge(
+        program_names=["BASS STAB"], program_keygroups={0: [(24, 60)]}
+    )
+    bridge.program_list = lambda: ["BASS STAB"]  # the sampler "lost" the PDATA
+    worker = BridgeWorker(bridge)
+    created, failed = [], []
+    worker.program_created.connect(lambda *a: created.append(a))
+    worker.program_create_failed.connect(lambda *a: failed.append(a))
+
+    worker.submit_create_program(0, "NEW PROG")
+    worker.process_pending()
+
+    assert created == []
+    assert len(failed) == 1 and "can't tell where" in failed[0][1]
+    assert bridge.kdata_writes == []
 
 
 def test_worker_emits_program_create_failed_on_error_mid_sequence():
