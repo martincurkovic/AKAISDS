@@ -618,7 +618,21 @@ samples | cards, and a Samples tab; every writable control edits the unit) all e
   (`SamplerController.yamaha_loaded_names()`, because a name clash adds a number) after re-reading the sample list (`samples_changed` -> `_on_samples_changed`).
   The Slice Editor is the S3000's own dialog with two opt-in additions (`extra_channels`: a stereo sample's other channel is sliced at the same frames and
   handed to the export callback as `extra_slices=`; `hide_bit_depth`); its export callback blocks on a local `QEventLoop` until the controller's
-  `transfer_finished`, like the S3000 window's blocking sends. No "create program" step (the A4000 editor can't create programs).
+  `transfer_finished`, like the S3000 window's blocking sends. **Bit depth**: the Slice Editor's bit-depth box is hidden here (`hide_bit_depth`) - a Yamaha wave is
+  always 16-bit words (no bit-depth field exists in a sample's parameters), so a lower depth could only be a bit-crush effect with no memory saving; the sample-rate
+  box still works (`prepare_channels` resamples).
+  **"Also fill a program with the slices"** (the Akai flow's counterpart): the A4000 has no create-program and a program's NAME is read only (`program_name` row), but
+  its 128 programs always exist - so this ASSIGNS the slices, in order, to an EMPTY program picked in the dialog (combo = programs whose scan count is 0, from the
+  window's `_free_programs`; an empty program's name isn't read, so its row is just the number). The dialog is configured, not forked: `program_labels` (checkbox/combo
+  text, `has_name` False hides the name rule), `max_program_slices` (92 = keys 36..127), `program_confirm_message`. Each slice is loaded already mapped: `key_range_low/
+  high` = `original_key` = 36 + i (C1 upward, this app's C3-at-60 names, like the Akai export) and loop mode 4 (one-shot), carried in the sample dump
+  (`yamaha_load.CARRIED_ROWS`) instead of a guarded write per row - ONLY when the checkbox is ticked (`_wants_program` reads the dialog's checkbox, since the
+  dialog calls the export callback before the program callback). Then `_create_program` links each slice with `YamahaSession.change_link` (guarded: program backed up
+  once, the unit asked afterwards) one at a time, stops at the first refusal and says how far it got (`programs_changed(number, names)` still tells the window what DID
+  land). **A link right after loads once left a real unit silent for 28 s - ~8 min (unexplained)**, so it waits `LINK_SETTLE_MS` (4 s) first and lets each link's reply take
+  up to `LINK_REPLY_TIMEOUT_MS` (restored afterwards). The Easy Edit slots a link appends have default key limits/shift, so each slice plays on its own key via its sample's own
+  range. **UNVERIFIED ON HARDWARE**: linking 4-92 samples in a row, the settle wait being enough, and a program's maximum number of samples (unknown - the unit ignores a link
+  it can't make, and the flow reports it).
   **UNVERIFIED ON HARDWARE**: the whole edit/slice path against a real A4000 (a sample dump with a carried-over loop mode/addresses and non-default key/tune, a
   copy of a STEREO sample, 4+ samples in one queue), and that the carried loop addresses survive the unit's own bulk-load rules. Everything is proven only
   against `FakeA4000`, which models the measured rules but is not the unit.
@@ -1221,7 +1235,9 @@ class.
 source's own loop settings; `SPITCH`/`STUNO`/`SHLTO` copied from source;
 the whole batch goes in ONE `send_file_queue` call (not one per slice) -
 `SamplerController` already reports one combined `transfer_finished` for
-a whole queue. Slice names zero-pad to a width computed ONCE per batch
+a whole queue. **With "create program" ticked, at most 92 slices** (`program_editor_window._MAX_SLICES_PER_PROGRAM`, passed to the dialog as `max_program_slices`): each slice gets its
+own key from `_FIRST_SLICE_NOTE` (36, C1) up, so slice 93+ would need a key above 127 (`LONOTE`/`HINOTE` max 127) even though a program holds 99 keygroups - the old cap of 99
+let slices 93-99 queue writes that failed silently. Exporting samples WITHOUT a program isn't capped by this. Slice names zero-pad to a width computed ONCE per batch
 (`<base>-01`..`<base>-16`, not `-1`..`-16`) so truncation stays consistent
 across it. Collision checks re-query `existing_names_provider()` live,
 never a stale snapshot. The dialog is application-modal specifically so
