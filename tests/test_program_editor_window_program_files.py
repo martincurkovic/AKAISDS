@@ -11,13 +11,13 @@ from PySide6.QtWidgets import QMessageBox
 from core import akai_program_file as apf
 from core.program_editor_bridge import LoggingBridge
 from core.s1000_bridge import S1000Bridge
-from tests.test_program_editor_window_s1000 import (  # noqa: F401 - fixtures/helpers
+from test_program_editor_window_s1000 import (  # noqa: F401 - fixtures/helpers
     _dispose,
     _make_editor,
     _pump_until,
     qapp,
 )
-from tests.test_akai_program_file import PointerFake, _blocks
+from test_akai_program_file import PointerFake, _blocks
 
 
 @pytest.fixture

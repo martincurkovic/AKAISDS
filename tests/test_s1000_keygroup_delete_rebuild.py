@@ -15,8 +15,8 @@ from core import program_editor_bridge
 from core.demo_s1000 import make_keygroup_block, make_program_block
 from core.program_editor_bridge import BridgeWorker, LoggingBridge
 from core.s1000_bridge import S1000Bridge
-from tests.test_akai_program_file import PointerFake
-from tests.test_program_editor_window_s1000 import (  # noqa: F401 - fixtures/helpers
+from test_akai_program_file import PointerFake
+from test_program_editor_window_s1000 import (  # noqa: F401 - fixtures/helpers
     _dispose,
     _make_editor,
     _pump_until,
