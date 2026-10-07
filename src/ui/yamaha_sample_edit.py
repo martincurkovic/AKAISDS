@@ -21,6 +21,7 @@ import tempfile
 from PySide6.QtCore import QEventLoop, QObject, QTimer
 from PySide6.QtWidgets import QMessageBox
 
+from controller.yamaha_session import LinkResult
 from core import debug_log
 from core import sample_editing as se
 from core import yamaha_edit as ye
@@ -45,6 +46,10 @@ ONE_SHOT = 4
 #: findings.md): wait a moment first, and let each link's answer take as long as that. (Tests shorten both.)
 LINK_SETTLE_MS = 4000
 LINK_REPLY_TIMEOUT_MS = 60000
+#: how long to wait for a unit that has stopped answering (a front-panel "MIDI Bulk Received" message waiting for OK - measured 2026-10-07,
+#: dev_docs/a4000-editor-roadmap.md) before giving up on a slice's assignment, and how often to ask whether it is back
+SILENCE_GIVE_UP_S = 900
+SILENCE_POLL_MS = 3000
 
 _NOT_CHANGED = (
     "\n\nThe original sample is not changed - the A4000 can't delete or overwrite samples over MIDI, so remove it on the "
@@ -383,6 +388,10 @@ class YamahaSampleEditor(QObject):
                 status_callback(f'Assigning "{name}" to program {number:03d} ({index + 1}/{count})...')
                 result = self._link_and_wait(program, name)
                 if result is None or not result.ok:
+                    session.reply_timeout_ms = old_timeout  # (the probes below should fail fast)
+                    result = self._recover_silent_link(program, number, name, result, status_callback)
+                    session.reply_timeout_ms = LINK_REPLY_TIMEOUT_MS
+                if result is None or not result.ok:
                     why = result.message if result is not None else "the sampler didn't answer"
                     _log(f"slice program {number:03d}: assigning {name!r} failed after {index} of {count}: {why}")
                     if index:
@@ -397,6 +406,73 @@ class YamahaSampleEditor(QObject):
         tab.programs_changed.emit(number, list(names))
         _log(f"slice program: {count} slices assigned to program {number:03d}")
         return True, f"Assigned {count} slice{'s' if count != 1 else ''} to program {number:03d}"
+
+    def _unit_answers(self, wait_ms=4000):
+        """True if the unit answers an identity request within `wait_ms`. An identity request is handled without touching the unit's
+        display; an object-list request pops up "Transmitting Object List" on it every time (measured 2026-10-07), which is the wrong
+        thing to repeat at a unit that is waiting for someone to press OK. Blocks in a nested event loop, like the other waits here."""
+        midi = self._tab._controller.midi_manager
+        box = {"answered": False}
+        loop = QEventLoop()
+
+        def on_sysex(data):
+            raw = bytes(data)
+            if len(raw) > 3 and raw[0] == 0x7E and raw[2] == 0x06 and raw[3] == 0x02:  # General MIDI identity reply
+                box["answered"] = True
+                loop.quit()
+
+        midi.sysex_received.connect(on_sysex)
+        try:
+            midi.send_sysex(bytes([0x7E, 0x7F, 0x06, 0x01]))
+            QTimer.singleShot(wait_ms, loop.quit)
+            loop.exec()
+        finally:
+            midi.sysex_received.disconnect(on_sysex)
+        return box["answered"]
+
+    def _assigned_names(self, number):
+        box = {"done": False, "names": None}
+        loop = QEventLoop()
+
+        def got(dump):
+            if dump is not None:
+                data = bytes(dump.data)
+                count = yp.extract(yp.get("program", "assigned_samples"), data)
+                box["names"] = [yp.extract(yp.get("easy_edit", "assigned_name"), data, slot).strip(" \x00") for slot in range(count)]
+            box["done"] = True
+            loop.quit()
+
+        self._tab._session.request_bulk("PG", ysx.program_object_name(number), got)
+        if not box["done"]:
+            loop.exec()
+        return box["names"]
+
+    def _recover_silent_link(self, program, number, name, result, status_callback):
+        """A link got no confirmation. If the unit answered but says the link isn't there, it refused: hand the result back. If it NEVER
+        answered (after bulk loads it can sit behind a front-panel "MIDI Bulk Received" message until OK is pressed - the link has usually
+        been made by then), say what to press, wait until it answers (it may already have, by the time the reply timed out), then check
+        whether the link landed and only send it again if it did not."""
+        if result is not None and result.linked is not None:
+            return result  # the unit DID answer (it says the link isn't there): a refusal, not silence
+        _log(f"slice program {number:03d}: no answer after linking {name!r} - waiting for the unit")
+        status_callback(
+            "The sampler has stopped answering. If its display shows a message such as 'MIDI Bulk Received', press OK (Knob 5) on it - "
+            "this carries on by itself once it answers..."
+        )
+        waited = 0.0
+        while waited < SILENCE_GIVE_UP_S:
+            if self._unit_answers():
+                break
+            loop = QEventLoop()
+            QTimer.singleShot(SILENCE_POLL_MS, loop.quit)
+            loop.exec()
+            waited += SILENCE_POLL_MS / 1000
+        else:
+            return result
+        if name in (self._assigned_names(number) or []):
+            _log(f"slice program {number:03d}: {name!r} had been linked all along")
+            return LinkResult(ok=True, requested=True, program=program, sample=name, linked=True, message=f"Assigned {name!r} to program {program}")
+        return self._link_and_wait(program, name)
 
     def _link_and_wait(self, program, name):
         """Assign one sample and block (in a nested event loop, like the S3000 window's blocking sends) until the unit has answered."""

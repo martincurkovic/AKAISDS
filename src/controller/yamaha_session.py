@@ -492,6 +492,11 @@ class YamahaSession(QObject):
             ok = False
             message = f"The sampler didn't confirm the change to program {program}" + (
                 " (its backup could not be made)" if op.phase == "backup" and backup is None else ""
+            ) + (
+                # measured 2026-10-07: after bulk loads the unit can stop answering MIDI until OK is pressed on a front-panel
+                # message ("MIDI Bulk Received"); the link itself usually HAS been made
+                ". If the sampler's display shows a message such as 'MIDI Bulk Received', press OK (Knob 5) on it - the change "
+                "may already have been made"
             )
         else:
             ok = False

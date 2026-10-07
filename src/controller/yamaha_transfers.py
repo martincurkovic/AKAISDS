@@ -375,10 +375,12 @@ class YamahaTransfers:
                 yp.extract(yp.get("sample", "sampling_frequency_l"), data),
                 yp.is_stereo(data),
             )
-            if got != (load.frames, load.rate, load.stereo):
+            # an edited copy carries its source's Start/End window (`params` wave_length), which can be shorter than the audio it holds
+            expected_length = (entry.get("params") or {}).get("wave_length", load.frames)
+            if got != (expected_length, load.rate, load.stereo):
                 problem = (
                     f"the sampler holds {got[0]:,} frames at {got[1]} Hz ({'stereo' if got[2] else 'mono'}) "
-                    f"instead of {load.frames:,} at {load.rate}"
+                    f"instead of {expected_length:,} at {load.rate}"
                 )
         if problem:
             self._send_failed_check(token, load, label, problem)
@@ -395,7 +397,8 @@ class YamahaTransfers:
         done = self._send_done
         self._send_finished(
             token, False,
-            f"{label} was not loaded: {why}. Check that Bulk Protect is off and that the sampler has free wave memory"
+            f"{label} was not loaded: {why}. Check that Bulk Protect is off, that the sampler has free wave memory and that its display "
+            "isn't showing a 'MIDI Bulk Received' message waiting for OK (it stops answering until you press OK)"
             + (f" ({done} earlier sample(s) did load)" if done else ""),
         )
 
