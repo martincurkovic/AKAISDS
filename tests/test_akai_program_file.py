@@ -122,9 +122,12 @@ class PointerFake(FakeS1000):
     breaks the chain - which is what the import must never do.
     """
 
-    def __init__(self, *, honor_first_pointer=False, **kwargs):
+    def __init__(self, *, honor_first_pointer=False, insert_at=None, **kwargs):
         super().__init__(**kwargs)
         self.honor_first_pointer = honor_first_pointer
+        #: where a newly created program lands in the list (None = the end). A real S2000 orders its list by PRGNUM, so a clone of a
+        #: program sorts right after it - between two existing ones (measured 2026-10-07)
+        self.insert_at = insert_at
         self.sent_pointers = []  # (op, bytes) of every PDATA/KDATA pointer received
         address = 0
         for entry in self.programs:
@@ -151,6 +154,8 @@ class PointerFake(FakeS1000):
             self._free += self.block_size * (1 + len(entry["keygroups"]))
             if self.honor_first_pointer:
                 entry["block"][1:3] = bytes(block[1:3])
+            if self.insert_at is not None:
+                self.programs.insert(self.insert_at, self.programs.pop())
 
     def _kdata(self, payload):
         block = m.decode_nibbles(payload[3:])
@@ -238,6 +243,24 @@ def test_export_then_import_recreates_the_program_with_the_samplers_own_pointers
         bytes(k[3:]) for k in fake.programs[0]["keygroups"]
     ]
     assert fake.ignored_ops == []
+
+
+def test_a_program_the_sampler_slots_into_the_middle_of_its_list_is_loaded_and_checked_at_its_real_index():
+    # real S2000 (2026-10-07): the load worked, but the check compared the other programs with the pre-load snapshot BY INDEX, so the program
+    # pushed down a place looked "changed by the load" and loading was disabled for the session
+    fake = PointerFake(insert_at=1)
+    worker, original = _export(fake)
+    names_before = [bytes(e["block"][3:15]) for e in fake.programs]
+    others = _snapshot(fake)
+
+    imported, failed = _import(worker, _reload(original), "DRUMS B")
+
+    assert failed == []
+    assert imported == [(1, "DRUMS B")]  # where it REALLY is, not one past the end
+    snap = _snapshot(fake)
+    assert snap[0] == others[0] and snap[2] == others[1]  # both originals untouched, the second one moved down
+    assert [bytes(e["block"][3:15]) for e in fake.programs][0::2] == names_before
+    assert len(fake.programs[1]["keygroups"]) == 2
 
 
 def test_import_stops_before_any_keygroup_if_the_sampler_honours_our_pointer():
