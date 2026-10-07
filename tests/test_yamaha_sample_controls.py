@@ -479,7 +479,7 @@ def test_a_refused_assignment_stops_there_and_says_how_far_it_got(window, monkey
     def flaky(program, sample, linked, callback, sample_type="sample"):
         calls.append(sample)
         if len(calls) == 3:  # the unit "ignores" the third link
-            callback(LinkResult(ok=False, requested=True, program=program, sample=sample, message="The sampler didn't assign it"))
+            callback(LinkResult(ok=False, requested=True, program=program, sample=sample, linked=False, message="The sampler didn't assign it"))
             return
         real(program, sample, linked, callback, sample_type)
 
@@ -493,6 +493,81 @@ def test_a_refused_assignment_stops_there_and_says_how_far_it_got(window, monkey
     assert changed and changed[0][0] == 2 and len(changed[0][1]) == 2  # the window is told what DID land
     settle_edit(tab)
     assert session.reply_timeout_ms != edit_module.LINK_REPLY_TIMEOUT_MS  # the long wait was only for the assignments
+
+
+def _silent_unit(window, monkeypatch, *, link_lands, silent_probes=3):
+    """The unit after bulk loads (measured on a real A4000, 2026-10-07): the link on the 3rd slice gets no confirmation and the unit then
+    answers nothing until the user presses OK on its front panel - `silent_probes` identity requests go unanswered. `link_lands`: whether
+    that 3rd link had been made anyway (it usually had)."""
+    session = window._session
+    real_link = session.change_link
+    state = {"links": [], "probes": 0}
+    monkeypatch.setattr(edit_module, "SILENCE_POLL_MS", 1)
+
+    def link(program, sample, linked, callback, sample_type="sample"):
+        state["links"].append(sample)
+        if len(state["links"]) == 3:
+            if link_lands:
+                real_link(program, sample, linked, lambda r: None, sample_type)
+            callback(LinkResult(ok=False, requested=True, program=program, sample=sample, message="The sampler didn't confirm"))
+            state["silent"] = True
+            return
+        real_link(program, sample, linked, callback, sample_type)
+
+    real_answers = edit_module.YamahaSampleEditor._unit_answers
+
+    def unit_answers(self, wait_ms=4000):
+        if state.get("silent"):
+            state["probes"] += 1
+            if state["probes"] <= silent_probes:
+                return False
+            state["silent"] = False
+        return real_answers(self, wait_ms)
+
+    monkeypatch.setattr(session, "change_link", link)
+    monkeypatch.setattr(edit_module.YamahaSampleEditor, "_unit_answers", unit_answers)
+    return state
+
+
+def test_the_identity_probe_gets_the_fakes_answer_and_is_what_the_fill_waits_with(window):
+    editor = window.samples_tab.findChild(edit_module.YamahaSampleEditor)
+    assert editor is not None and editor._unit_answers() is True
+
+
+def test_a_unit_that_goes_silent_during_the_fill_is_waited_for_and_the_link_that_landed_is_not_repeated(window, monkeypatch):
+    shown = drive_into_program(window, monkeypatch, slices=4)
+    tab = user_sample(window, mode=4, end=4000)
+    state = _silent_unit(window, monkeypatch, link_lands=True)
+    tab.slice_button.click()
+    assert shown["succeeded"] is True and "program 002" in shown["message"]
+    names = sorted(n for n in window.fake.samples if n.startswith("HIT"))
+    assert assigned_names(window, 2) == names  # all four, in order, none twice
+    assert state["probes"] > 3 and state["links"].count(names[2]) == 1  # it waited, and did not link the 3rd slice again
+    settle_edit(tab)
+
+
+def test_a_unit_that_is_answering_again_by_the_time_the_link_timed_out_is_still_checked_not_taken_for_a_refusal(window, monkeypatch):
+    # real A4000 (2026-10-07): the link got no reply for the whole 60 s, the user pressed OK meanwhile, so the unit already answered when
+    # the fill looked - and the first version stopped there although the link had been made
+    shown = drive_into_program(window, monkeypatch, slices=4)
+    tab = user_sample(window, mode=4, end=4000)
+    state = _silent_unit(window, monkeypatch, link_lands=True, silent_probes=0)
+    tab.slice_button.click()
+    assert shown["succeeded"] is True
+    names = sorted(n for n in window.fake.samples if n.startswith("HIT"))
+    assert assigned_names(window, 2) == names and state["links"].count(names[2]) == 1
+    settle_edit(tab)
+
+
+def test_a_unit_that_went_silent_without_making_the_link_gets_it_sent_again(window, monkeypatch):
+    shown = drive_into_program(window, monkeypatch, slices=4)
+    tab = user_sample(window, mode=4, end=4000)
+    state = _silent_unit(window, monkeypatch, link_lands=False)
+    tab.slice_button.click()
+    assert shown["succeeded"] is True
+    names = sorted(n for n in window.fake.samples if n.startswith("HIT"))
+    assert assigned_names(window, 2) == names and state["links"].count(names[2]) == 2  # the 3rd was sent a second time
+    settle_edit(tab)
 
 
 def test_the_most_slices_a_program_takes_is_what_fits_on_the_keyboard():

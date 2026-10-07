@@ -277,6 +277,19 @@ def test_a_mono_file_becomes_a_new_sample_with_its_audio(sender, tmp_path):
     assert not [m for k, m in fake.received if m[:1] == b"\x7e"]  # no Sample Dump Standard anywhere
 
 
+def test_an_edited_copy_that_keeps_a_shorter_start_end_window_still_verifies(sender, tmp_path):
+    # real A4000 (2026-10-07): Reverse/Fade/Normalise/Filter of a sample whose Start/End sat inside the audio carry that window
+    # (wave_length 5400 of 6000 frames); the check compared wave_length with the audio's frame count and reported a good copy as "not loaded"
+    audio = [(i * 31) % 20000 - 10000 for i in range(6000)]
+    path = wav(tmp_path, "win", audio)
+    params = {"wave_start_address": 100, "wave_end_address": 5500, "wave_length": 5400, "loop_start_address": 5500, "loop_end_address": 5500, "loop_length": 0}
+    assert sender.controller.send_file_queue([entry(path, params=params)])
+    assert finish(sender) is True
+    data = sender.fake.samples["win"]
+    assert yp.extract(yp.get("sample", "wave_length"), data) == 5400 and sender.fake.audio["win"] == audio  # all the audio, the carried window
+    assert sender.controller.yamaha_loaded_names() == ["win"]
+
+
 def test_a_stereo_file_becomes_one_real_stereo_sample(sender, tmp_path):
     left, right = [i % 500 - 250 for i in range(5000)], [250 - i % 500 for i in range(5000)]
     path = wav(tmp_path, "pad", left, right)
