@@ -174,7 +174,13 @@ object-select message looked slightly garbled in the page image, so verify on th
   selection persists until the next select, so every edit sequence is select-then-edit and must be serialised.
 - Object edit `F0 43 1n 58 01 <P1..P6: 6 bytes> <data, nibbled> F7` - set one parameter of the selected object.
 - System parameter change `... 58 02 <P1..P6> <data> F7`.
-- Switch remote `... 58 03 ...` (front-panel key/knob remote control; not needed).
+- Switch remote `F0 43 1n 58 03 <id> 00 00 00 00 00 <value> F7` - front-panel key/knob remote control. **This IS how delete and rename could
+  be done** (found 2026-10-07 in the user's Ctrlr panel "YAMAHA A5000 A4000 A3000 Editor", J. Kasurinen - unlicensed as far as we saw, so
+  take the protocol facts only, never its code): a button push is `id` = button number (F1-F6 = 0-5, COMMAND = 6, Audition = 8, Play/Edit/Rec/
+  Disk/Util = 9-13, Knob1-5 push = 14-18), value 64; a knob turn is `id` = 109 + knob (14-18), value = 64 + steps (-63..63). There is NO delete/
+  rename opcode - the panel drives the menus open loop with fixed sleeps (1 s per push, 0.3 s per turn): Play, F2, COMMAND, Knob1 left 10,
+  Knob3 push + left 10, Knob4 left 10s to the list top then right N (banks come first in the list: N = bank count + the sample's index),
+  Knob1 push (confirm), Knob5 push (EXEC), then re-read the object list. Rename types the name character by character with knobs. UNTESTED by us.
 - Object link change `... 58 04 <upper name> <upper type> <lower name> <lower type> <0/1> F7` - link/unlink
   Program<->Sample Bank/Sample, Sample Bank<->Sample.
 - Requests use `3n` instead of `1n`: `3n 58 01 <P1..P6>` (object parameter), `3n 58 02 <P1..P6>` (system),
@@ -523,7 +529,7 @@ stereo loading, Dashboard list + receive, sample list durations, envelope graphs
 4. **A stereo sample to test with**: assigning one and restoring a program that uses one are UNTESTED (no stereo sample after the cold
    boot). Record one on the unit (RECORD > SETUP: input StOut, type New, Stereo; TRIGGER: Manual/Manual; RECORD > GO > START >
    FINISH - see session 2 notes), then `a4000_link_probe.py multi --stereo "<name>"`.
-5. **Create / delete objects.** No known opcode for delete (front panel: COMMAND > DELETE > OneSample, Knob 5 picks, Knob 1 EXEC);
+5. **Create / delete objects.** No delete/rename OPCODE - but the switch-remote message above can drive COMMAND > DELETE > OneSample from the computer, open loop (unmeasured, see there);
    creation may be a bulk load (see 3). Don't guess. Sample BANKS can be linked by the same message (lower type 17) but the UI only
    assigns samples.
 6. **Polish backlog:** remember a loaded waveform per sample for the session (only the last is kept), program names for empty programs
@@ -626,3 +632,46 @@ marker knobs + Loop Mode + Loop Preview in a **Loop Controls** card; Trim / Reve
 7. **Slice Editor > "Also fill a program with the slices"**: pick an empty program, export 4 then ~40 slices. Does every link land (the editor reports the first it
    couldn't make), does the 4 s settle wait avoid the "silent after a link" hang (dev_docs/a4000-native-load-findings.md), is there a maximum samples-per-program, and does each
    slice play on its own key (C1 upward) at its own pitch, one-shot? Check the program's Easy Edit slots read back default (key limits/shift) after the links.
+
+
+## Session 6 (2026-10-07, unattended hardware run via `tools/a4000_app_check.py`) - measured on the real A4000
+
+The user left the unit connected ("nothing of value on it, do risky things"). `tools/a4000_app_check.py <stage>` drives the APP's own code (Dashboard
+`send_file_queue`, the Samples tab, `YamahaSession`) headlessly; throwaway objects are `T-...`.
+
+* **Native load through the app code: PROVEN** (stage `load`). A looping mono sample (`params`: loop mode 1, loop 1000..5000, key 57, fine tune 17) and a
+  real STEREO sample both loaded, verified by the app's own check, the SP carried every param, and the wave audio (L and R) read back identical to what was
+  sent. Speed: ~330 frames/s per channel here (6000 mono frames 18 s, 8000 stereo frames 35 s).
+* **Stereo markers: PROVEN** (`tools/a4000_marker_check.py T-STEREO`): every marker alone and several at once, loop and no-loop, the two channel views always
+  agreed, byte-exact restore.
+* **The "right-channel twin address bytes" question is ANSWERED**: after left-only writes (loop mode, loop start/end, wave start/end) the unit also moved
+  the second copy of each address it keeps in the sample block (payload bytes 176-183 hold the wave start TWICE, 186-193 the wave length twice, 194-201 the loop
+  start twice, 202-209 the loop length twice - every row we model has such a duplicate right after it, equal to it) - on a mono sample too. So writing the
+  left rows is enough; the duplicates are kept equal by the unit. (We never proved the right CHANNEL's playback uses its own copy; only that it stays equal.)
+  Offsets in no row of ours: 183, 190-191, 198-199, 206-207 (those duplicates).
+* **LINK -> UNIT SILENT, reproduced on a sample loaded ~15 min earlier** (so it is NOT "right after a load"): `a4000_assign_check.py --samples
+  "T-STEREO,T-LOOP,pulse 1"` - the first link got "didn't confirm", then the unit answered NOTHING (identity, SP, OL) for 5+ min. Earlier cases (28 s, ~8 min)
+  were also natively loaded samples; factory samples (`pulse n`) link fine. A front-panel-remote Knob 5 push (`F0 43 10 58 03 12 00 00 00 00 00 40 F7`) did
+  not revive it. **It never came back on its own: silent for 20+ minutes (identity polled every 3 s, nothing heard at all), and repeated panel-remote
+  pushes (Knob 5 x3, Play) did nothing** - either the `58 03` remote is ignored in that state or my format is wrong; the unit needed the user at it (power cycle
+  / front panel). So: linking a natively loaded sample can hang the unit for good, not just for minutes - the app should warn before assigning one, or
+  link only after the unit has been shown idle, and never loop retries into a silent unit. **Not yet run (blocked by this):** the edits (Trim/Reverse/Fade/
+  Normalise/Filter) on looping and stereo samples, the Slice Editor with 8+ slices incl. "fill a program" with 40, and the remote-panel delete probe.
+
+**Session 6 results, continued (2026-10-07, user at the unit pressing OK on dialogs):**
+* **Edits PROVEN on the real unit** (Reverse, Normalise, Trim, Fade, Filter, each on a LOOPING mono sample and a STEREO sample): copy created, loop mode/start/
+  end and wave addresses as computed, key/coarse/fine tune and rate carried, stereo kept, left AND right audio identical to the computed transform.
+  **Bug found and fixed**: the post-load check compared the unit's `wave_length` with the audio's frame count, so a copy that carries the source's
+  shorter Start/End window (Reverse/Fade/Normalise/Filter of a sample whose markers sit inside the audio) was reported "not loaded" although it had landed
+  (`YamahaTransfers._verify_sample` now expects the carried `wave_length`; regression test added).
+* **Slice Editor + fill a program PROVEN**: 8 STEREO slices exported in one queue (109 s) and 6 mono; each slice on its own key (C1 up), one-shot, own key range,
+  stereo kept, all linked to the chosen empty program, assigned in order. Needed the silent-unit recovery described in AGENTS.md ("Silent unit").
+* **Link/silence pattern**: reproduced with a tiny MONO sample too (load -> alive, reads fine -> first link -> silent until OK pressed, 790 s here because the
+  user was away). Linking at another time (samples loaded earlier, nothing pending) never hung. Stereo assign + Easy Edit restore round trip + remove: PROVEN
+  (`a4000_assign_check.py`, once the unit was responsive).
+* **NOT done**: the remote-panel delete/rename probe (the unit's silent-unit behaviour makes open-loop button pushes unsafe to rely on until understood).
+* **Silence is a dialog, not busyness** (hands-off timing run, `a4000_app_check.py busy-or-dialog`): after a load the unit shows "MIDI Bulk Received" and answers
+  NOTHING over MIDI (not even identity) until OK is pressed; 716 s untouched, then answered the instant OK was pressed. Repeated object-list requests at it just
+  pop "Transmitting Object List" (Knob 5 aborts that, then it shows its busy metronome for a while). The Knob 5 remote (`58 03`) is not processed while blocked.
+* **40-slice fill PROVEN** (mono, 40 x 150 frames: export 663 s; fill 14 s once the unit answered), each slice on keys 36..75, one-shot, linked; and a program
+  took **96 samples with no refusal** (the limit, if any, is above that). A program fill of 6 slices works without stalls when the user has pressed OK in time.
