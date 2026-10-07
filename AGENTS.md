@@ -64,6 +64,11 @@ receive, paced with real `time.sleep()` so the progress bar/timing feel
 genuine. Falls back to a synthesized tone if that fixture's missing.
 `AKAISDS_DEMO_INSTANT=1` skips the pacing entirely (fast UI iteration).
 
+**Yamaha A4000/A5000 demo (no hardware)**: `uv run python tools/a4000_demo.py` opens the real Dashboard on `core/demo_a4000.FakeA4000` (Sampler Type Yamaha,
+fake MIDI ports, Settings unusable) with three demo samples that have real audio - `DEMO LOOP` (mono, loops), `DEMO STEREO`, `DEMO BREAK` (four hits, for the
+Slice Editor); `--editor` opens the Program Editor straight on the Samples tab, `--smoke` (with `QT_QPA_PLATFORM=offscreen`) is a headless self-check. Double-click a
+waveform to load its audio; edits and slices create new samples on the fake. Sends are paced at real MIDI speed (a stereo copy takes ~10 s) - same as the unit.
+
 ## `BridgeWorker` - read before touching `core/program_editor_bridge.py`
 
 `S3kBridge` is unsafe for concurrent calls on one connection. A
@@ -591,6 +596,32 @@ samples | cards, and a Samples tab; every writable control edits the unit) all e
   loop (click again to stop), 2 loop for `_RELEASE_PREVIEW_MS`, 3/5 a reversed copy with the playhead mapped back. No pitch shift (the
   sample plays at its own rate/key). Audio must be loaded first; `audio_matches` now accepts a wave LONGER than the end address (a
   trimmed end is legal).
+- **Samples tab = the S3000 editor's Loop Controls layout (session 5, 2026-10-07)**: the old "Waveform" card is now **Loop Controls** - zoom row,
+  the waveform(s) (stacked for stereo), then the four marker KNOBS (Start / Loop Start / Loop End / End, swatch + 28 px knob + frame count, the same
+  look as the S3000's), a Loop Mode combo, and the edit buttons (Trim to Markers / Reverse / Fade In/Out / Normalise / Filter Sample... and, right-aligned,
+  Slice Editor...), followed by a **Loop Preview** card (the S3000's `LoopJoinPreview`, left channel). The old "Loop & Wave" card became a read-only
+  **Wave** card (sample rate, wave length, loop length, loop tempo) so the card pairs stay aligned (Pitch/Key, Level/Wave, ...). **The A4000 has NO loop
+  hold or loop tune** (those are S3000 `LDWELL1`/`SHLTO`/loop-tune fields): its loop settings are the 6-mode Loop Mode + a loop tempo. A knob turn calls
+  `WaveformView.set_marker` (pushes neighbours, mirrors to the right channel through the existing `markers_changed` plumbing) and `sliderReleased` (a drag's
+  release AND a typed value) commits through `_on_marker_committed` - the SAME guarded planner/write path as dragging a marker on the waveform, so the
+  unit's order rules still hold. A drag in the Loop Preview reports a frame delta and commits after 400 ms of stillness (`_preview_commit_timer`). Loop
+  knobs/swatches/preview follow the loop mode (`_set_loops_enabled`); everything locks while audio loads or an edit is being sent (`_apply_marker_lock`).
+- **Edits (Trim/Reverse/Fade/Normalise/Filter) and the Slice Editor make NEW samples - nothing is overwritten** (`ui/yamaha_sample_edit.py` +
+  `core/yamaha_edit.py`). The A4000 has no delete or overwrite over MIDI (a sample re-sent under its own name has ALL parameters reset), so the S3000's
+  send-temp/delete/rename pipeline can't exist here: the copy is named `<name> TRIM`/` REV`/` FADE`/` NORM`/` FILT` (cut to 16 chars, a clash gets ` 2`) and every
+  confirmation says the original is unchanged. The pure transforms are `core/sample_editing.py`'s (5-in/5-out, markers from
+  `markers_with_loop_in_range()`), run per channel; a stereo sample is edited as a pair (same trim/fade, one filter per channel, **normalise with ONE gain from
+  both channels' peak** so the balance survives). The copy goes through the native bulk load (`YamahaTransfers.send_file_queue`, wave dump(s) + SP, then read
+  back) with `params` = `yamaha_edit.params_for_copy`: original key, coarse/fine tune, loop mode and the wave/loop ADDRESSES for the new audio (carried through
+  `yamaha_load.CARRIED_ROWS`; everything else - envelopes, filter, EQ, controllers - stays at the template's defaults, NOT the original's). A non-looping copy
+  parks the loop at the wave end with length 0 (measured convention). The window selects the name the loader REALLY gave the sample
+  (`SamplerController.yamaha_loaded_names()`, because a name clash adds a number) after re-reading the sample list (`samples_changed` -> `_on_samples_changed`).
+  The Slice Editor is the S3000's own dialog with two opt-in additions (`extra_channels`: a stereo sample's other channel is sliced at the same frames and
+  handed to the export callback as `extra_slices=`; `hide_bit_depth`); its export callback blocks on a local `QEventLoop` until the controller's
+  `transfer_finished`, like the S3000 window's blocking sends. No "create program" step (the A4000 editor can't create programs).
+  **UNVERIFIED ON HARDWARE**: the whole edit/slice path against a real A4000 (a sample dump with a carried-over loop mode/addresses and non-default key/tune, a
+  copy of a STEREO sample, 4+ samples in one queue), and that the carried loop addresses survive the unit's own bulk-load rules. Everything is proven only
+  against `FakeA4000`, which models the measured rules but is not the unit.
 - **NATIVE SAMPLE LOADING (session 4, 2026-10-06; written from `dev_docs/a4000-native-load-findings.md` - read it)**: Dashboard "Send Samples" for the
   Yamaha Sampler Type no longer uses SDS. `core/yamaha_load.py` builds a load = the wave dump(s) (`yamaha_wave.build_wave_messages`) THEN one sample
   dump (`SP`, from a real user sample's captured parameters with name/wave names/rate/addresses set); `YamahaSession.send_messages` sends them
