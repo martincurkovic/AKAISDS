@@ -494,10 +494,11 @@ samples | cards, and a Samples tab; every writable control edits the unit) all e
   ones; measured on the unit: 11 chunks -> 451 growth steps, biggest jump 30 frames; display only, the load finishes once the
   queue has drained) - and has a
   Cancel button. The loaded audio is checked against the sample's own `wave_length` and refused if it doesn't match.
-- **Samples tab list + envelope graphs**: rows use the shared `build_sample_list_row_widget` (name left, grey `0.45s` duration right,
-  taller than a plain row; the item has NO text of its own, the name is in `Qt.UserRole` - use `tab.sample_names()`). Durations come
-  from each sample's SP dump, read by a background scan that only issues a request while `session.idle` (so it never gets in front
-  of a user action) and skips what the host already cached (`note_cached`). The three envelope cards each have a shape-only graph:
+- **Samples tab list + envelope graphs**: rows use the shared `build_sample_list_row_widget` (the name; its grey duration label is
+  deliberately LEFT BLANK, so rows keep the S3000 list's height; the item has NO text of its own, the name is in `Qt.UserRole` - use
+  `tab.sample_names()`). **No per-sample durations in the list** (user decision, 2026-10-07): they needed a background scan of EVERY
+  sample's SP dump, one at a time, which was too slow - don't bring it back (a sample's length is in its own summary line once selected;
+  the Assign dialog's `durations` argument is now unused). The three envelope cards each have a shape-only graph:
   amplitude reuses the S3000's `ADSREnvelopeGraph` through `envelope_graph.yamaha_adsr_values` (the A4000's attack/decay/release are
   RATES - higher is FASTER, owner's manual - so they become times; factory sample = instant stages), filter and pitch use the new
   bipolar `LevelEnvelopeGraph` (init/attack/sustain/release levels -127..+127). No calibrated timing, like the originals.
@@ -649,9 +650,9 @@ samples | cards, and a Samples tab; every writable control edits the unit) all e
   Stereo is two wave objects + the right name at SP @80 (works, user listened). **Open**: linking a freshly loaded sample to a program once left the
   unit silent for 28 s / ~8 min (cause unknown - give link generous timeouts); pacing minimum, odd names, wave-memory-full and a failed REPLACE are
   untested. `FakeA4000._bulk_load` models the measured rules (`same_name_replaces` is a guess flag). **The unit cannot report free memory over
-  MIDI**: the Dashboard's memory bar is an ESTIMATE (`YamahaTransfers._estimate_memory`: sum of the samples' word counts vs
-  `app_config.get_yamaha_wave_memory_kb`, entered in Settings > Wave memory, in kB as the unit's PLAY > PROGRAM > FREE MEMORY page shows it; the
-  user's is 102400); hidden while unknown. Sending needs a MIDI input (the check reads the unit).
+  MIDI**, so the Yamaha Dashboard has NO memory bar and Settings has no wave-memory field (both removed 2026-10-07 at the user's request:
+  the old estimate read every sample's SP dump on each list refresh - same cost as the removed duration scan; a stale
+  `yamaha_wave_memory_kb` key in `config.json` is simply ignored). Don't re-add one without a cheap source for the sizes. Sending needs a MIDI input (the check reads the unit).
 - **HANDOFF (end of session 3, 2026-10-06):** sessions 1-2 are committed on `s1000-support`; session 3's work (restore + assign) may be
   UNCOMMITTED - check `git status` and offer a commit; the suite had 2060 passing tests. Read `dev_docs/a4000-editor-roadmap.md` "HANDOFF"
   and "Next steps" before continuing: (markers + preview are DONE, see above - stereo markers still need a real stereo sample), then the missing tables
