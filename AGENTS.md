@@ -328,6 +328,25 @@ saved** (zones reference them by NAME; the Load confirmation lists the ones not 
   `tests/test_program_editor_window_program_files.py`. **The file layout and pointer values are NOT yet checked against a file from
   another tool** - `tests/akai_program_file_test_plan.md` lists every guess and the real-hardware steps.
 
+## Akai S2000/S3000: program placement, create-from-slices and `.p3` files (MEASURED on a real S2000, 2026-10-07)
+
+- **A new program does NOT land at the end of the list.** The sampler keeps its program list ordered by `PRGNUM`; a clone carries its template's
+  number, so it sorts right after the template - BETWEEN two programs once their numbers differ (`renumber_programs`). A PDATA addressed "one past the
+  end" creates it there, so **never address the next KDATA/PDATA at `len(list)`**: `BridgeWorker._locate_new_program(names_before)` re-reads the list
+  and finds where it went (callers already refuse a name that is resident). The old assumption wrote a whole create-from-slices run into the wrong
+  program (it overwrote that program's keygroup 0 and filled it with the slices). The same shift also hit `_import_program`'s post-load check (it compared
+  the other programs with the pre-load snapshot BY INDEX, so the program pushed down a place looked "changed by the load" and loading was disabled
+  for the session): it now maps `index -> index + 1` past the new program. `_handle_create_program` also reads the template's keygroups BEFORE the
+  first write, because the insert can shift the template too.
+- **Proven on the S2000** (`tools/s2000_check.py {snapshot|create|p3|multi}`, `tools/s2000_slices_check.py`): creating a program mid-list (new index
+  reported correctly, every other program byte-identical afterwards); multi-keygroup (4) clone; `.p3` Save (384/960-byte files, saving twice is
+  byte-identical) and Load (1 and 4 keygroups, equal to the original apart from the pointer bytes, others untouched); and the whole Slice Editor path
+  (`ProgramEditorWindow._export_slices` + `_create_program_from_slices`: 4 slices over SDS in 44 s, program created in 6 s, keys 36..39, zone 1 = its slice).
+- **The sampler recomputes the pointers itself** (`program load: new program N FIRSTKG sent c000, sampler holds 8460`): the "good case" in
+  `tests/akai_program_file_test_plan.md`. Zone `SBADD` read back identical to the file's for a program saved from the same sampler (not yet checked for a
+  file from another disk).
+- A tool that talks to the bridge while a `ProgramEditorWindow` is open must wait for `window._worker.is_idle()` first (S3kBridge is single-caller).
+
 ## Akai S900/S950 support (written without hardware)
 
 A DIFFERENT protocol from every other Akai entry, not a variant of the S1000
