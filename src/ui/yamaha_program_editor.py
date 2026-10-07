@@ -231,6 +231,8 @@ class YamahaProgramEditorWindow(QMainWindow):
         self.samples_tab = YamahaSamplesTab(self._controller, self._session, self._sample_cache, self._writer)
         self.samples_tab.status_message.connect(lambda m: self.status_bar.showMessage(m, 8000))
         self.samples_tab.samples_changed.connect(self._on_samples_changed)
+        self.samples_tab.programs_changed.connect(self._on_programs_changed)
+        self.samples_tab.free_programs_provider = self._free_programs
         self.main_tabs = QTabWidget()
         self.main_tabs.setTabBar(FullWidthTabBar(self.main_tabs))
         self.main_tabs.addTab(programs_tab, "Programs")
@@ -535,6 +537,20 @@ class YamahaProgramEditorWindow(QMainWindow):
         self._apply_visibility()
         self._show_placeholder("Reading the programs...")
         self._start_scan()
+
+    def _free_programs(self):
+        """[(number, row text)] of the programs known to hold no sample (the scan has read them) - what the Slice Editor can fill."""
+        return [(n, program_row_text(n, self._names.get(n, ""))) for n in self._program_numbers if self._counts.get(n) == 0]
+
+    def _on_programs_changed(self, number, sample_names):
+        """The Slice Editor assigned samples to a program: show what the unit holds now."""
+        for name in sample_names:
+            self._sample_cache.pop(name, None)  # their "used in programs" changed
+        self._counts[number] = len(sample_names)
+        self._program_data.pop(number, None)
+        self._apply_visibility()
+        self._reload_object("PG", ysx.program_object_name(number))
+        self.status_bar.showMessage(f"Program {number:03d} now holds {len(sample_names)} slices", 8000)
 
     def _on_samples_changed(self, select_name):
         """The Samples tab made new samples (an edit's copy, slices): re-read the sample list and show them."""

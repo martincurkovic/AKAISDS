@@ -8,8 +8,8 @@ through the unit's native bulk load (controller/yamaha_transfers.py: wave dump(s
 stereo sample stays stereo, and the tab's sample list is refreshed afterwards with the copy selected.
 
 The Slice Editor (ui/slice_editor_window.py, the S3000 editor's own dialog) opens on the loaded audio; its Export sends every slice
-as a new sample the same way (a stereo sample's slices are stereo: the dialog slices the other channel at the same frames). There is no
-"create a program" step - the A4000 editor can't create programs.
+as a new sample the same way (a stereo sample's slices are stereo: the dialog slices the other channel at the same frames). Its "also fill a
+program" option assigns the slices to an EMPTY program (the A4000 can't create or rename programs), each on its own key - see `_create_program`.
 
 Everything needs the audio of the shown sample in memory (double-click the waveform), like the S3000 editor.
 """
@@ -18,7 +18,7 @@ import os
 import shutil
 import tempfile
 
-from PySide6.QtCore import QEventLoop, QObject
+from PySide6.QtCore import QEventLoop, QObject, QTimer
 from PySide6.QtWidgets import QMessageBox
 
 from core import debug_log
@@ -26,6 +26,7 @@ from core import sample_editing as se
 from core import yamaha_edit as ye
 from core import yamaha_load as yl
 from core import yamaha_params as yp
+from core import yamaha_sysex as ysx
 from ui.filter_sample_dialog import FilterSampleDialog
 from ui.slice_editor_window import SliceEditorWindow
 
@@ -33,6 +34,17 @@ from ui.slice_editor_window import SliceEditorWindow
 def _log(message):
     debug_log.get_logger().info(f"YamahaEditor: {message}")
 
+
+#: the Slice Editor's "fill a program": slice i is mapped to key FIRST_SLICE_NOTE + i (36 = C1 in this app's C3-at-60 note names, like the
+#: Akai export), so at most 128 - 36 slices fit on the keyboard
+FIRST_SLICE_NOTE = 36
+MAX_PROGRAM_SLICES = 128 - FIRST_SLICE_NOTE
+#: the loop mode a slice gets when it is going into a program: 4 = One-shot (plays right through, like the Akai export's one-shot slices)
+ONE_SHOT = 4
+#: a link made right after samples were loaded once left a real unit silent for 28 s to ~8 min (unexplained, dev_docs/a4000-native-load-
+#: findings.md): wait a moment first, and let each link's answer take as long as that. (Tests shorten both.)
+LINK_SETTLE_MS = 4000
+LINK_REPLY_TIMEOUT_MS = 60000
 
 _NOT_CHANGED = (
     "\n\nThe original sample is not changed - the A4000 can't delete or overwrite samples over MIDI, so remove it on the "
@@ -46,6 +58,8 @@ class YamahaSampleEditor(QObject):
         self._tab = tab
         self._temp_dir = None
         self._select_name = None
+        self._free_programs = []  # [(number, label)] the Slice Editor can fill (see open_slicer)
+        self._dialog = None
         buttons = tab.edit_buttons
         buttons["trim"].clicked.connect(self.trim)
         buttons["reverse"].clicked.connect(self.reverse)
@@ -240,6 +254,8 @@ class YamahaSampleEditor(QObject):
             "fine_tune_l": g("fine_tune_l"),
             "fine_tune_r": g("fine_tune_r"),
         }
+        self._free_programs = tab.free_programs()  # [(number, label)], fixed for as long as the dialog is open
+        self._dialog = None
         dialog = SliceEditorWindow(
             tab,
             ctx["name"],
@@ -253,8 +269,32 @@ class YamahaSampleEditor(QObject):
             cancel_callback=tab._controller.cancel_transfer,
             extra_channels=ctx["channels"][1:] or None,
             hide_bit_depth=True,
+            program_names_provider=lambda: [label for _number, label in self._free_programs],
+            create_program_callback=self._create_program,
+            program_labels={
+                "checkbox": "Also fill a program with the slices",
+                "combo": "Program:",
+                "tooltip": (
+                    "Assign every slice to an empty program, each on its own key starting at C1, played right through "
+                    "(one-shot). The A4000 can't create programs or rename them over MIDI, so this fills a program that is "
+                    "empty now, and it keeps its name."
+                ),
+                "no_options_tooltip": (
+                    "There is no empty program to fill (every program holds samples, or the editor hasn't finished reading the "
+                    "program list yet)"
+                ),
+                "has_name": False,
+            },
+            max_program_slices=MAX_PROGRAM_SLICES,
+            program_confirm_message=lambda count, label: (
+                f"Also assign the {count} slice{'s' if count != 1 else ''} to program {label.split()[0]} (empty now), each on its own "
+                "key starting at C1, played right through (one-shot). The program keeps its name - the A4000's program names can't "
+                "be changed over MIDI."
+            ),
         )
+        self._dialog = dialog
         dialog.exec()
+        self._dialog = None
         if dialog.export_succeeded:
             tab.samples_changed.emit("")
 
@@ -268,6 +308,9 @@ class YamahaSampleEditor(QObject):
         controller = tab._controller
         if controller.is_transfer_busy():
             return False, "Export failed - a transfer is already in progress"
+        # a slice that is going into a program is mapped to its own key (root note = that key, so it plays at its own pitch) and
+        # one-shot, set in the sample dump itself rather than by a write per slice and row
+        into_program = self._wants_program()
         temp_dir = tempfile.mkdtemp(prefix="akaisds_yamaha_slices_")
         try:
             entries = []
@@ -275,9 +318,11 @@ class YamahaSampleEditor(QObject):
                 channels = [slice_samples] + [extra[index] for extra in (extra_slices or [])]
                 path = os.path.join(temp_dir, f"slice_{index:03d}.wav")
                 ye.write_wav(path, channels, framerate)
-                entries.append(
-                    {"filepath": path, "name": name, "sample_rate": sample_rate, "mono": False, "params": dict(self._slice_params)}
-                )
+                params = dict(self._slice_params)
+                if into_program:
+                    note = FIRST_SLICE_NOTE + index
+                    params.update(key_range_low=note, key_range_high=note, original_key_l=note, original_key_r=note, loop_mode=ONE_SHOT)
+                entries.append({"filepath": path, "name": name, "sample_rate": sample_rate, "mono": False, "params": params})
             result = {"ok": None, "message": ""}
             loop = QEventLoop()
 
@@ -307,3 +352,62 @@ class YamahaSampleEditor(QObject):
             return bool(result["ok"]), result["message"]
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
+
+    # -- "fill a program" -----------------------------------------------------------------------------------------
+
+    def _wants_program(self):
+        checkbox = getattr(getattr(self, "_dialog", None), "create_program_checkbox", None)
+        return bool(checkbox is not None and checkbox.isChecked())
+
+    def _create_program(self, names, template_index, program_name, progress_callback, status_callback, busy_callback=None):
+        """The second half of the Slice Editor's export, called once every slice is on the unit: assign the slices, in order, to the
+        empty program picked in the dialog. The A4000 has no create-program or program-name write (the 128 programs always exist and
+        a program's name is read only), so "new program" means filling an empty one. Each assignment is the session's own guarded
+        link (backup once, then ask the unit whether it holds the link). Returns (ok, message)."""
+        tab = self._tab
+        session = tab._session
+        number = self._free_programs[template_index][0]
+        program = ysx.program_object_name(number)
+        count = len(names)
+        busy = busy_callback or (lambda _busy: None)
+        old_timeout = session.reply_timeout_ms
+        busy(True)
+        try:
+            if LINK_SETTLE_MS:
+                status_callback("Letting the sampler settle before assigning...")
+                loop = QEventLoop()
+                QTimer.singleShot(LINK_SETTLE_MS, loop.quit)
+                loop.exec()
+            session.reply_timeout_ms = LINK_REPLY_TIMEOUT_MS
+            for index, name in enumerate(names):
+                status_callback(f'Assigning "{name}" to program {number:03d} ({index + 1}/{count})...')
+                result = self._link_and_wait(program, name)
+                if result is None or not result.ok:
+                    why = result.message if result is not None else "the sampler didn't answer"
+                    _log(f"slice program {number:03d}: assigning {name!r} failed after {index} of {count}: {why}")
+                    if index:
+                        tab.programs_changed.emit(number, list(names[:index]))
+                    return False, (
+                        f"Assigned {index} of {count} slices to program {number:03d} - stopped at \"{name}\": {why}"
+                    )
+                progress_callback(index + 1, count)
+        finally:
+            session.reply_timeout_ms = old_timeout
+            busy(False)
+        tab.programs_changed.emit(number, list(names))
+        _log(f"slice program: {count} slices assigned to program {number:03d}")
+        return True, f"Assigned {count} slice{'s' if count != 1 else ''} to program {number:03d}"
+
+    def _link_and_wait(self, program, name):
+        """Assign one sample and block (in a nested event loop, like the S3000 window's blocking sends) until the unit has answered."""
+        box = {"result": None, "done": False}
+        loop = QEventLoop()
+
+        def done(result):
+            box["result"], box["done"] = result, True
+            loop.quit()
+
+        self._tab._session.change_link(program, name, True, done, "sample")
+        if not box["done"]:
+            loop.exec()
+        return box["result"]

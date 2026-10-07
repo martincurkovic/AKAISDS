@@ -110,9 +110,9 @@ def _put32(data, offset, value):
 
 
 #: the sample rows a caller may set when it makes a sample from an EXISTING one (an edited copy): the musical settings that belong to
-#: the sound, and the wave/loop addresses (which the caller works out for the new audio). Everything else stays at the template's defaults.
+#: the sound (including the key range a slice is mapped to), and the wave/loop addresses (which the caller works out for the new audio). Everything else stays at the template's defaults.
 CARRIED_ROWS = (
-    "original_key_l", "original_key_r", "coarse_tune", "fine_tune_l", "fine_tune_r", "loop_mode",
+    "original_key_l", "original_key_r", "key_range_low", "key_range_high", "coarse_tune", "fine_tune_l", "fine_tune_r", "loop_mode",
     "wave_start_address", "wave_length", "wave_end_address", "loop_start_address", "loop_length", "loop_end_address",
 )
 

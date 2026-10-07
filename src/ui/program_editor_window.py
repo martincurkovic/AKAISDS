@@ -119,6 +119,9 @@ _DELETE_SHORTCUTS = [
 # note - raw note 36, which is "C1" under THIS app's own C3-at-60 octave
 # convention (core/midi_notes.py), not general MIDI's C1 (24)
 _FIRST_SLICE_NOTE = 36
+# one keygroup per slice, each on its own key from _FIRST_SLICE_NOTE up to the top of the keyboard (127) - so at most 92 slices. (A program
+# can hold 99 keygroups, but slice 93 onwards would need a key above 127, which LONOTE/HINOTE can't hold.)
+_MAX_SLICES_PER_PROGRAM = 128 - _FIRST_SLICE_NOTE
 
 # (label, tooltip) per ZPLAY value, in raw-byte order (0-4) - labels are the
 # abbreviated forms the front panel itself uses; tooltips spell out what
@@ -4482,6 +4485,7 @@ class ProgramEditorWindow(QMainWindow):
             demo_mode=bool(os.environ.get("AKAISDS_DEMO_SAMPLER")),
             program_names_provider=_existing_program_names,
             create_program_callback=self._create_program_from_slices,
+            max_program_slices=_MAX_SLICES_PER_PROGRAM,
             cancel_callback=sampler_controller.cancel_transfer,
         )
         dialog.exec()
@@ -4745,13 +4749,14 @@ class ProgramEditorWindow(QMainWindow):
         # "submit fast, verify once via a final reload" shape
         # _export_slices already uses for its own per-sample header fixups.
         slice_count = len(names)
-        if slice_count > 99:
+        if slice_count > _MAX_SLICES_PER_PROGRAM:
             # same ceiling SliceEditorWindow already checks client-side
             # before ever calling this - re-checked here since this method
             # has no other caller today, but shouldn't silently trust one
             return False, (
                 f"Can't create a program - {slice_count} keygroups "
-                "requested, but a program can only hold 99."
+                f"requested, but a slice program can only hold {_MAX_SLICES_PER_PROGRAM} "
+                "(one per key, from C1 up to the top of the keyboard)."
             )
 
         # _on_program_created/_on_keygroup_created (see __init__) are

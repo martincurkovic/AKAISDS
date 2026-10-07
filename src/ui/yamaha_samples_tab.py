@@ -345,6 +345,8 @@ class YamahaSamplesTab(QWidget):
     #: the edit buttons / Slice Editor made new samples on the unit: the host should re-read its sample list. The argument is the
     #: name to select afterwards ("" = leave the selection)
     samples_changed = Signal(str)
+    #: samples were assigned to a program (the Slice Editor's "fill a program"): (program number, the sample names). The host re-reads it.
+    programs_changed = Signal(int, list)
 
     def __init__(self, controller, session, sample_cache, writer=None, parent=None):
         super().__init__(parent)
@@ -367,6 +369,8 @@ class YamahaSamplesTab(QWidget):
         self._marker_job = None  # the marker write in progress: {"name", "steps", "index"}
         self._marker_pending = None  # the newest drag that arrived meanwhile: (sample name, view markers)
         self._preview = SlicePreviewPlayer(self)
+        #: set by the host: callable() -> [(program number, label)] of the programs that hold no sample (what the Slice Editor can fill)
+        self.free_programs_provider = None
         self._edit_busy = False  # an edit's new sample is being sent to the unit
         self._loops_enabled = False  # the shown sample's loop mode loops (the loop markers/knobs/preview apply)
         self._marker_knobs = {}  # marker name -> (swatch, knob, value label)
@@ -660,6 +664,9 @@ class YamahaSamplesTab(QWidget):
 
     def _markers_editable(self):
         return self._writer is not None and self._loading_name is None and not self._edit_busy
+
+    def free_programs(self):
+        return list(self.free_programs_provider()) if self.free_programs_provider is not None else []
 
     def _set_edit_busy(self, busy):
         """A new sample is being sent to the unit (an edit or a slice export): nothing else on the tab may start meanwhile."""
