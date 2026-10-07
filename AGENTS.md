@@ -1115,6 +1115,15 @@ under the original's own name (keygroup zones resolve samples by NAME,
 live, with no uniqueness enforced on hardware - two samples briefly
 sharing a name make every zone using it ambiguous, measured).
 
+**A new sample takes the LOWEST FREE SLOT, so the original's list index goes stale (MEASURED on a real S2000, 2026-10-07).** After any edit
+or delete leaves a hole, the next send's replacement lands BELOW the original: `_perform_sample_edit_real` used to delete by the index the original had
+before the send, which then pointed at the replacement (the edit silently did nothing - "sent and original deleted, but 'X-TMP' is missing") or, with
+the hole further down, at an UNRELATED sample. It now reloads the list and finds both the original and the `-TMP` copy BY NAME (exactly once each, else
+nothing is deleted) before deleting. Regression test: `test_reverse_sample_real_mode_deletes_the_original_by_name_when_the_replacement_lands_below_it`
+(`FakeSamplerController.insert_new_at`). Proven on the S2000 with `tools/s2000_samples_check.py edits` (fade, normalise, filter, reverse, trim, each
+read back over SDS: audio == the computed transform, SSTART/SMPEND = the new markers, SPTYPE/SPITCH/SHLTO/STUNO kept) and `roundtrip` (a sent sample
+comes back bit-identical). Never delete a sample by an index remembered from before a send.
+
 **These five transforms used to silently drop the sample's own header
 fields on every resend** - a freshly-sent SDS dump lands with the
 sampler's own defaults, not the original's, so Trim/Reverse's genuinely
