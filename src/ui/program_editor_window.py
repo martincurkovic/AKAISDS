@@ -3909,6 +3909,25 @@ class ProgramEditorWindow(QMainWindow):
             QMessageBox.warning(self, "Load Program", f"Couldn't read this file:\n\n{e}")
             return
         expected = "s1000" if self._is_s1000 else "s2000_s3000"
+        if program_file.family == "s1000" and expected == "s2000_s3000":
+            # the S2000/S3000 reads S1000 programs from disk (its manual) but SysEx takes raw blocks, so convert here (never the other way)
+            answer = QMessageBox.question(
+                self,
+                "Load Program",
+                "This is an S1000 (.p1) program. The S2000/S3000 can use it, but this app has to convert it first: its S2000-only "
+                "parameters (modulation matrix, second filter, envelope 3, effects sends) are set to neutral values, and "
+                "S1000-only settings the S2000 has no equivalent for may be ignored, so it can sound a little different "
+                "from the original and may need tweaking.\n\nConvert it and continue?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.Yes,
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                return
+            try:
+                program_file = akai_program_file.convert_s1000_to_s3000(program_file)
+            except akai_program_file.ProgramFileError as e:
+                QMessageBox.warning(self, "Load Program", f"Couldn't convert this file:\n\n{e}")
+                return
         if program_file.family != expected:
             mine = "S1000" if self._is_s1000 else "S2000/S3000"
             theirs = "S1000 (.p1)" if program_file.family == "s1000" else "S2000/S3000 (.p3)"

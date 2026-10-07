@@ -166,6 +166,39 @@ def parse_file(data):
     return ProgramFile(block_size=block_size, program=program, keygroups=keygroups)
 
 
+# -- S1000 (.p1) -> S2000/S3000 (.p3) ---------------------------------------------------------------------
+
+#: Everything an S2000/S3000 block holds beyond the S1000's: program bytes 72-191 (legato, bend-down, the modulation matrix, LFO2, portamento,
+#: effects sends, ...) and keygroup bytes 149-191 (resonance, the second filter, envelope 3, ...). The S1000 has no such fields, so a converted
+#: program gets NEUTRAL values. s3k.params documents no defaults, so these are MEASURED: the bytes a real S2000 holds in an unedited program
+#: (2026-10-07, "TEST PROGRAM" and every program cloned from it agree). The program's bytes 115-191 are all zero there. They are not claimed to
+#: match the sampler's own "new program" defaults beyond that - see tests/akai_program_file_test_plan.md.
+S3000_PROGRAM_TAIL = bytes.fromhex(
+    "0002000008060c060306060605080a0a050000000000000000000005080e00080800000000000000"
+    "00001900000000000000000000000000000000000000000000000000000000000000000000000000"
+    "00000000000000000000000000000000000000000000000000000000000000000000000000000000"
+)
+S3000_KEYGROUP_TAIL = bytes.fromhex("0032000000000063326300ff0019000000000001010000000000000063000063326300632d000000000019")
+_S1000_USED_PROGRAM_BYTES = 72  # program fields 0-71 are the S1000's (s3k.params: LEGATO is the first S3000-only one)
+_S1000_USED_KEYGROUP_BYTES = 149  # keygroup fields 0-148 (FILQ is the first S3000-only one)
+
+
+def convert_s1000_to_s3000(program_file):
+    """A `.p1` ProgramFile -> a `.p3` one the S2000/S3000 can load over SysEx.
+
+    The S2000 reads `.p1` programs from DISK and converts them itself (its manual: it "will convert certain program parameters"), but the
+    program editor sends raw SysEx blocks, which the sampler takes as they are - so the conversion happens here. The S2000/S3000 layout is a
+    superset of the S1000's at the same offsets, so: keep the file's bytes 0-71 (program) / 0-148 (keygroup), fill the rest with the neutral
+    S2000 values above, and rewrite the pointers for 192-byte blocks. What it does NOT do is the sampler's own parameter conversion: fields
+    the S2000 declares "not used - fixed" (the S1000's fixed controller routings) are carried over but may be ignored there, so a genuine S1000
+    program can sound a little different and need tweaking."""
+    if program_file.block_size != S1000_BLOCK_SIZE:
+        raise ProgramFileError("only an S1000 (.p1) program can be converted")
+    program = bytes(program_file.program[:_S1000_USED_PROGRAM_BYTES]) + S3000_PROGRAM_TAIL
+    keygroups = [bytes(kg[:_S1000_USED_KEYGROUP_BYTES]) + S3000_KEYGROUP_TAIL for kg in program_file.keygroups]
+    return parse_file(build_file(program, keygroups))
+
+
 def zone_sample_names(program_file):
     """Sample names the file's zones point at, in first-use order, empty (unused) zones skipped.
 

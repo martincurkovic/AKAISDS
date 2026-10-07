@@ -20,12 +20,32 @@
 # actually fix the macOS crackle too, this file (and the miniaudio
 # dependency in pyproject.toml) is the entire blast radius to revert.
 
+import atexit
 import struct
+import weakref
 
 import miniaudio
 from PySide6.QtCore import QObject, QTimer, Signal
 
 from core import app_config, debug_log
+
+# every player that may own a running miniaudio device - stopped at interpreter exit (see _stop_all_players)
+_LIVE_PLAYERS = weakref.WeakSet()
+
+
+def _stop_all_players():
+    """Stop every player's device before Python finalizes. A miniaudio device's real-time CoreAudio thread calls back INTO Python (a cffi
+    callback that takes the GIL); if the process starts shutting down while one is still running, that thread is forced to exit inside the
+    callback and macOS kills the whole process (SIGTRAP in `_os_workgroup_tsd_cleanup`, crash report 2026-10-07: a failed test left a
+    preview running at exit; quitting the app mid-preview could do the same)."""
+    for player in list(_LIVE_PLAYERS):
+        try:
+            player.stop()
+        except Exception:  # noqa: BLE001 - at exit there is nothing useful left to do with a failure
+            pass
+
+
+atexit.register(_stop_all_players)
 
 # how often the playhead position is re-read/re-emitted during playback -
 # fast enough to look smooth, cheap enough that polling it costs nothing
@@ -166,6 +186,7 @@ class SlicePreviewPlayer(QObject):
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        _LIVE_PLAYERS.add(self)
         self._device = None
         self._current_frame = 0
         # set True by a generator right before it ends, for any reason
