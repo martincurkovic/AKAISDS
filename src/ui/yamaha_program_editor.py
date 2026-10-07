@@ -721,7 +721,6 @@ class YamahaProgramEditorWindow(QMainWindow):
         if not self._connected or dump is None:
             return
         self._sample_cache[name] = bytearray(dump.data)
-        self.samples_tab.note_cached(name)
         self._on_sample_for_range(number, name, self._sample_cache[name])
 
     def _on_sample_for_range(self, number, name, sample_data):
@@ -998,8 +997,7 @@ class YamahaProgramEditorWindow(QMainWindow):
             return
         taken = {name for name, _otype in self._assigned}
         candidates = [n for n in self._sample_names if n not in taken]
-        durations = {n: label.text() for n, label in self.samples_tab._rows.items() if label.text()}
-        dialog = AssignDialog(candidates, f"program {number:03d}", durations, self)
+        dialog = AssignDialog(candidates, f"program {number:03d}", parent=self)
         if dialog.exec() != AssignDialog.DialogCode.Accepted or not dialog.chosen:
             return
         _log(f"assign {dialog.chosen!r} to program {number:03d}")

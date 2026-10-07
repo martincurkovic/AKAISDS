@@ -115,11 +115,6 @@ def format_duration(frames, rate):
     return f"{frames / rate:.3f} s" if rate > 0 else ""
 
 
-def format_list_duration(frames, rate):
-    """'0.45s' - the grey duration at the right of a sample list row (the same format the S3000/S950 lists use)."""
-    return f"{frames / rate:.2f}s" if rate > 0 else ""
-
-
 #: loop modes that actually loop (owner's manual p.123): continuous loop and loop-to-release
 _LOOPING_MODES = (1, 2)
 #: loop modes that play the wave backwards (3 = reverse, 5 = reverse one-shot)
@@ -337,7 +332,6 @@ def _controls_card(panel):
 
 
 class YamahaSamplesTab(QWidget):
-    _SCAN_RETRY_MS = 400  # how often the duration scan checks whether the wire is free
     #: a short message for the host window's status bar
     status_message = Signal(str)
     #: the user asked to jump to a program that uses the sample
@@ -380,9 +374,6 @@ class YamahaSamplesTab(QWidget):
         self._preview_commit_timer.setInterval(400)
         self._preview_commit_timer.timeout.connect(self._commit_markers_from_view)
         self._preview_reversed = 0  # frames in the reversed copy being played (0 = a forward preview)
-        self._rows = {}  # sample name -> the duration label of its list row
-        self._scan_token = 0  # bumped by every refresh/list change so a late scan result is dropped
-        self._scan_failed = set()
         # smooth reveal of arriving chunks (see the module docstring)
         self._reveal_queue = collections.deque()  # [view, frames, offset] segments, oldest first
         self._reveal_pending = 0  # frames queued
@@ -693,82 +684,33 @@ class YamahaSamplesTab(QWidget):
         self._names = list(names)
         self.sample_list_widget.blockSignals(True)
         self.sample_list_widget.clear()
-        self._rows = {}
         for name in self._names:
-            # a row widget (name left, grey duration right - the S3000 editor's list), so the ITEM gets no text of its own
-            # (it would double-paint - AGENTS.md); the name lives in the item's data
+            # a row widget (the S3000 editor's list row), so the ITEM gets no text of its own
+            # (it would double-paint - AGENTS.md); the name lives in the item's data. The row's duration label is left
+            # blank on purpose: reading every sample's length took one full SP dump each, one at a time, over MIDI
             item = QListWidgetItem(self.sample_list_widget)
             item.setData(Qt.ItemDataRole.UserRole, name)
-            row_widget, name_label, duration_label = build_sample_list_row_widget(name)
+            row_widget, _name_label, _duration_label = build_sample_list_row_widget(name)
             item.setSizeHint(row_widget.sizeHint())
             self.sample_list_widget.setItemWidget(item, row_widget)
-            self._rows[name] = duration_label
-            self._show_duration(name)
         self.sample_list_widget.blockSignals(False)
         if previous in self._names:
             self.select_sample(previous)
         else:
             self._selected = None
             self._show_placeholder("Select a sample on the left" if self._names else "No samples on the unit")
-        self._start_duration_scan()
 
-    # -- the durations in the list ---------------------------------------------------------------------------
+    # -- the list's names ------------------------------------------------------------------------------------
 
     def sample_names(self):
         """The names in the list, in order."""
         return [self.sample_list_widget.item(i).data(Qt.ItemDataRole.UserRole) for i in range(self.sample_list_widget.count())]
-
-    def _show_duration(self, name):
-        label, data = self._rows.get(name), self._cache.get(name)
-        if label is not None and data is not None:
-            frames = max(yp.extract(yp.get("sample", "wave_length"), data), 0)
-            try:
-                label.setText(format_list_duration(frames, yp.extract(yp.get("sample", "sampling_frequency_l"), data)))
-            except RuntimeError:  # the row was deleted under us (the list was rebuilt or the window is going away)
-                self._rows.pop(name, None)
 
     def reload_sample(self, name):
         """The host changed a sample on the unit behind our back (a restore): read it again and show what it holds now."""
         self._cache.pop(name, None)
         if name == self._selected and self.sample_list_widget.currentItem() is not None:
             self._on_selected(self.sample_list_widget.currentItem(), None)
-        else:
-            self._show_duration(name)
-
-    def note_cached(self, name):
-        """The host cached a sample's dump (the Programs tab needs each assigned sample's key range): show its duration."""
-        self._show_duration(name)
-
-    def _start_duration_scan(self):
-        """Read the dump of every sample not yet read, one at a time and only while the wire is otherwise idle, so the
-        list can show each one's length without ever getting in front of something the user asked for."""
-        self._scan_token += 1
-        self._scan_failed = set()
-        self._scan_next(self._scan_token)
-
-    def _scan_next(self, token):
-        if token != self._scan_token or not self._connected:
-            return
-        for name in self._names:
-            self._show_duration(name)
-        todo = [n for n in self._names if n not in self._cache and n not in self._scan_failed]
-        if not todo:
-            return
-        if not self._session.idle:
-            QTimer.singleShot(self._SCAN_RETRY_MS, lambda: self._scan_next(token))
-            return
-        name = todo[0]
-        self._session.request_bulk("SP", name, lambda dump, n=name: self._on_scan_dump(token, n, dump))
-
-    def _on_scan_dump(self, token, name, dump):
-        if token != self._scan_token or not self._connected:
-            return
-        if dump is None:
-            self._scan_failed.add(name)  # never retried until the next refresh
-        elif name not in self._cache:
-            self._cache[name] = bytearray(dump.data)
-        self._show_duration(name)
-        QTimer.singleShot(0, lambda: self._scan_next(token))
 
     def select_sample(self, name):
         if name in self._names:
@@ -818,7 +760,6 @@ class YamahaSamplesTab(QWidget):
                 self.status_message.emit(f"Couldn't read sample {name!r}")
             return
         self._cache[name] = bytearray(dump.data)
-        self._show_duration(name)
         if token == self._token:
             self._show(name)
 
@@ -944,7 +885,6 @@ class YamahaSamplesTab(QWidget):
         """Forget the audio read so far (the host is about to re-read everything)."""
         self._preview.stop()
         self._load_token += 1  # a load in flight is abandoned (the host cancels the session)
-        self._scan_token += 1  # ...and so is the duration scan (set_samples starts a new one)
         self._reset_reveal()
         self._loading_name = None
         self.cancel_load_button.setVisible(False)
@@ -1296,7 +1236,6 @@ class YamahaSamplesTab(QWidget):
         theme.notifier.changed.disconnect(self._refresh_themed_swatches)
         self._preview.stop()
         self._marker_pending = None
-        self._scan_token += 1
         self._reset_reveal()
         if self._loading_name is not None:
             self._load_token += 1

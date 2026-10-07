@@ -47,13 +47,6 @@ YAMAHA_LIST_NEEDS_MIDI_INPUT = (
     "The Yamaha A4000/A5000 answers on your MIDI input, so browsing and\n"
     "receiving samples needs one - select it in Settings."
 )
-YAMAHA_WAVE_MEMORY = (
-    "How much wave memory your A4000/A5000 has, in kB (4096 kB built in + any installed SIMMs).\n"
-    "The sampler can't report its free memory over MIDI, so the Dashboard's memory bar\n"
-    "is an estimate against this size. To find it: PLAY > PROGRAM > turn Knob 1 to the\n"
-    "FREE MEMORY page - type the second row's total as it shows (e.g. 102400).\n"
-    "Unknown hides the bar."
-)
 YAMAHA_SEND_NEEDS_MIDI_INPUT = (
     "Sending to the Yamaha A4000/A5000 needs a MIDI input too - the sampler never\n"
     "answers a load, so each sample is checked by asking it afterwards. Select one in Settings."

@@ -104,26 +104,6 @@ def get_yamaha_device_number():
     return value if isinstance(value, int) and not isinstance(value, bool) and 0 <= value <= 15 else 0
 
 
-def get_yamaha_wave_memory_kb():
-    # the A4000/A5000's wave memory in kilobytes - the unit's own unit (4096 kB built in + the installed SIMMs) - or None if unknown. The unit has no MIDI
-    # way to report its free memory, so the Dashboard's "memory used" bar is an ESTIMATE against this size. Set in Settings (shown
-    # for the Yamaha Sampler Type); config.json's "yamaha_wave_memory_kb". The unit's PLAY > PROGRAM page shows FREE MEMORY: the
-    # second row's total (e.g. 102400) is the wave memory, typed here as it is
-    value = load_config().get("yamaha_wave_memory_kb")
-    ok = isinstance(value, (int, float)) and not isinstance(value, bool) and value > 0
-    return float(value) if ok else None
-
-
-def save_yamaha_wave_memory_kb(kilobytes):
-    # None (or 0) = unknown: the key is removed, so the Dashboard shows no memory bar
-    config = load_config()
-    if kilobytes:
-        config["yamaha_wave_memory_kb"] = int(kilobytes)
-    else:
-        config.pop("yamaha_wave_memory_kb", None)
-    save_config(config)
-
-
 def get_yamaha_write_warning_acknowledged():
     # the one-time "editing a Yamaha A4000/A5000 is experimental" warning, shown before the first
     # parameter write (ui/yamaha_writer.py)

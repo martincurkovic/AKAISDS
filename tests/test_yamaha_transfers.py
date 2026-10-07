@@ -405,34 +405,18 @@ def test_the_send_button_needs_a_midi_input_for_a_yamaha(dash, tmp_path):
     assert not dash.btn_send.isEnabled() and dash.btn_send.toolTip() == tooltips.YAMAHA_SEND_NEEDS_MIDI_INPUT
 
 
-# --- the memory bar (an estimate) -----------------------------------------------------------------------------------
+# --- no memory bar ----------------------------------------------------------------------------------------------------
 
 
-def test_the_memory_estimate_adds_up_every_samples_words(rig, monkeypatch):
-    from core import app_config
-
-    monkeypatch.setattr(app_config, "get_yamaha_wave_memory_kb", lambda: 1024)  # 1 MB = 524,288 words
-    rig.fake.add_sample("mono", audio=[1] * 10000)
-    rig.fake.add_sample("st", audio=[1] * 20000, audio_right=[2] * 20000)
+def test_a_list_refresh_reads_no_sample_dumps_and_reports_no_memory(rig, dash):
+    # the unit can't report its free memory, and an estimate meant reading every sample's dump on each refresh - gone
     infos = []
     rig.controller.memory_status_updated.connect(infos.append)
-    rig.controller.refresh_sample_list(silent=True)
-    assert wait_until(lambda: bool(infos), timeout=15)
-    info = infos[-1]
-    assert info["estimated"] and info["max_num_samp_words"] == 524_288
-    # the 7 factory waves (132 words each), the mono sample's wave and the stereo sample's two (each + 4 guard words)
-    assert info["max_num_samp_words"] - info["num_words_free"] == 7 * 132 + 10004 + 2 * 20004
-
-
-def test_without_a_known_memory_size_there_is_no_estimate_and_no_bar(rig, dash, monkeypatch):
-    from core import app_config
-
-    monkeypatch.setattr(app_config, "get_yamaha_wave_memory_kb", lambda: None)  # (the real config may have one)
-    infos = []
-    rig.controller.memory_status_updated.connect(infos.append)
+    before = len([k for k, m in rig.fake.received if k == "dump_request"])
     rig.controller.refresh_sample_list(silent=True)
     assert wait_until(lambda: bool(rig.rec.lists))
     assert infos == []
+    assert len([k for k, m in rig.fake.received if k == "dump_request"]) == before + 1  # the object list itself, nothing per sample
     dash._update_device_type_ui()
     assert dash.memory_avail_prog_bar.isHidden()
 

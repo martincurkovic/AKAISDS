@@ -931,9 +931,6 @@ def test_other_sampler_types_never_see_the_s950_warning(dashboard, monkeypatch):
 
 @pytest.fixture
 def yamaha_dashboard(dashboard, monkeypatch):
-    from core import app_config
-
-    monkeypatch.setattr(app_config, "get_yamaha_wave_memory_kb", lambda: None)  # (the real config may hold a size)
     dashboard.midi_manager.input_name = "Fake In"
     dashboard.midi_manager.output_name = "Fake Out"
     dashboard.sampler_controller.set_device_type("yamaha_a4000")
@@ -947,22 +944,10 @@ def test_yamaha_is_the_generic_family_underneath_but_the_editor_and_the_sample_l
     assert d.sampler_controller.device_type == "generic"  # the protocol FAMILY (sends/receives/lists branch on is_yamaha first)
     assert d.btn_open_editor.isEnabled() is True
     assert "Yamaha" in d.btn_open_editor.toolTip() and "experimental" in d.btn_open_editor.toolTip()
-    # listing, receiving and sending use the unit's own protocol, so the hardware list is live (unlike Generic SDS); the memory bar
-    # stays hidden until a wave memory size is set
+    # listing, receiving and sending use the unit's own protocol, so the hardware list is live (unlike Generic SDS); the unit
+    # can't report its free memory, so there is no memory bar
     assert d.list_hardware.isEnabled() and d.btn_refresh.isEnabled()
     assert d.btn_delete_selected.isEnabled() is False and d.memory_avail_prog_bar.isHidden()
-
-
-def test_the_memory_bar_appears_once_a_wave_memory_size_is_set(yamaha_dashboard, monkeypatch):
-    from core import app_config
-
-    d = yamaha_dashboard
-    assert d.memory_avail_prog_bar.isHidden()
-    monkeypatch.setattr(app_config, "get_yamaha_wave_memory_kb", lambda: 102400)
-    d._update_device_type_ui()
-    assert not d.memory_avail_prog_bar.isHidden()
-    d.on_memory_status_updated({"max_num_samp_words": 1000, "num_words_free": 400, "num_blocks_free": -1, "estimated": True})
-    assert d.memory_avail_prog_bar.value() == 60 and "estimate" in d.memory_avail_prog_bar.toolTip()
 
 
 def test_yamaha_without_a_midi_input_cant_refresh_or_receive(dashboard):

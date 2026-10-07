@@ -24,11 +24,10 @@ import os
 
 from PySide6.QtCore import QTimer
 
-from core import app_config, debug_log, sds_encoder
+from core import debug_log, sds_encoder
 from core import yamaha_load as yl
 from core import yamaha_params as yp
 from core import yamaha_sysex as ysx
-from core import yamaha_wave
 
 
 def _log(message):
@@ -56,7 +55,6 @@ class YamahaTransfers:
         self.verify_delay_ms = 2500
         self.verify_retries = 3
         self.verify_retry_ms = 3000
-        self._memory_token = 0  # bumped per refresh so a slower estimate from an earlier one is dropped
 
     @property
     def _session(self):
@@ -74,49 +72,12 @@ class YamahaTransfers:
             self.names = [e.name for e in entries if e.kind == "sample"]
             _log(f"sample list: {len(self.names)} sample(s)")
             self._c.sample_list_updated.emit(list(self.names))
-            self._estimate_memory(list(self.names))
             if not silent:
                 self._c.status_changed.emit(f"Loaded {len(self.names)} sample(s) from hardware")
 
         if not silent:
             self._c.status_changed.emit("Requesting the sample list...")
         self._session.request_object_list(got)
-
-    # -- memory (an ESTIMATE) -------------------------------------------------------------------------------------
-
-    def _estimate_memory(self, names):
-        """The unit can't report its free wave memory over MIDI, so - only if the memory size is known (config.json's
-        `yamaha_wave_memory_kb`) - add up the words of every sample's wave(s), read from each sample's own dump, and report the
-        share as the Dashboard's "memory used" bar (`memory_status_updated`, flagged `estimated`). Waves no sample uses, and the
-        unit's own bookkeeping, are not counted: the bar can only under-state."""
-        capacity_kb = app_config.get_yamaha_wave_memory_kb()
-        self._memory_token += 1
-        if capacity_kb is None or not names:
-            return
-        token = self._memory_token
-        capacity_words = int(capacity_kb * 1024 / 2)
-        used = [0]
-
-        def next_one(remaining):
-            if token != self._memory_token:
-                return
-            if not remaining:
-                free = max(capacity_words - used[0], 0)
-                _log(f"memory estimate: {used[0]:,} of {capacity_words:,} words used by {len(names)} sample(s)")
-                self._c.memory_status_updated.emit(
-                    {"max_num_samp_words": capacity_words, "num_words_free": free, "num_blocks_free": -1, "estimated": True}
-                )
-                return
-            name, rest = remaining[0], remaining[1:]
-
-            def got(dump):
-                if dump is not None:
-                    used[0] += sample_words(bytes(dump.data))
-                next_one(rest)
-
-            self._session.request_bulk("SP", name, got)
-
-        next_one(list(names))
 
     # -- receiving ---------------------------------------------------------------------------------------------
 
@@ -451,9 +412,3 @@ def prepare_channels(channels, framerate, *, target_rate=None, force_mono=False)
         rate = int(rate)
     return channels, rate
 
-
-def sample_words(sp_data):
-    """The wave words a sample's dump accounts for: its [Common] word count (frames + guard words) per channel - or its wave length
-    if that is zero - doubled for a stereo sample."""
-    words = int.from_bytes(sp_data[20:24], "big") or (yp.extract(yp.get("sample", "wave_length"), sp_data) + yamaha_wave.GUARD_WORDS)
-    return words * (2 if yp.is_stereo(sp_data) else 1)

@@ -424,19 +424,11 @@ class TransferDashboard(QWidget):
                 "Can't open Settings - a MIDI transfer is already in progress"
             )
             return
-        memory_before = app_config.get_yamaha_wave_memory_kb()
         dialog = MidiSettingsDialog(self.midi_manager, self.sampler_controller, self)
         dialog.exec()
         diagnostics.log_session_config("after Settings")
         self._update_device_type_ui()
         self._update_open_editor_enabled()
-        if (
-            self._is_yamaha()
-            and app_config.get_yamaha_wave_memory_kb() != memory_before
-            and not self.sampler_controller.is_open_loop()
-        ):
-            # the memory bar is an estimate against that size: redo it (a silent list refresh re-reads the sample sizes)
-            self.sampler_controller.refresh_sample_list(silent=True)
 
     def request_sample_list(self):
         self.sampler_controller.refresh_sample_list()
@@ -608,8 +600,8 @@ class TransferDashboard(QWidget):
             self.btn_refresh.setEnabled(not is_open_loop)
             self.btn_receive.setEnabled(not is_open_loop and has_samples)
             self.btn_delete_selected.setEnabled(False)
-            # the unit can't report its free memory: the bar is an estimate, shown once the memory size is known (config.json)
-            self.memory_avail_prog_bar.setVisible(app_config.get_yamaha_wave_memory_kb() is not None)
+            # the unit can't report its free memory over MIDI, so there is no memory bar
+            self.memory_avail_prog_bar.setVisible(False)
             if is_open_loop:
                 self.empty_hardware_label.setText(tooltips.YAMAHA_LIST_NEEDS_MIDI_INPUT)
                 self.empty_hardware_label.setVisible(self.list_hardware.count() == 0)
@@ -1631,16 +1623,10 @@ class TransferDashboard(QWidget):
             self.memory_avail_prog_bar.setProperty("memoryLevel", "normal")
 
         self.memory_avail_prog_bar.setValue(percent_used)
-        if info.get("estimated"):
-            self.memory_avail_prog_bar.setToolTip(
-                f"About {info['num_words_free']:,} sample words free (an estimate: the sampler can't report its memory over\n"
-                "MIDI, so this adds up the samples' sizes against the memory size set in config.json)"
-            )
-        else:
-            self.memory_avail_prog_bar.setToolTip(
-                f"{info['num_words_free']:,} sample words free\n"
-                f"{info['num_blocks_free']:,} sample blocks/slots free"
-            )
+        self.memory_avail_prog_bar.setToolTip(
+            f"{info['num_words_free']:,} sample words free\n"
+            f"{info['num_blocks_free']:,} sample blocks/slots free"
+        )
         self.memory_avail_prog_bar.style().unpolish(self.memory_avail_prog_bar)
         self.memory_avail_prog_bar.style().polish(self.memory_avail_prog_bar)
 

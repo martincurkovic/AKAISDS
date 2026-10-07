@@ -447,49 +447,23 @@ def test_a_stereo_sample_says_only_its_left_wave_is_covered(win, fake):
 # --- the sample list rows and the envelope graphs ----------------------------------------------------------------
 
 
-def test_format_list_duration_matches_the_other_editors_lists():
-    assert samples_module.format_list_duration(22050, 44100) == "0.50s"
-    assert samples_module.format_list_duration(3996, 44100) == "0.09s"
-    assert samples_module.format_list_duration(100, 0) == ""
-
-
-def test_sample_rows_show_the_name_and_a_grey_duration_filled_in_by_a_background_scan(qapp):  # noqa: F811
+def test_sample_rows_show_just_the_name_and_read_no_dumps_to_fill_in_a_duration(qapp):  # noqa: F811
+    # the list used to show each sample's length, read by a background scan of every sample's SP dump - too slow, so it is gone
     fake = demo.FakeA4000()
-    fake.add_sample("one second", audio=[0] * 48000)  # the fake's rate is 48 kHz
+    fake.add_sample("one second", audio=[0] * 48000)
     fake.add_sample("quarter", audio=[0] * 12000)
     window = build_window(qapp, fake)
     try:
         tab = window.samples_tab
-        assert wait_until(lambda: tab.sample_names() and len(tab._rows) == 9, timeout=20)
-        # every row's duration arrives without the user selecting anything
-        assert wait_until(lambda: all(label.text() for label in tab._rows.values()), timeout=40)
-        assert tab._rows["one second"].text() == "1.00s" and tab._rows["quarter"].text() == "0.25s"
-        assert tab._rows["sine wave"].text() == "0.00s"  # 128 frames
-        assert tab._rows["quarter"].objectName() == "mutedLabel"  # the theme's grey "secondary info" text
+        assert wait_until(lambda: tab.sample_names() and tab.sample_list_widget.count() == 9, timeout=20)
         item = tab.sample_list_widget.item(0)
         assert item.text() == "" and item.data(Qt.ItemDataRole.UserRole) == "sine wave"  # no double-painted text
-        assert item.sizeHint().height() > 20  # taller than a plain text row (the row widget's own 6 px margins)
+        assert item.sizeHint().height() > 20  # still the row widget's height (its own 6 px margins)
+        row = tab.sample_list_widget.itemWidget(item)
+        assert [label.text() for label in row.findChildren(QLabel)] == ["sine wave", ""]  # name only, no duration
+        assert not hasattr(tab, "_start_duration_scan")
     finally:
         dispose(window)
-
-
-def test_the_duration_scan_waits_while_the_wire_is_busy_and_skips_what_is_cached(win, fake):
-    tab = win.samples_tab
-    tab._cache.clear()
-    tab._scan_failed = set()
-    before = len([k for k, m in fake.received if k == "dump_request"])
-    busy = {"on": True}
-    real_idle = type(win._session).idle
-    try:
-        type(win._session).idle = property(lambda self: not busy["on"] and real_idle.fget(self))
-        tab._SCAN_RETRY_MS = 20
-        tab._start_duration_scan()
-        assert not wait_until(lambda: len([k for k, m in fake.received if k == "dump_request"]) > before, timeout=0.3)
-        busy["on"] = False
-        assert wait_until(lambda: len([k for k, m in fake.received if k == "dump_request"]) > before, timeout=5)
-    finally:
-        type(win._session).idle = real_idle
-    assert wait_until(lambda: all(n in tab._cache for n in tab.sample_names()), timeout=30)
 
 
 def test_the_envelope_graphs_follow_the_values_on_load_and_on_edit(win):
