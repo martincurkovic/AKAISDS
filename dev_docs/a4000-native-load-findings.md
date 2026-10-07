@@ -172,7 +172,7 @@ The user hit ABORT on the front panel while the unit was sending data back durin
   is no cleanup needed. If the sample name existed, the previous version is unchanged after a failed replace (shown for the partial-wave case with a
   NEW name; for a failed REPLACE of an existing name this was not tested - test before promising it).
 * **Warn the user:** (1) replacing a sample resets its parameters; (2) never reuse a wave name; (3) the unit shows "MIDI Bulk Received" after each load and
-  does NOT need OK to continue; (4) linking a sample to a program right after loading can leave the unit silent for a long time (unexplained - give the
+  does NOT need OK to continue (SUPERSEDED 2026-10-07: a later LINK hangs the unit until OK is pressed - AGENTS.md "Silent unit"); (4) linking a sample to a program right after loading can leave the unit silent for a long time (unexplained - give the
   link a generous timeout and don't report failure early); (5) Bulk Protect must be OFF; (6) transfers are slow (stereo, long samples: minutes).
 * **No delete exists over MIDI**, so a test/aborted send cannot be undone except via the front panel or a power cycle (RAM only). The unit
   garbage-collects wave objects nothing references (stereo -> mono resend removed the right wave).
