@@ -321,8 +321,15 @@ saved** (zones reference them by NAME; the Load confirmation lists the ones not 
 - **Fixed on the way**: `_on_samples_loaded` reset the program list to row 0 after EVERY program reload (each is followed by a sample reload),
   undoing "select the new program" for Duplicate/Load/rebuild; it now only selects row 0 when nothing is selected (first load).
 - **Load = a NEW program** through the duplicate flow's order (PDATA GROUPS=1, KDATA 0, then KDATA + PDATA(GROUPS+1)). A name
-  matching a resident program is never sent (PDATA would delete it) - the window prompts for another. A `.p1` is refused on an
-  S2000/S3000 setting and vice versa (different block lengths; padding a 150-byte block would invent neutral values we can't vouch for).
+  matching a resident program is never sent (PDATA would delete it) - the window prompts for another. A `.p3` is refused on an
+  S1000 setting (it has fields an S1000 can't hold). A `.p1` on an S2000/S3000 setting is CONVERTED after a confirmation
+  (`akai_program_file.convert_s1000_to_s3000`, added 2026-10-07): the S2000 reads S1000 programs from disk and converts them itself (its manual), but
+  SysEx takes raw blocks, so the app keeps the file's S1000 bytes (program 0-71, keygroup 0-148) and fills the S2000-only ones (mod matrix, LFO2,
+  second filter, envelope 3, effects sends: program 72-191, keygroup 149-191) with `S3000_PROGRAM_TAIL`/`S3000_KEYGROUP_TAIL` - bytes MEASURED in an
+  unedited program on a real S2000 (s3k.params has no defaults). **Proven only mechanically** (a `.p1` made by cutting a real program's blocks to 150
+  bytes converts, loads and comes back byte-identical on the S2000); never run on a GENUINE S1000 program, and the sampler's own parameter
+  conversion is NOT replicated (S1000 "fixed controller" fields are carried over but the S2000 may ignore them, so it can sound slightly different).
+  The confirmation says so - keep that wording.
   Disabled in demo mode like Duplicate Program (DemoBridge has no add-program primitive); Save works there if the demo bridge reads blocks.
 - Tests: `tests/test_akai_program_file.py` (codec + worker, incl. a FakeS1000 round trip) and
   `tests/test_program_editor_window_program_files.py`. **The file layout and pointer values are NOT yet checked against a file from
@@ -1304,6 +1311,13 @@ real bug: a click a pixel or two either side of a marker (still within its
 own hover/hit radius) used to resolve to the wrong neighbouring slice,
 even though the hover highlight visually said "you're on this marker." A
 real drag (movement, not just a press) cancels the pending preview.
+
+**A running preview device at interpreter exit CRASHES the process on macOS** (crash report 2026-10-07: SIGTRAP in `_os_workgroup_tsd_cleanup` on
+CoreAudio's IO thread - the miniaudio callback calls back into Python, takes the GIL while Python is finalizing, and the thread is forced to exit;
+reproduced as exit code 133 every time). `audio_preview` keeps a `WeakSet` of players and an `atexit` hook (`_stop_all_players`) that stops them, so
+quitting mid-preview is safe, and `tests/test_audio_preview.py` has an autouse fixture doing the same, because a failed assert skips a test's own
+`player.stop()`. Those tests also POLL (`_wait_until`) instead of sleeping a fixed 0.1 s - how long an output device takes to start varies by
+machine/device (a fixed sleep failed here once the default output changed).
 
 **Sensitivity slider - live transient detection, no separate button**
 (`core/transient_detection.py`): hand-rolled energy-flux onset detection
