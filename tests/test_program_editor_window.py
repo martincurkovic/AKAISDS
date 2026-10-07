@@ -380,6 +380,9 @@ class FakeSamplerController(QObject):
         self.sent_entries = []
         self.next_result = True  # what the next send's transfer_finished reports
         self.busy = False
+        #: where a sent sample lands in the list (None = the end). A real S2000 gives a new sample the LOWEST FREE slot, which after an
+        #: earlier delete is below samples that were there first (measured 2026-10-07)
+        self.insert_new_at = None
 
     def is_transfer_busy(self):
         return self.busy
@@ -415,8 +418,11 @@ class FakeSamplerController(QObject):
             )
             last_filepath = entry["filepath"]
             if result:
-                new_index = len(self._bridge._samples)
-                self._bridge._samples.append(entry["name"])
+                new_index = len(self._bridge._samples) if self.insert_new_at is None else self.insert_new_at
+                self._bridge._samples.insert(new_index, entry["name"])
+                self._bridge.sample_headers = {
+                    (i + 1 if i >= new_index else i): h for i, h in self._bridge.sample_headers.items()
+                }
                 self._bridge.sample_headers[new_index] = {
                     "SSTART": 0, "SMPEND": 0, "LOOPAT1": 0, "LLNGTH1": 0,
                     "SLNGTH": 0, "SSRATE": 44100, "SBANDW": 1, "SPTYPE": 0,
@@ -3459,6 +3465,41 @@ def test_reverse_sample_real_mode_happy_path_sends_deletes_and_renames(
     # landed on a clean final selection - the renamed sample, not nothing
     assert editor.sample_list_widget.currentRow() >= 0
     assert editor._sample_name_at_row(editor.sample_list_widget.currentRow()) == "SQUARE"
+
+
+def test_reverse_sample_real_mode_deletes_the_original_by_name_when_the_replacement_lands_below_it(
+    editor, qapp, monkeypatch
+):
+    # real S2000 (2026-10-07): after one edit left a free slot, the NEXT edit's replacement took that lower slot, so the original's
+    # pre-send list index pointed at the replacement (the edit silently did nothing) - or, with the hole further down, at an
+    # unrelated sample. The original must be found BY NAME in a fresh list before anything is deleted.
+    import ui.program_editor_window as pew
+
+    monkeypatch.delenv("AKAISDS_DEMO_SAMPLER", raising=False)
+    monkeypatch.setattr(
+        pew.QMessageBox, "question", lambda *a, **k: pew.QMessageBox.StandardButton.Yes
+    )
+    bridge = editor._bridge
+    fake_sampler = FakeSamplerController(bridge)
+    fake_sampler.insert_new_at = 0  # the replacement lands at the very top, pushing everything down
+    editor._main_window.sampler_controller = fake_sampler
+    names_before = list(bridge.sample_list())
+    victim = names_before[1]  # what the OLD code would have deleted: the original's stale index
+
+    original_samples = list(range(100))
+    _select_sample_with_full_audio(  # sample 2 == the original being edited
+        editor, qapp, 2, original_samples,
+        {"start": 10, "loop_start": 30, "loop_end": 60, "end": 90},
+    )
+    edited = names_before[2]
+
+    editor._confirm_reverse_sample()
+
+    after = bridge.sample_list()
+    assert after.count(edited) == 1 and f"{edited}-TMP" not in after
+    assert victim in after  # nothing else was deleted
+    assert sorted(after) == sorted(names_before)  # same samples, same count
+    assert "complete" in editor.status_bar.currentMessage().lower()
 
 
 def test_reverse_sample_real_mode_send_failure_leaves_original_untouched(

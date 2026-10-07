@@ -8222,16 +8222,45 @@ class ProgramEditorWindow(QMainWindow):
                 return
 
             # replacement confirmed resident under temp_name - now safe to
-            # remove the original
+            # remove the original. NOT by the index it had before the send:
+            # a new sample takes the LOWEST FREE SLOT (measured on a real
+            # S2000, 2026-10-07), which after any earlier delete is below the
+            # original, so that index now points at the replacement - or at
+            # an unrelated sample. Look both up BY NAME in a fresh list.
+            which, args = self._wait_for_any_signal(
+                [self._worker.samples_loaded, self._worker.samples_load_failed],
+                start=self._worker.submit_sample_list,
+                timeout_ms=20000,
+            )
+            if which != 0:
+                self.status_bar.showMessage(
+                    f'{action_label} sent as "{temp_name}", but the sample list '
+                    "couldn't be refreshed to find the original - nothing was "
+                    "deleted; check the sampler and delete the original manually."
+                )
+                return
+            names_now = args[0]
+            if names_now.count(original_name) != 1 or temp_name not in names_now:
+                logger.debug(
+                    f"_perform_sample_edit_real: can't tell which sample to delete "
+                    f"in {names_now!r} (original {original_name!r}, temp {temp_name!r})"
+                )
+                self.status_bar.showMessage(
+                    f'{action_label}: "{temp_name}" or "{original_name}" is not '
+                    "listed exactly once, so nothing was deleted - check the "
+                    "sampler directly."
+                )
+                return
+            delete_index = names_now.index(original_name)
             which, args = self._wait_for_any_signal(
                 [self._worker.sample_deleted, self._worker.sample_delete_failed],
-                start=lambda: self._worker.submit_delete_sample(sample_index),
+                start=lambda: self._worker.submit_delete_sample(delete_index),
                 timeout_ms=20000,
             )
             if which != 0:
                 error = args[1] if args else "timed out waiting for a response"
                 logger.debug(
-                    f"_perform_sample_edit_real: delete of sample {sample_index} "
+                    f"_perform_sample_edit_real: delete of sample {delete_index} "
                     f"failed: {error}"
                 )
                 self.status_bar.showMessage(
