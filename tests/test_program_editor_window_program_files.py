@@ -126,6 +126,43 @@ def test_load_refuses_a_file_for_the_other_sampler_family(qapp, s1000, tmp_path,
     assert len(fake.programs) == 2  # nothing sent
 
 
+def _s2000_editor_loading_a_p1(s1000, tmp_path, monkeypatch, answers):
+    """The window in S2000/S3000 mode (only the model flag differs from the fixture) loading a .p1; `answers` = what each question() returns."""
+    fake, editor = s1000
+    editor._is_s1000 = False
+    path = tmp_path / "OLD.p1"
+    path.write_bytes(apf.build_file(*_blocks(150, groups=2, name="OLD S1000")))
+    monkeypatch.setattr("ui.program_editor_window.QFileDialog.getOpenFileName", lambda *a, **k: (str(path), ""))
+    asked, submitted = [], []
+
+    def question(*a, **k):
+        asked.append(a[2])
+        return answers[len(asked) - 1]
+
+    monkeypatch.setattr(QMessageBox, "question", question)
+    monkeypatch.setattr(QMessageBox, "warning", lambda *a, **k: asked.append("WARNING: " + a[2]))
+    monkeypatch.setattr(editor._worker, "submit_import_program", lambda pf, name: submitted.append((pf, name)))
+    editor._load_program_from_file()
+    return asked, submitted
+
+
+def test_an_s1000_program_loaded_on_an_s2000_is_converted_after_a_confirmation(qapp, s1000, tmp_path, monkeypatch):
+    yes = QMessageBox.StandardButton.Yes
+    asked, submitted = _s2000_editor_loading_a_p1(s1000, tmp_path, monkeypatch, [yes, yes])
+    assert "S1000 (.p1) program" in asked[0] and "convert" in asked[0].lower() and "tweaking" in asked[0]
+    assert len(submitted) == 1
+    program_file, name = submitted[0]
+    assert program_file.block_size == 192 and program_file.family == "s2000_s3000" and len(program_file.keygroups) == 2
+    assert program_file.program[72:] == apf.S3000_PROGRAM_TAIL
+    assert name == "OLD S1000"
+
+
+def test_declining_the_conversion_sends_nothing(qapp, s1000, tmp_path, monkeypatch):
+    no = QMessageBox.StandardButton.No
+    asked, submitted = _s2000_editor_loading_a_p1(s1000, tmp_path, monkeypatch, [no])
+    assert len(asked) == 1 and submitted == []
+
+
 def test_load_reports_an_unreadable_file(qapp, s1000, tmp_path, monkeypatch):
     fake, editor = s1000
     path = tmp_path / "junk.p1"

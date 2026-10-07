@@ -108,6 +108,53 @@ def test_zone_sample_names_lists_each_used_name_once_in_order():
     assert apf.zone_sample_names(parsed) == ["SMP0", "SMP2"]
 
 
+# --- .p1 -> .p3 conversion (the S2000/S3000 reads S1000 programs from disk; over SysEx the app has to convert) -------------
+
+
+def _p1(groups=3, name="OLD S1000"):
+    program, keygroups = _blocks(150, groups=groups, name=name)
+    return apf.parse_file(apf.build_file(program, keygroups))
+
+
+def test_convert_makes_a_valid_192_byte_program_with_the_s1000_fields_unchanged():
+    original = _p1(groups=3)
+    converted = apf.convert_s1000_to_s3000(original)
+    assert converted.block_size == 192 and converted.extension == ".p3" and converted.family == "s2000_s3000"
+    assert converted.name == "OLD S1000" and len(converted.keygroups) == 3
+    apf.validate_blocks(converted.program, converted.keygroups)  # identifiers, GROUPS, equal lengths
+    # the S1000's own fields (program 0-71, keygroup 0-148) are carried over, apart from the pointer bytes the file format rewrites
+    strip = lambda b: bytes(b[:1]) + b"\x00\x00" + bytes(b[3:])  # noqa: E731
+    assert strip(converted.program[:72]) == strip(original.program[:72])
+    for old, new in zip(original.keygroups, converted.keygroups):
+        assert strip(new[:149]) == strip(old[:149])
+
+
+def test_convert_fills_the_s2000_only_bytes_with_the_neutral_measured_values_and_rewrites_the_pointers():
+    converted = apf.convert_s1000_to_s3000(_p1(groups=2))
+    assert converted.program[72:] == apf.S3000_PROGRAM_TAIL and len(apf.S3000_PROGRAM_TAIL) == 120
+    assert all(kg[149:] == apf.S3000_KEYGROUP_TAIL for kg in converted.keygroups) and len(apf.S3000_KEYGROUP_TAIL) == 43
+    # file-relative pointers for 192-byte blocks (not the 150-byte ones)
+    assert int.from_bytes(converted.program[1:3], "little") == 192
+    assert [int.from_bytes(k[1:3], "little") for k in converted.keygroups] == [384, 576]
+
+
+def test_the_neutral_tail_has_the_modulation_matrix_sources_and_no_other_surprises():
+    # spot checks of what the measured bytes mean (offsets from s3k.params), so a wrong paste of the constants is caught
+    prog = bytes(72) + apf.S3000_PROGRAM_TAIL
+    kg = bytes(149) + apf.S3000_KEYGROUP_TAIL
+    value = lambda region, name, blk: p.decode_field(p.lookup(name, region), blk[p.lookup(name, region).offset:][:p.lookup(name, region).size])  # noqa: E731
+    assert value("program", "B_PTCHD", prog) == 2 and value("program", "LEGATO", prog) == 0 and value("program", "PORTEN", prog) == 0
+    assert value("program", "PFXSLEV", prog) == 25 and value("keygroup", "KFXSLEV", kg) == 25
+    assert value("keygroup", "KGMUTE", kg) == 255 and value("keygroup", "FIL2FR", kg) == 99 and value("keygroup", "ENV3L1", kg) == 99
+    assert set(apf.S3000_PROGRAM_TAIL[43:]) <= {0, 0x19}  # bytes 115-191 of a program: zero apart from nothing we model
+
+
+def test_convert_refuses_a_file_that_is_not_an_s1000_one():
+    program, keygroups = _blocks(192)
+    with pytest.raises(apf.ProgramFileError):
+        apf.convert_s1000_to_s3000(apf.parse_file(apf.build_file(program, keygroups)))
+
+
 # --- BridgeWorker: export/import against a fake sampler that really allocates addresses ----------
 
 
@@ -360,3 +407,17 @@ def test_export_refuses_a_block_size_that_is_neither_150_nor_192():
     worker.submit_export_program(0)
     worker.process_pending()
     assert exported == [] and "160-byte" in failed[0]
+
+
+def test_a_converted_s1000_program_loads_onto_an_s2000_like_sampler_as_a_new_program():
+    fake = PointerFake(block_size=192)
+    worker = _worker(fake)
+    converted = apf.convert_s1000_to_s3000(_p1(groups=2, name="OLD S1000"))
+    others = _snapshot(fake)
+    imported, failed = _import(worker, _reload(converted), "OLD CONV")
+    assert failed == [] and imported == [(2, "OLD CONV")]
+    assert _snapshot(fake)[:2] == others  # nothing else touched
+    copy = fake.programs[2]
+    assert len(copy["keygroups"]) == 2 and len(copy["block"]) == 192
+    assert bytes(copy["block"][72:]) == apf.S3000_PROGRAM_TAIL
+    assert all(bytes(k[149:]) == apf.S3000_KEYGROUP_TAIL for k in copy["keygroups"])
