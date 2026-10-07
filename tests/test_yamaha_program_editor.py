@@ -556,7 +556,9 @@ def test_every_labelled_row_uses_the_same_label_width_so_values_line_up(win):
 
     widths = set()
     for panel in (win.program_panel, win.easy_panel, win.samples_tab.panel):
-        for w in panel.widgets.values():
+        for key, w in panel.widgets.items():
+            if panel is win.samples_tab.panel and key == "loop_mode":
+                continue  # lives in the Loop Controls card, laid out like the S3000's "Loop Type" row (short label, beside the marker knobs)
             parent = w.parentWidget()
             for label in (parent.findChildren(QLabel) if parent is not None else []):
                 if label.minimumWidth() == label.maximumWidth() and label.minimumWidth() > 60:
@@ -566,7 +568,7 @@ def test_every_labelled_row_uses_the_same_label_width_so_values_line_up(win):
 
 def test_the_read_only_sample_values_are_grey_and_the_program_name_is_not(win):
     tab = win.samples_tab
-    for key in ("sampling_frequency_l", "wave_start_address", "wave_length", "loop_end_address", "loop_tempo"):
+    for key in ("sampling_frequency_l", "wave_length", "loop_length", "loop_tempo"):
         assert tab.panel.widgets[key].objectName() == "mutedLabel"
     assert win.program_panel.widgets["program_name"].objectName() != "mutedLabel"
 
@@ -617,7 +619,7 @@ def test_the_sample_page_is_aligned_pairs_with_no_collapsible_parts(win):
     page.resize(1000, 2600)
     _assert_pairs_line_up(
         page,
-        [("Pitch", "Key & Velocity Range"), ("Level & Pan", "Loop & Wave"), ("Filter", "Filter Envelope"),
+        [("Pitch", "Key & Velocity Range"), ("Level & Pan", "Wave"), ("Filter", "Filter Envelope"),
          ("Amplitude Envelope", "Pitch Envelope"), ("LFO", "Controllers"), ("Output", "EQ")],
     )
     # everything is simply shown: nothing hides behind a header
@@ -633,7 +635,7 @@ def test_the_waveform_card_is_exactly_as_wide_as_the_cards_below_it(win):
     container.resize(1000, 2600)
     container.layout().activate()
     tab.cards_page.layout().activate()
-    waveform = _card_titled(container, "Waveform")
+    waveform = _card_titled(container, "Loop Controls")
     pitch, key_range = _card_titled(container, "Pitch"), _card_titled(container, "Key & Velocity Range")
     def span(card):
         left = card.mapTo(container, card.rect().topLeft()).x()
