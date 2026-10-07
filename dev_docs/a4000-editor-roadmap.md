@@ -52,7 +52,7 @@ the unit - record one: RECORD > SETUP: input StOut, type New, Stereo; TRIGGER Ma
 agree) and **whether the unit moves a stereo sample's right-channel address twins itself**.
 
 **Session 4 also built NATIVE SAMPLE LOADING** (Dashboard Send over the unit's own wave + sample bulk dumps, mono and real stereo), an estimated
-Dashboard memory bar and a Settings "Wave memory (kB)" field - see AGENTS.md and `dev_docs/a4000-native-load-findings.md` (the hardware fork's
+Dashboard memory bar and a Settings "Wave memory (kB)" field (both REMOVED later - too slow, see AGENTS.md; same for the list durations) - see AGENTS.md and `dev_docs/a4000-native-load-findings.md` (the hardware fork's
 measurements and the not-yet-done tests). **Not yet run end to end against the real unit through the app code** (the pieces were measured with
 `tools/a4000_load_probe.py`/`a4000_load_lab.py`; the app path is only tested against `FakeA4000`): do that first next session, in the app.
 Unit state: ~184 objects incl. many `T-*`/`PROBE`/`PAIR`/`SYNTH` throwaways - a power cycle clears them.
