@@ -28,6 +28,11 @@ Same rules as `s1000_test_plan.md`: **safest to riskiest, and stop at the first 
 
 ## Part 1 - S2000/S3000 (you)
 
+> **2026-10-07, real S2000 (headless, `tools/s2000_check.py`): A, B1, B2, B6 and D PASSED** for 1- and 4-keygroup programs (Save twice byte-identical;
+> Load -> new program equal to the original apart from pointer bytes; other programs unchanged; the sampler recomputes FIRSTKG). Found and fixed on the
+> way: the post-load check compared programs by index and cried wolf when the sampler inserted the new program mid-list. **Still open:** B3 (play it),
+> B4 (a file from another tool), B5 (missing samples), all of C.
+
 **A. Save (read-only on the sampler)**
 - [ ] Select the scratch program, **Save...** (button under the Programs list, or right-click). Takes a few seconds per keygroup.
 - [ ] File is `NAME.p3`, size 192 x (N + 1). Status bar: `Saved "NAME" (N keygroups)`.
