@@ -623,3 +623,6 @@ marker knobs + Loop Mode + Loop Preview in a **Loop Controls** card; Trim / Reve
 5. What the copy does NOT carry (envelopes, filter, EQ, LFO, controllers, outputs): the new sample has the template's defaults. If that matters, the next step is
    building the copy's SP from the source's own dump with the name/wave names/object address and the "linked to program" map (+24..+39) cleared - untested.
 6. Markers of a STEREO sample are still unmeasured (the tab only writes the left addresses) - unchanged by this session.
+7. **Slice Editor > "Also fill a program with the slices"**: pick an empty program, export 4 then ~40 slices. Does every link land (the editor reports the first it
+   couldn't make), does the 4 s settle wait avoid the "silent after a link" hang (dev_docs/a4000-native-load-findings.md), is there a maximum samples-per-program, and does each
+   slice play on its own key (C1 upward) at its own pitch, one-shot? Check the program's Easy Edit slots read back default (key limits/shift) after the links.
