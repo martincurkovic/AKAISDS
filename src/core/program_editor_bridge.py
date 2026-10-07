@@ -1867,7 +1867,8 @@ class BridgeWorker(QThread):
             if set(chain) & taken:
                 problems.append("its keygroup addresses overlap another program's")
         for index, was in before.items():
-            now = after.get(index)
+            # the new program may have been slotted in BEFORE this one (the sampler keeps its list ordered), moving it down a place
+            now = after.get(index if index < new_index else index + 1)
             if now is None:
                 continue
             if (
