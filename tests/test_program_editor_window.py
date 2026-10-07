@@ -4451,15 +4451,15 @@ def test_create_program_from_slices_single_slice_maps_only_c1(editor, qapp):
     assert keygroup_writes[(0, "SNAME1")] == "TRIM"
 
 
-def test_create_program_from_slices_refuses_more_than_99_keygroups(editor):
+def test_create_program_from_slices_refuses_more_than_92_keygroups(editor):
     bridge = editor._bridge
     programs_before = list(bridge.program_list())
     success, message = editor._create_program_from_slices(
-        [f"S-{i}" for i in range(100)], 0, "TOO BIG",
+        [f"S-{i}" for i in range(93)], 0, "TOO BIG",
         lambda *a: None, lambda *a: None,
     )
     assert success is False
-    assert "99" in message
+    assert "92" in message
     assert bridge.program_list() == programs_before  # never even started
 
 
