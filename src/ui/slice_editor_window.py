@@ -151,6 +151,8 @@ class SliceEditorWindow(QDialog):
         program_names_provider=None,
         create_program_callback=None,
         cancel_callback=None,
+        extra_channels=None,
+        hide_bit_depth=False,
     ):
         super().__init__(parent)
         self.setWindowTitle(f'Slice Editor - "{sample_name}"')
@@ -158,6 +160,10 @@ class SliceEditorWindow(QDialog):
 
         self._samples = samples
         self._framerate = framerate
+        # the Yamaha editor's stereo samples: the OTHER channel(s), sliced at exactly the same frames as `samples` (which stays what
+        # the markers are placed on) and handed to export_callback as `extra_slices=`. None for everything else, which then calls
+        # export_callback exactly as before.
+        self._extra_channels = [list(c) for c in extra_channels] if extra_channels else None
         # computed ONCE here, reused on every Sensitivity slider tick - see
         # transient_detection.compute_flux's own docstring on why
         self._transient_flux, self._transient_window_frames = (
@@ -405,8 +411,12 @@ class SliceEditorWindow(QDialog):
             [(f"{d}-bit", d) for d in _BIT_DEPTH_OPTIONS], default=16
         )
         self.rate_combo = _build_quality_combo(_RATE_OPTIONS, default=None)
-        name_row.addWidget(QLabel("Bit depth:"))
+        bit_depth_label = QLabel("Bit depth:")
+        name_row.addWidget(bit_depth_label)
         name_row.addWidget(self.bit_depth_combo)
+        if hide_bit_depth:  # a sampler whose samples are always 16-bit (the Yamaha): nothing to choose
+            bit_depth_label.setVisible(False)
+            self.bit_depth_combo.setVisible(False)
         name_row.addWidget(QLabel("Sample rate:"))
         name_row.addWidget(self.rate_combo)
         name_row.addStretch()
@@ -920,6 +930,12 @@ class SliceEditorWindow(QDialog):
             else f"Exporting {slice_count} slices..."
         )
         QApplication.processEvents()
+        extra = {}
+        if self._extra_channels:
+            extra["extra_slices"] = [
+                sample_slicing.slice_samples(channel, self.waveform.start(), self.waveform.end(), markers)
+                for channel in self._extra_channels
+            ]
         try:
             success, message = self._export_callback(
                 names,
@@ -933,6 +949,7 @@ class SliceEditorWindow(QDialog):
                 self._on_export_progress,
                 self._on_export_status,
                 busy_callback=self._on_export_busy,
+                **extra,
             )
             if success and create_program:
                 # runs AFTER every slice has actually landed as a resident

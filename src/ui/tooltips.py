@@ -540,3 +540,16 @@ S1000_LOUDNESS_VELOCITY_NOTE = "Velocity > Loudness is the Velocity knob in Volu
 S1000_PAN_LFO_RATE = "Speed of the Pan LFO - the S1000's automatic left/right panning."
 S1000_PAN_LFO_DEPTH = "How far the Pan LFO swings the sound left and right."
 S1000_PAN_LFO_DELAY = "How long after a note starts before the Pan LFO fades in."
+
+
+# --- Yamaha A4000/A5000 Samples tab: edits make a NEW sample (the unit can't delete or overwrite one over MIDI) -----------------------------
+_YAMAHA_COPY_NOTE = " Makes a new sample - the original is not changed. Needs the audio loaded (double-click the waveform)."
+YAMAHA_TRIM_SAMPLE_BUTTON = "Trim the sample down to the Start/End markers." + _YAMAHA_COPY_NOTE
+YAMAHA_REVERSE_SAMPLE_BUTTON = "Reverse the sample so it plays backwards." + _YAMAHA_COPY_NOTE
+YAMAHA_FADE_SAMPLE_BUTTON = "Fade in up to the Start marker and out from the End marker." + _YAMAHA_COPY_NOTE
+YAMAHA_NORMALISE_SAMPLE_BUTTON = "Gain the sample up so its loudest point hits maximum amplitude (one gain for both channels of a stereo sample)." + _YAMAHA_COPY_NOTE
+YAMAHA_FILTER_SAMPLE_BUTTON = "Apply a highpass and/or lowpass filter (with a preview)." + _YAMAHA_COPY_NOTE
+YAMAHA_SLICE_EDITOR_BUTTON = (
+    "Chop the sample into slices and send each one to the sampler as a new sample (ReCycle-style). "
+    "Needs the audio loaded (double-click the waveform)."
+)

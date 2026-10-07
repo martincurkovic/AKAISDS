@@ -61,6 +61,7 @@ from core import debug_log
 from core import yamaha_markers as ym
 from core import yamaha_params as yp
 from core.audio_preview import SlicePreviewPlayer
+from ui import theme
 from ui import tooltips as tt
 from ui.editor_layout import (
     build_centered_row,
@@ -74,9 +75,12 @@ from ui.editor_layout import (
     sync_waveform_scrollbar,
 )
 from ui.envelope_graph import ADSREnvelopeGraph, LevelEnvelopeGraph, yamaha_adsr_values
+from ui.knob import Knob
+from ui.loop_preview_view import HALF_WINDOW_FRAMES, LoopJoinPreview
 from ui.qt_helpers import build_scroll_area, build_section_card
 from ui.waveform_view import WaveformView
 from ui.yamaha_fields import Field, FieldPanel
+from ui.yamaha_sample_edit import YamahaSampleEditor
 
 _SPECIAL_ORIGINAL = {-1: "Original", 128: "Original"}
 
@@ -128,6 +132,13 @@ _RELEASE_PREVIEW_MS = 2000
 #: the waveform area is 180 px tall: one mono view, or a stereo pair at half height each
 _GRAPH_SIZE = (200, 80)  # the envelope graphs (the S3000 editor's are 200 x 90)
 _MONO_VIEW_HEIGHT = 180
+_MARKERS = (("start", "Start"), ("loop_start", "Loop Start"), ("loop_end", "Loop End"), ("end", "End"))
+_MARKER_TIPS = {
+    "start": "Wave start: the frame playback begins at",
+    "loop_start": "Loop start: the frame the loop jumps back to (only for the looping modes)",
+    "loop_end": "Loop end: the last frame of the loop, after which it jumps back to the loop start (only for the looping modes)",
+    "end": "Wave end: the last frame that plays",
+}
 _STEREO_VIEW_HEIGHT = 90
 
 
@@ -214,16 +225,13 @@ def build_sample_cards(panel):
         row(s("level_key_scaling_level_1", "Scale level 1")),
         row(s("level_key_scaling_level_2", "Scale level 2")),
     )
-    loop = build_section_card(
-        "Loop & Wave",
-        row(c("loop_mode", "Loop mode")),
-        row(t("loop_tempo", "Loop tempo", format_tempo)),
+    # (the loop mode, the four addresses and the edit buttons live in the Loop Controls card above these cards - see the tab's _build)
+    info = build_section_card(
+        "Wave",
         row(t("sampling_frequency_l", "Sample rate", format_hz)),
-        row(t("wave_start_address", "Wave start", format_address)),
         row(t("wave_length", "Wave length", format_address)),
-        row(t("loop_start_address", "Loop start", format_address)),
         row(t("loop_length", "Loop length", format_address)),
-        row(t("loop_end_address", "Loop end", format_address)),
+        row(t("loop_tempo", "Loop tempo", format_tempo)),
     )
 
     filt = build_section_card(
@@ -299,7 +307,7 @@ def build_sample_cards(panel):
     # the page of cards sits inside a container that already applies the scroll-bar clearance on the right (the waveform card is
     # in it too): a second one here made every card 8 px narrower than the waveform card
     layout.setContentsMargins(0, 0, 0, 0)
-    for left, right in ((pitch, key_range), (level, loop), (filt, feg), (aeg, peg), (lfo, controls), (out, eq)):
+    for left, right in ((pitch, key_range), (level, info), (filt, feg), (aeg, peg), (lfo, controls), (out, eq)):
         equalize_card_heights(left, right)
         layout.addLayout(build_paired_row(left, right))
     layout.addStretch()
@@ -334,6 +342,9 @@ class YamahaSamplesTab(QWidget):
     status_message = Signal(str)
     #: the user asked to jump to a program that uses the sample
     sample_selected = Signal(str)
+    #: the edit buttons / Slice Editor made new samples on the unit: the host should re-read its sample list. The argument is the
+    #: name to select afterwards ("" = leave the selection)
+    samples_changed = Signal(str)
 
     def __init__(self, controller, session, sample_cache, writer=None, parent=None):
         super().__init__(parent)
@@ -356,6 +367,14 @@ class YamahaSamplesTab(QWidget):
         self._marker_job = None  # the marker write in progress: {"name", "steps", "index"}
         self._marker_pending = None  # the newest drag that arrived meanwhile: (sample name, view markers)
         self._preview = SlicePreviewPlayer(self)
+        self._edit_busy = False  # an edit's new sample is being sent to the unit
+        self._loops_enabled = False  # the shown sample's loop mode loops (the loop markers/knobs/preview apply)
+        self._marker_knobs = {}  # marker name -> (swatch, knob, value label)
+        self._syncing_knobs = False
+        self._preview_commit_timer = QTimer(self)  # a drag in the Loop Preview commits once it has been still for a moment
+        self._preview_commit_timer.setSingleShot(True)
+        self._preview_commit_timer.setInterval(400)
+        self._preview_commit_timer.timeout.connect(self._commit_markers_from_view)
         self._preview_reversed = 0  # frames in the reversed copy being played (0 = a forward preview)
         self._rows = {}  # sample name -> the duration label of its list row
         self._scan_token = 0  # bumped by every refresh/list change so a late scan result is dropped
@@ -378,6 +397,8 @@ class YamahaSamplesTab(QWidget):
             self.panel.edited.connect(self._on_edited)
         self._preview.position_changed.connect(self._on_preview_position)
         self._preview.finished.connect(self._clear_playheads)
+        theme.notifier.changed.connect(self._refresh_themed_swatches)
+        self._edits = YamahaSampleEditor(self)
         self._connected = True
 
     def _build(self):
@@ -452,19 +473,35 @@ class YamahaSamplesTab(QWidget):
         channel_stack.setContentsMargins(0, 0, 0, 0)
         channel_stack.addWidget(self.waveform_view)
         channel_stack.addWidget(self.waveform_view_right)
+        # The Loop Controls card is laid out like the S3000 editor's: zoom, the waveform(s), then the four markers as knobs, the loop
+        # mode and the edit buttons. (The A4000 has no loop hold or loop tune: its loop settings are the mode - owner's manual p.123 -
+        # and a loop tempo, shown in the Wave card below.)
+        marker_row = self._build_marker_row()
+        loop_mode_row = self.panel.labeled_row(_combo("loop_mode", "Loop Mode"), label_width=70)
+        edit_row = self._build_edit_row()
         waveform_card = build_section_card(
-            "Waveform",
+            "Loop Controls",
             zoom_row,
             channel_stack,
             self._row(scrollbar_container),
             self._row(self.waveform_hint),
+            marker_row,
+            loop_mode_row,
+            edit_row,
         )
+        # what the loop makes of the audio at its join (left channel), kept live with the markers
+        self.loop_preview = LoopJoinPreview()
+        self.loop_preview.marker_drag_delta.connect(self._on_loop_preview_dragged)
+        loop_preview_card = build_section_card("Loop Preview", self._row(self.loop_preview))
+        self.waveform_view.markers_changed.connect(self._update_marker_knobs)
+        self.waveform_view.markers_changed.connect(lambda _s, ls, le, _e: self._refresh_loop_preview(ls, le))
         self.cards_page = build_sample_cards(self.panel)
 
         cards_layout = QVBoxLayout()
         style_card_page_layout(cards_layout)
         cards_layout.addLayout(header)
         cards_layout.addWidget(waveform_card)
+        cards_layout.addWidget(loop_preview_card)
         cards_layout.addWidget(self.cards_page)
         cards_container = QWidget()
         cards_container.setLayout(cards_layout)
@@ -491,6 +528,155 @@ class YamahaSamplesTab(QWidget):
         row = QHBoxLayout()
         row.addWidget(widget)
         return row
+
+    # -- the marker knobs, loop preview and edit buttons (built like the S3000 editor's Loop Controls) ------------------
+
+    def _build_marker_row(self):
+        """Start / Loop Start / Loop End / End: a colour swatch, a name, a small knob and the frame number, like the S3000 editor.
+        Dragging a knob moves the marker on the waveform (pushing its neighbours, as a drag on the waveform does); letting go (or
+        typing a value) writes the addresses that changed - the same guarded path as dragging a marker."""
+        row = QHBoxLayout()
+        row.setSpacing(18)
+        for name, display in _MARKERS:
+            swatch = QLabel()
+            swatch.setFixedSize(10, 10)
+            swatch.setProperty("swatchKind", "marker_boundary" if name in ("start", "end") else "marker_loop")
+            self._refresh_swatch(swatch)
+            knob = Knob()
+            knob.setRange(0, 0)
+            knob.setFixedSize(28, 28)
+            knob.setToolTip(_MARKER_TIPS[name])
+            knob.setEnabled(False)
+            value_label = QLabel("-")
+            value_label.setFixedWidth(64)  # frame counts run well past six digits
+            knob.valueChanged.connect(lambda v, lbl=value_label: lbl.setText(f"{v:,}"))
+            knob.valueChanged.connect(lambda v, n=name: self._on_marker_knob_changed(n, v))
+            knob.sliderReleased.connect(self._commit_markers_from_view)  # fires on a drag's release AND a typed value
+            self._marker_knobs[name] = (swatch, knob, value_label)
+            field = QHBoxLayout()
+            field.setSpacing(4)
+            field.addWidget(swatch)
+            field.addWidget(QLabel(display + ":"))
+            field.addWidget(knob)
+            field.addWidget(value_label)
+            row.addLayout(field)
+        row.addStretch()
+        return row
+
+    def _build_edit_row(self):
+        """Trim / Reverse / Fade / Normalise / Filter, and the Slice Editor. Each edit makes a NEW sample (the A4000 can't delete or
+        overwrite a sample over MIDI), so the original is never touched - see ui/yamaha_sample_edit.py."""
+        row = QHBoxLayout()
+        row.setSpacing(8)
+        self.edit_buttons = {}
+        for key, label, tip in (
+            ("trim", "Trim to Markers", tt.YAMAHA_TRIM_SAMPLE_BUTTON),
+            ("reverse", "Reverse sample", tt.YAMAHA_REVERSE_SAMPLE_BUTTON),
+            ("fade", "Fade In/Out", tt.YAMAHA_FADE_SAMPLE_BUTTON),
+            ("normalise", "Normalise Sample", tt.YAMAHA_NORMALISE_SAMPLE_BUTTON),
+            ("filter", "Filter Sample\u2026", tt.YAMAHA_FILTER_SAMPLE_BUTTON),
+        ):
+            button = QPushButton(label)
+            button.setToolTip(tip)
+            button.setEnabled(False)
+            self.edit_buttons[key] = button
+            row.addWidget(button)
+        row.addStretch()
+        self.slice_button = QPushButton("Slice Editor\u2026")
+        self.slice_button.setToolTip(tt.YAMAHA_SLICE_EDITOR_BUTTON)
+        self.slice_button.setEnabled(False)
+        row.addWidget(self.slice_button)
+        return row
+
+    def _swatch_color(self, swatch):
+        palette = theme.current_palette()
+        if swatch.property("swatchKind") == "marker_boundary" or not self._loops_enabled:
+            return palette["text_disabled"]  # (a loop swatch greys out with its loop, like the S3000's)
+        return palette["keygroup_color_3"]
+
+    def _refresh_swatch(self, swatch):
+        swatch.setStyleSheet(f"background-color: {self._swatch_color(swatch)}; border-radius: 2px;")
+
+    def _refresh_themed_swatches(self):
+        for swatch, _knob, _label in self._marker_knobs.values():
+            self._refresh_swatch(swatch)
+
+    def _set_marker_knob_range(self, frames):
+        for _swatch, knob, _label in self._marker_knobs.values():
+            knob.blockSignals(True)
+            knob.setRange(0, max(frames - 1, 0))
+            knob.blockSignals(False)
+
+    def _update_marker_knobs(self, start, loop_start, loop_end, end):
+        """The waveform's markers changed (a drag, a pushed neighbour, a new sample): show them on the knobs without echoing back."""
+        values = {"start": start, "loop_start": loop_start, "loop_end": loop_end, "end": end}
+        for name, (_swatch, knob, label) in self._marker_knobs.items():
+            knob.blockSignals(True)
+            knob.setValue(values[name])
+            knob.blockSignals(False)
+            label.setText(f"{values[name]:,}")
+
+    def _clear_marker_knobs(self):
+        self._set_marker_knob_range(0)
+        for _swatch, knob, label in self._marker_knobs.values():
+            knob.blockSignals(True)
+            knob.setValue(0)
+            knob.blockSignals(False)
+            label.setText("-")
+
+    def _on_marker_knob_changed(self, name, value):
+        if not self.waveform_view.has_header():
+            return
+        # pushes neighbours exactly like a drag, then markers_changed re-syncs every knob (this one too, if it was pushed back)
+        self.waveform_view.set_marker(name, value)
+
+    def _commit_markers_from_view(self):
+        """Write whatever the markers on the waveform now say (the knob was let go, or a Loop Preview drag went still)."""
+        self._preview_commit_timer.stop()
+        view = self.waveform_view
+        if not view.has_header():
+            return
+        m = view.markers()
+        self._on_marker_committed(view, None, (m["start"], m["loop_start"], m["loop_end"], m["end"]))
+
+    def _on_loop_preview_dragged(self, name, delta):
+        # the Loop Preview only reports a frame DELTA against its own zoom: apply it through the same entry point the knobs use,
+        # and write once the drag has been still for a moment (the preview has no "let go" signal of its own)
+        if not self.waveform_view.has_header() or not self._markers_editable():
+            return
+        self._on_marker_knob_changed(name, self.waveform_view.markers()[name] + delta)
+        self._preview_commit_timer.start()
+
+    def _refresh_loop_preview(self, loop_start, loop_end):
+        if not self._loops_enabled:
+            self.loop_preview.clear_no_loop()
+            return
+        before = self.waveform_view.samples_before(loop_end, HALF_WINDOW_FRAMES)
+        after = self.waveform_view.samples_after(loop_start, HALF_WINDOW_FRAMES)
+        if before is None or after is None:
+            self.loop_preview.clear()
+        else:
+            self.loop_preview.set_join(before, after)
+
+    def _markers_editable(self):
+        return self._writer is not None and self._loading_name is None and not self._edit_busy
+
+    def _set_edit_busy(self, busy):
+        """A new sample is being sent to the unit (an edit or a slice export): nothing else on the tab may start meanwhile."""
+        self._edit_busy = busy
+        self._apply_marker_lock()  # also refreshes the edit buttons
+
+    def _set_loops_enabled(self, loops):
+        """The shown sample's loop mode loops (or not): the loop markers, knobs, swatches and preview follow."""
+        self._loops_enabled = loops
+        for kind in ("loop_start", "loop_end"):
+            self._refresh_swatch(self._marker_knobs[kind][0])
+        self._apply_marker_lock()
+        m = self.waveform_view.markers() if self.waveform_view.has_header() else None
+        if m is None:
+            self.loop_preview.clear_no_loop() if not loops else self.loop_preview.clear()
+        else:
+            self._refresh_loop_preview(m["loop_start"], m["loop_end"])
 
     # -- the list -----------------------------------------------------------------------------------------
 
@@ -721,15 +907,20 @@ class YamahaSamplesTab(QWidget):
             for view in views:
                 view.clear()
                 view.set_placeholder_text("This sample is empty")
+            self._clear_marker_knobs()
+            self._set_loops_enabled(False)
             return
         self._shown_markers = (start, loop_start, loop_end, end)
         loaded = name == self._audio_name and self._audio_samples is not None
+        self._set_marker_knob_range(frames)
         for view, samples in ((self.waveform_view, self._audio_samples), (self.waveform_view_right, self._audio_samples_right)):
             view.set_loop_enabled(loops)
             if loaded and samples is not None:
                 view.set_waveform(samples, start, loop_start, loop_end, end)
             else:
                 view.set_header(frames, start, loop_start, loop_end, end)
+        self._update_marker_knobs(start, loop_start, loop_end, end)
+        self._set_loops_enabled(loops)
         if not loaded:
             self._set_hint(_LOAD_HINT)
         elif self._writer is None:
@@ -756,9 +947,13 @@ class YamahaSamplesTab(QWidget):
 
     def _apply_marker_lock(self):
         """Markers can be dragged when the tab can write, except while the audio is arriving (the views are being filled)."""
-        locked = self._writer is None or self._loading_name is not None
+        locked = self._writer is None or self._loading_name is not None or self._edit_busy
         for view in (self.waveform_view, self.waveform_view_right):
             view.set_markers_locked(locked)
+        has_header = self.waveform_view.has_header()
+        for name, (_swatch, knob, _label) in self._marker_knobs.items():
+            knob.setEnabled(has_header and not locked and (self._loops_enabled or name in ("start", "end")))
+        self.update_edit_buttons()
 
     def _other_view(self, view):
         return self.waveform_view_right if view is self.waveform_view else self.waveform_view
@@ -1067,6 +1262,20 @@ class YamahaSamplesTab(QWidget):
         self.cancel_load_button.setVisible(False)
         self._set_hint(_LOAD_HINT)
 
+    def update_edit_buttons(self):
+        """The edit buttons need the audio of the SHOWN sample in memory, no load or edit running, and a tab that can write."""
+        ready = (
+            self._writer is not None
+            and self._selected is not None
+            and self._audio_name == self._selected
+            and self._audio_samples is not None
+            and self._loading_name is None
+            and not self._edit_busy
+        )
+        for button in self.edit_buttons.values():
+            button.setEnabled(ready)
+        self.slice_button.setEnabled(ready)
+
     @property
     def loading(self):
         """True while the audio of a sample is being received."""
@@ -1077,6 +1286,7 @@ class YamahaSamplesTab(QWidget):
         if not self._connected:
             return
         self._connected = False
+        theme.notifier.changed.disconnect(self._refresh_themed_swatches)
         self._preview.stop()
         self._marker_pending = None
         self._scan_token += 1

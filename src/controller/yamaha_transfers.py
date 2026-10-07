@@ -39,6 +39,7 @@ class YamahaTransfers:
     def __init__(self, controller):
         self._c = controller
         self.names = []  # the samples of the last list read, in order (index == number)
+        self.loaded_names = []  # the names the samples of the LAST send really landed under (a clash adds a number), in order
         self.busy = False  # a receive or a send is running
         self._mode = None  # "receive" / "send" while busy
         self._send_total = 0
@@ -258,7 +259,8 @@ class YamahaTransfers:
 
     def send_file_queue(self, entries):
         """Load WAV files as new samples. entries: the Dashboard's dicts (filepath, name or None, sample_rate or None, mono; the
-        bit depth is ignored - the unit's waves are always 16-bit). Reports through the controller's signals like the other
+        bit depth is ignored - the unit's waves are always 16-bit), optionally with `params`: sample rows to carry over
+        (`core.yamaha_load.CARRIED_ROWS` - the Samples tab's edited copies keep their key, tuning, loop mode and markers). Reports through the controller's signals like the other
         engines: transfer_progress / unit_progress, file_transferred per file that landed, transfer_finished at the end."""
         if not entries:
             return False
@@ -271,6 +273,7 @@ class YamahaTransfers:
         self.busy = True
         self._mode = "send"
         self._token += 1
+        self.loaded_names = []
         self._queue = list(entries)
         self._send_total = len(entries)
         self._send_done = 0
@@ -340,7 +343,9 @@ class YamahaTransfers:
         try:
             wanted = yl.sample_name_for(entry.get("name") or base)
             name = yl.unique_name(wanted, samples)
-            load = yl.build_sample_load(self._session.device, name, channels, rate, taken_samples=samples, taken_waves=waves)
+            load = yl.build_sample_load(
+                self._session.device, name, channels, rate, taken_samples=samples, taken_waves=waves, params=entry.get("params")
+            )
         except yl.LoadError as e:
             self._c.status_changed.emit(f"Skipping {base}: {e}")
             self._send_skipped += 1
@@ -418,6 +423,7 @@ class YamahaTransfers:
             self._send_failed_check(token, load, label, problem)
             return
         self._send_done += 1
+        self.loaded_names.append(load.sample_name)
         self._send_current = None
         self._c.unit_progress.emit(1.0)
         self._c.file_transferred.emit(entry["filepath"])

@@ -109,8 +109,22 @@ def _put32(data, offset, value):
     data[offset : offset + 4] = int(value).to_bytes(4, "big")
 
 
-def build_sample_payload(name, wave_names, frames, rate, *, original_key=60):
-    """The 336-byte sample dump payload for a sample of `frames` frames at `rate` Hz that plays from start to end once (no loop)."""
+#: the sample rows a caller may set when it makes a sample from an EXISTING one (an edited copy): the musical settings that belong to
+#: the sound, and the wave/loop addresses (which the caller works out for the new audio). Everything else stays at the template's defaults.
+CARRIED_ROWS = (
+    "original_key_l", "original_key_r", "coarse_tune", "fine_tune_l", "fine_tune_r", "loop_mode",
+    "wave_start_address", "wave_length", "wave_end_address", "loop_start_address", "loop_length", "loop_end_address",
+)
+
+
+def build_sample_payload(name, wave_names, frames, rate, *, original_key=60, params=None):
+    """The 336-byte sample dump payload for a sample of `frames` frames at `rate` Hz that plays from start to end once (no loop).
+
+    `params` ({row key: value}, keys from `CARRIED_ROWS`) overrides those defaults - how an edited copy of a sample keeps its key,
+    tuning, loop mode and markers."""
+    unknown = sorted(set(params or {}) - set(CARRIED_ROWS))
+    if unknown:
+        raise LoadError(f"Can't carry over {', '.join(unknown)}")
     data = bytearray(_TEMPLATE)
     data[2:18] = ysx.pad_name(name)
     data[yp.WAVE_NAME_L_OFFSET : yp.WAVE_NAME_L_OFFSET + 16] = ysx.pad_name(wave_names[0])
@@ -130,6 +144,10 @@ def build_sample_payload(name, wave_names, frames, rate, *, original_key=60):
         "original_key_r": original_key,
     }
     values["sampling_frequency_r"] = rate  # (measured: a mono sample otherwise keeps the template's 44100 there)
+    carried = dict(params or {})
+    if "original_key_l" in carried:
+        carried.setdefault("original_key_r", carried["original_key_l"])
+    values.update(carried)
     for key, value in values.items():
         yp.store(yp.get("sample", key), data, value)
     for key in _RIGHT_TWIN_ROWS:  # the unit keeps a right-channel copy of these four addresses
@@ -154,10 +172,12 @@ def check_audio(channels, rate):
     return frames
 
 
-def build_sample_load(device, name, channels, rate, *, taken_samples=(), taken_waves=(), original_key=60, rng=random):
+def build_sample_load(
+    device, name, channels, rate, *, taken_samples=(), taken_waves=(), original_key=60, rng=random, params=None
+):
     """The messages that load a sample. `channels`: one list of int16 per channel (1 = mono, 2 = stereo, equal length); `rate` in Hz;
     `taken_samples` / `taken_waves`: names already on the unit (a clash is the CALLER's policy - see `unique_name` - this only
-    guarantees the WAVE names are new). Raises `LoadError` for audio the unit can't hold."""
+    guarantees the WAVE names are new); `params`: see `build_sample_payload`. Raises `LoadError` for audio the unit can't hold."""
     frames = check_audio(channels, rate)
     name = sample_name_for(name)
     taken = list(taken_waves)
@@ -167,6 +187,6 @@ def build_sample_load(device, name, channels, rate, *, taken_samples=(), taken_w
     messages = []
     for wave, words in zip(waves, channels):
         messages += yamaha_wave.build_wave_messages(device, wave, [int(w) for w in words])
-    payload = build_sample_payload(name, waves, frames, rate, original_key=original_key)
+    payload = build_sample_payload(name, waves, frames, rate, original_key=original_key, params=params)
     messages.append(ysx.build_bulk_dump(device, "SP", ysx.pad_name(name), payload))
     return SampleLoad(name, waves, frames, rate, messages)

@@ -230,6 +230,7 @@ class YamahaProgramEditorWindow(QMainWindow):
         programs_tab.setLayout(build_content_row(programs_container, assigned_container, right_container))
         self.samples_tab = YamahaSamplesTab(self._controller, self._session, self._sample_cache, self._writer)
         self.samples_tab.status_message.connect(lambda m: self.status_bar.showMessage(m, 8000))
+        self.samples_tab.samples_changed.connect(self._on_samples_changed)
         self.main_tabs = QTabWidget()
         self.main_tabs.setTabBar(FullWidthTabBar(self.main_tabs))
         self.main_tabs.addTab(programs_tab, "Programs")
@@ -534,6 +535,18 @@ class YamahaProgramEditorWindow(QMainWindow):
         self._apply_visibility()
         self._show_placeholder("Reading the programs...")
         self._start_scan()
+
+    def _on_samples_changed(self, select_name):
+        """The Samples tab made new samples (an edit's copy, slices): re-read the sample list and show them."""
+        self._session.request_object_list(lambda entries: self._on_new_sample_list(entries, select_name))
+
+    def _on_new_sample_list(self, entries, select_name):
+        if entries is None or not self._connected:
+            return
+        self._sample_names = [e.name for e in entries if e.kind == "sample"]
+        self.samples_tab.set_samples(self._sample_names)
+        if select_name and select_name in self._sample_names:
+            self.samples_tab.select_sample(select_name)
 
     # -- the background scan (names + assigned counts) --------------------------------------------------------
 

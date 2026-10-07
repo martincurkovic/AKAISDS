@@ -230,6 +230,11 @@ class SamplerController(QObject):
             self._yamaha_transfers_engine = YamahaTransfers(self)
         return self._yamaha_transfers_engine
 
+    def yamaha_loaded_names(self):
+        """The sample names the last Yamaha send really landed under (a clash with an existing name adds a number)."""
+        engine = self._yamaha_transfers_engine
+        return list(engine.loaded_names) if engine is not None else []
+
     def is_yamaha_model(self):
         return sampler_models.is_yamaha(self.sampler_model)
 
