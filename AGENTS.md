@@ -513,7 +513,7 @@ samples | cards, and a Samples tab; every writable control edits the unit) all e
 - **The Transfer Dashboard lists and receives natively too** (`controller/yamaha_transfers.py`, built lazily by `SamplerController`):
   Refresh = the object list's samples (`sample_list_updated`, index == number == SDS position - measured to stay true after a
   delete); Receive = SP dump + the wave dump(s) -> a mono or STEREO WAV at the sample's rate. Delete/rename/info are refused (no
-  known opcode - front panel). **SENDING samples is still plain SDS** (`device_type` "generic"; the native route for loading
+  delete/rename OPCODE; the front-panel remote `58 03` could drive the menus open loop - see the roadmap, untested). **SENDING samples is still plain SDS** (`device_type` "generic"; the native route for loading
   audio is unmeasured). `is_sds_transfer_busy()` (what the session waits out) vs `is_transfer_busy()` (also counts a running
   Yamaha receive, which goes THROUGH the session - never make the session wait on that one).
 - SDS facts that still hold (the Dashboard's sends use it): number == the sample's CURRENT list position, also after a delete
@@ -642,7 +642,7 @@ samples | cards, and a Samples tab; every writable control edits the unit) all e
   dump (`SP`, from a real user sample's captured parameters with name/wave names/rate/addresses set); `YamahaSession.send_messages` sends them
   paced by wire time + `send_gap_ms` (400); `YamahaTransfers.send_file_queue` drives it (WAV -> channels, mono/stereo, rate override) and VERIFIES
   (wait `verify_delay_ms`, object list holds the sample + waves, SP read-back matches frames/rate/stereo; each read retried - the first read after a
-  load is sometimes unanswered). MEASURED: a bulk dump sent to the unit is never answered ("MIDI Bulk Received" on its LCD; it needs no OK pressed);
+  load is sometimes unanswered). MEASURED: a bulk dump sent to the unit is never answered ("MIDI Bulk Received" on its LCD - **it DOES need OK pressed before long**: see "Silent unit" below);
   a WD alone is dropped - it only counts with the SP that names it (either order); a missing/short/duplicated/reordered wave message creates
   NOTHING; a wave under an existing wave's name is overwritten IN PLACE (so our wave names are random `SMP nnnnnn`, never derived from the sample
   name); a sample under an existing SAMPLE name is replaced in place with ALL its parameters reset (so the app never overwrites: a clash gets
@@ -653,6 +653,14 @@ samples | cards, and a Samples tab; every writable control edits the unit) all e
   MIDI**, so the Yamaha Dashboard has NO memory bar and Settings has no wave-memory field (both removed 2026-10-07 at the user's request:
   the old estimate read every sample's SP dump on each list refresh - same cost as the removed duration scan; a stale
   `yamaha_wave_memory_kb` key in `config.json` is simply ignored). Don't re-add one without a cheap source for the sizes. Sending needs a MIDI input (the check reads the unit).
+- **Silent unit after bulk loads (MEASURED 2026-10-07, unattended run - `dev_docs/a4000-editor-roadmap.md` "Session 6")**: after native loads the unit
+  can show a front-panel "MIDI Bulk Received" message and then answers NOTHING over MIDI (identity, object list, links - dead for 20+ min) until a
+  person presses OK (Knob 5) on it. MEASURED with nobody touching it: still silent 716 s after a link, answered the moment OK was pressed (the message was visible the whole time, and the unit was already silent to an identity request right after the load, before the link). Reads often still work right after a load; the first LINK (`change_link`) after loads is what hung it in 5 of 6 runs
+  (mono and stereo; the link itself DOES take effect, only the confirmation never comes). A front-panel-remote Knob 5 push (`58 03`) is NOT processed
+  while it is silent; sent while the unit still answered it once avoided the hang (n=1, a batch of 3 loads + one push still hung) - unproven, not used by the app. The app copes:
+  `yamaha_sample_edit._recover_silent_link` (the slice fill) tells the user to press OK, waits until the unit answers (probing with a General-MIDI
+  IDENTITY request - an object-list request pops "Transmitting Object List" on the unit every time, which is the wrong thing to repeat at a unit
+  waiting for OK), checks whether the link landed and only re-sends it if not (only when the link got NO answer at all: `result.linked is None`); the Assign dialog's failure text carries the same hint. Tell any tester: watch the unit's display during loads/assigns.
 - **HANDOFF (end of session 3, 2026-10-06):** sessions 1-2 are committed on `s1000-support`; session 3's work (restore + assign) may be
   UNCOMMITTED - check `git status` and offer a commit; the suite had 2060 passing tests. Read `dev_docs/a4000-editor-roadmap.md` "HANDOFF"
   and "Next steps" before continuing: (markers + preview are DONE, see above - stereo markers still need a real stereo sample), then the missing tables
