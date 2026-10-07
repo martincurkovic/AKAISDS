@@ -605,3 +605,21 @@ Easy Edit rows through the session: 6/6 EXACT on program 001 slot 0 (level/pan o
   dump SP --name "sine wave" | param program 001 2 0 0 3 0 | listen 60 | decode <file>}`. It only ever sends identity /
   dump / parameter requests and object select (a guard refuses anything else) and saves every reply under
   `~/.akaisds/a4000_discovery/`. `--device N` if the unit's Device Number changes; `--fill 0` if a name needs NUL padding.
+
+
+## Session 5 (2026-10-07): the Samples tab's S3000-style Loop Controls, sample edits, Slice Editor, demo launcher
+
+Done (all against `FakeA4000`; see AGENTS.md "Samples tab = the S3000 editor's Loop Controls layout" and "Edits ... make NEW samples"):
+marker knobs + Loop Mode + Loop Preview in a **Loop Controls** card; Trim / Reverse / Fade / Normalise / Filter and the Slice Editor, each creating a NEW sample
+(carrying the source's key, tuning, loop mode and markers); `tools/a4000_demo.py`. The A4000 has no loop hold/loop tune parameters.
+
+**To verify on the real A4000** (none of this has touched one):
+1. Trim a mono one-shot, then a LOOPING sample (loop mode 1) - does the copy keep the loop (mode, start, end) and play like the original? Compare `NAME TRIM`'s
+   sample dump with the original's (`tools/a4000_discovery.py`): the loop/wave address rows and the right-channel twins.
+2. Reverse / Normalise / Fade / Filter on a STEREO sample - both channels present and in step, and the copy is stereo (`is_stereo`).
+3. Tuning: a sample with a non-zero original key and fine tune - are they carried over (key, coarse, fine L/R)?
+4. Slice Editor: export 8+ slices of a stereo sample in one queue - does the unit keep up (memory, pacing, the verification reads), and are the names right
+   when some already exist (` 2` suffix)?
+5. What the copy does NOT carry (envelopes, filter, EQ, LFO, controllers, outputs): the new sample has the template's defaults. If that matters, the next step is
+   building the copy's SP from the source's own dump with the name/wave names/object address and the "linked to program" map (+24..+39) cleared - untested.
+6. Markers of a STEREO sample are still unmeasured (the tab only writes the left addresses) - unchanged by this session.
