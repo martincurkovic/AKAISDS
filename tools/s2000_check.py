@@ -202,7 +202,49 @@ def stage_multi(bridge, _arg=None):
     stage_p3(bridge, base)
 
 
-STAGES = {"multi": stage_multi, "snapshot": stage_snapshot, "create": stage_create, "p3": stage_p3}
+def stage_p1(bridge, program=None):
+    """Cut a program's blocks to 150 bytes (what an S1000 program is), convert them to the S2000 layout, load that, compare with the original."""
+    before = snapshot(bridge)
+    names = [s["name"] for s in before.values()]
+    src = names.index(program) if program in names else 0
+    worker = peb.BridgeWorker(bridge)
+    exported = []
+    worker.program_exported.connect(lambda i, f: exported.append(f))
+    worker._handle_export_program(src)
+    pf = exported[0]
+    p1 = apf.parse_file(apf.build_file(pf.program[:150], [k[:150] for k in pf.keygroups]))
+    check(p1.block_size == 150 and p1.extension == ".p1", f"made a {p1.extension} from {pf.name!r} ({len(p1.keygroups)} keygroups)")
+    conv = apf.convert_s1000_to_s3000(p1)
+    check(conv.block_size == 192, "converted to 192-byte blocks")
+    load_name = f"P1-{int(time.time()) % 100000}"
+    imported, failed = [], []
+    worker.program_imported.connect(lambda i, n: imported.append((i, n)))
+    worker.program_import_failed.connect(lambda n, m: failed.append((n, m)))
+    worker._handle_import_program(conv, load_name)
+    check(imported and not failed, f"loaded {load_name!r}: imported={imported} failed={failed}")
+    after = snapshot(bridge)
+    show(after)
+    names2 = [s["name"] for s in after.values()]
+    if load_name in names2:
+        new, orig = after[names2.index(load_name)], before[src]
+        check(new["groups"] == orig["groups"], f"same keygroup count ({new['groups']})")
+        # the whole header apart from pointer bytes (1-2) and the name (3-14)
+        mask = lambda b: bytes(b[:1]) + bytes(14) + bytes(b[15:])  # noqa: E731
+        check(mask(new["header"]) == mask(orig["header"]), "program header identical to the original apart from pointer and name")
+        diffs = [i for i in range(192) if mask(new["header"])[i] != mask(orig["header"])[i]]
+        if diffs:
+            say("INFO", f"   differing header bytes: {diffs}")
+        for k, (a, b) in enumerate(zip(new["keygroups"], orig["keygroups"])):
+            same = strip_ptr(a) == strip_ptr(b)
+            check(same, f"keygroup {k + 1} identical to the original apart from the pointer bytes")
+            if not same:
+                say("INFO", f"   differing bytes: {[i for i in range(192) if strip_ptr(a)[i] != strip_ptr(b)[i]]}")
+    for i, s in before.items():
+        j = names2.index(s["name"])
+        check(after[j]["header"] == s["header"] and after[j]["keygroups"] == s["keygroups"], f"{s['name']!r} untouched")
+
+
+STAGES = {"p1": stage_p1, "multi": stage_multi, "snapshot": stage_snapshot, "create": stage_create, "p3": stage_p3}
 
 
 def main():
