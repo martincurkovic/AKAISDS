@@ -51,7 +51,7 @@ Same rules as `s1000_test_plan.md`: **safest to riskiest, and stop at the first 
 - [ ] B6. Check the other programs on the sampler are unchanged (play one, or compare their parameters before/after).
 
 **C. Refusals and errors (none should write anything)**
-- [ ] Load a `.p1` while set to S2000/S3000 -> a message about the sampler type, nothing sent.
+- [ ] Load a `.p1` while set to S2000/S3000 -> a confirmation that it will be CONVERTED (S2000-only parameters neutral, may sound slightly different); No sends nothing. (A `.p3` on an S1000 is still refused.) **With a GENUINE S1000 `.p1`: does it load, and does it sound like the original?**
 - [ ] Load a non-program file renamed `x.p3` -> "Couldn't read this file", nothing sent.
 - [ ] Load a truncated copy of a real file (cut a few bytes off) -> "the file is truncated".
 - [ ] Pull the MIDI cable partway through a Load -> an error that says a partly loaded program may remain; refresh and delete it.
