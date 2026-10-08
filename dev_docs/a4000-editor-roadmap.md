@@ -6,6 +6,9 @@ hardware and the editor works end to end - read AND write for program / Easy Edi
 waveform (both channels of a stereo sample), and the Transfer Dashboard lists and receives samples natively. What is left is in
 "HANDOFF" and "Next steps" below.**
 
+> **Newest first: see "Session 7" at the end of this file** (Detect Pitch, loading bar, assign warning). The HANDOFF below is from session 3 and its
+> repo-state/unit-state paragraphs are historical.
+
 ## HANDOFF - where session 3 stopped (read this first)
 
 **Repo state:** branch `s1000-support`. Sessions 1-2 are COMMITTED (the user commits as the session goes). **Session 3 (restore from backup
@@ -675,3 +678,18 @@ The user left the unit connected ("nothing of value on it, do risky things"). `t
   pop "Transmitting Object List" (Knob 5 aborts that, then it shows its busy metronome for a while). The Knob 5 remote (`58 03`) is not processed while blocked.
 * **40-slice fill PROVEN** (mono, 40 x 150 frames: export 663 s; fill 14 s once the unit answered), each slice on keys 36..75, one-shot, linked; and a program
   took **96 samples with no refusal** (the limit, if any, is above that). A program fill of 6 slices works without stalls when the user has pressed OK in time.
+
+## Session 7 (2026-10-08, no hardware): Detect Pitch, loading bar, assign warning
+
+Built against `FakeA4000` only (full suite 2242+ passing); details in AGENTS.md ("Detect Pitch", "Loading bar", "Assigning a sample this app loaded over MIDI").
+
+* **Detect Pitch** (Samples tab, Pitch card). **To verify on the unit**: (1) the Fine tune unit - detect a pitch on a tone that is a known number of cents off
+  and read back what is written (`FINE_TUNE_STEPS_PER_CENT`, assumed 1.0); (2) the sign - after Detect Pitch, play the sample at its Original key against a
+  tuner, it should be in tune (a positive Fine tune is assumed to raise the pitch); (3) a STEREO sample - does the unit mirror the left key/fine tune into the right?
+* **Loading bar** in the editor window (`YamahaSession.busy_changed`). Nothing hardware-specific; just look at it during a refresh on the real unit (the
+  200 ms / 150 ms debounce was copied from the S3000 editor, whose reads are slower per step).
+* **Assign warning** for samples this app loaded over MIDI (the session 6 link/silent-unit finding). Still unexplained and still the most valuable thing to
+  measure: does the unit stay silent only for natively LOADED samples, or also ones recorded on it? Is there anything (a pause, a front-panel state) that makes the first
+  link safe? If a cause is found, replace the warning with the real guard.
+* Still the best next steps WITHOUT the unit: the missing parameter tables (effects, controllers, MIDI-channel bitmaps) as rows + fake tests, then verified later with
+  `tools/a4000_verify_params.py`; polish backlog items (per-sample waveform memory, last program/tab, Device Number field in Settings, A5000 gating).
