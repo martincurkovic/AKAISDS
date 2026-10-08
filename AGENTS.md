@@ -1078,6 +1078,9 @@ since the 2026-09-27 `s3ked` bump); `_handle_program_change` still needs
 the raw wire byte for the actual MIDI message, so it explicitly subtracts
 the offset back out after reading.
 
+The multi's on-disk FILE format (4096 bytes: 1024-byte header + 16 x 192-byte parts, same offsets as the SysEx `multipart` region) is researched in
+`dev_docs/s3000-multi-file-format.md` - read it before building any multi Save/Load.
+
 The 16 Multis-tab part combos hold their OWN copy of every program name -
 renaming a program needs an explicit `_update_multi_program_combo_names()`
 push; a full list reload alone won't catch it.
