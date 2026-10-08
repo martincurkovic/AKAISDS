@@ -689,6 +689,14 @@ samples | cards, and a Samples tab; every writable control edits the unit) all e
   as "(unexpected)"). No reply = treated as an A4000 and asked again at the next Refresh. NOT done: A5000 MIDI-B channels 17-32 are still not named in the
   receive-channel dropdown, `effect456_connection` has no control, and **bulk requests still use the A4000 header (`HEADER_A4000`) - whether a real A5000
   answers them is unknown**, so this only decides what the UI offers. `FakeA4000(model="A5000")` answers identity as an A5000. Tests: `tests/test_yamaha_a5000_gating.py`.
+- **Long operations freeze the Yamaha editor's navigation (session 7)**: while an audio load or an edit's/slice export's send runs (`samples_tab.long_operation`,
+  announced by `YamahaSamplesTab.busy_changed`) or a restore/assignment runs, `_apply_lock` disables the program/assigned/sample lists, "Show empty programs",
+  the tab bar, Refresh, the Hardware/Window menu actions that start things, the parameter controls and the assign/remove/Edit Sample buttons (`_is_busy`), and
+  shows a bottom-row **Cancel** (`_cancel_long_operation`: the load's own `_cancel_load`, else `controller.cancel_transfer()`; none for a restore/assignment).
+  WHY: the session is one FIFO, so a click on another sample only QUEUED its read behind the transfer, swapped the cards (and the progress bar with them) for a
+  "Reading..." placeholder, and the window looked hung. Deliberately NOT `main_tabs.setEnabled(False)` like the S3000 editor's `_set_hardware_busy_ui`: that
+  would also grey the tab's own "Cancel load", waveform and progress bar. Programmatic `select_sample` still works while locked (the lists only block clicks).
+  Tests: `tests/test_yamaha_busy_lock.py`.
 - **Edit progress bar (session 7)**: Trim/Reverse/Fade/Normalise/Filter on the Yamaha Samples tab show the S3000 editor's small determinate bar
   (`tab.edit_progress`, 140 px, right of the zoom buttons) plus a `Reverse "NAME" - 45%` status-bar message while the new sample goes out, fed by
   `controller.transfer_progress` (bytes on the wire; the "Checking..." read-back afterwards has no bar). It is connected in
