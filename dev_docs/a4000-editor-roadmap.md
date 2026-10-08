@@ -693,3 +693,6 @@ Built against `FakeA4000` only (full suite 2242+ passing); details in AGENTS.md 
   link safe? If a cause is found, replace the warning with the real guard.
 * Still the best next steps WITHOUT the unit: the missing parameter tables (effects, controllers, MIDI-channel bitmaps) as rows + fake tests, then verified later with
   `tools/a4000_verify_params.py`; polish backlog items (per-sample waveform memory, last program/tab, Device Number field in Settings, A5000 gating).
+* **A5000 gating** (see AGENTS.md): the editor identifies the unit and hides effects 4-6 as output targets unless it is an A5000. **To verify on the A4000**: open the editor and check
+  (1) the Output dropdowns (Program > Audio Input, assigned sample's Output, Samples tab > Output) end at `effect3` and nothing else changed, (2) `YamahaEditor: identity: A4000` is in
+  `~/.akaisds/akaisds.log`, (3) opening the editor with the unit's MIDI-in cable pulled still shows the usual "no reply" message (the identity request must not make it worse).
