@@ -176,6 +176,19 @@ def test_reverse_makes_a_reversed_copy(window):
     settle_edit(tab)
 
 
+def test_an_edit_shows_its_send_progress_in_a_bar_that_goes_away_afterwards(window):
+    tab = user_sample(window, mode=4, end=4000)
+    shown = []  # (status text, the bar was showing, its value, its maximum) at every progress message
+    tab.status_message.connect(lambda m: shown.append((m, not tab.edit_progress.isHidden(), tab.edit_progress.value(), tab.edit_progress.maximum())))
+    assert tab.edit_progress.isHidden()
+    tab.edit_buttons["reverse"].click()
+    new_sample(window, "UM REV")
+    settle_edit(tab)
+    progress = [x for x in shown if x[0].startswith('Reverse "UM" - ')]
+    assert progress and all(visible and total > 0 and 0 <= value <= total for _m, visible, value, total in progress)
+    assert progress[-1][0].endswith("%") and tab.edit_progress.isHidden()  # hidden again once the edit is over
+
+
 def test_a_stereo_sample_stays_stereo_through_an_edit(window):
     tab = user_sample(window, "ST", mode=4, end=4000, right=True)
     tab.edit_buttons["reverse"].click()

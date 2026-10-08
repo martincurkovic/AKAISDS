@@ -774,7 +774,7 @@ class _StubAssignDialog:
     class DialogCode:
         Accepted = 1
 
-    def __init__(self, candidates, program_label, durations=None, parent=None):
+    def __init__(self, candidates, program_label, durations=None, parent=None, midi_loaded=()):
         type(self).seen.append((list(candidates), program_label, dict(durations or {})))
         self.chosen = type(self).chosen_name
 
@@ -812,6 +812,37 @@ def test_assigning_a_sample_adds_it_to_the_program_and_selects_it(assign_ui, fak
     assert not win._linking and win.assign_button.isEnabled()
     assert "Assigned 'triangle' to program 001" in win.status_bar.currentMessage()
     assert yp.linked_programs(fake.samples["triangle"]) == [1]
+
+
+def test_a_sample_loaded_over_midi_asks_first_and_cancel_changes_nothing(assign_ui, fake, monkeypatch):
+    win, shown, answer = assign_ui
+    monkeypatch.setattr(win._controller, "yamaha_midi_loaded_names", lambda: {"triangle"})
+    answer["question"] = QMessageBox.StandardButton.Cancel
+    _StubAssignDialog.chosen_name = "triangle"
+    win._assign_sample()
+    assert len(shown["question"]) == 1 and "'triangle' was sent to the sampler over MIDI by this app" in shown["question"][0] and "Knob 5" in shown["question"][0]
+    assert "power cycle" not in shown["question"][0]
+    assert assigned_names(win) == ["sine wave", "saw up"] and not win._linking
+    wait_until(lambda: False, timeout=0.3)  # (a link would have been sent by now)
+    assert yp.linked_programs(fake.samples["triangle"]) == []
+
+
+def test_a_sample_loaded_over_midi_is_assigned_once_confirmed(assign_ui, fake, monkeypatch):
+    win, shown, answer = assign_ui
+    monkeypatch.setattr(win._controller, "yamaha_midi_loaded_names", lambda: {"triangle"})
+    _StubAssignDialog.chosen_name = "triangle"
+    win._assign_sample()  # (the fixture's answer is Yes)
+    assert len(shown["question"]) == 1
+    assert wait_until(lambda: "triangle" in assigned_names(win), timeout=10)
+
+
+def test_any_other_sample_is_assigned_without_the_extra_question(assign_ui, fake, monkeypatch):
+    win, shown, answer = assign_ui
+    monkeypatch.setattr(win._controller, "yamaha_midi_loaded_names", lambda: {"square"})
+    _StubAssignDialog.chosen_name = "triangle"
+    win._assign_sample()
+    assert wait_until(lambda: "triangle" in assigned_names(win), timeout=10)
+    assert shown["question"] == []
 
 
 def test_the_samples_tab_shows_the_new_use_of_a_sample_afterwards(assign_ui, fake):

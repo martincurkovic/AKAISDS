@@ -288,6 +288,7 @@ def test_an_edited_copy_that_keeps_a_shorter_start_end_window_still_verifies(sen
     data = sender.fake.samples["win"]
     assert yp.extract(yp.get("sample", "wave_length"), data) == 5400 and sender.fake.audio["win"] == audio  # all the audio, the carried window
     assert sender.controller.yamaha_loaded_names() == ["win"]
+    assert sender.controller.yamaha_midi_loaded_names() == {"win"}  # (what the Assign dialog warns about; kept across later sends)
 
 
 def test_a_stereo_file_becomes_one_real_stereo_sample(sender, tmp_path):
@@ -362,6 +363,8 @@ def test_a_unit_that_refuses_the_load_is_reported_not_trusted(sender, tmp_path):
     assert sender.send.transferred == [] and "a" not in sender.fake.samples
     assert any("was not loaded" in s and "Bulk Protect" in s for s in sender.rec.statuses)
     assert not sender.controller.is_transfer_busy()
+    # a load that went out but could not be verified still counts as "sent over MIDI" (it may well be on the unit)
+    assert sender.controller.yamaha_midi_loaded_names() == {"a"}
 
 
 def test_cancelling_mid_load_stops_sending_and_frees_the_wire(sender, tmp_path):
