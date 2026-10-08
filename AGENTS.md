@@ -663,6 +663,37 @@ samples | cards, and a Samples tab; every writable control edits the unit) all e
   **UNVERIFIED ON HARDWARE**: the whole edit/slice path against a real A4000 (a sample dump with a carried-over loop mode/addresses and non-default key/tune, a
   copy of a STEREO sample, 4+ samples in one queue), and that the carried loop addresses survive the unit's own bulk-load rules. Everything is proven only
   against `FakeA4000`, which models the measured rules but is not the unit.
+- **Detect Pitch (session 7, 2026-10-08; UNVERIFIED ON HARDWARE)**: a button in the Samples tab's Pitch card, right of the Original key spinbox
+  (`panel.detect_pitch_button`, built in `build_sample_cards`, wired and enabled in `YamahaSamplesTab` alongside the edit buttons - it needs the
+  shown sample's audio loaded). Same engine as the S3000's Detect Root Note (`core/root_note_detection.py`, left channel; anchor = the current
+  Original key; below `CONFIDENCE_THRESHOLD` it only says it couldn't), then a Yes/No dialog and, on Yes, writes **Original key = the note** and
+  **Fine tune = -cents** through `panel.set_value`, i.e. the ordinary guarded edit path (backup, write, read-back; an unchanged value writes
+  nothing). Coarse tune is untouched; the right channel's key/fine tune are mirrored by the unit (not proven for stereo). **Two guesses, both
+  one-line fixes**: `FINE_TUNE_STEPS_PER_CENT = 1.0` (the Fine tune unit is unmeasured - the row is -63..+63) and the SIGN (a positive Fine tune is
+  assumed to raise the pitch, so a sample sharp by c cents gets -c; the Akai button adds +c to its own tune field, which is a different
+  convention). Check both against a tuner on the real unit. The analysis-window choice (loop region if >= 4096 frames, else an attack-skipped
+  chunk, both capped to 0.3 s) now lives in `root_note_detection.analysis_window` and is shared with the S3000 window, whose old `_MIN_LOOP_ANALYSIS_FRAMES`/
+  `_ROOT_NOTE_*` names remain as aliases for its tests. Tests: `tests/test_yamaha_detect_pitch.py`.
+- **Loading bar (session 7)**: the Yamaha editor has the S3000 editor's indeterminate 120 px bar next to Refresh, with the same debounce (shown
+  after 200 ms busy, hidden 150 ms after idle, a stale "idle" ignored while more work is queued - `_on_session_busy_changed`/`_confirm_session_idle`).
+  The source is the new `YamahaSession.busy_changed(bool)` signal / `working` property: true while a read, write or link is queued or running -
+  **wave loads and bulk sends deliberately do NOT count** (they have their own Cancel/progress and run for minutes; `idle` still counts them, so
+  use `working` for anything bar-like). The window disconnects the signal on close (once - a second `disconnect` warns). Tests:
+  `tests/test_yamaha_busy_indicator.py`.
+- **Edit progress bar (session 7)**: Trim/Reverse/Fade/Normalise/Filter on the Yamaha Samples tab show the S3000 editor's small determinate bar
+  (`tab.edit_progress`, 140 px, right of the zoom buttons) plus a `Reverse "NAME" - 45%` status-bar message while the new sample goes out, fed by
+  `controller.transfer_progress` (bytes on the wire; the "Checking..." read-back afterwards has no bar). It is connected in
+  `YamahaSampleEditor._start_send`/`_on_send_progress` and hidden by `tab._set_edit_busy(False)`. The Slice Editor keeps its own dialog progress. The S1000 uses
+  the S2000/S3000 window (same `sample_edit_progress` bar); the S900/S950 editor has no sample edits to show it for.
+- **Assigning a sample this app loaded over MIDI asks first (session 7)**: linking a natively loaded sample has left the real unit silent
+  (the unit stops answering until OK is pressed on its "MIDI Bulk Received" dialog - session 6; it never needed a power cycle), and nothing known makes it safe. `YamahaTransfers.midi_loaded_names` records
+  every name whose load has been SENT since the app started (recorded as soon as the load goes out, not once verified; any Dashboard or editor send counts,
+  since the Dashboard and the editor share one controller; not reset by a send; `SamplerController.yamaha_midi_loaded_names()`); the Assign dialog marks those
+  with a small grey asterisk (the shared sample-list row's grey label) and a one-line "* Sent with AKAISDS" note, and `_assign_sample` shows a short Cancel-default
+  confirmation (`_confirm_assign_midi_loaded`: "...was sent to the sampler over MIDI by this app. You will likely need to press OK (Knob 5) ...") before
+  linking one. The user wants these messages SHORT - no walls of text.
+  It can only know about THIS run's loads - samples sent by an earlier run, or recorded/loaded any other way, are not flagged. The slice-fill path
+  (`yamaha_sample_edit`) has its own recovery and is unchanged.
 - **NATIVE SAMPLE LOADING (session 4, 2026-10-06; written from `dev_docs/a4000-native-load-findings.md` - read it)**: Dashboard "Send Samples" for the
   Yamaha Sampler Type no longer uses SDS. `core/yamaha_load.py` builds a load = the wave dump(s) (`yamaha_wave.build_wave_messages`) THEN one sample
   dump (`SP`, from a real user sample's captured parameters with name/wave names/rate/addresses set); `YamahaSession.send_messages` sends them
@@ -1196,7 +1227,7 @@ manufacture false confidence in noise.
 `test_confidence_does_not_swing_low_based_on_anchor_alone` regression-
 guards this against the real fixture.
 
-**Analysis window**: the loop region (`markers_with_loop_in_range()`,
+**Analysis window** (the choice now lives in `root_note_detection.analysis_window`, shared with the A4000 editor's Detect Pitch): the loop region (`markers_with_loop_in_range()`,
 already-stable/repeating, immune to attack-transient bias) is preferred if
 its span is at least `_MIN_LOOP_ANALYSIS_FRAMES` (≈2 periods of the lowest
 supported note); otherwise an attack-skipped, capped chunk of
