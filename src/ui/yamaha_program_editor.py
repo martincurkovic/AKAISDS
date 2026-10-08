@@ -25,6 +25,7 @@ unwritable stays disabled (`FieldPanel`). The window refuses to close or refresh
 from PySide6.QtCore import Qt, QTimer, QUrl
 from PySide6.QtGui import QAction, QDesktopServices
 from PySide6.QtWidgets import (
+    QApplication,
     QCheckBox,
     QHBoxLayout,
     QLabel,
@@ -1048,6 +1049,10 @@ class YamahaProgramEditorWindow(QMainWindow):
         (a click would only queue behind the transfer - and swap the cards for a "Reading..." placeholder - so the window would look hung),
         and the controls that write are off. A load or an edit's send can be cancelled from the bottom row."""
         busy = self._is_busy()
+        if busy:
+            focused = QApplication.focusWidget()  # (see YamahaSamplesTab._drop_focus: a disabled widget's focus scrolls a page)
+            if focused is not None and self.isAncestorOf(focused):
+                focused.clearFocus()
         for action in (self._restore_action, self._unchanged_action, self._refresh_action, *self._tab_actions):
             action.setEnabled(not busy)
         self.refresh_button.setEnabled(not busy)

@@ -47,6 +47,7 @@ import time
 
 from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtWidgets import (
+    QApplication,
     QGridLayout,
     QHBoxLayout,
     QLabel,
@@ -915,6 +916,8 @@ class YamahaSamplesTab(QWidget):
     def _apply_marker_lock(self):
         """Markers can be dragged when the tab can write, except while the audio is arriving (the views are being filled)."""
         locked = self._writer is None or self._loading_name is not None or self._edit_busy
+        if self.long_operation:
+            self._drop_focus()  # before anything is disabled (see _drop_focus)
         for view in (self.waveform_view, self.waveform_view_right):
             view.set_markers_locked(locked)
         has_header = self.waveform_view.has_header()
@@ -924,6 +927,14 @@ class YamahaSamplesTab(QWidget):
         if self.long_operation != self._reported_busy:
             self._reported_busy = self.long_operation
             self.busy_changed.emit(self._reported_busy)
+
+    def _drop_focus(self):
+        """Give up the keyboard focus before the controls are disabled. A disabled widget hands its focus to the next one in the tab order, the
+        scroll area scrolls to reveal whichever widget receives it, and the first enabled one was far down the page: clicking Reverse threw the
+        page about 3/4 of the way down. With no focus there is nothing to hand on."""
+        widget = QApplication.focusWidget()
+        if widget is not None and (widget is self or self.isAncestorOf(widget)):
+            widget.clearFocus()
 
     @property
     def long_operation(self):
