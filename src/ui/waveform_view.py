@@ -510,6 +510,22 @@ class WaveformView(QWidget):
         self._placeholder_text = text
         self.update()
 
+    def _active_marker_names(self):
+        """The markers drawn solid: the one hovered or dragged here, and - for a stacked stereo pair, which is ONE display - the one
+        hovered or dragged in the other half too, so the marker lights up across both channels."""
+        names = {self._hover_marker, self._dragging}
+        partner = self._stack_partner
+        if self._stack_role is not None and partner is not None:
+            names |= {partner._hover_marker, partner._dragging}
+        names.discard(None)
+        return names
+
+    def _repaint_pair(self):
+        """Repaint this view and, for a stacked pair, its other half (hover/drag highlights span both)."""
+        self.update()
+        if self._stack_role is not None and self._stack_partner is not None:
+            self._stack_partner.update()
+
     def set_markers_locked(self, locked):
         # markers stay visible but can't be grabbed/dragged (and so never emit
         # marker_committed) - for a view of a sample whose markers aren't editable.
@@ -520,7 +536,7 @@ class WaveformView(QWidget):
             self._hover_marker = None
             self._press_cycle_candidates = []
             self._press_cycle_index = 0
-        self.update()
+        self._repaint_pair()
 
     def set_loop_enabled(self, enabled):
         if self._loop_enabled == enabled:
@@ -1042,6 +1058,7 @@ class WaveformView(QWidget):
         # so even fully stacked, the loop marker's own colour and handle
         # remain visible at the bottom instead of disappearing behind
         # "end"'s handle at the top.
+        active_markers = self._active_marker_names()
         for name in ("start", "end", "loop_start", "loop_end"):
             # no loop on the current sample's SPTYPE - see set_loop_enabled
             # - the loop markers don't just grey out, they don't draw at
@@ -1061,7 +1078,7 @@ class WaveformView(QWidget):
             # moving the mouse again doesn't flash back to the dim/dashed
             # look for one frame (mouseReleaseEvent sets _hover_marker to
             # match for exactly this reason)
-            is_active = name == self._hover_marker or name == self._dragging
+            is_active = name in active_markers
             color = brighten_for_hover(colors[name], palette) if is_active else colors[name]
             handle_size = _HANDLE_SIZE * 1.5 if is_active else _HANDLE_SIZE
             pen = QPen(color)
@@ -1249,6 +1266,7 @@ class WaveformView(QWidget):
             if self._dragging is not None:
                 self._drag_anchor_x = x
                 self._drag_value = float(self._markers[self._dragging])
+                self._repaint_pair()
         except Exception:
             debug_log.get_logger().error(
                 "WaveformView.mousePressEvent: unexpected error", exc_info=True
@@ -1267,7 +1285,7 @@ class WaveformView(QWidget):
                 hovered = candidates[0] if candidates else None
                 if hovered != self._hover_marker:
                     self._hover_marker = hovered
-                    self.update()
+                    self._repaint_pair()
                 return
             fine = bool(event.modifiers() & Qt.KeyboardModifier.ShiftModifier)
 
@@ -1394,7 +1412,7 @@ class WaveformView(QWidget):
             # next mouseMoveEvent to notice, which would otherwise leave the
             # marker looking neither dragged nor hovered for one repaint
             self._hover_marker = which
-            self.update()
+            self._repaint_pair()
             m = self._markers
             self.marker_committed.emit(
                 which, m["start"], m["loop_start"], m["loop_end"], m["end"]
@@ -1417,7 +1435,7 @@ class WaveformView(QWidget):
         # only place that can
         if self._hover_marker is not None:
             self._hover_marker = None
-            self.update()
+            self._repaint_pair()
         super().leaveEvent(event)
 
     def hideEvent(self, event):
