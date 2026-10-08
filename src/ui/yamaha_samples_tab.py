@@ -52,15 +52,18 @@ from PySide6.QtWidgets import (
     QLabel,
     QListWidget,
     QListWidgetItem,
+    QMessageBox,
     QPushButton,
     QVBoxLayout,
     QWidget,
 )
 
 from core import debug_log
+from core import root_note_detection
 from core import yamaha_markers as ym
 from core import yamaha_params as yp
 from core.audio_preview import SlicePreviewPlayer
+from core.midi_notes import midi_note_to_name
 from ui import theme
 from ui import tooltips as tt
 from ui.editor_layout import (
@@ -114,6 +117,11 @@ def format_used_in(programs):
 def format_duration(frames, rate):
     return f"{frames / rate:.3f} s" if rate > 0 else ""
 
+
+#: How many Fine tune steps make one cent. UNMEASURED: the row is -63..+63; if a step is really ~1/64 or 1/128 of a semitone
+#: (1.56 / 0.78 cents) the correction is off by up to that factor, never more than ~half a semitone either way. Check on the
+#: unit (detect a pitch, then listen against a tuner) and change this one number if it needs it.
+FINE_TUNE_STEPS_PER_CENT = 1.0
 
 #: loop modes that actually loop (owner's manual p.123): continuous loop and loop-to-release
 _LOOPING_MODES = (1, 2)
@@ -191,9 +199,15 @@ def build_sample_cards(panel):
     row = panel.labeled_row
     knobs = panel.knob_row
 
+    # "Detect Pitch" sits right of the Original key spinbox (before the row's trailing stretch); the tab wires it up
+    original_key_row = row(note("original_key_l", "Original key"))
+    panel.detect_pitch_button = QPushButton("Detect Pitch")
+    panel.detect_pitch_button.setToolTip(tt.YAMAHA_DETECT_PITCH_BUTTON)
+    panel.detect_pitch_button.setEnabled(False)
+    original_key_row.insertWidget(original_key_row.count() - 1, panel.detect_pitch_button)
     pitch = build_section_card(
         "Pitch",
-        row(note("original_key_l", "Original key")),
+        original_key_row,
         knobs([k("coarse_tune", "Coarse"), k("fine_tune_l", "Fine")]),
         row(s("detune", "Detune")),
         row(s("random_pitch", "Random pitch")),
@@ -390,6 +404,7 @@ class YamahaSamplesTab(QWidget):
         if writer is not None:
             self.panel.set_editable(True)
             self.panel.edited.connect(self._on_edited)
+        self.panel.detect_pitch_button.clicked.connect(self._detect_pitch)
         self._preview.position_changed.connect(self._on_preview_position)
         self._preview.finished.connect(self._clear_playheads)
         theme.notifier.changed.connect(self._refresh_themed_swatches)
@@ -1222,6 +1237,41 @@ class YamahaSamplesTab(QWidget):
         for button in self.edit_buttons.values():
             button.setEnabled(ready)
         self.slice_button.setEnabled(ready)
+        self.panel.detect_pitch_button.setEnabled(ready)
+
+    def _detect_pitch(self):
+        """Estimate the loaded sample's pitch (left channel) and, if the user agrees, write Original key and Fine tune."""
+        name, data = self._selected, self._cache.get(self._selected)
+        if data is None or self._audio_name != name or self._audio_samples is None or not self.waveform_view.has_header():
+            return
+        rate = yp.extract(yp.get("sample", "sampling_frequency_l"), data)
+        window = root_note_detection.analysis_window(self._audio_samples, rate, self.waveform_view.markers_with_loop_in_range())
+        result = root_note_detection.detect_root_note(window, rate, self.panel.value("original_key_l"))
+        if result is None or result[2] < root_note_detection.CONFIDENCE_THRESHOLD:
+            _log(f"pitch detection for {name!r}: no reliable pitch ({result})")
+            QMessageBox.information(self, "Detect Pitch", "Couldn't reliably detect a pitch for this sample.")
+            return
+        note, cents, confidence = result
+        # The sample sounds `cents` sharp of `note` when played at its original key, so Fine tune takes that off again (a
+        # positive Fine tune is taken to raise the pitch). Coarse tune is left alone; the unit mirrors the left channel's key and
+        # fine tune into the right one itself.
+        fine_row = yp.get("sample", "fine_tune_l")
+        fine = max(fine_row.lo, min(fine_row.hi, round(-cents * FINE_TUNE_STEPS_PER_CENT)))
+        _log(f"pitch detection for {name!r}: {midi_note_to_name(note)} {cents:+.1f} cents, confidence {confidence:.2f} -> fine {fine}")
+        answer = QMessageBox.question(
+            self,
+            "Detect Pitch",
+            f"Detected pitch: {midi_note_to_name(note)} ({confidence * 100:.0f}% confidence, {cents:+.0f} cents).\n\n"
+            f"Set this sample's Original key to {midi_note_to_name(note)} and Fine tune to {fine:+d}?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        # through the widgets, so each change takes the ordinary guarded edit path (backup, write, read-back); a value that
+        # is already set emits nothing and so writes nothing
+        self.panel.set_value("original_key_l", note)
+        self.panel.set_value("fine_tune_l", fine)
 
     @property
     def loading(self):

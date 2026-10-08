@@ -270,29 +270,11 @@ _MARKER_KNOB_TOOLTIPS = {
     "end": tt.SAMPLE_END_KNOB,
 }
 
-# Detect Root Note (core/root_note_detection.py) - window selection: the
-# loop region (already-identified stable, repeating audio) is strongly
-# preferred over blindly analysing the whole sample, which would both be
-# slower and biased by the attack transient right at the start. Falls
-# back to a short, attack-skipped chunk of [start, end] only when the
-# loop region itself is too small a span to say anything meaningful about
-# (loop off, or loop_start/loop_end sitting at/near the same value) - see
-# _confirm_detect_root_note.
-#
-# _MIN_LOOP_ANALYSIS_FRAMES: enough for at least 2 full periods of the
-# LOWEST note root_note_detection supports (MIDI 21 ~= 29Hz, period
-# ~1513 frames @44100) with real margin, comfortably before any
-# decimation that function does internally.
-_MIN_LOOP_ANALYSIS_FRAMES = 4096
-# skip this much of the fallback window's own start to dodge the attack
-# transient (pick noise, breath, drum-like click) - not applied to the
-# loop-region case, which is already past the attack by construction
-_ROOT_NOTE_ATTACK_SKIP_SECONDS = 0.05
-# capped short deliberately - measured ~200ms of real analysis time for a
-# window this size (pure Python, no numpy) against ~900ms for a full
-# second's worth; this is a one-click button, not a live-dragged control,
-# but should still feel closer to instant than "this can take a while"
-_ROOT_NOTE_FALLBACK_WINDOW_SECONDS = 0.3
+# Detect Root Note (core/root_note_detection.py) - the analysis window is chosen by root_note_detection.analysis_window (shared
+# with the A4000 editor); these names are kept for the tests and _detect_root_note_analysis_window below.
+_MIN_LOOP_ANALYSIS_FRAMES = root_note_detection.MIN_LOOP_ANALYSIS_FRAMES
+_ROOT_NOTE_ATTACK_SKIP_SECONDS = root_note_detection.ATTACK_SKIP_SECONDS
+_ROOT_NOTE_FALLBACK_WINDOW_SECONDS = root_note_detection.WINDOW_SECONDS
 
 # real audio for AKAISDS_DEMO_SAMPLER's fake sample-audio path (see
 # _fetch_demo_sample_audio) - the same fixture the test suite uses, not
@@ -6902,47 +6884,9 @@ class ProgramEditorWindow(QMainWindow):
         self._flush_write("STUNO")
 
     def _detect_root_note_analysis_window(self, entry):
-        # loop region first preference - already-identified stable,
-        # repeating audio, ideal for pitch analysis and immune to the
-        # attack-transient bias the fallback below has to dodge by hand.
-        # Falls back to a short, attack-skipped chunk of [start, end] only
-        # when the loop region's own span is too small to say anything
-        # meaningful about (loop off, or loop_start/loop_end sitting
-        # at/near the same value) - see _MIN_LOOP_ANALYSIS_FRAMES's own
-        # comment for why that particular floor.
-        markers = self.waveform_view.markers_with_loop_in_range()
-        loop_start, loop_end = markers["loop_start"], markers["loop_end"]
-        if loop_end - loop_start + 1 >= _MIN_LOOP_ANALYSIS_FRAMES:
-            # capped to the SAME length budget as the fallback below - a
-            # real, measured issue: an uncapped loop region's own analysis
-            # time scales with its length (confirmed ~1.5s of real
-            # decaying-tone audio took ~1.5 SECONDS to analyse, entirely
-            # because nothing here capped it), which would make this
-            # button noticeably slow on a sustained pad with a
-            # multi-second loop. Loop content is stable/repeating by
-            # definition, so any representative chunk of it works equally
-            # well - no need to analyse the WHOLE region, just take it
-            # from the start (already past any attack, unlike the
-            # fallback, which has to skip it by hand below).
-            max_frames = round(
-                entry["framerate"] * _ROOT_NOTE_FALLBACK_WINDOW_SECONDS
-            )
-            window_end = min(loop_end, loop_start + max_frames - 1)
-            return entry["samples"][loop_start : window_end + 1]
-
-        start, end = markers["start"], markers["end"]
-        span = end - start + 1
-        skip = min(
-            round(entry["framerate"] * _ROOT_NOTE_ATTACK_SKIP_SECONDS), span // 4
+        return root_note_detection.analysis_window(
+            entry["samples"], entry["framerate"], self.waveform_view.markers_with_loop_in_range()
         )
-        window_start = start + skip
-        window_end = min(
-            end,
-            window_start
-            + round(entry["framerate"] * _ROOT_NOTE_FALLBACK_WINDOW_SECONDS)
-            - 1,
-        )
-        return entry["samples"][window_start : window_end + 1]
 
     def _confirm_detect_root_note(self):
         sample_index = self.sample_list_widget.currentRow()

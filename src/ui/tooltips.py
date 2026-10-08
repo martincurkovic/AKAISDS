@@ -343,6 +343,11 @@ DETECT_ROOT_NOTE_BUTTON = (
     "the sample."
 )
 
+YAMAHA_DETECT_PITCH_BUTTON = (
+    "Estimate this sample's fundamental pitch from its loop region (if one is set), otherwise from a short chunk of the "
+    "sample, and offer to set Original key and Fine tune to match. Needs the waveform loaded (double-click it)."
+)
+
 # --- Filter section (Program/Keygroup tabs) - new ---------------------------
 
 FILTER_CUTOFF_KNOB = (

@@ -64,6 +64,22 @@ CONFIDENCE_THRESHOLD = 0.5
 # wildly based on the anchor alone rather than the audio)
 _CANDIDATE_CONFIDENCE_RATIO = 0.8
 
+# Analysis-window selection (shared by the S3000 and A4000 editors' detect buttons): the loop region (already-identified
+# stable, repeating audio) is strongly preferred over blindly analysing the whole sample, which would be slower and biased by
+# the attack transient. Falls back to a short, attack-skipped chunk of [start, end] only when the loop region is too small to
+# say anything about (loop off, or loop_start/loop_end at/near the same value).
+#
+# MIN_LOOP_ANALYSIS_FRAMES: enough for at least 2 full periods of the LOWEST supported note (MIDI 21 ~= 29Hz, period ~1513
+# frames @44100) with real margin, comfortably before any decimation detect_root_note does internally.
+MIN_LOOP_ANALYSIS_FRAMES = 4096
+# skip this much of the fallback window's own start to dodge the attack transient (pick noise, breath, a click) - not applied
+# to the loop-region case, which is already past the attack by construction
+ATTACK_SKIP_SECONDS = 0.05
+# capped short deliberately - ~200ms of real analysis time for a window this size (pure Python, no numpy) against ~900ms for a
+# full second's worth. Both paths use the same budget: an uncapped loop region's analysis time scales with its length
+# (measured ~1.5 s for ~1.5 s of audio), which would make the button noticeably slow on a sustained pad with a long loop.
+WINDOW_SECONDS = 0.3
+
 
 def _decimate(samples, factor):
     if factor <= 1:
@@ -143,6 +159,23 @@ def _find_peaks(correlations):
             continue
         peaks.append(_refine_peak(correlations, i))
     return peaks
+
+
+def analysis_window(samples, framerate, markers):
+    """The slice of *samples* worth analysing, given the sample's markers (a dict with start / loop_start / loop_end / end,
+    loop points already clamped into [start, end]): a capped chunk of the loop region when it is large enough, otherwise an
+    attack-skipped, capped chunk of [start, end]. See the constants above for why."""
+    loop_start, loop_end = markers["loop_start"], markers["loop_end"]
+    max_frames = round(framerate * WINDOW_SECONDS)
+    if loop_end - loop_start + 1 >= MIN_LOOP_ANALYSIS_FRAMES:
+        # loop content is stable/repeating by definition, so any representative chunk works: take it from the loop's start
+        window_end = min(loop_end, loop_start + max_frames - 1)
+        return samples[loop_start : window_end + 1]
+    start, end = markers["start"], markers["end"]
+    span = end - start + 1
+    window_start = start + min(round(framerate * ATTACK_SKIP_SECONDS), span // 4)
+    window_end = min(end, window_start + max_frames - 1)
+    return samples[window_start : window_end + 1]
 
 
 def detect_root_note(samples, framerate, anchor_midi_note):
