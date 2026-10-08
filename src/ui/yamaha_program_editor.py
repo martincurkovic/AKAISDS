@@ -165,6 +165,7 @@ class YamahaProgramEditorWindow(QMainWindow):
         self._connected = True
         self._restoring = False  # a restore from backup is running: nothing else may write, refresh or close the window
         self._linking = False  # a sample is being assigned/removed: same lock
+        self._edit_sample_ok = False  # the shown assigned entry is a sample this window knows (what "Edit Sample..." needs)
         self.model = None  # "A4000" / "A5000" / "unknown" from the unit's identity reply (None until it has answered)
         self._select_sample_after_load = None  # after an assignment, select that sample's row once the program is re-read
 
@@ -267,6 +268,7 @@ class YamahaProgramEditorWindow(QMainWindow):
         self.samples_tab.status_message.connect(lambda m: self.status_bar.showMessage(m, 8000))
         self.samples_tab.samples_changed.connect(self._on_samples_changed)
         self.samples_tab.programs_changed.connect(self._on_programs_changed)
+        self.samples_tab.busy_changed.connect(lambda _busy: self._apply_lock())
         self.samples_tab.free_programs_provider = self._free_programs
         self.main_tabs = QTabWidget()
         self.main_tabs.setTabBar(FullWidthTabBar(self.main_tabs))
@@ -283,10 +285,17 @@ class YamahaProgramEditorWindow(QMainWindow):
         self.refresh_button = QPushButton("Refresh")
         self.refresh_button.setToolTip("Re-read the program and sample lists from the sampler")
         self.refresh_button.clicked.connect(self._refresh)
+        # while an audio load or an edit's send runs: stops it (like the S3000 editor's bottom-row Cancel). The Samples tab keeps its own
+        # "Cancel load" beside the waveform.
+        self.cancel_button = QPushButton("Cancel")
+        self.cancel_button.setToolTip("Stop the transfer that is running")
+        self.cancel_button.clicked.connect(self._cancel_long_operation)
+        self.cancel_button.setVisible(False)
         close_button = QPushButton("Close")
         close_button.clicked.connect(self.close)
         bottom = QHBoxLayout()
         bottom.addWidget(self.refresh_button)
+        bottom.addWidget(self.cancel_button)
         bottom.addWidget(self._loading_progress)  # beside Refresh, like the S3000 editor's
         bottom.addStretch()
         bottom.addWidget(close_button)
@@ -507,10 +516,12 @@ class YamahaProgramEditorWindow(QMainWindow):
         programs.setShortcut("Ctrl+2")
         programs.triggered.connect(lambda: self.main_tabs.setCurrentIndex(0))
         window.addAction(programs)
+        self._tab_actions = [programs]
         samples = QAction("Samples Tab", self)
         samples.setShortcut("Ctrl+3")
         samples.triggered.connect(lambda: self.main_tabs.setCurrentIndex(self._samples_tab_index))
         window.addAction(samples)
+        self._tab_actions.append(samples)
 
     def _on_tab_changed(self, index):
         on_samples = index == self._samples_tab_index
@@ -837,7 +848,11 @@ class YamahaProgramEditorWindow(QMainWindow):
             own = "original" if own_low < 0 or own_high > NOTE_MAX else format_range(own_low, own_high)
             info = f"Plays {format_range(*rng)} in this program (the sample's own range: {own})"
         self.assigned_info.setText(info)
-        self.edit_sample_button.setEnabled(otype == ysx.OBJECT_TYPES["sample"] and name in self._sample_names)
+        self._edit_sample_ok = otype == ysx.OBJECT_TYPES["sample"] and name in self._sample_names
+        self._update_edit_sample_button()
+
+    def _update_edit_sample_button(self):
+        self.edit_sample_button.setEnabled(self._edit_sample_ok and not self._is_busy())  # (it jumps to another tab)
 
     def _edit_sample(self):
         row = self.assigned_list.currentRow()
@@ -1024,21 +1039,39 @@ class YamahaProgramEditorWindow(QMainWindow):
         self._linking = linking
         self._apply_lock()
 
+    def _is_busy(self):
+        """A restore, an assignment, an audio load or an edit's send is running: the window can't take anything else."""
+        return self._restoring or self._linking or self.samples_tab.long_operation
+
     def _apply_lock(self):
-        """While a restore or an assignment runs nothing else may write: controls and the buttons that start something are off."""
-        locked = self._restoring or self._linking
-        self._restore_action.setEnabled(not locked)
-        self._unchanged_action.setEnabled(not locked)
-        self.refresh_button.setEnabled(not locked)
+        """While something long runs nothing else may start: the lists, the tab bar, Refresh and the menu actions that start things are off
+        (a click would only queue behind the transfer - and swap the cards for a "Reading..." placeholder - so the window would look hung),
+        and the controls that write are off. A load or an edit's send can be cancelled from the bottom row."""
+        busy = self._is_busy()
+        for action in (self._restore_action, self._unchanged_action, self._refresh_action, *self._tab_actions):
+            action.setEnabled(not busy)
+        self.refresh_button.setEnabled(not busy)
+        for widget in (
+            self.program_list, self.assigned_list, self.show_empty_check, self.samples_tab.sample_list_widget, self.main_tabs.tabBar(),
+        ):
+            widget.setEnabled(not busy)
         for panel in (self.program_panel, self.easy_panel, self.samples_tab.panel):
-            panel.set_editable(not locked)
+            panel.set_editable(not busy)
+        self.cancel_button.setVisible(self.samples_tab.long_operation)
         self._update_assign_buttons()
+        self._update_edit_sample_button()
+
+    def _cancel_long_operation(self):
+        if self.samples_tab.loading:
+            self.samples_tab._cancel_load()
+        else:
+            self._controller.cancel_transfer()  # an edit's / slice export's send
 
     def _update_assign_buttons(self):
-        locked = self._restoring or self._linking
-        self.assign_button.setEnabled(not locked and self._selected is not None and self._selected in self._program_data)
+        busy = self._is_busy()
+        self.assign_button.setEnabled(not busy and self._selected is not None and self._selected in self._program_data)
         row = self.assigned_list.currentRow()
-        self.remove_assigned_button.setEnabled(not locked and 0 <= row < len(self._assigned))
+        self.remove_assigned_button.setEnabled(not busy and 0 <= row < len(self._assigned))
 
     # -- assigning samples to a program ---------------------------------------------------------------------------
 

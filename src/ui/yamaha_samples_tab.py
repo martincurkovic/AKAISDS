@@ -356,6 +356,8 @@ class YamahaSamplesTab(QWidget):
     samples_changed = Signal(str)
     #: samples were assigned to a program (the Slice Editor's "fill a program"): (program number, the sample names). The host re-reads it.
     programs_changed = Signal(int, list)
+    #: a long operation (an audio load, or an edit's / slice export's send) started or ended: the host window locks its navigation while it runs
+    busy_changed = Signal(bool)
 
     def __init__(self, controller, session, sample_cache, writer=None, parent=None):
         super().__init__(parent)
@@ -381,6 +383,7 @@ class YamahaSamplesTab(QWidget):
         #: set by the host: callable() -> [(program number, label)] of the programs that hold no sample (what the Slice Editor can fill)
         self.free_programs_provider = None
         self._edit_busy = False  # an edit's new sample is being sent to the unit
+        self._reported_busy = False
         self._loops_enabled = False  # the shown sample's loop mode loops (the loop markers/knobs/preview apply)
         self._marker_knobs = {}  # marker name -> (swatch, knob, value label)
         self._syncing_knobs = False
@@ -933,6 +936,14 @@ class YamahaSamplesTab(QWidget):
         for name, (_swatch, knob, _label) in self._marker_knobs.items():
             knob.setEnabled(has_header and not locked and (self._loops_enabled or name in ("start", "end")))
         self.update_edit_buttons()
+        if self.long_operation != self._reported_busy:
+            self._reported_busy = self.long_operation
+            self.busy_changed.emit(self._reported_busy)
+
+    @property
+    def long_operation(self):
+        """An audio load or an edit/slice send is running (the minutes-long things the host window freezes its navigation for)."""
+        return self._loading_name is not None or self._edit_busy
 
     def _other_view(self, view):
         return self.waveform_view_right if view is self.waveform_view else self.waveform_view
