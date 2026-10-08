@@ -106,7 +106,8 @@ def test_double_clicking_loads_the_audio_into_the_waveform(window):
     assert tab.cancel_load_button.isHidden() and not tab.loading
     # it asked for the sample's WAVE object by name - not for a Sample Dump Standard number
     assert len(wd_requests(window)) == 1 and bytes(wd_requests(window)[0][13:29]).rstrip() == b"saw up"
-    assert not [m for k, m in window.fake.received if m[:1] == b"\x7e"]
+    # (the editor's own identity request is a 0x7E message too, but a Universal one - not Sample Dump Standard)
+    assert not [m for k, m in window.fake.received if m[:1] == b"\x7e" and m[2:4] != b"\x06\x01"]
 
 
 def test_a_user_sample_is_fetched_by_its_wave_name_whatever_its_position_or_name(window):
