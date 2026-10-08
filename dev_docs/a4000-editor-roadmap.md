@@ -696,3 +696,10 @@ Built against `FakeA4000` only (full suite 2242+ passing); details in AGENTS.md 
 * **A5000 gating** (see AGENTS.md): the editor identifies the unit and hides effects 4-6 as output targets unless it is an A5000. **To verify on the A4000**: open the editor and check
   (1) the Output dropdowns (Program > Audio Input, assigned sample's Output, Samples tab > Output) end at `effect3` and nothing else changed, (2) `YamahaEditor: identity: A4000` is in
   `~/.akaisds/akaisds.log`, (3) opening the editor with the unit's MIDI-in cable pulled still shows the usual "no reply" message (the identity request must not make it worse).
+* **Dropdown value order (UI polish pass)**: these fields became named dropdowns using the manual's lists, assuming the raw value counts up through the list in the manual's
+  order. Check each on the A4000 (change it on the front panel, read the editor, or the other way round) and fix `yp.ENUMS` if any is off:
+  LFO cycle (Eighth, Quarter, 3 eighths, 2/4/8/16 quarters = 0-6), LFO initial phase (0/90/180/270 = 0-3), step wave total steps (2,3,4,6,8,12,16 = 0-6) and slope
+  (Off, Up, Down, Up & down = 0-3), program portamento type (rate fingered, rate full-time, time fingered, time full-time = 0-3), AD input source (L/R, L+R, 2 mono =
+  0-2), sample EQ type (Peak/dip, Low shelf, High shelf = 0-2). Still numeric: pitch bend type (0-13; the manual only names Normal, Slow, Slow&Rev, Stop, Stop&Rev, the
+  Up[A]Dwn[B] types and Up&Dwn12 - photograph the unit's own list: Sample > Knob 2 LIST...).
+
