@@ -708,6 +708,11 @@ samples | cards, and a Samples tab; every writable control edits the unit) all e
   Keep sentences short and only say what is known (envelope RATES: higher is faster). The user will review the wording after use. (4) Nothing is written UNDER the
   Samples waveform any more (the hint/"Receiving the wave" line pushed the controls down; `waveform_hint` is gone - the "Double-click to load" hint lives INSIDE the
   waveform) and the Programs list's count is the short "125 programs empty". Tests: `tests/test_yamaha_tooltips.py`.
+- **Stereo marker hover + focus-scroll fix (session 7)**: (1) a stacked stereo pair is ONE display, so a marker hovered or dragged in either half is drawn solid in
+  BOTH (`WaveformView._active_marker_names` also consults `_stack_partner`; `_repaint_pair` repaints both wherever hover/drag state changes). (2) **A disabled widget
+  hands its keyboard focus to the next one in the tab order, and a `QScrollArea` scrolls to reveal whatever widget receives focus** - so clicking Reverse (whose button
+  is then disabled) threw the Samples page ~3/4 of the way down. `YamahaSamplesTab._drop_focus` (called when a long operation starts) and the window's `_apply_lock`
+  clear the focus BEFORE disabling anything. Any new "click a button, then disable it" flow inside a scroll area needs the same. Tests: `tests/test_yamaha_stereo_polish.py`.
 - **Edit progress bar (session 7)**: Trim/Reverse/Fade/Normalise/Filter on the Yamaha Samples tab show the S3000 editor's small determinate bar
   (`tab.edit_progress`, 140 px, right of the zoom buttons) plus a `Reverse "NAME" - 45%` status-bar message while the new sample goes out, fed by
   `controller.transfer_progress` (bytes on the wire; the "Checking..." read-back afterwards has no bar). It is connected in
