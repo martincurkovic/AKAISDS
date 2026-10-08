@@ -29,7 +29,9 @@ def test_the_bar_sits_beside_refresh_and_starts_hidden(win):
     assert bar.minimumWidth() == bar.maximumWidth() == 120
     assert not bar.isTextVisible()
     row = [b for b in win.centralWidget().layout().children() if b.indexOf(win.refresh_button) >= 0][0]
-    assert row.indexOf(bar) == row.indexOf(win.refresh_button) + 1
+    # Refresh, then the (hidden unless something is cancellable) Cancel button, then the bar - the S3000 editor's order
+    assert row.indexOf(win.cancel_button) == row.indexOf(win.refresh_button) + 1
+    assert row.indexOf(bar) == row.indexOf(win.cancel_button) + 1
     assert wait_until(bar.isHidden, timeout=2)  # (the fixture returns inside the scan's 150 ms hide grace period)
 
 
