@@ -680,6 +680,15 @@ samples | cards, and a Samples tab; every writable control edits the unit) all e
   **wave loads and bulk sends deliberately do NOT count** (they have their own Cancel/progress and run for minutes; `idle` still counts them, so
   use `working` for anything bar-like). The window disconnects the signal on close (once - a second `disconnect` warns). Tests:
   `tests/test_yamaha_busy_indicator.py`.
+- **A5000 gating (session 7; UNVERIFIED ON HARDWARE - the user owns an A4000 only)**: the editor asks the unit for its identity once per session
+  (`YamahaSession.request_identity`, queued ahead of the first object list; a Universal 0x7E message, so the controller routes an identity reply to
+  `YamahaSession.handle_identity` BEFORE its 0x43 branch - the session only gets it while an identity op is waiting; the unit's display isn't touched;
+  1 s timeout, silent failure) and `YamahaProgramEditorWindow.model` becomes `IdentityReply.model` ("A4000" measured: family bytes `5A 03`; "A5000" is the
+  MANUAL's `5B 03`, never seen). Only an A5000 gets the A5000-only dropdown entries - effect4/5/6 as an output target (`yp.A5000_ONLY_ENUM_VALUES`,
+  `yp.enum_items`), via `FieldPanel.set_a5000` on the program, Easy Edit and sample panels (rebuilds the combos, keeps the selection, a held hidden value shows
+  as "(unexpected)"). No reply = treated as an A4000 and asked again at the next Refresh. NOT done: A5000 MIDI-B channels 17-32 are still not named in the
+  receive-channel dropdown, `effect456_connection` has no control, and **bulk requests still use the A4000 header (`HEADER_A4000`) - whether a real A5000
+  answers them is unknown**, so this only decides what the UI offers. `FakeA4000(model="A5000")` answers identity as an A5000. Tests: `tests/test_yamaha_a5000_gating.py`.
 - **Edit progress bar (session 7)**: Trim/Reverse/Fade/Normalise/Filter on the Yamaha Samples tab show the S3000 editor's small determinate bar
   (`tab.edit_progress`, 140 px, right of the zoom buttons) plus a `Reverse "NAME" - 45%` status-bar message while the new sample goes out, fed by
   `controller.transfer_progress` (bytes on the wire; the "Checking..." read-back afterwards has no bar). It is connected in
