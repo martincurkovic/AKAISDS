@@ -32,6 +32,7 @@ from PySide6.QtWidgets import (
     QListWidgetItem,
     QMainWindow,
     QMessageBox,
+    QProgressBar,
     QPushButton,
     QStackedWidget,
     QStatusBar,
@@ -171,6 +172,7 @@ class YamahaProgramEditorWindow(QMainWindow):
         self._writer = WriteCoordinator(self._session, self)
         self._writer.message.connect(lambda m: self.status_bar.showMessage(m, 8000))
         self._build_ui()
+        self._build_busy_indicator()
         self._build_menus()
         self._controller.status_changed.connect(self._on_controller_status)
         theme.notifier.changed.connect(self._refresh_themed_swatches)
@@ -179,6 +181,38 @@ class YamahaProgramEditorWindow(QMainWindow):
         QTimer.singleShot(0, self._refresh)
 
     # -- construction -------------------------------------------------------------------------------------
+
+    def _build_busy_indicator(self):
+        """The same debounce as the S3000 editor's loading bar: shown only once the session has been busy for 200 ms (a quick read
+        never flashes it), hidden 150 ms after it goes idle (the program scan is a burst of back-to-back reads, which would
+        otherwise flicker between them)."""
+        self._busy_show_timer = QTimer(self)
+        self._busy_show_timer.setSingleShot(True)
+        self._busy_show_timer.setInterval(200)
+        self._busy_show_timer.timeout.connect(lambda: self._loading_progress.setVisible(True))
+        self._busy_hide_timer = QTimer(self)
+        self._busy_hide_timer.setSingleShot(True)
+        self._busy_hide_timer.setInterval(150)
+        self._busy_hide_timer.timeout.connect(self._confirm_session_idle)
+        self._session.busy_changed.connect(self._on_session_busy_changed)
+        self._busy_hooked = True
+        if self._session.working:
+            self._on_session_busy_changed(True)
+
+    def _on_session_busy_changed(self, busy):
+        if busy:
+            self._busy_hide_timer.stop()  # a burst of jobs is one continuous span
+            # isHidden(), not isVisible(): the latter is false for a window that has not been shown yet
+            if not self._busy_show_timer.isActive() and self._loading_progress.isHidden():
+                self._busy_show_timer.start()
+        else:
+            self._busy_hide_timer.start()
+
+    def _confirm_session_idle(self):
+        if self._session.working:
+            return  # (a stale False: more work has been queued since)
+        self._busy_show_timer.stop()
+        self._loading_progress.setVisible(False)
 
     def _build_ui(self):
         self.program_list = QListWidget()
@@ -239,6 +273,12 @@ class YamahaProgramEditorWindow(QMainWindow):
         self._samples_tab_index = self.main_tabs.addTab(self.samples_tab, "Samples")
         self.main_tabs.currentChanged.connect(self._on_tab_changed)
 
+        # indeterminate, like the S3000 editor's: a read over MIDI has no predictable length (see _on_session_busy_changed)
+        self._loading_progress = QProgressBar()
+        self._loading_progress.setRange(0, 0)
+        self._loading_progress.setFixedWidth(120)
+        self._loading_progress.setTextVisible(False)
+        self._loading_progress.setVisible(False)
         self.refresh_button = QPushButton("Refresh")
         self.refresh_button.setToolTip("Re-read the program and sample lists from the sampler")
         self.refresh_button.clicked.connect(self._refresh)
@@ -246,6 +286,7 @@ class YamahaProgramEditorWindow(QMainWindow):
         close_button.clicked.connect(self.close)
         bottom = QHBoxLayout()
         bottom.addWidget(self.refresh_button)
+        bottom.addWidget(self._loading_progress)  # beside Refresh, like the S3000 editor's
         bottom.addStretch()
         bottom.addWidget(close_button)
         layout = QVBoxLayout()
@@ -1087,6 +1128,7 @@ class YamahaProgramEditorWindow(QMainWindow):
         self._writer.close()
         self._scan_generation += 1
         self._session.cancel()
+        self._stop_busy_indicator()
         if not self._connected:
             super().closeEvent(event)
             self._main_window.show()
@@ -1103,3 +1145,11 @@ class YamahaProgramEditorWindow(QMainWindow):
                 pass
         self._main_window.show()
         super().closeEvent(event)
+
+    def _stop_busy_indicator(self):
+        for timer in (self._busy_show_timer, self._busy_hide_timer):
+            timer.stop()
+        self._loading_progress.setVisible(False)
+        if self._busy_hooked:
+            self._busy_hooked = False
+            self._session.busy_changed.disconnect(self._on_session_busy_changed)

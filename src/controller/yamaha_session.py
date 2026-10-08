@@ -56,7 +56,7 @@ import re
 import time
 from pathlib import Path
 
-from PySide6.QtCore import QObject, QTimer
+from PySide6.QtCore import QObject, QTimer, Signal
 
 from core import app_config, debug_log
 from core import yamaha_params as yp
@@ -113,9 +113,14 @@ class _Op:
 
 
 class YamahaSession(QObject):
+    #: True when the session starts working on reads/writes/links, False once none is queued or running. Wave (audio) loads
+    #: and bulk sends don't count: they have progress displays of their own and can run for minutes.
+    busy_changed = Signal(bool)
+
     def __init__(self, controller):
         super().__init__()
         self._c = controller
+        self._reported_busy = False
         # timing in ms - attributes so tests can shrink them
         self.reply_timeout_ms = 2500
         self.bulk_timeout_ms = 8000
@@ -165,6 +170,18 @@ class YamahaSession(QObject):
     @property
     def idle(self):
         return self._op is None and not self._queue and not self._draining
+
+    @property
+    def working(self):
+        """What `busy_changed` reports: a read/write/link is queued or running (not a wave load or bulk send)."""
+        ops = ([self._op] if self._op else []) + self._queue
+        return any(op.kind not in ("wave", "send") for op in ops)
+
+    def _emit_busy_if_changed(self):
+        busy = self.working
+        if busy != self._reported_busy:
+            self._reported_busy = busy
+            self.busy_changed.emit(busy)
 
     def request_object_list(self, callback):
         """callback(list[ObjectEntry] | None)."""
@@ -268,11 +285,13 @@ class YamahaSession(QObject):
             self._maybe_drain(in_flight, only_if_streaming=False)
         for op in ops:
             self._finish(op, failed=True, quiet=True)
+        self._emit_busy_if_changed()
 
     # -- the queue ------------------------------------------------------------------------------------
 
     def _enqueue(self, op):
         self._queue.append(op)
+        self._emit_busy_if_changed()
         if self._op is None:
             self._start_next()
 
@@ -537,6 +556,7 @@ class YamahaSession(QObject):
         if op is not None:
             self._finish(op, failed=failed)
         self._start_next()
+        self._emit_busy_if_changed()
 
     def _finish(self, op, *, failed, quiet=False):
         try:
