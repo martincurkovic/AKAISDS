@@ -697,6 +697,17 @@ samples | cards, and a Samples tab; every writable control edits the unit) all e
   "Reading..." placeholder, and the window looked hung. Deliberately NOT `main_tabs.setEnabled(False)` like the S3000 editor's `_set_hardware_busy_ui`: that
   would also grey the tab's own "Cancel load", waveform and progress bar. Programmatic `select_sample` still works while locked (the lists only block clicks).
   Tests: `tests/test_yamaha_busy_lock.py`.
+- **UI text polish (session 7; dropdown value ORDER unverified on hardware)**: (1) dropdown option text is sentence case ("Effect 1", "Stereo out", "Low-pass 1",
+  "Ch 1"; `yp.OUTPUT1/OUTPUT2/FILTER_TYPES/MIDI_CHANNEL`); the leading `=` of "=Sample"/"=Program" is KEPT - `FieldPanel._style_inherited` dims a combo whose text
+  starts with it. (2) Seven numeric boxes became dropdowns with NAMES from the owner's manual: LFO cycle, LFO initial phase, step wave total steps (2,3,4,6,8,12,16)
+  and slope, program portamento type, AD input source, sample EQ type (`yp.ENUMS`, rows carry `enum=`). **The names are the manual's lists; that the raw value
+  counts up through each list in that order is an ASSUMPTION** - verify each on the unit (set the value on the front panel, read it here) and fix the dict if one is off.
+  Not converted: pitch bend type (the manual lists only some of its 14 names) and the sample's portamento type (not in the UI). (3) `ui/yamaha_tooltips.py`: every
+  row's tooltip is title (the table name in sentence case, abbreviations spelled out) + an optional written sentence (`DESCRIPTIONS`, plus rules for the
+  envelope rows, Easy Edit `_offset`s and the controllers) + `Range:` line (special values from the name's parentheses; loop tempo shown /100; none for a dropdown).
+  Keep sentences short and only say what is known (envelope RATES: higher is faster). The user will review the wording after use. (4) Nothing is written UNDER the
+  Samples waveform any more (the hint/"Receiving the wave" line pushed the controls down; `waveform_hint` is gone - the "Double-click to load" hint lives INSIDE the
+  waveform) and the Programs list's count is the short "125 programs empty". Tests: `tests/test_yamaha_tooltips.py`.
 - **Edit progress bar (session 7)**: Trim/Reverse/Fade/Normalise/Filter on the Yamaha Samples tab show the S3000 editor's small determinate bar
   (`tab.edit_progress`, 140 px, right of the zoom buttons) plus a `Reverse "NAME" - 45%` status-bar message while the new sample goes out, fed by
   `controller.transfer_progress` (bytes on the wire; the "Checking..." read-back afterwards has no bar). It is connected in
