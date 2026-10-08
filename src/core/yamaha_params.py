@@ -326,6 +326,16 @@ OUTPUT2 = {0: "off", 1: "assignL&R", 2: "assign1&2", 3: "assign3&4", 4: "assign5
 # MIDI receive channel: 0-15 = channels 01-16, 16 = "Bch" (the basic receive channel); 17-32 are the
 # A5000's MIDI-B channels (owner's manual p.56; the A4000 stops at 16)
 MIDI_CHANNEL = {**{n: f"{n + 1:02d}" for n in range(16)}, 16: "Basic channel"}
+#: enum values only an A5000 has (effects 4-6 as an output target): hidden from the dropdowns unless the connected unit says it is an A5000
+A5000_ONLY_ENUM_VALUES = {name: frozenset({10, 11, 12}) for name in ("output1", "output2", "easy_output1", "easy_output2")}
+
+
+def enum_items(enum, a5000=False):
+    """(value, text) of an enum in value order, without the entries only an A5000 has unless `a5000`."""
+    hidden = frozenset() if a5000 else A5000_ONLY_ENUM_VALUES.get(enum, frozenset())
+    return [(value, text) for value, text in sorted(ENUMS[enum].items()) if value not in hidden]
+
+
 ENUMS = {
     "filter_type": dict(enumerate(FILTER_TYPES)),
     "output1": OUTPUT1,

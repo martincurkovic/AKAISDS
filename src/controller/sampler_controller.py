@@ -712,6 +712,14 @@ class SamplerController(QObject):
             self._s950.handle_sysex(data_bytes)
             return
 
+        if (
+            data_bytes[0] == 0x7E
+            and self.is_yamaha_model()
+            and self._yamaha_engine is not None
+            and self._yamaha_engine.handle_identity(data_bytes)
+        ):
+            return  # the answer to the editor's identity request (an SDS 0x7E message is never one: its third byte differs)
+
         if data_bytes[0] == 0x43 and self.is_yamaha_model():
             # Yamaha editor traffic (parameter replies, bulk dumps): not SDS, and the generic path below would
             # log it as "unrecognised". Sample transfers (0x7E) still take the normal path.

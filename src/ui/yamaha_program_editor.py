@@ -165,6 +165,7 @@ class YamahaProgramEditorWindow(QMainWindow):
         self._connected = True
         self._restoring = False  # a restore from backup is running: nothing else may write, refresh or close the window
         self._linking = False  # a sample is being assigned/removed: same lock
+        self.model = None  # "A4000" / "A5000" / "unknown" from the unit's identity reply (None until it has answered)
         self._select_sample_after_load = None  # after an assignment, select that sample's row once the program is re-read
 
         self.program_panel = FieldPanel("program")
@@ -555,7 +556,20 @@ class YamahaProgramEditorWindow(QMainWindow):
         self._items.clear()
         self._show_placeholder("Reading the object list...")
         self.scan_label.setText("")
+        if self.model is None:  # (asked once it has been answered; a unit that didn't answer is asked again on the next refresh)
+            self._session.request_identity(self._on_identity)
         self._session.request_object_list(self._on_object_list)
+
+    def _on_identity(self, reply):
+        """The unit's identity reply says which model is connected: the A5000's extra dropdown entries (effects 4-6 as an output) are offered
+        only for an A5000. No reply leaves the editor as it was - A4000 features only."""
+        if not self._connected:
+            return
+        self.model = reply.model if reply is not None else None
+        _log(f"identity: {reply.model if reply is not None else 'no reply'}")
+        a5000 = self.model == "A5000"
+        for panel in (self.program_panel, self.easy_panel, self.samples_tab.panel):
+            panel.set_a5000(a5000)
 
     def _on_object_list(self, entries):
         if entries is None:

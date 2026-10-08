@@ -68,6 +68,7 @@ class FieldPanel(QObject):
         self._fields = {}  # key -> Field
         self._filling = False
         self._editable = False
+        self._a5000 = False  # the connected unit is an A5000: its extra dropdown entries are offered (see yp.A5000_ONLY_ENUM_VALUES)
 
     # -- building -----------------------------------------------------------------------------------
 
@@ -101,7 +102,7 @@ class FieldPanel(QObject):
             w.valueChanged.connect(lambda v: self._on_edit(key, int(v)))
         elif field.kind == "combo":
             w = QComboBox()
-            for value, text in sorted(yp.ENUMS[p.enum].items()):
+            for value, text in yp.enum_items(p.enum, self._a5000):
                 w.addItem(text, value)
             w.activated.connect(lambda _i, w=w: (self._on_edit(key, w.currentData()), self._style_inherited(w)))
         elif field.kind == "check":
@@ -121,6 +122,29 @@ class FieldPanel(QObject):
         self._fields[key] = field
         w.setEnabled(self._can_edit(key))
         return w
+
+    def set_a5000(self, a5000):
+        """Offer (or stop offering) the dropdown entries only an A5000 has. Called once the editor has identified the unit; until
+        then, and for an A4000 or an unidentified unit, they are hidden. A value the unit holds that is hidden shows as "(unexpected)"."""
+        a5000 = bool(a5000)
+        if a5000 == self._a5000:
+            return
+        self._a5000 = a5000
+        for key, w in self.widgets.items():
+            p = self.param(key)
+            if isinstance(w, QComboBox) and p.enum in yp.A5000_ONLY_ENUM_VALUES:
+                current = w.currentData()
+                w.blockSignals(True)
+                w.clear()
+                for value, text in yp.enum_items(p.enum, a5000):
+                    w.addItem(text, value)
+                index = w.findData(current)
+                if index < 0 and current is not None:
+                    w.addItem(f"{current} (unexpected)", current)
+                    index = w.findData(current)
+                w.setCurrentIndex(index)
+                w.blockSignals(False)
+                self._style_inherited(w)
 
     def knob_column(self, field):
         """Label above, knob, value readout below (the same column the S3000 editor's knobs use)."""

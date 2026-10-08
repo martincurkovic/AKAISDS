@@ -136,8 +136,10 @@ def make_sample_payload(name):
 
 
 class FakeA4000:
-    def __init__(self, *, device=0, programs=None, samples=None, bulk_protect=False, device_number_off=False):
+    def __init__(self, *, device=0, programs=None, samples=None, bulk_protect=False, device_number_off=False, model="A4000"):
         self.device = device
+        #: what an identity request is answered with ("A4000" is the measured reply; the A5000's family number is the manual's, never seen)
+        self.model = model
         #: when True the unit never answers (its Device Number is "off")
         self.device_number_off = device_number_off
         #: when True edits are silently ignored (GUESS - see the module docstring)
@@ -312,7 +314,8 @@ class FakeA4000:
             self.ignored_ops.append(f"SDS message {kind:#04x}")
 
     def _identity(self):
-        self._say(bytes([0x7E, 0x00, 0x06, 0x02, 0x43, 0x00, 0x41, 0x5A, 0x03, 0x16, 0x00, 0x00, 0x7F]))
+        family = 0x01DB if self.model == "A5000" else 0x01DA
+        self._say(bytes([0x7E, 0x00, 0x06, 0x02, 0x43, 0x00, 0x41, family & 0x7F, family >> 7, 0x16, 0x00, 0x00, 0x7F]))
 
     def _yamaha(self, m):
         kind, model, sub = m[1] >> 4, m[2], m[3]

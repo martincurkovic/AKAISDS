@@ -131,6 +131,8 @@ class YamahaSession(QObject):
         self.wave_chunk_timeout_ms = 6000
         #: after a wave stream is abandoned, how long the wire must be quiet before the next operation may start
         self.drain_idle_ms = 2500
+        #: how long to wait for an identity reply (a unit that doesn't send one is simply treated as unidentified)
+        self.identity_timeout_ms = 1000
         #: how long after an object edit (which gets no reply) before the value is read back
         self.edit_settle_ms = 120
         #: where a pre-write backup of an object is saved (tests point this at a temp dir)
@@ -182,6 +184,23 @@ class YamahaSession(QObject):
         if busy != self._reported_busy:
             self._reported_busy = busy
             self.busy_changed.emit(busy)
+
+    def request_identity(self, callback):
+        """callback(IdentityReply | None) - the unit's General MIDI identity reply, whose family number says A4000 or A5000. A Universal
+        message (not addressed to a Device Number), handled without touching the unit's display. None if it doesn't answer."""
+        self._enqueue(_Op("identity", callback, name=""))
+
+    def handle_identity(self, data):
+        """An identity reply (bytes between F0 and F7) from the controller. True if this session was waiting for it."""
+        op = self._op
+        if op is None or op.kind != "identity":
+            return False
+        try:
+            op.results_value = ysx.parse_identity_reply(data)
+        except ysx.YamahaSysexError:
+            return False  # someone else's reply: keep waiting
+        self._complete()
+        return True
 
     def request_object_list(self, callback):
         """callback(list[ObjectEntry] | None)."""
@@ -322,7 +341,10 @@ class YamahaSession(QObject):
         op = self._queue.pop(0)
         self._op = op
         try:
-            if op.kind == "bulk":
+            if op.kind == "identity":
+                self._send(ysx.build_identity_request())
+                self._timeout.start(self.identity_timeout_ms)
+            elif op.kind == "bulk":
                 self._send(ysx.build_dump_request(self.device, op.kw["fmt"], op.kw["name"]))
                 self._timeout.start(self.bulk_timeout_ms)
             elif op.kind == "send":
@@ -562,7 +584,7 @@ class YamahaSession(QObject):
         try:
             if op.kind == "send":
                 op.callback(not failed)
-            elif op.kind in ("bulk", "wave"):
+            elif op.kind in ("bulk", "wave", "identity"):
                 op.callback(None if failed else op.results_value)
             elif op.kind == "write":
                 op.callback(self._write_result(op, failed))
@@ -578,6 +600,10 @@ class YamahaSession(QObject):
     def _on_timeout(self):
         op = self._op
         if op is None:
+            return
+        if op.kind == "identity":
+            debug_log.get_logger().info("YamahaSession: no identity reply - the model stays unidentified")
+            self._complete(failed=True)  # no status message: the unit may still answer everything else
             return
         if op.kind == "link":
             what = f"object link of {op.kw['sample']!r} / {op.kw['name']!r}"
