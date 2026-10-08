@@ -138,7 +138,7 @@ def test_the_scan_hides_empty_programs_and_selects_the_first_with_samples(win):
     assert visible == [1, 5]
     assert win.program_list.currentItem().data(Qt.ItemDataRole.UserRole) == 1
     assert win.program_list.currentItem().text() == "001  Pgm 001"
-    assert "2 of 128" in win.scan_label.text()
+    assert win.scan_label.text() == "126 programs empty"
 
 
 def test_show_empty_programs_reveals_all_128(win):
@@ -520,7 +520,7 @@ def test_hovering_a_knobs_name_explains_it_like_hovering_the_knob(win):
     from ui.yamaha_fields import LABEL_WIDTH  # noqa: F401
 
     knob = win.samples_tab.panel.widgets["feg_attack_level"]
-    assert "FEG attack level" in knob.toolTip()
+    assert "Filter envelope attack level" in knob.toolTip()
     label = knob.parentWidget().findChildren(QLabel)
     assert any(l.text() == "Att lvl" and l.toolTip() == knob.toolTip() for l in label)
 

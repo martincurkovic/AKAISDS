@@ -102,7 +102,7 @@ def test_double_clicking_loads_the_audio_into_the_waveform(window):
     assert wait_until(lambda: tab._audio_name == "saw up")
     assert tab._audio_samples == window.fake.audio["saw up"] and tab._audio_samples_right is None
     assert tab.waveform_view.has_waveform() and tab.waveform_view_right.isHidden()
-    assert "Drag a marker" in tab.waveform_hint.text()
+    assert not hasattr(tab, "waveform_hint")  # nothing is written under the waveform (it used to push the controls below it around)
     assert tab.cancel_load_button.isHidden() and not tab.loading
     # it asked for the sample's WAVE object by name - not for a Sample Dump Standard number
     assert len(wd_requests(window)) == 1 and bytes(wd_requests(window)[0][13:29]).rstrip() == b"saw up"
@@ -166,7 +166,6 @@ def test_the_waveform_fills_in_progressively_while_the_wave_arrives(window):
     view = tab.waveform_view
     assert wait_until(lambda: view._samples is not None and 0 < len(view._samples) < 20000)
     assert tab.loading and not tab.cancel_load_button.isHidden() and tab._audio_name is None
-    assert "fills in as it arrives" in tab.waveform_hint.text()
     assert wait_until(lambda: tab._audio_name == "long")
     assert len(view._samples) == 20000 and not tab.loading
 

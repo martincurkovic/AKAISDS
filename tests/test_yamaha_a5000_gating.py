@@ -14,7 +14,7 @@ from ui.yamaha_fields import Field, FieldPanel
 from test_s950_transfers import qapp, wait_until  # noqa: F401
 from test_yamaha_program_editor import build_window, dispose, warning_acknowledged  # noqa: F401  (autouse: no modal warning)
 
-A5000_ONLY = ("effect4", "effect5", "effect6")
+A5000_ONLY = ("Effect 4", "Effect 5", "Effect 6")
 
 
 def texts(combo):
@@ -35,7 +35,7 @@ def open_editor(qapp, model):  # noqa: F811
 def test_the_a5000_only_entries_are_left_out_unless_asked_for():
     for enum in ("output1", "output2", "easy_output1", "easy_output2"):
         shown = [text for _v, text in yp.enum_items(enum)]
-        assert not any(name in shown for name in A5000_ONLY) and "effect3" in shown
+        assert not any(name in shown for name in A5000_ONLY) and "Effect 3" in shown
         everything = [text for _v, text in yp.enum_items(enum, a5000=True)]
         assert all(name in everything for name in A5000_ONLY)
         assert [v for v, _t in yp.enum_items(enum, a5000=True)] == sorted(yp.ENUMS[enum])
@@ -49,7 +49,7 @@ def test_a_panel_offers_the_extra_outputs_only_once_told_it_is_an_a5000(qapp):  
     panel = FieldPanel("sample")
     combo = panel.widget(Field("output1", "Output 1", "combo"))
     assert not any(name in texts(combo) for name in A5000_ONLY)
-    combo.setCurrentIndex(combo.findData(2))  # effect1
+    combo.setCurrentIndex(combo.findData(2))  # Effect 1
     seen = []
     panel.edited.connect(lambda *a: seen.append(a))
     panel.set_a5000(True)
@@ -63,8 +63,8 @@ def test_a_value_the_unit_holds_that_is_hidden_still_shows(qapp):  # noqa: F811
     panel = FieldPanel("sample")
     combo = panel.widget(Field("output1", "Output 1", "combo"))
     panel.set_a5000(True)
-    panel.set_value("output1", 11)  # effect5
-    assert combo.currentText() == "effect5"
+    panel.set_value("output1", 11)  # Effect 5
+    assert combo.currentText() == "Effect 5"
     panel.set_a5000(False)
     assert combo.currentData() == 11 and "unexpected" in combo.currentText()  # shown honestly, not silently changed to something else
 

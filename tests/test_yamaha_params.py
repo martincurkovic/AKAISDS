@@ -196,7 +196,7 @@ def test_range_check_and_enums():
     assert not yp.in_range(yp.get("sample", "filter_cutoff"), 128)
     assert not yp.in_range(yp.get("program", "assigned_samples"), 1)  # read-only
     assert yp.ENUMS["filter_type"][0] == "Bypass" and len(yp.ENUMS["filter_type"]) == 17
-    assert yp.ENUMS["output1"][1] == "stereo out" and yp.ENUMS["output2"][6] == "stereo out"
+    assert yp.ENUMS["output1"][1] == "Stereo out" and yp.ENUMS["output2"][6] == "Stereo out"
 
 
 def test_store_is_the_inverse_of_extract():
