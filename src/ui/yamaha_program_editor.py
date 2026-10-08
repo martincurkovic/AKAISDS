@@ -334,20 +334,20 @@ class YamahaProgramEditorWindow(QMainWindow):
             row(c("lfo_wave", "Wave")),
             row(c("lfo_sync", "Sync")),
             row(s("lfo_tempo", "Tempo")),
-            row(s("lfo_cycle", "Cycle")),
-            row(s("lfo_initial_phase", "Initial phase")),
+            row(c("lfo_cycle", "Cycle")),
+            row(c("lfo_initial_phase", "Initial phase")),
             row(note),
             row(c("lfo_reset_midi_channel", "Reset channel")),
         )
         porta = build_section_card(
             "Portamento & S/H",
-            row(s("portamento_type", "Type")),
+            row(c("portamento_type", "Type")),
             knobs([k("portamento_rate", "Rate"), k("portamento_time", "Time"), k("sh_speed", "S/H speed")]),
         )
         audio = build_section_card(
             "Audio Input",
             row(ck("ad_in_on", "Input on")),
-            row(s("ad_in_source", "Source")),
+            row(c("ad_in_source", "Source")),
             knobs([k("ad_in_l_pan", "L pan"), k("ad_in_r_pan", "R pan")]),
             row(c("ad_in_l_output1", "L output 1")),
             row(c("ad_in_l_output2", "L output 2")),
@@ -359,8 +359,8 @@ class YamahaProgramEditorWindow(QMainWindow):
         steps = [k(f"lfo_step_value_{n}", str(n), 28) for n in range(1, 17)]
         step_card = build_section_card(
             "LFO Step Wave",
-            row(s("lfo_step_total", "Total steps")),
-            row(s("lfo_step_slope", "Slope")),
+            row(c("lfo_step_total", "Total steps")),
+            row(c("lfo_step_slope", "Slope")),
             p.knob_row(steps[:8], spacing=6),
             p.knob_row(steps[8:], spacing=6),
         )
@@ -644,7 +644,7 @@ class YamahaProgramEditorWindow(QMainWindow):
             # pass 1: every program's assigned-sample count (one small request each - ~7 s for all 128)
             number = todo[0]
             done = len(self._program_numbers) - len(todo)
-            self.scan_label.setText(f"Scanning programs... {done}/{len(self._program_numbers)}")
+            self.scan_label.setText(f"Scanning {done}/{len(self._program_numbers)}")
             self._session.request_parameters(
                 "program", ysx.program_object_name(number), [yp.get("program", "assigned_samples").p],
                 lambda results, n=number, g=generation: self._on_scanned(g, n, results),
@@ -660,8 +660,8 @@ class YamahaProgramEditorWindow(QMainWindow):
             )
             return
         self._scanning = False
-        shown = sum(1 for n in self._program_numbers if self._counts.get(n))
-        self.scan_label.setText(f"{shown} of {len(self._program_numbers)} programs have samples")
+        empty = sum(1 for n in self._program_numbers if not self._counts.get(n))
+        self.scan_label.setText(f"{empty} program{'s' if empty != 1 else ''} empty")  # short: a long line widens the whole column
         if self._selected is None and not self._first_visible_number():
             self._show_placeholder("No programs have samples assigned.\n\nTick \"Show empty programs\" to see all 128.")
 

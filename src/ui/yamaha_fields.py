@@ -19,6 +19,7 @@ from core import yamaha_params as yp
 from ui.editor_layout import build_knob_column
 from ui.knob import Knob
 from ui.note_spinbox import NoteSpinBox
+from ui.yamaha_tooltips import tooltip
 
 
 #: the width of every "Label  [widget]" row's label, so the values line up in the same column in every card
@@ -117,7 +118,7 @@ class FieldPanel(QObject):
         if field.tip:
             w.setToolTip(field.tip)
         elif p.kind == "int" and field.kind != "text":
-            w.setToolTip(f"{p.name} ({p.lo} to {p.hi})")
+            w.setToolTip(tooltip(p))
         self.widgets[key] = w
         self._fields[key] = field
         w.setEnabled(self._can_edit(key))

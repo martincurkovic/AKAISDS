@@ -94,25 +94,25 @@ def _program_rows():
     rows = [
         _text("program", "program_name", "program name (read only)", _pad6((1, 0)), 8, 64),
         P("ad_in_on", "AD in on", 3, 0, 1, 72, bits=(0, 1)),
-        P("ad_in_source", "AD in source", 4, 0, 2, 72, bits=(1, 2)),
+        P("ad_in_source", "AD in source", 4, 0, 2, 72, bits=(1, 2), enum="ad_in_source"),
         P("ad_in_l_pan", "AD in (L) pan", 5, -63, 63, 78),
         P("ad_in_l_output1", "AD in (L) output1", 6, 0, 12, 373, enum="output1"),
         P("ad_in_l_output1_level", "AD in (L) output1 level", 7, 0, 127, 374),
         P("ad_in_l_output2", "AD in (L) output2", 8, 0, 12, 375, enum="output2"),
         P("ad_in_l_output2_level", "AD in (L) output2 level", 9, 0, 127, 376),
         P("program_level", "program level", 10, 0, 127, 83),
-        P("lfo_cycle", "program LFO cycle", 11, 0, 6, 73, bits=(0, 3)),
+        P("lfo_cycle", "program LFO cycle", 11, 0, 6, 73, bits=(0, 3), enum="lfo_cycle"),
         P("lfo_sync", "program LFO sync", 12, 0, 1, 72, bits=(6, 2), enum="lfo_sync"),
         P("transpose", "program transpose", 13, -127, 127, 86),
         P("lfo_tempo", "program LFO tempo", 14, 25, 250, 92),
         P("lfo_wave", "program LFO wave", 15, 0, 6, 73, bits=(3, 3), enum="program_lfo_wave"),
-        P("portamento_type", "program portamento type", 16, 0, 3, 88),
+        P("portamento_type", "program portamento type", 16, 0, 3, 88, enum="program_portamento_type"),
         P("portamento_rate", "program portamento rate", 17, 1, 127, 89),
         P("portamento_time", "program portamento time", 18, 1, 127, 90),
         P("sh_speed", "S/H speed", 19, 0, 127, 91),
         P("assigned_samples", "number of assigned samples", 20, 0, 999, 94, size=2, read_only=True),
         P("effect_connection", "effect1-3 connection", 23, 0, 4, 72, bits=(3, 3)),
-        P("lfo_initial_phase", "program LFO initial phase", 24, 0, 3, 73, bits=(6, 2)),
+        P("lfo_initial_phase", "program LFO initial phase", 24, 0, 3, 73, bits=(6, 2), enum="lfo_initial_phase"),
         P("lfo_reset_midi_channel", "program LFO reset MIDI channel", 25, -2, 32, 87, enum="lfo_reset_channel"),
         # Table 2 calls this UC but its range includes -1 ("all"); Table 1 says SC
         P("lfo_reset_note", "program LFO reset note", 26, -1, 127, 93),
@@ -122,8 +122,8 @@ def _program_rows():
         P("ad_in_r_output2", "AD in R output2", 30, 0, 12, 380, enum="output2"),
         P("ad_in_r_output2_level", "AD in R output2 level", 31, 0, 127, 381),
         P("effect456_connection", "effect4-6 connection", 32, 0, 4, 372, bits=(0, 3), a5000_only=True),
-        P("lfo_step_total", "total steps of program LFO step wave", 33, 0, 6, 398, bits=(0, 3)),
-        P("lfo_step_slope", "program LFO step wave slope", 34, 0, 3, 398, bits=(3, 2)),
+        P("lfo_step_total", "total steps of program LFO step wave", 33, 0, 6, 398, bits=(0, 3), enum="lfo_step_total"),
+        P("lfo_step_slope", "program LFO step wave slope", 34, 0, 3, 398, bits=(3, 2), enum="lfo_step_slope"),
     ]
     for n in range(16):
         rows.append(
@@ -234,7 +234,7 @@ def _sample_rows():
         S("level_key_scaling_level_1", "level key scaling level 1", 40, 0, 127, 118),
         S("level_key_scaling_level_2", "level key scaling level 2", 40, 0, 127, 119, p3=1),
         S("velocity_sensitivity", "velocity sensitivity", 41, -127, 127, 120),
-        S("portamento_type", "sample portamento type", 42, 0, 5, 218),
+        S("portamento_type", "sample portamento type", 42, 0, 5, 218, enum="sample_portamento_type"),
         S("mono_mode", "mono mode", 43, 0, 1, 41, bits=(1, 1)),
         S("key_xfade_on", "key x-fade on", 44, 0, 1, 41, bits=(2, 1)),
         S("velocity_xfade_low", "velocity x-fade low", 46, 0, 127, 213),
@@ -289,7 +289,7 @@ def _sample_rows():
         S("output2", "output2", 81, 0, 12, 216, enum="output2"),
         S("output2_level", "output2 level", 82, 0, 127, 217),
         S("filter_gain", "filter gain", 84, -31, 31, 169),
-        S("eq_type", "EQ type", 85, 0, 2, 41, bits=(6, 2)),
+        S("eq_type", "EQ type", 85, 0, 2, 41, bits=(6, 2), enum="eq_type"),
         S("portamento_rate", "sample portamento rate", 87, 1, 127, 219),
         S("portamento_time", "sample portamento time", 88, 1, 127, 220),
     ]
@@ -315,17 +315,18 @@ _BY_KEY = {(scope, p.key): p for scope, rows in PARAMS.items() for p in rows}
 # -- enumerations (manual pp.41-42) ---------------------------------------------------------------------
 
 FILTER_TYPES = (
-    "Bypass", "LowPass1", "LowPass2", "HiPass1", "HiPass2", "BandPass", "BandElim", "LowPass3",
-    "Peak1", "Peak2", "2Peaks", "2Dips", "DualLPFs", "LPF+Peak", "DualHPFs", "HPF+Peak", "LPF+HP",
+    "Bypass", "Low-pass 1", "Low-pass 2", "High-pass 1", "High-pass 2", "Band-pass", "Band-eliminate", "Low-pass 3",
+    "Peak 1", "Peak 2", "2 Peaks", "2 Dips", "Dual low-pass", "Low-pass + Peak", "Dual high-pass", "High-pass + Peak",
+    "Low-pass + High-pass",
 )
-#: value -> name; Easy Edit adds -1 = "=sample"; 10-12 are A5000-only
-OUTPUT1 = {0: "off", 1: "stereo out", 2: "effect1", 3: "effect2", 4: "effect3", 5: "assignL&R", 6: "assign1&2",
-           7: "assign3&4", 8: "assign5&6", 9: "DIG&OPT", 10: "effect4", 11: "effect5", 12: "effect6"}
-OUTPUT2 = {0: "off", 1: "assignL&R", 2: "assign1&2", 3: "assign3&4", 4: "assign5&6", 5: "DIG&OPT",
-           6: "stereo out", 7: "effect1", 8: "effect2", 9: "effect3", 10: "effect4", 11: "effect5", 12: "effect6"}
+#: value -> name; Easy Edit adds -1 = "=Sample"; 10-12 are A5000-only
+OUTPUT1 = {0: "Off", 1: "Stereo out", 2: "Effect 1", 3: "Effect 2", 4: "Effect 3", 5: "Assign L&R", 6: "Assign 1&2",
+           7: "Assign 3&4", 8: "Assign 5&6", 9: "Digital & optical", 10: "Effect 4", 11: "Effect 5", 12: "Effect 6"}
+OUTPUT2 = {0: "Off", 1: "Assign L&R", 2: "Assign 1&2", 3: "Assign 3&4", 4: "Assign 5&6", 5: "Digital & optical",
+           6: "Stereo out", 7: "Effect 1", 8: "Effect 2", 9: "Effect 3", 10: "Effect 4", 11: "Effect 5", 12: "Effect 6"}
 # MIDI receive channel: 0-15 = channels 01-16, 16 = "Bch" (the basic receive channel); 17-32 are the
 # A5000's MIDI-B channels (owner's manual p.56; the A4000 stops at 16)
-MIDI_CHANNEL = {**{n: f"{n + 1:02d}" for n in range(16)}, 16: "Basic channel"}
+MIDI_CHANNEL = {**{n: f"Ch {n + 1}" for n in range(16)}, 16: "Basic channel"}
 #: enum values only an A5000 has (effects 4-6 as an output target): hidden from the dropdowns unless the connected unit says it is an A5000
 A5000_ONLY_ENUM_VALUES = {name: frozenset({10, 11, 12}) for name in ("output1", "output2", "easy_output1", "easy_output2")}
 
@@ -350,10 +351,22 @@ ENUMS = {
     # owner's manual p.123 (loop modes), p.143 (LFO), p.137 (attack mode), p.103 (program LFO sync)
     "loop_mode": {0: "No loop", 1: "Loop (continuous)", 2: "Loop to release", 3: "Reverse (no loop)",
                   4: "One-shot", 5: "Reverse one-shot"},
-    "program_lfo_wave": {0: "Off", 1: "Sine", 2: "Saw", 3: "Triangle", 4: "Square", 5: "S/H", 6: "Step wave"},
-    "sample_lfo_wave": {0: "Saw", 1: "Triangle", 2: "Square", 3: "S/H"},
+    "program_lfo_wave": {0: "Off", 1: "Sine", 2: "Saw", 3: "Triangle", 4: "Square", 5: "Sample & hold", 6: "Step"},
+    "sample_lfo_wave": {0: "Saw", 1: "Triangle", 2: "Square", 3: "Sample & hold"},
     "attack_mode": {0: "Rate", 1: "Hold", 2: "Rate 2"},
     "lfo_sync": {0: "Manual", 1: "MIDI"},
+    # Named choices that were plain numbers. The NAMES and their ORDER are the owner's manual's lists (pp.91, 103, 107, 143); that the raw
+    # value counts up through each list in the manual's order is an assumption not yet checked on a real unit (see AGENTS.md).
+    "ad_in_source": {0: "L/R", 1: "L+R", 2: "2 mono"},
+    "lfo_cycle": {0: "Eighth note", 1: "Quarter note", 2: "3 eighth notes", 3: "2 quarter notes", 4: "4 quarter notes",
+                  5: "8 quarter notes", 6: "16 quarter notes"},
+    "program_portamento_type": {0: "Rate (fingered)", 1: "Rate (full-time)", 2: "Time (fingered)", 3: "Time (full-time)"},
+    "sample_portamento_type": {0: "Off", 1: "=Program", 2: "Rate (fingered)", 3: "Rate (full-time)", 4: "Time (fingered)",
+                               5: "Time (full-time)"},
+    "lfo_initial_phase": {0: "0\u00b0", 1: "90\u00b0", 2: "180\u00b0", 3: "270\u00b0"},
+    "lfo_step_total": {0: "2", 1: "3", 2: "4", 3: "6", 4: "8", 5: "12", 6: "16"},
+    "lfo_step_slope": {0: "Off", 1: "Up", 2: "Down", 3: "Up & down"},
+    "eq_type": {0: "Peak/dip", 1: "Low shelf", 2: "High shelf"},
 }
 
 

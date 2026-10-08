@@ -128,8 +128,8 @@ FINE_TUNE_STEPS_PER_CENT = 1.0
 _LOOPING_MODES = (1, 2)
 #: loop modes that play the wave backwards (3 = reverse, 5 = reverse one-shot)
 _REVERSE_MODES = (3, 5)
-#: said INSIDE the waveform (once, centered across a stereo pair) - the label under it stays empty until it has more to say
-_LOAD_HINT = ""
+#: said INSIDE the waveform (once, centered across a stereo pair). Nothing is written under the waveform: a line that came and went there
+#: pushed the controls below it up and down
 _WAVEFORM_HINT = "Double-click to load the audio waveform"
 #: how long a "loop to release" sample's loop is held in a preview (there is no key to release)
 _RELEASE_PREVIEW_MS = 2000
@@ -295,7 +295,7 @@ def build_sample_cards(panel):
     )
     eq = build_section_card(
         "EQ",
-        row(s("eq_type", "Type")),
+        row(c("eq_type", "Type")),
         row(s("eq_frequency", "Frequency")),
         row(s("eq_gain", "Gain")),
         row(s("eq_width", "Width")),
@@ -484,9 +484,6 @@ class YamahaSamplesTab(QWidget):
         header.addWidget(self.summary_label)
         header.addWidget(self.used_label)
 
-        self.waveform_hint = QLabel(_LOAD_HINT)
-        self.waveform_hint.setObjectName("mutedLabel")
-        self.waveform_hint.setVisible(bool(_LOAD_HINT))
         # the two channels touch (no spacing) and draw as ONE display - see WaveformView.set_stack_position
         self.channel_stack = QVBoxLayout()
         channel_stack = self.channel_stack
@@ -505,7 +502,6 @@ class YamahaSamplesTab(QWidget):
             zoom_row,
             channel_stack,
             self._row(scrollbar_container),
-            self._row(self.waveform_hint),
             marker_row,
             loop_mode_row,
             edit_row,
@@ -761,11 +757,6 @@ class YamahaSamplesTab(QWidget):
         finally:
             self._syncing = False
 
-    def _set_hint(self, text):
-        """The line under the waveform; hidden while empty so it doesn't leave a blank row in the card."""
-        self.waveform_hint.setText(text)
-        self.waveform_hint.setVisible(bool(text))
-
     def _show_placeholder(self, text):
         self.waveform_view.clear()
         self.waveform_view_right.clear()
@@ -904,12 +895,6 @@ class YamahaSamplesTab(QWidget):
                 view.set_header(frames, start, loop_start, loop_end, end)
         self._update_marker_knobs(start, loop_start, loop_end, end)
         self._set_loops_enabled(loops)
-        if not loaded:
-            self._set_hint(_LOAD_HINT)
-        elif self._writer is None:
-            self._set_hint("Click the waveform to preview it. The markers are shown for reference.")
-        else:
-            self._set_hint("Drag a marker to change it (written when you let go) - click the waveform to preview.")
 
     def set_active(self, active):
         self._active = active
@@ -1111,7 +1096,6 @@ class YamahaSamplesTab(QWidget):
             view.set_loading(True)
             view.begin_live_capture()  # the wave draws itself in as it arrives
         self.cancel_load_button.setVisible(True)
-        self._set_hint("Receiving the wave - it fills in as it arrives. Cancel stops waiting for it.")
         _log(f"loading audio of {name!r}: wave object(s) {waves}")
         self.status_message.emit(f"Receiving {name!r}...")
         self._load_wave(token, name, waves, [])
@@ -1250,7 +1234,6 @@ class YamahaSamplesTab(QWidget):
         for view in (self.waveform_view, self.waveform_view_right):
             view.set_loading(False)
         self.cancel_load_button.setVisible(False)
-        self._set_hint(_LOAD_HINT)
 
     def update_edit_buttons(self):
         """The edit buttons need the audio of the SHOWN sample in memory, no load or edit running, and a tab that can write."""
