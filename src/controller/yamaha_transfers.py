@@ -39,6 +39,7 @@ class YamahaTransfers:
         self._c = controller
         self.names = []  # the samples of the last list read, in order (index == number)
         self.loaded_names = []  # the names the samples of the LAST send really landed under (a clash adds a number), in order
+        self.midi_loaded_names = set()  # every name this app has loaded over MIDI since it started (never reset by a send)
         self.busy = False  # a receive or a send is running
         self._mode = None  # "receive" / "send" while busy
         self._send_total = 0
@@ -333,6 +334,8 @@ class YamahaTransfers:
         if not ok:
             self._send_finished(token, False, f"Sending {label} failed - see the log")
             return
+        # recorded as soon as the load has gone out, not once it is verified: a load the check then doubts may well be on the unit
+        self.midi_loaded_names.add(load.sample_name)
         self._c.status_changed.emit(f"Checking {label} on the sampler...")
         QTimer.singleShot(self.verify_delay_ms, lambda: self._check_objects(token, entry, load, label, 0))
 

@@ -53,6 +53,7 @@ from PySide6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QMessageBox,
+    QProgressBar,
     QPushButton,
     QVBoxLayout,
     QWidget,
@@ -449,6 +450,13 @@ class YamahaSamplesTab(QWidget):
         zoom_row.addWidget(zoom_out)
         zoom_row.addWidget(zoom_in)
         zoom_row.addWidget(zoom_fit)
+        zoom_row.addSpacing(12)
+        # the S3000 editor's edit-progress bar, in the same place: a Trim/Reverse/... sends the new sample out, and the waveform
+        # (unlike a load) has nothing of its own to show for that
+        self.edit_progress = QProgressBar()
+        self.edit_progress.setFixedWidth(140)
+        self.edit_progress.setVisible(False)
+        zoom_row.addWidget(self.edit_progress)
         zoom_row.addStretch()
         self.cancel_load_button = QPushButton("Cancel load")
         self.cancel_load_button.setToolTip("Stop receiving this sample's audio (a long sample takes minutes at MIDI speed)")
@@ -674,9 +682,18 @@ class YamahaSamplesTab(QWidget):
     def free_programs(self):
         return list(self.free_programs_provider()) if self.free_programs_provider is not None else []
 
+    def show_edit_progress(self, sent, total, label):
+        """The edit's new sample is going out: the small bar next to the zoom buttons, plus the percentage in the status bar."""
+        self.edit_progress.setRange(0, max(total, 1))
+        self.edit_progress.setValue(min(sent, max(total, 1)))
+        self.edit_progress.setVisible(True)
+        self.status_message.emit(f"{label} - {100 * sent // total if total else 0}%")
+
     def _set_edit_busy(self, busy):
         """A new sample is being sent to the unit (an edit or a slice export): nothing else on the tab may start meanwhile."""
         self._edit_busy = busy
+        if not busy:
+            self.edit_progress.setVisible(False)
         self._apply_marker_lock()  # also refreshes the edit buttons
 
     def _set_loops_enabled(self, loops):

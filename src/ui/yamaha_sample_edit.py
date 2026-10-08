@@ -63,6 +63,7 @@ class YamahaSampleEditor(QObject):
         self._tab = tab
         self._temp_dir = None
         self._select_name = None
+        self._progress_label = ""
         self._free_programs = []  # [(number, label)] the Slice Editor can fill (see open_slicer)
         self._dialog = None
         buttons = tab.edit_buttons
@@ -212,26 +213,33 @@ class YamahaSampleEditor(QObject):
         entry = {"filepath": path, "name": name, "sample_rate": ctx["rate"], "mono": False, "params": params}
         _log(f"{label} of {ctx['name']!r} -> new sample {name!r} ({len(channels[0]):,} frames, {len(channels)} ch)")
         expected = yl.unique_name(yl.sample_name_for(name), tab._names)
-        self._start_send([entry], temp_dir, expected)
+        self._start_send([entry], temp_dir, expected, f'{label} "{ctx["name"]}"')
 
     # -- sending ---------------------------------------------------------------------------------------------
 
-    def _start_send(self, entries, temp_dir, select_name):
+    def _start_send(self, entries, temp_dir, select_name, label):
         tab = self._tab
         controller = tab._controller
         self._temp_dir, self._select_name = temp_dir, select_name
+        self._progress_label = label
         controller.transfer_finished.connect(self._on_send_finished)
+        controller.transfer_progress.connect(self._on_send_progress)
         tab._set_edit_busy(True)
         if not controller.send_file_queue(entries):
             controller.transfer_finished.disconnect(self._on_send_finished)
+            controller.transfer_progress.disconnect(self._on_send_progress)
             tab._set_edit_busy(False)
             self._cleanup()
             return False
         return True
 
+    def _on_send_progress(self, sent, total):
+        self._tab.show_edit_progress(sent, total, self._progress_label)
+
     def _on_send_finished(self, ok):
         tab = self._tab
         tab._controller.transfer_finished.disconnect(self._on_send_finished)
+        tab._controller.transfer_progress.disconnect(self._on_send_progress)
         self._cleanup()
         tab._set_edit_busy(False)
         landed = tab._controller.yamaha_loaded_names()  # the name it REALLY got (a clash adds a number)

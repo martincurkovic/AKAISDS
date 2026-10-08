@@ -1038,11 +1038,30 @@ class YamahaProgramEditorWindow(QMainWindow):
             return
         taken = {name for name, _otype in self._assigned}
         candidates = [n for n in self._sample_names if n not in taken]
-        dialog = AssignDialog(candidates, f"program {number:03d}", parent=self)
+        midi_loaded = self._controller.yamaha_midi_loaded_names()
+        dialog = AssignDialog(candidates, f"program {number:03d}", parent=self, midi_loaded=midi_loaded)
         if dialog.exec() != AssignDialog.DialogCode.Accepted or not dialog.chosen:
+            return
+        if dialog.chosen in midi_loaded and not self._confirm_assign_midi_loaded(dialog.chosen, number):
             return
         _log(f"assign {dialog.chosen!r} to program {number:03d}")
         self._start_link(number, dialog.chosen, True, "sample")
+
+    def _confirm_assign_midi_loaded(self, sample, number):
+        """Linking a sample that was loaded over MIDI has left a real A4000 not answering until OK was pressed on its front panel
+        (measured in several runs, cause unknown - dev_docs/a4000-editor-roadmap.md, session 6). Nothing is known to make it safe, so
+        say so, briefly, before doing it."""
+        _log(f"assign of {sample!r} (loaded over MIDI by this app) to program {number:03d}: asking first")
+        answer = QMessageBox.question(
+            self,
+            "Assign Sample",
+            f"{sample!r} was sent to the sampler over MIDI by this app.\n\n"
+            "You will likely need to press OK (Knob 5) on the sampler if it displays \"MIDI Bulk Received\".\n\n"
+            "Assign it anyway?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Cancel,
+        )
+        return answer == QMessageBox.StandardButton.Yes
 
     def _remove_assigned(self):
         number, row = self._selected, self.assigned_list.currentRow()

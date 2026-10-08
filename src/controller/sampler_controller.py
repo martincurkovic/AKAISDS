@@ -235,6 +235,12 @@ class SamplerController(QObject):
         engine = self._yamaha_transfers_engine
         return list(engine.loaded_names) if engine is not None else []
 
+    def yamaha_midi_loaded_names(self):
+        """Every sample name this app has loaded onto the Yamaha over MIDI since it started (not just the last send). Linking such a
+        sample to a program has left a real A4000 unresponsive - see ui/yamaha_program_editor.py's _assign_sample."""
+        engine = self._yamaha_transfers_engine
+        return set(engine.midi_loaded_names) if engine is not None else set()
+
     def is_yamaha_model(self):
         return sampler_models.is_yamaha(self.sampler_model)
 
