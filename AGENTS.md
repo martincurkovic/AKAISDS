@@ -92,248 +92,101 @@ teardown or hit `QThread: Destroyed while thread is still running`.
 
 ## Akai S1000 support (`core/s1000_bridge.py`) - written without hardware
 
-The Settings "Sampler Type" combo has four entries (`core/sampler_models.py`,
-alphabetical): "Akai S1000" (`akai_s1000`), "Akai S2000/S3000"
-(`akai_s2000_s3000`), "Akai S900/S950 (experimental)" (`akai_s900_s950` - a different
-protocol, see its own section), "Generic SDS" (`generic`). Before the S1000 existed the
-S2000/S3000 was persisted as plain `"akai"`; that legacy value is still accepted
-everywhere (`sampler_models.normalize`) and `app_config.ensure_defaults_saved()`
-rewrites it in `config.json` at startup so the file names the real hardware
-(only that exact legacy string - an unrecognised value from a newer version is
-left alone). Note `"akai"` also remains the PROTOCOL FAMILY name below - a
-different thing from the saved selection. The S1000, S2000 and S3000 all answer a MIDI identity/status request
-identically, so the model can only be a user setting, never detected.
-`SamplerController.device_type` is still the PROTOCOL FAMILY (`akai`/`generic`)
-every transfer path branches on (an S1000's SDS/RSTAT/list traffic is the same
-as an S2000/S3000's); the full choice is `SamplerController.sampler_model`.
-Only the Program Editor cares about the S1000/S2000+ split.
+The Settings "Sampler Type" combo has four entries (`core/sampler_models.py`, alphabetical): "Akai S1000" (`akai_s1000`), "Akai S2000/S3000" (`akai_s2000_s3000`), "Akai S900/S950 (experimental)"
+(`akai_s900_s950` - a different protocol, see its section), "Generic SDS" (`generic`). Before the S1000 the S2000/S3000 was persisted as plain `"akai"`; that exact legacy string is still accepted
+everywhere (`sampler_models.normalize`) and `app_config.ensure_defaults_saved()` rewrites it at startup (an unrecognised value from a newer version is left alone). `"akai"` also remains the PROTOCOL
+FAMILY name - a different thing from the saved selection. The S1000, S2000 and S3000 answer an identity/status request identically, so the model is a user setting, never detected.
+`SamplerController.device_type` is the PROTOCOL FAMILY (`akai`/`generic`) every transfer path branches on (an S1000's SDS/RSTAT/list traffic equals an S2000/S3000's); the full choice is
+`SamplerController.sampler_model`. Only the Program Editor cares about the S1000/S2000+ split.
 
-**Why a separate bridge**: `S3kBridge.get_parameter`/`set_parameter` use the
-S3000-only byte-addressable header ops (0x27-0x38). The S1000 doesn't implement
-them and stays silent - a real S1000 user's log showed lists working (base ops)
-and every `get_parameter` timing out at 2.0s. The S1000 only has whole-block
-RPDATA/RKDATA/RSDATA + PDATA/KDATA/SDATA (0x06-0x0B, nibbled), so
-`S1000Bridge` is a wrapper that does read-modify-write of whole blocks while
-exposing the same duck-typed surface (`program_editor_bridge.connect(
-midi_manager, sampler_model)` picks it). The S3000 header layout is a superset
-of the S1000's at the same offsets (program 0-71, keygroup 0-148, sample 0-140,
-checked against the S1000 spec), so `s3k.params` is reused as-is for those
-fields (`_S1000_BLOCK_SIZES`); anything past them reads as a neutral zero and
-refuses writes, so `BridgeWorker`'s fixed field lists work unmodified.
+**Why a separate bridge**: `S3kBridge.get_parameter`/`set_parameter` use the S3000-only byte-addressable header ops (0x27-0x38); the S1000 stays silent (a real user's log: lists worked, every
+`get_parameter` timed out at 2.0 s). It only has whole-block RPDATA/RKDATA/RSDATA + PDATA/KDATA/SDATA (0x06-0x0B, nibbled), so `S1000Bridge` does read-modify-write of whole blocks behind the same
+duck-typed surface (`program_editor_bridge.connect(midi_manager, sampler_model)` picks it). The S3000 header layout is a superset of the S1000's at the same offsets (program 0-71, keygroup 0-148, sample
+0-140), so `s3k.params` is reused for those fields (`_S1000_BLOCK_SIZES`); anything past them reads as a neutral zero and refuses writes, so `BridgeWorker`'s fixed field lists work unmodified.
+**Never assume the block length** (the spec says "about 150 bytes"): the adapter caches the length the device sent, patches in place, writes back that same length, and logs every raw block (hex) at DEBUG -
+ask a real S1000 user for `~/.akaisds/akaisds.log`. Blocks are cached 1.5 s (~50 fields = one fetch) and invalidated by every `program_list`/`sample_list`/`delete_*`, and by raw frames passed through
+`S1000Bridge.send_and_receive` (else the reload after a duplicate shows the old `GROUPS`).
 
-**Never assume the block length** (the spec says "about 150 bytes", no exact
-figure): the adapter caches whatever length the device sent, patches in place,
-writes back that same length, and logs every raw block (hex) at DEBUG - ask a
-real S1000 user for `~/.akaisds/akaisds.log` to learn the real sizes. Blocks are
-cached 1.5s (reading ~50 fields = one fetch) and invalidated by every
-`program_list`/`sample_list`/`delete_*`.
+**UI gating** (`ProgramEditorWindow._apply_s1000_gating`, one-way at construction - a model change in Settings while the editor is open closes it): hides Modulation (both tabs), LFO2, Portamento, LFO1
+shape, Bend down, Resonance and the S3000's 4-stage ENV2 grid/graph; Multi tab hidden/never loaded. **ENV2 on an S1000 is a plain ADSR** (`ATTAK2`/`DECAY2`/`SUSTN2`/`RELSE2`, same KDATA block as ENV1's),
+so the Envelope 2 card gets an ENV1-style graph + 4 knobs (`_build_s1000_env2_adsr`, loaded in `_on_detail_loaded`). Gotcha: hiding widgets in a not-yet-shown window leaves nested layouts' size hints stale
+(the swapped card stayed 406px tall vs 225) until its layout is `invalidate()`d/`activate()`d before `equalize_card_heights` re-measures. **The S1000 has ONE bend field** (`B_PTCH`, 0-12 st; the S3000 splits
+it into increase 0-24 + `B_PTCHD` at offset 73, past the S1000's block), so the combo is relabelled "Bend range". Other narrower ranges: polyphony 1-16 (S3000 1-32), keygroup note range and sample root note 24-127.
 
-**UI gating** (`ProgramEditorWindow._apply_s1000_gating`, one-way at construction -
-a model change in Settings while the editor is open closes it): hides
-Modulation (both tabs), LFO2, Portamento, LFO1 shape, Bend down, Resonance and the
-S3000's 4-stage ENV2 grid/graph; bend up limited to 0-12; Multi tab hidden/never
-loaded. **ENV2 on an S1000 is a plain ADSR** (`ATTAK2`/`DECAY2`/`SUSTN2`/`RELSE2`,
-in the same KDATA block as ENV1's four - the S1000 spec lists both), so the
-Envelope 2 card gets an ENV1-style graph + 4 knobs (`_build_s1000_env2_adsr`,
-loaded in `_on_detail_loaded`) instead. Gotcha found building that: hiding widgets
-in a not-yet-shown window leaves nested layouts' cached size hints stale, so the
-swapped card stayed pinned 406px tall (vs 225) until its layout was
-`invalidate()`d/`activate()`d before `equalize_card_heights` re-measured.
-**The S1000 has ONE bend field** (`B_PTCH`, 0-12 st; the S3000 splits it into `B_PTCH`
-"increase" 0-24 + `B_PTCHD` "decrease" at offset 73, past the S1000's block), so the
-combo is relabelled "Bend range" there. Other S1000-narrower ranges applied in
-gating: polyphony 1-16 (S3000 1-32), keygroup note range and sample root note 24-127
-(S3000 21-127).
+**S1000 controller routing is editable** (its fixed equivalent of the mod matrix - `ProgramEditorWindow._build_s1000_controller_cards`): program-tab "Controllers" grid (Loudness/Pan/Pitch/LFO1
+depth/rate/delay x Velocity/Key/Pressure/Modwheel), keygroup-tab "Controllers" (Filter freq, Pitch, Loudness, Env 2 level x Velocity/Pressure/Envelope 2; `E_FREQ` is the filter envelope's depth) and
+"Envelope response" (V_ATT/V_REL/O_REL/K_DAR) cards; the hidden LFO2 card is reused as the **Pan LFO** (`PANRAT`/`PANDEP`/`PANDEL`). **Gotcha that nearly broke all of it**: `s3k.params` declares most of
+these fields "Not used - fixed value in the specification", range **0..0** (the S3000 spec); the S1000 spec lists "+/-50". Left alone, `encode_field` refuses every non-zero write AND `decode_field`
+(sign-extends only when the DECLARED range goes negative) reads a stored -20 back as 236. `S1000Bridge` applies `_S1000_RANGE_OVERRIDES` (corrected copies via `s1000_param`, by name+region, never editing
+the dependency) on every read, write and `get_header`. **Don't add a new S1000-only field without checking its declared range in `s3k.params` first.** The grids reuse `_ModMatrixGrid` (zebra rows + column
+separators behind a `QGridLayout`) with stretch-1 data columns (the S3000 cards hug their content) and a per-grid label column; `fontMetrics()` is read at construction, which works because `apply_to_app` runs
+before any window (a preview script that skips it renders the dark zebra stripes black on a light window). These fields are only READ for an S1000 (`BridgeWorker`'s
+`extra_program_fields`/`extra_keygroup_fields`). `V_LOUD` deliberately has no grid cell (the Velocity knob in Volume, Pan & Velocity already covers it).
 
-**S1000 controller routing is now editable** (the S1000's fixed equivalent of the S3000's
-mod matrix - `ProgramEditorWindow._build_s1000_controller_cards`): a program-tab
-"Controllers" grid (Loudness/Pan/Pitch/LFO1 depth/rate/delay x Velocity/Key/Pressure/
-Modwheel), keygroup-tab "Controllers" (Filter freq, Pitch, Loudness, Env 2 level x
-Velocity/Pressure/Envelope 2 - `E_FREQ` is the filter envelope's depth) and "Envelope
-response" (V_ATT/V_REL/O_REL/K_DAR for both envelopes) cards, and the hidden LFO2 card is
-reused as the **Pan LFO** (`PANRAT`/`PANDEP`/`PANDEL` - same three fields, minus LFO2's
-shape/retrigger). **Gotcha that nearly broke all of it**: `s3k.params` declares most
-of these fields "Not used - fixed value in the specification", range **0..0**, because
-the S3000 spec says so. The S1000 spec lists each as "+/-50". Left alone,
-`encode_field` refuses every non-zero write AND `decode_field` (which sign-extends
-only when the DECLARED range goes negative) reads a stored -20 back as 236.
-`S1000Bridge` therefore applies `_S1000_RANGE_OVERRIDES` (corrected copies via
-`s1000_param`, by name+region, to whatever `Parameter` the caller passes - never
-editing the dependency) on every read, write and `get_header`. Don't add a new
-S1000-only field to the UI without checking its declared range in `s3k.params` first.
-The controller grids reuse `_ModMatrixGrid` (zebra rows + column separators painted
-behind a `QGridLayout`) like the S3000 mod cards, but with stretch-1 data columns so
-they track window width (the S3000 cards' columns hug their content), and a label
-column sized per grid from its longest label. They must be built AFTER the stylesheet
-fonts exist only in the sense that `fontMetrics()` is read at construction - it is,
-since `apply_to_app` runs before any window is made. (Screenshot gotcha: a preview
-script that skips `theme.apply_to_app` renders the dark-palette zebra stripes on a
-light window - they look black.)
-These fields are only READ when the model is an S1000 (`BridgeWorker`'s
-`extra_program_fields`/`extra_keygroup_fields`) - an S2000/S3000 never pays the round
-trips. `V_LOUD` deliberately has no grid cell (it already has the Velocity knob in
-Volume, Pan & Velocity - two controls for one field would need syncing).
+**Remaining gaps (audited against the spec, 2026-10-03)**: not in either model's UI - `OUTPUT`/`STEREO`, `PLAYLO`/`PLAYHI`, `OSHIFT`, `TEMPER`, `KXFADE`/`VXFADE`, `KGTUNO`, per-zone `VZOUT`/`VSS`/`VFREQ`.
+The Samples tab edits loop 1 only (the S1000 has 8 loops; `SALOOP` says which plays). Drum-trigger (`DDATA`) and misc/MIDI-channel (`MDATA`) blocks have no UI.
 
-**Remaining S1000 gaps (audited against the S1000 spec, 2026-10-03)**: not in either
-model's UI - `OUTPUT`/`STEREO`, `PLAYLO`/`PLAYHI`, `OSHIFT`, `TEMPER`, `KXFADE`/
-`VXFADE`, `KGTUNO`, per-zone `VZOUT`/`VSS`/`VFREQ`. The Samples tab edits loop 1 only;
-the S1000 has 8 loops and `SALOOP` ("first active loop") says which one plays - loop 1
-isn't guaranteed to be it. Drum-trigger (`DDATA`) and misc/MIDI-channel (`MDATA`)
-blocks exist on an S1000 and have no UI at all.
+**The S1000 spec's name rule is destructive, so renames are guarded**: a `PDATA`/`SDATA` whose name matches a DIFFERENT resident program/sample deletes that one first. Duplicate Program/Sample, and renames
+(`_confirm_rename_program`, `_commit_program_name`, `_confirm_rename_sample`), refuse a clashing name on an S1000 only (on an S2000/S3000 a duplicate name is ambiguous, not destructive). The name field's
+`editingFinished` fires on any click-away, so on an S1000 an UNCHANGED name writes nothing (every write re-sends the whole block); the baseline is `_program_name_on_sampler` because
+`_on_program_name_typed` overwrites the list item's text live. `FakeS1000` models delete-on-clash (`deleted_by_name_clash`) and treats a rewrite under an item's OWN name as a plain replace - an assumption
+the spec doesn't state and every editor write depends on: **the first thing a real S1000 must confirm.**
 
-**The S1000 spec's name rule is destructive, so renames are guarded**: a `PDATA`/`SDATA`
-whose name matches a DIFFERENT resident program/sample deletes that one first. Duplicate
-Program/Sample already refused a clashing name; renaming (`_confirm_rename_program`, the
-program-name field's `_commit_program_name`, `_confirm_rename_sample`) now does too, on an
-S1000 only (on an S2000/S3000 a duplicate name is ambiguous, not destructive). The name
-field's `editingFinished` also fires on any click-away, so on an S1000 an UNCHANGED name
-writes nothing (every S1000 write re-sends the whole block); the baseline is
-`_program_name_on_sampler`, because `_on_program_name_typed` overwrites the list item's text
-live while typing. `FakeS1000` models the delete-on-clash rule (`deleted_by_name_clash`), and
-treats a rewrite under an item's OWN name as a plain replace - an assumption the spec doesn't
-state and every editor write depends on: **the first thing a real S1000 must confirm.**
+**Duplicate Program/Keygroup and "create program from slices" are ENABLED** (same `PDATA`/`KDATA` clone flows as the S2000/S3000, `BridgeWorker._handle_create_*`) so the first S1000 tester can find out whether
+they work (KDATA for the new keygroup first, THEN PDATA with `GROUPS+1`, matches the spec's "GROUPS must be correct" - reading, not measurement). Clones are sent at the block's real length
+(`build_pdata_request`'s "192 bytes" docstring is S3000-specific). `TransferDashboard.open_program_editor` shows a one-time experimental warning.
 
-**Duplicate Program/Keygroup and "create program from slices" are ENABLED** (same
-`PDATA`/`KDATA` clone flows as the S2000/S3000, `BridgeWorker._handle_create_*`),
-specifically so the first S1000 tester can find out whether they work - the spec's
-"GROUPS must be correct" wording suggests the existing order (KDATA for the new
-keygroup first, THEN PDATA with `GROUPS+1`) is consistent with it (the KDATA
-creates the keygroup, so the count already matches by the time the PDATA lands),
-but that's reading, not measurement. Clones are sent at the block's real length
-(`build_pdata_request`'s "192 bytes" docstring is S3000-specific; it nibbles
-whatever it's given). Raw frames passed through `S1000Bridge.send_and_receive`
-invalidate the block cache, or the reload after a duplicate shows the old
-`GROUPS`. `TransferDashboard.open_program_editor` shows a one-time experimental
-warning.
+**S1000 memory layout and DELK (measured 2026-10-05/06 from tester logs; the full logs and analysis are in `dev_docs/s1000-delk-findings.md` - read it before touching delete/create flows)**:
+programs, keygroups and sample headers are 150-byte blocks in ONE linked memory area; bytes 1-2 of a program block (`FIRSTKG`) and of a keygroup block (`NXTKG`) are ABSOLUTE addresses the sampler
+assigns (the last keygroup keeps whatever terminator we sent - a clone's carries its template's stale one). **DELK is a plain linked-list unlink** (`prev.NXTKG = victim.NXTKG`): no memory compaction,
+no `GROUPS` update, and a PDATA with the smaller `GROUPS` is REJECTED (`REPLY` error 01) - no DELK + PDATA sequence reaches a consistent state, and a stale `GROUPS` made the next "add keygroup" link
+into ANOTHER program. So: **no DELK anywhere in create-from-slices** (`_handle_create_program(first_keygroup_only=True)` clones only keygroup 0 on an S1000, `_create_program_from_slices` refuses if the
+clone has more than one - don't reintroduce a DELK), and **standalone Delete Keygroup on an S1000 is DISABLED (`s1000_bridge.KEYGROUP_DELETE_SUPPORTED = False`) after TWO failed real-sampler tests -
+don't re-enable it and don't try variants blind; get a measurement that explains the rejection first.** The dead path (`BridgeWorker._delete_keygroup_s1000`: snapshot, DELK, rewrite `GROUPS`, compare
+keygroup CONTENT, block for the session on a mismatch) is still in the code. The only untested idea is the REBUILD (see Program files below; `KEYGROUP_DELETE_BY_REBUILD`, OFF). Duplicate Program/Keygroup
+still send the template's stale `NXTKG` (never failed in the logs; rewriting it to `FIRSTKG + 150*(n+1)` is a held-back hypothesis).
 
-**S1000 memory layout and DELK (measured, 2026-10-05 tester log) - why create-from-slices
-never deletes**: programs, keygroups and sample headers are 150-byte blocks in ONE linked
-memory area; bytes 1-2 of a program block (`FIRSTKG`) and of a keygroup block (`NXTKG`) are
-ABSOLUTE addresses (program 0 at 0 with 10 keygroups ends at 0x672, the 12 sample headers
-that follow end at 0xd7a where the next program starts). When a keygroup is appended the
-sampler repoints the PREVIOUS keygroup's `NXTKG`, but the last one keeps whatever we sent -
-a clone's last keygroup carries the template's stale terminator. A real `DELK` was
-acknowledged but (a) left the program's `GROUPS` unchanged and (b) left the chain ending in
-that stale pointer (into a sample header); the next "add keygroup" used the stale `GROUPS` as
-its index, walked off the chain and linked the new keygroup into ANOTHER program (program 0
-grew a keygroup 6 = the new clone, its 7-9 orphaned, "block identifier is 3, expected 2" on
-every later read). That is what "Create new program with slices" did with a multi-keygroup
-template (clone N, DELK N-1). So: `_handle_create_program(first_keygroup_only=True)` clones
-only keygroup 0 on an S1000 and `_create_program_from_slices` refuses to continue if the clone
-has more than one - **no DELK anywhere in that flow, don't reintroduce one**. The standalone
-Delete Keygroup goes through `BridgeWorker._delete_keygroup_s1000`: snapshot (target program
-in full + other programs within `_S1000_VERIFY_READ_BUDGET` reads), DELK, rewrite `GROUPS` via
-PDATA if the sampler left it, snapshot again and compare keygroup CONTENT (pointer bytes
-ignored, logged as `S1000 delete check:` lines). Any mismatch raises, shows a dialog, and sets
-`s1000_keygroup_delete_blocked` (action disabled for the session).
+**Known/untested, for the first real-S1000 report**: whether re-sending a block under its own unchanged name is an in-place replace (the spec says a duplicate name "should be avoided" - read as a name
+colliding with a DIFFERENT item); whether `LOOPAT1`/`LLNGTH1`/`STUNO`/`SBANDW` have the S2000's semantics; the sample edit actions (Trim/Reverse/...) write 8 header fields back through this adapter; the
+editor's SDATA/PDATA/KDATA replies also reach `SamplerController` on the shared port ("unexpected SDATA"/"unrecognised Akai message" log noise, not a bug unless a Samples-tab audio receive is mid-flight);
+`PRGNUM`'s +1 display offset (same `s3k.params` entry).
 
-**Standalone Delete Keygroup on an S1000 is DISABLED (`s1000_bridge.KEYGROUP_DELETE_SUPPORTED = False`) after TWO failed real-sampler
-tests (2026-10-06 tester logs). Don't re-enable it, and don't try variants blind - get a measurement that explains the rejection first.**
-What is known:
-- **Flow 1 (failed)**: DELK of the chosen keygroup, then a PDATA rewriting `GROUPS`. DELK(program 2, keygroup 0) advanced the program's `FIRSTKG` by
-  150 (no memory compaction), left `GROUPS` unchanged and left the last keygroup's stale `NXTKG`; the PDATA with `GROUPS=9` got `REPLY` error
-  `47 00 16 48 01` (code 01); the program kept 9 reachable keygroups but `GROUPS=10` ("block identifier is 3, expected 2" on every read of
-  keygroup 9).
-- **Flow 2 (failed, `akaisds.log` of the second tester run)**: shift keygroups k+1..N-1 down with KDATA (each slot keeping its own `NXTKG`), DELK of
-  the LAST keygroup, then PDATA `GROUPS=N-1`. Tried on the first, a middle and the last keygroup of 10- and 12-keygroup programs: the shifting
-  KDATAs and the DELK were accepted ("Sampler confirmed: OK"), `GROUPS` read back UNCHANGED (10 -> 10, 12 -> 12), and the PDATA with the
-  smaller `GROUPS` was rejected with the SAME error 01 - **even though `FIRSTKG` did not move** (program 0: bytes 1-2 `96 00` before and after),
-  which REFUTES the "FIRSTKG must equal the program's own address + 150" hypothesis from Flow 1. After the DELK, reading keygroup N-1 returns a
-  block with identifier 3 (a SAMPLE header): the DELK DID remove the keygroup and closed the memory up - the sampler just never decrements `GROUPS`,
-  and refuses a PDATA that does. The program is left with a duplicated/junk last keygroup and `GROUPS` one too high (needs reloading - the tester's
-  "filled the last keygroup with junk"); other loaded programs were untouched. The editor shows the "only partly applied" dialog and blocks further
-  deletes for the session.
-- **What the Flow 2 log shows about DELK itself** (`akaisds.log`, program 0 at address 0, 10 keygroups, keygroup i at 150*(i+1)): BEFORE the
-  delete keygroup 8's `NXTKG` was 0x05dc (-> keygroup 9) and keygroup 9's own `NXTKG` was 0x0672 (1650 = the end of the program's 11 blocks);
-  AFTER DELK(9) keygroup 8's `NXTKG` was 0x0672. So **DELK is a plain linked-list unlink (`prev.NXTKG = victim.NXTKG`), nothing more**: no memory
-  compaction (the dead block's 150 bytes stay as a hole), no `GROUPS` update, and the new last keygroup now points at 1650 - a sample header -
-  which is exactly why reading keygroup N-1 returns "block identifier is 3". Flow 1's DELK of keygroup 0 was the same unlink (`FIRSTKG` +150).
-  **Working hypothesis (consistent with BOTH logs, unproven)**: the sampler accepts a PDATA only if its `GROUPS` matches the program's MEMORY
-  EXTENT (every PDATA that ever worked - creates, editor writes, `GROUPS+1` after a KDATA append - did; extent here is still 11 blocks), so
-  `GROUPS=N-1` is refused while the hole exists and `GROUPS=N` leaves a chain of N-1: **no sequence of DELK + PDATA can reach a consistent state**.
-  Contrast: on an S3000XL, s3ked measured DELK on a 22-keygroup program as `GROUPS` 22 -> 21 with the rest shifting down (its
-  `RESOLUTION_NOTES`/`TODO.md`, github.com/lentferj/s3ked) - so the S3000 firmware does the bookkeeping the S1000's DELK doesn't. The S1000 spec
-  (lakai.sourceforge.net/docs/s1000_sysex.html, the only public protocol text; the S1000 V2.0 manual has no SysEx chapter) says nothing about DELK's
-  effects beyond "If the argument ... exceeds the maximum, an error message will be given", and no other open-source S1000 editor was found
-  (Lakai = Linux data-exchange tools; akaitools/akaiutil work on disk images, not over MIDI) - there is nothing to copy.
-- **Only idea that could work, UNTESTED and risky**: don't DELK at all - REBUILD the program: create a new program (the create/duplicate flow:
-  PDATA + KDATA appends with `GROUPS+1`, measured to work) with the N-1 wanted keygroups under a temporary name, DELP the original and put the new
-  one back under the old name/position (program order, `PRGNUM` and the name-clash-deletes rule make that delicate). Needs a tester with a
-  throwaway program and a full log; also worth asking their OS version (the S1000 and S1100 differ, and DELK may differ between OS versions).
-- Duplicate Program/Keygroup still send the template's stale `NXTKG` terminator (they never failed in the logs); rewriting it to
-  `FIRSTKG + 150*(n+1)` is a held-back hypothesis, not implemented.
-
-**Known/untested, flagged for the first real-S1000 report**: whether re-sending a
-program/sample block with its own unchanged name behaves as an in-place replace
-(the spec: a duplicate name "should be avoided"; it's read as meaning a name that
-collides with a DIFFERENT item); whether `LOOPAT1`/`LLNGTH1`/`STUNO`/`SBANDW` have
-the same semantics as the S2000 notes above; the sample edit actions
-(Trim/Reverse/...) write 8 header fields back through this adapter; the editor's
-SDATA/PDATA/KDATA replies also reach `SamplerController` on the shared port
-(logs "unexpected SDATA"/"unrecognised Akai message" - noise, not a bug, unless
-a Samples-tab audio receive happens to be mid-flight).
-
-**`core/demo_s1000.py`'s `FakeS1000`** fakes the MIDI PORTS (not the bridge's
-Python surface, unlike s3ked's `DemoBridge`): real `S3kBridge` + real adapter run
-on top of it, and it ignores 0x20+ ops like the real machine (so a stray S3000
-op times out and lands in `ignored_ops`). `AKAISDS_DEMO_SAMPLER=1` with the S1000
-model selected uses it. Its blocks are 150 bytes with `0xA5` junk past the spec
-fields (tests also try 72..192) specifically so wrongly-read or dropped trailing
-bytes are caught. Also: **`PRGNUM`'s +1 display offset applies on the S1000 too**
-(unverified there - same `s3k.params` entry).
+**`core/demo_s1000.py`'s `FakeS1000`** fakes the MIDI PORTS (not the bridge's Python surface, unlike s3ked's `DemoBridge`): the real `S3kBridge` + adapter run on top, and it ignores 0x20+ ops like the real
+machine (a stray S3000 op times out and lands in `ignored_ops`). `AKAISDS_DEMO_SAMPLER=1` with the S1000 model uses it. Its blocks are 150 bytes with `0xA5` junk past the spec fields (tests also try
+72..192) so wrongly-read or dropped trailing bytes are caught.
 
 ## Program files: Save/Load as `.p1`/`.p3` (Programs tab, S1000 and S2000/S3000) - written without hardware
 
-The Programs list column has Save... / Load... buttons (also its context menu). The file is the Akai disk format:
-150-byte header + N x 150-byte keygroups (`.p1`, S1000) or 192 + N x 192 (`.p3`, S2000/S3000), N at header byte 42.
-`core/akai_program_file.py` (pure codec) + `BridgeWorker.submit_export_program`/`submit_import_program`
-(`program_exported`/`program_imported` and their `*_failed` signals) + `ProgramEditorWindow._save_program_to_file`/
-`_load_program_from_file`. Decisions the user made: Akai file format (so files from other tools work), **samples are NOT
-saved** (zones reference them by NAME; the Load confirmation lists the ones not resident), lives in the Program Editor.
+Programs column Save... / Load... buttons (and context menu). Akai disk format: 150-byte header + N x 150-byte keygroups (`.p1`, S1000) or 192 + N x 192 (`.p3`, S2000/S3000), N at header byte 42.
+`core/akai_program_file.py` (pure codec) + `BridgeWorker.submit_export_program`/`submit_import_program` (`program_exported`/`program_imported` + `*_failed` signals) +
+`ProgramEditorWindow._save_program_to_file`/`_load_program_from_file`. User decisions: Akai file format (files from other tools work), **samples are NOT saved** (zones reference them by NAME; the Load
+confirmation lists the ones not resident), lives in the Program Editor.
 
-- **No parameter list is needed**: the blocks are exactly what RPDATA/RKDATA return, so every byte (modelled by `s3k.params`
-  or not) round-trips. Don't "decode" the blocks into fields for this.
-- **Pointer bytes** (1-2 of the header = FIRSTKG, of each keygroup = NXTKG; the spec calls them "internal use", as it does the per-zone
-  `SBADD`, `LVXF/HVXF` and `TPNUM`) are addresses the SAMPLER assigns. A file holds file-relative stand-ins (150, 300, ... - confirmed
-  against the S1000 spec's own defaults `150,0` / `44,1`=300 / 450 / 600 and two open-source tools' notes: `header + N x block == file size`,
-  N at byte 42, no extra file header, on 2000+ real programs). On save `build_file` rewrites them; on a sampler those same numbers are
-  addresses of OTHER programs' blocks. Whether a sampler honours the pointers of an incoming PDATA/KDATA is UNKNOWN (measured only: an appended
-  keygroup keeps the NXTKG it was sent; an S1000 walks the chain by the stored pointers - that is what scrambled programs after DELK). So
-  **`BridgeWorker._import_program` never sends a pointer the sampler didn't hand us**: after the create PDATA (the one write that has to
-  carry the file's) it reads the new program back and **stops before writing any keygroup if its FIRSTKG equals an address another program
-  uses**; keygroup 0 goes out with the dummy slot's own NXTKG, each appended keygroup with the previous slot's terminator, every GROUPS+1 PDATA
-  with the sampler's current FIRSTKG; each append's resulting link is checked for collisions; then a full read-back compares the new program
-  with the file (ignoring `_IMPORT_*_INTERNAL` bytes) and every other program with the pre-load snapshot (`_s1000_snapshot`, ~60-read budget).
-  Any stop/mismatch raises `_ImportSafetyError` and sets `program_import_blocked` for the session (like the keygroup-delete block). The log
-  has `program load:` INFO lines (FIRSTKG sent vs held, where each keygroup was placed, NXTKG and zone SBADD read back vs the file's) - ask a
-  tester for them. **No DELK anywhere**; a failed load can leave a partial program (the message says so) - never deleted automatically.
-  The duplicate flows were NOT changed and still send the template's pointers (never failed in the logs; same unknown applies).
-- **S1000 Delete Keygroup by REBUILD (`s1000_bridge.KEYGROUP_DELETE_BY_REBUILD`, OFF until a real S1000 has run the load above)**:
-  `BridgeWorker._delete_keygroup_s1000_rebuild`: save a `.p1` backup (`PROGRAM_BACKUP_DIR`, `~/.akaisds/program_backups`; no backup, no
-  change) -> drop the keygroup on the computer (GROUPS-1) -> load it through `_import_program` under a TEMP name (`-TMP`; never the
-  original's, so the sampler's delete-on-name-clash rule can't fire) -> only after that passes its checks DELP the original, compare the other
-  programs by name (before/after snapshot) -> rename the copy to the original name. Every step leaves a complete program; a failure before the
-  DELP says the original was not changed, one after it names the temp program and the backup. The program ends up LAST in the list
-  (`program_rebuilt` signal, the window selects it). No DELK, no name-collision override (an override would let the sampler delete the original
-  before the copy is verified). Takes the same `program_import_blocked` session block as a failed load. When on it takes precedence over the
-  dead DELK path (`KEYGROUP_DELETE_SUPPORTED`, still False). Unmeasured on hardware: DELP on a real S1000 (whether others' addresses move),
-  free room for a second copy. Tests: `tests/test_s1000_keygroup_delete_rebuild.py`.
-- **Fixed on the way**: `_on_samples_loaded` reset the program list to row 0 after EVERY program reload (each is followed by a sample reload),
-  undoing "select the new program" for Duplicate/Load/rebuild; it now only selects row 0 when nothing is selected (first load).
-- **Load = a NEW program** through the duplicate flow's order (PDATA GROUPS=1, KDATA 0, then KDATA + PDATA(GROUPS+1)). A name
-  matching a resident program is never sent (PDATA would delete it) - the window prompts for another. A `.p3` is refused on an
-  S1000 setting (it has fields an S1000 can't hold). A `.p1` on an S2000/S3000 setting is CONVERTED after a confirmation
-  (`akai_program_file.convert_s1000_to_s3000`, added 2026-10-07): the S2000 reads S1000 programs from disk and converts them itself (its manual), but
-  SysEx takes raw blocks, so the app keeps the file's S1000 bytes (program 0-71, keygroup 0-148) and fills the S2000-only ones (mod matrix, LFO2,
-  second filter, envelope 3, effects sends: program 72-191, keygroup 149-191) with `S3000_PROGRAM_TAIL`/`S3000_KEYGROUP_TAIL` - bytes MEASURED in an
-  unedited program on a real S2000 (s3k.params has no defaults). **Proven only mechanically** (a `.p1` made by cutting a real program's blocks to 150
-  bytes converts, loads and comes back byte-identical on the S2000); never run on a GENUINE S1000 program, and the sampler's own parameter
-  conversion is NOT replicated (S1000 "fixed controller" fields are carried over but the S2000 may ignore them, so it can sound slightly different).
-  The confirmation says so - keep that wording.
-  Disabled in demo mode like Duplicate Program (DemoBridge has no add-program primitive); Save works there if the demo bridge reads blocks.
-- Tests: `tests/test_akai_program_file.py` (codec + worker, incl. a FakeS1000 round trip) and
-  `tests/test_program_editor_window_program_files.py`. **The file layout and pointer values are NOT yet checked against a file from
-  another tool** - `tests/akai_program_file_test_plan.md` lists every guess and the real-hardware steps.
+- **No parameter list is needed**: the blocks are what RPDATA/RKDATA return, so every byte (modelled or not) round-trips. Don't "decode" blocks into fields for this.
+- **Pointer bytes** (1-2 of the header = FIRSTKG, of each keygroup = NXTKG; also per-zone `SBADD`, `LVXF/HVXF`, `TPNUM` - the spec calls them "internal use") are addresses the SAMPLER assigns. A file holds
+  file-relative stand-ins (150, 300, ... - checked against the S1000 spec's defaults and two open-source tools: `header + N x block == file size`, no extra file header, on 2000+ real programs);
+  `build_file` rewrites them on save. Whether a sampler honours the pointers of an incoming PDATA/KDATA is UNKNOWN (measured: an appended keygroup keeps the NXTKG it was sent; an S1000 walks the chain by
+  stored pointers). So **`BridgeWorker._import_program` never sends a pointer the sampler didn't hand us**: after the create PDATA (the one write that must carry the file's) it reads the new program back and
+  **stops before any keygroup if its FIRSTKG equals an address another program uses**; keygroup 0 goes out with the dummy slot's own NXTKG, each append with the previous slot's terminator, every GROUPS+1
+  PDATA with the sampler's current FIRSTKG; each append's link is checked for collisions; then a full read-back compares the new program with the file (ignoring `_IMPORT_*_INTERNAL` bytes) and every
+  other program with the pre-load snapshot (`_s1000_snapshot`, ~60-read budget). Any stop/mismatch raises `_ImportSafetyError` and sets `program_import_blocked` for the session. The log has `program load:`
+  INFO lines (FIRSTKG sent vs held, keygroup placement, NXTKG and zone SBADD vs the file's) - ask a tester. **No DELK**; a failed load can leave a partial program (the message says so), never deleted
+  automatically. The duplicate flows still send the template's pointers (never failed; same unknown).
+- **Load = a NEW program** through the duplicate flow's order (PDATA GROUPS=1, KDATA 0, then KDATA + PDATA(GROUPS+1)). A name matching a resident program is never sent (PDATA would delete it) - the window prompts
+  for another. A `.p3` is refused on an S1000 setting. A `.p1` on an S2000/S3000 is CONVERTED after a confirmation (`akai_program_file.convert_s1000_to_s3000`): SysEx takes raw blocks (the S2000 only converts
+  from disk), so the app keeps the S1000 bytes (program 0-71, keygroup 0-148) and fills the S2000-only ones (program 72-191, keygroup 149-191) with `S3000_PROGRAM_TAIL`/`S3000_KEYGROUP_TAIL` - bytes MEASURED in
+  an unedited program on a real S2000. **Proven only mechanically** (a `.p1` made by cutting a real program's blocks to 150 bytes converts, loads and comes back byte-identical); never run on a GENUINE S1000
+  program, and the sampler's own parameter conversion is NOT replicated (S1000 "fixed controller" fields are carried over but the S2000 may ignore them) - the confirmation says so, keep that wording.
+  Disabled in demo mode like Duplicate Program (DemoBridge has no add-program primitive); Save works there.
+- **S1000 Delete Keygroup by REBUILD (`s1000_bridge.KEYGROUP_DELETE_BY_REBUILD`, OFF until a real S1000 has run the load above)**: `BridgeWorker._delete_keygroup_s1000_rebuild`: save a `.p1` backup
+  (`PROGRAM_BACKUP_DIR`, `~/.akaisds/program_backups`; no backup, no change) -> drop the keygroup on the computer (GROUPS-1) -> load it through `_import_program` under a TEMP name (`-TMP`; never the
+  original's, so delete-on-name-clash can't fire) -> only after its checks pass DELP the original, compare the other programs by name -> rename the copy to the original name. Every step leaves a complete
+  program; a failure before the DELP says the original was not changed, one after it names the temp program and the backup. The program ends up LAST in the list (`program_rebuilt`, the window selects it).
+  No DELK, no name-collision override. Takes the same `program_import_blocked` session block; when on it takes precedence over the dead DELK path. Unmeasured: DELP on a real S1000 (whether others'
+  addresses move), free room for a second copy. Tests: `tests/test_s1000_keygroup_delete_rebuild.py`.
+- **Fixed on the way**: `_on_samples_loaded` reset the program list to row 0 after EVERY program reload, undoing "select the new program" for Duplicate/Load/rebuild; it now selects row 0 only when nothing is selected.
+- Tests: `tests/test_akai_program_file.py` (codec + worker, incl. a FakeS1000 round trip) and `tests/test_program_editor_window_program_files.py`. **The file layout and pointer values are NOT yet checked
+  against a file from another tool** - `tests/akai_program_file_test_plan.md` lists every guess and the real-hardware steps.
 
 ## Akai S2000/S3000: program placement, create-from-slices and `.p3` files (MEASURED on a real S2000, 2026-10-07)
 
@@ -356,416 +209,162 @@ saved** (zones reference them by NAME; the Load confirmation lists the ones not 
 
 ## Akai S900/S950 support (written without hardware)
 
-A DIFFERENT protocol from every other Akai entry, not a variant of the S1000
-family: device byte `0x40` (not `0x48`), function codes 0-11, every 8-bit value as
-TWO MIDI bytes, 10-char plain-ASCII names, XOR checksums, and a sample dump that is
-ONE SysEx (header + all blocks + a single `F7`) with 4-byte handshakes
-(`F0 7E code F7`) - the standard 6-byte SDS ACK is silently ignored. Plan and
-staging: `dev_docs/s950-support-plan.md`.
-**Nothing here has been run against hardware.** Ported from
-[s950tools](https://github.com/diemonster/s950tools) (MIT - see
-`THIRD_PARTY_NOTICES.md`; keep the notice when porting more). Its comments say which
-behaviours were hardware-verified; `dxzl/akai-s950` has NO licence, so don't copy from it.
+A DIFFERENT protocol from every other Akai entry, not a variant of the S1000 family: device byte `0x40` (not `0x48`), function codes 0-11, every 8-bit value as TWO MIDI bytes, 10-char plain-ASCII
+names, XOR checksums, and a sample dump that is ONE SysEx (header + all blocks + a single `F7`) with 4-byte handshakes (`F0 7E code F7`) - the standard 6-byte SDS ACK is silently ignored.
+Plan and staging: `dev_docs/s950-support-plan.md`. **Nothing here has been run against hardware**; every unverified fact and guess is listed in `tests/s950_test_plan.md` ("What is a guess").
+Ported from [s950tools](https://github.com/diemonster/s950tools) (MIT - see `THIRD_PARTY_NOTICES.md`; keep the notice when porting more); its comments say which behaviours were hardware-verified.
+`dxzl/akai-s950` has NO licence, so don't copy from it.
 
-- `core/s950_sysex.py` - codecs (DB/DW/DD/TB/SW), framing, catalog, SPRM, sample dump,
-  16->12-bit conversion. `core/s950_program.py` - PRGM (76-byte header + 1-31 140-byte
-  keygroups). Messages are the bytes BETWEEN F0 and F7, like `core/akai_sysex.py`.
-  Only the program HEADER offsets are pinned by real captures (in `tests/test_s950_program.py`);
-  SPRM and keygroup offsets are as good as s950tools' copy. Unmodelled bytes are kept in `raw`
-  and written back untouched; `raw` is excluded from dataclass equality on purpose.
-  There is NO delete opcode - don't invent one.
-- `core/demo_s950.py` - `FakeS950`, a fake on rtmidi-style ports (like `FakeS1000`). Its
-  docstring separates what comes from s950tools' hardware notes from what is GUESSED
-  (catalog order, default name of an uploaded sample, ACK count per dump, NAK behaviour...).
-- Sampler Type "Akai S900/S950 (experimental)" (`akai_s900_s950`) has its OWN protocol family, `"s950"`
-  (`sampler_models.FAMILY_S950`) - not "akai", not "generic". **Nothing may fall through to
-  the akai/generic branches for it** (they'd put S1000-family or standard-SDS bytes on the
-  wire). `SamplerController` delegates the S950 entry points (refresh, send_file_queue,
-  receive_samples, rename, sample info, cancel, incoming SysEx) to
-  `controller/s950_transfers.py`'s `S950Transfers` (built lazily, reports through the
-  controller's own signals) and REFUSES the rest via `_s950_not_supported` (delete - there's
-  no opcode - and the legacy per-file / by-number senders). Add a new S950 path by delegating,
-  never by letting it reach the Akai code.
-- `S950Transfers` rules (from s950tools' hardware-verified comments; none run on a real unit by
-  this project): ONE operation at a time; an RCAT reply is the "device ready" barrier before every
-  upload (a stale ACK from the last dump satisfies "any reply" and green-lit a second dump
-  mid-bookkeeping); uploads are open loop - one SysEx, wait out the wire time (3125 B/s + 10%),
-  listen for NAKs, and ALWAYS go to an EMPTY slot (overwriting triggers a NAK storm; the boot
-  "TONE" placeholder counts as empty), then the sample is named by SPRM read-modify-write; a
-  receive streams a 4-byte ACK every 50 ms from just after the RSD (the unit stalls between
-  blocks and `sysex_received` only surfaces whole messages) and ignores a header-only message
-  the unit sometimes flushes first. Names are uppercased, 10 chars, made unique (zones find
-  samples by name). The Transmission Settings' bit depth is ignored (always 12-bit); stereo is
-  averaged to mono (left only with "mono"); the rate is clamped to the dump header's 2-65.5 kHz,
-  not what the hardware plays (S950 7.5-48 kHz, S900 40 kHz - unconfirmed which a given unit
-  honours). Received rate prefers SPRM's exact Hz over the header's whole-nanosecond period
-  (44100 would come back 44099). Root note/detune are shown as unavailable: SNOMP's direction
-  is only inferred.
-- The Dashboard needs a MIDI INPUT for everything S950 (the unit answers on it - no open-loop
-  send), has no memory bar (no RSTAT), shows sparse slot numbers via `sample_slots_updated`
-  (list index != sample number there, unlike `sample_list_updated`), can't delete, and shows a
-  one-time experimental warning before the first Send. Its Program Editor is described below.
-- **Program editor** - `ui/s950_program_editor.py`'s `S950ProgramEditorWindow`, opened by the Dashboard's
-  Open Editor button (`open_program_editor` branches to it for the S950; the button needs both ports,
-  and `open_program_editor` refuses with no MIDI input). A deliberately separate small window, NOT
-  `ProgramEditorWindow` (built on `s3k.params`). It shares the Dashboard's `SamplerController` - same
-  connection, no `S3kBridge`/`BridgeWorker`, no second thread.
-  - **Layout deliberately mirrors the S1000/S2000/S3000 editor's Programs tab** (the user asked for
-    consistency; keep them in step through `editor_layout`): Programs column | Keygroups column (`KeygroupRangeBar` + `keygroupList` rows with colored
-    swatches, recolored on `theme.notifier.changed`, item with NO text because it has a row widget) |
-    `detail_stack` of a program page and a keygroup page (program click -> page 0, keygroup click ->
-    page 1), section cards via `build_section_card` (Range, Filter, Amplitude/Filter Envelope =
-    `ADSREnvelopeGraph` over four `Knob`s, a `zoneCard` with Soft/Loud buttons where the S3000 has
-    Zone 1-4, Velocity, LFO, Pitch Warp, Output), and a bottom bar with Refresh left / Close right plus
-    the write buttons. The Zone card's Sample combo/Filter/Loud row uses the S3000 editor's shape (`build_labeled_combo_column` +
-    `build_labeled_knob_value_column`: bold label above each, value readout to the RIGHT of the knob), and the LFO
-    card is Rate/Depth (52px, `_centered_knob_row`) over Build-up/Aftertouch/Mod Wheel (40px). The per-sample
-    **Filter** knob (`soft_filter`/`loud_filter`, 0..99, 99 brightest) is the only cutoff-like control the keygroup
-    block holds - the Filter card is key track/velocity/envelope amount/filter envelope. Tune shows 4 decimals on
-    purpose: the raw unit is 1/16 semitone (0.0625), which 2 decimals would round; the unit itself is s950tools',
-    unverified. Knobs are used for the same kind of field the S3000 editor uses them for
-    (`_KNOB_ATTRS`: 0..99 amounts and +-50 offsets); spinboxes for note range/velocity switch/MIDI
-    offset/program number, combos for samples/output. **A fresh `Knob.setValue(0)` emits nothing**, so
-    its value readout is filled explicitly in `_set_widget` (a knob at 0 once showed "-").
-  - **Tabs, like the S3000 editor (Programs | Samples; no Multi)**, Ctrl+2/Ctrl+3. The program-write buttons are
-    hidden on the Samples tab. **The first program is auto-selected** when the editor opens (and whenever the chosen
-    one vanishes from the catalog) - the placeholder before the catalog arrives says "Reading the program list...",
-    never "select a program". The "N keygroups" note under the keygroup list was removed at the user's request.
-  - **Samples tab = `ui/s950_samples_tab.py`'s `S950SamplesTab`, a self-contained widget, READ-ONLY** (list with
-    durations, a `WaveformView`, a details card). It is built from the same `editor_layout` pieces (sample list row,
-    `build_samples_page`, `build_waveform_scrollbar`/`sync_waveform_scrollbar`, now shared with the S3000 editor, which
-    was verified pixel-identical after moving them). It only ever READS: no sample-parameter write exists for the S950
-    because start/end/loop semantics are inferred and some SPRM changes sit in an "active edit buffer" (see the test
-    plan's guesses). Rename a sample from the Dashboard. Mechanics worth knowing: (1) per-sample SPRM reads
-    (`S950Transfers.request_sample_params` -> `s950_sample_params_received(slot, SampleParams | None)`, op
-    `"sample_read"`, in `_BUSY_OPS`) run one at a time, ONLY while the tab is active (`set_active`), selected sample
-    first, and a failed slot is remembered and never retried until `refresh()`; (2) audio is received ASYNCHRONOUSLY
-    through `receive_samples` into a temp WAV (the S3000 editor freezes the window for this; the S950 engine is
-    event-driven so nothing here blocks), shown only if its sample is still selected when it lands, temp file always
-    removed; the Dashboard's own receive handlers see the same signals and are harmless while it is hidden; (3) a load
-    or read that finds the wire busy RETRIES (`_RETRY_MS`) rather than failing; (4) a changed catalog name drops that
-    sample's cached SPRM/audio; (5) `WaveformView.set_markers_locked(True)` (new, opt-in) keeps the markers drawn but
-    un-grabbable, and `set_placeholder_text()` replaces the S3000 default that promises a freezing load.
-  - **Reads**: `S950Transfers.request_program(slot)` (op `"program"`) -> `SamplerController.
-    s950_program_received(slot, Program | None)` - **`None` on ANY failure** so a waiting window never
-    hangs. Every catalog read also emits `program_slots_updated`. A catalog read is NOT "busy" to
-    `is_transfer_busy()`, so the window waits on the stricter `is_s950_idle()`. Only the latest wanted
-    slot is read; a failed slot is marked shown so it never retries in a loop (Refresh clears that).
-  - **Writes are STAGED, not live** (s950tools live-syncs every 400 ms; we send once, on "Write to
-    Sampler"). The window edits a deep copy (`_working`) of what the unit holds (`_baseline`).
-    `core/s950_params.py` is the foundation: `diff_programs(baseline, edited)` -> `Change`s (only the
-    fields the editor offers - NOT `control_bits`, whose meaning is inferred), `validate_changes`
-    (limits are s950tools' documented ones, unverified; the +-24 st transpose limit is OURS; only
-    CHANGED fields are range-checked so a value the unit already holds out of range survives),
-    `apply_changes`. `S950Transfers.write_program(slot, baseline, edited)` (op `"program_write"`, in
-    `_BUSY_OPS`): fresh RPRGM -> **refuse unless a `.syx` backup of that reply saved** to
-    `~/.akaisds/s950_backups` (`backup_dir` attribute; tests point it at tmp_path) -> apply ONLY the
-    changes onto the FRESH copy (so a front-panel edit made since loading survives, and unmodelled raw
-    bytes pass through) -> PRGM -> wire time + 500 ms NAK window (NAK = fail, names the backup) + 200 ms
-    settle -> RPRGM read-back -> compare. Reports `s950_program_written(slot, verified, Program|None,
-    message)`; on a mismatch the Program is what the unit reports and the window shows IT (and a
-    warning), keeping nothing stale. It never creates a program (a pre-read of an empty slot just
-    times out - the fake stays silent for one; that is itself a guess), never changes the keygroup
-    count, and a no-change write is allowed on purpose (Hardware menu > "Write Program Back Unchanged
-    (test)" - the first thing a tester should try).
-  - **`Keygroup.to_bytes`/`Program.to_payload` now re-encode a field only if it no longer matches what
-    `raw` already holds** - without that, a name the unit padded with NULs would silently come back
-    space-padded on every write even if untouched. Don't go back to unconditional re-encoding.
-  - Also: "Restore Previous" (writes back the pre-write baseline, session only), a one-time experimental
-    warning before the first write (`app_config.get_s950_program_write_warning_acknowledged`), a refusal
-    to give a program another program's name (what the unit does is unknown), discard-confirmation on
-    switching program/refresh/close, controls locked while a write is in flight, and the old program is
-    dropped (`_working = None`) the moment the next read starts so nothing can be written to it.
-  - **Not done**: create/duplicate/delete program (no delete opcode; create needs slot picking), adding/
-    removing keygroups, and **renaming a sample does not rewrite the programs that use it** (the
-    Dashboard rename warns nobody - say so in the UI if that bites).
-  - Everything unverified and every guess is listed in `tests/s950_test_plan.md` ("What is a guess").
-- **Known unmeasured risk**: a receive is ONE message of up to ~1 MB. macOS CoreMIDI assembles
-  it; backends that split long SysEx would lose it, because `MidiManager._on_raw_message` drops
-  any fragment not starting with F0. A timeout there says so; ask for `~/.akaisds/akaisds.log`.
-- `tools/s950_demo.py` opens the real Dashboard on a `FakeS950` (no hardware; Settings
-  doesn't work in it). `tests/test_s950_transfers.py` drives the real engine + controller
-  against the fake over a fake MidiManager that delivers replies asynchronously. **Tests that
-  repopulate the hardware list must flush deferred deletes** (the `dashboard` fixture does):
-  `QListWidget.clear()` defers deleting row widgets, which otherwise fire inside another test's
-  nested event loop (`_wait_for_any_signal`) and segfault (confirmed from a crash report).
-- Byte-for-byte collision to remember: a standard SDS ACK on channel 0 (`F0 7E 00 pp F7`...)
-  looks like the S950's own request-sample-dump (`F0 7E 00 nn 00 F7`). Generic SDS mode against
-  an S950 gives nonsense, not a clean failure.
+- `core/s950_sysex.py` (codecs DB/DW/DD/TB/SW, framing, catalog, SPRM, sample dump, 16->12-bit conversion) and `core/s950_program.py` (PRGM: 76-byte header + 1-31 140-byte keygroups). Messages are
+  the bytes BETWEEN F0 and F7, like `core/akai_sysex.py`. Only the program HEADER offsets are pinned by real captures (`tests/test_s950_program.py`); SPRM and keygroup offsets are as good as
+  s950tools' copy. Unmodelled bytes are kept in `raw` and written back untouched (`raw` is excluded from dataclass equality). There is NO delete opcode - don't invent one.
+  **`Keygroup.to_bytes`/`Program.to_payload` re-encode a field only if it no longer matches what `raw` holds** (else a NUL-padded name would silently come back space-padded) - don't go back to
+  unconditional re-encoding.
+- Fake: `core/demo_s950.py` `FakeS950` on rtmidi-style ports; its docstring separates s950tools' hardware notes from what is GUESSED. `tools/s950_demo.py` opens the real
+  Dashboard on it (Settings doesn't work there). `tests/test_s950_transfers.py` drives the real engine + controller against it over a fake MidiManager delivering replies asynchronously.
+  **Tests that repopulate the hardware list must flush deferred deletes** (the `dashboard` fixture does): `QListWidget.clear()` defers deleting row widgets, which otherwise fire inside another
+  test's nested event loop (`_wait_for_any_signal`) and segfault.
+- Sampler Type "Akai S900/S950 (experimental)" (`akai_s900_s950`) has its OWN protocol family `"s950"` (`sampler_models.FAMILY_S950`) - not "akai", not "generic". **Nothing may fall through to the
+  akai/generic branches for it** (they'd put S1000-family or standard-SDS bytes on the wire). `SamplerController` delegates the S950 entry points (refresh, send_file_queue, receive_samples, rename,
+  sample info, cancel, incoming SysEx) to `controller/s950_transfers.py`'s `S950Transfers` (built lazily, reports through the controller's signals) and REFUSES the rest via `_s950_not_supported`
+  (delete, legacy per-file/by-number senders). Add a new S950 path by delegating, never by letting it reach the Akai code.
+- `S950Transfers` rules (from s950tools' hardware-verified comments): ONE operation at a time; an RCAT reply is the "device ready" barrier before every upload (a stale ACK from the last dump
+  satisfies "any reply" and green-lit a second dump mid-bookkeeping); uploads are open loop - one SysEx, wait out the wire time (3125 B/s + 10%), listen for NAKs, and ALWAYS go to an EMPTY slot
+  (overwriting triggers a NAK storm; the boot "TONE" placeholder counts as empty), then name the sample by SPRM read-modify-write; a receive streams a 4-byte ACK every 50 ms from just after the RSD
+  (the unit stalls between blocks and `sysex_received` only surfaces whole messages) and ignores a header-only message the unit sometimes flushes first. Names are uppercased, 10 chars, made unique
+  (zones find samples by name). The Transmission Settings' bit depth is ignored (always 12-bit); stereo is averaged to mono (left only with "mono"); the rate is clamped to the dump header's
+  2-65.5 kHz (what the hardware plays is unconfirmed: S950 7.5-48 kHz, S900 40 kHz). Received rate prefers SPRM's exact Hz over the header's whole-nanosecond period (44100 would come back 44099).
+  Root note/detune are shown as unavailable (SNOMP's direction is only inferred).
+- The Dashboard needs a MIDI INPUT for everything S950 (no open-loop send), has no memory bar (no RSTAT), shows sparse slot numbers via `sample_slots_updated` (list index != sample number there,
+  unlike `sample_list_updated`), can't delete, and shows a one-time experimental warning before the first Send. **Known unmeasured risk:** a receive is ONE message of up to ~1 MB; macOS CoreMIDI
+  assembles it, but a backend that splits long SysEx would lose it (`MidiManager._on_raw_message` drops any fragment not starting with F0). A timeout says so; ask for `~/.akaisds/akaisds.log`.
+- Byte-for-byte collision to remember: a standard SDS ACK on channel 0 (`F0 7E 00 pp F7`...) looks like the S950's own request-sample-dump (`F0 7E 00 nn 00 F7`). Generic SDS mode against an S950
+  gives nonsense, not a clean failure.
 
-## Yamaha A4000/A5000 editing (IN PROGRESS - parameter editing, native wave dumps, Dashboard list/receive, restore-from-backup and assign/remove samples work; no create/delete yet)
+**Program editor** - `ui/s950_program_editor.py`'s `S950ProgramEditorWindow`, opened by the Dashboard's Open Editor (`open_program_editor` branches to it; needs both ports, refuses with no MIDI
+input). A deliberately separate small window, NOT `ProgramEditorWindow` (that is built on `s3k.params`); it shares the Dashboard's `SamplerController` (no `S3kBridge`/`BridgeWorker`, no second thread).
+- **Layout deliberately mirrors the S1000/S2000/S3000 editor's Programs tab** (the user asked for consistency; keep them in step through `editor_layout`): Programs | Keygroups (`KeygroupRangeBar` +
+  `keygroupList` rows with colored swatches recolored on `theme.notifier.changed`, item with NO text because it has a row widget) | `detail_stack` of a program page and a keygroup page; section cards via
+  `build_section_card`; bottom bar with Refresh left / Close right plus the write buttons. The Zone card, Filter/envelope cards (`ADSREnvelopeGraph` over four `Knob`s) and the LFO card
+  (Rate/Depth 52px over Build-up/Aftertouch/Mod Wheel 40px) follow the S3000 editor's shapes. The per-sample **Filter** knob (0..99, 99 brightest) is the only cutoff-like control in the keygroup
+  block. Tune shows 4 decimals on purpose (raw unit 1/16 semitone, unverified). Knobs are used for 0..99 amounts and +-50 offsets (`_KNOB_ATTRS`); spinboxes for note range/velocity switch/MIDI
+  offset/program number; combos for samples/output. **A fresh `Knob.setValue(0)` emits nothing**, so the readout is filled explicitly in `_set_widget`.
+- Tabs Programs | Samples (Ctrl+2/Ctrl+3; no Multi); write buttons hidden on Samples. **The first program is auto-selected** on open (and when the chosen one vanishes); the placeholder before the catalog
+  arrives says "Reading the program list...". The "N keygroups" note was removed at the user's request.
+- **Samples tab = `ui/s950_samples_tab.py`'s `S950SamplesTab`, READ-ONLY** (list with durations, `WaveformView`, details card), built from the shared `editor_layout` pieces. No sample-parameter write
+  exists (start/end/loop semantics are inferred; some SPRM changes sit in an "active edit buffer"). Rename from the Dashboard. Mechanics: (1) per-sample SPRM reads (`request_sample_params` ->
+  `s950_sample_params_received(slot, SampleParams | None)`, op `"sample_read"`, in `_BUSY_OPS`) run one at a time, ONLY while the tab is active, selected sample first, a failed slot never retried until
+  `refresh()`; (2) audio is received ASYNCHRONOUSLY through `receive_samples` into a temp WAV, shown only if its sample is still selected, temp file always removed; (3) a read that finds the wire
+  busy RETRIES (`_RETRY_MS`); (4) a changed catalog name drops that sample's cached SPRM/audio; (5) `WaveformView.set_markers_locked(True)` keeps markers drawn but un-grabbable and
+  `set_placeholder_text()` replaces the S3000 default that promises a freezing load.
+- **Reads**: `request_program(slot)` (op `"program"`) -> `s950_program_received(slot, Program | None)` - **`None` on ANY failure** so a waiting window never hangs. Every catalog read also emits
+  `program_slots_updated`. A catalog read is NOT "busy" to `is_transfer_busy()`, so the window waits on the stricter `is_s950_idle()`. Only the latest wanted slot is read; a failed slot is marked shown.
+- **Writes are STAGED, not live** (s950tools live-syncs every 400 ms; we send once, on "Write to Sampler"). The window edits a deep copy (`_working`) of what the unit holds (`_baseline`).
+  `core/s950_params.py`: `diff_programs(baseline, edited)` -> `Change`s (only fields the editor offers - NOT `control_bits`), `validate_changes` (s950tools' documented limits, unverified; the +-24 st
+  transpose limit is OURS; only CHANGED fields are range-checked), `apply_changes`. `S950Transfers.write_program(slot, baseline, edited)` (op `"program_write"`): fresh RPRGM -> **refuse unless a `.syx`
+  backup of that reply saved** to `~/.akaisds/s950_backups` (`backup_dir`; tests point it at tmp_path) -> apply ONLY the changes onto the FRESH copy (a front-panel edit since loading survives) -> PRGM ->
+  wire time + 500 ms NAK window (NAK = fail, names the backup) + 200 ms settle -> RPRGM read-back -> compare. Reports `s950_program_written(slot, verified, Program|None, message)`; on a mismatch the
+  window shows what the unit reports. It never creates a program, never changes the keygroup count, and a no-change write is allowed on purpose (Hardware menu > "Write Program Back Unchanged
+  (test)" - the first thing a tester should try).
+- Also: "Restore Previous" (session only), a one-time experimental warning before the first write (`app_config.get_s950_program_write_warning_acknowledged`), a refusal to give a program another
+  program's name, discard-confirmation on switching/refresh/close, controls locked while a write is in flight, the old program dropped (`_working = None`) the moment the next read starts. **Not done:**
+  create/duplicate/delete program, adding/removing keygroups, and renaming a sample does not rewrite the programs that use it.
 
-Goal: a program/sample editor for the user's Yamaha A4000 (sending samples works through plain SDS, which the Yamaha
-Sampler Type keeps; listing/receiving samples and the editor use the unit's own protocol). Plan, handoff and every measured fact: **`dev_docs/a4000-editor-roadmap.md`** (read it before
-touching anything here). State: `core/yamaha_sysex.py` (codec) + `core/yamaha_params.py` (204 program/Easy Edit/sample
-rows: P-address + bulk offset) + `core/demo_a4000.py` (`FakeA4000`) + `controller/yamaha_session.py` (conversation
-engine) + `ui/yamaha_program_editor.py`/`yamaha_samples_tab.py`/`yamaha_fields.py`/`yamaha_writer.py` (Programs | assigned
-samples | cards, and a Samples tab; every writable control edits the unit) all exist with tests and were checked against the real unit. The Sampler Type is
-`yamaha_a4000` ("Yamaha A4000/A5000 (experimental)"): its PROTOCOL FAMILY is `generic` (sample SENDS are plain SDS) but
-`sampler_models.is_yamaha()` makes the Dashboard offer the Yamaha editor, list and receive. The Samples tab shows the WAVEFORM
-(double-click; the native wave dump, both channels). Not done: effects/controls/system params, delete objects (creating samples = the native bulk load, below).
+## Yamaha A4000/A5000 editing (parameter editing, native wave dumps/loading, Dashboard list/receive, restore, assign/remove; no create/delete)
 
-- **Audio comes over the unit's NATIVE wave dump ("WD"), not SDS** (`core/yamaha_wave.py`, `YamahaSession.request_wave`; layout
-  measured and verified byte for byte against SDS dumps - read that module's docstring before touching it): a sample links a left
-  wave object (SP payload @64) and, if stereo, a right one (@80); each is requested by ITS OWN name and arrives as several complete
-  ~4 KB bulk messages (block number, then the audio words), ~620 frames/s. Why: SDS stalled on the real unit after a stereo
-  recording (even for mono samples) while WD kept working, WD is faster, and SDS can't reach a stereo sample's right channel.
-  **A bulk dump CAN'T be aborted** (measured: neither an identity request nor an SDS CANCEL stops it), so a cancelled wave makes
-  the session DRAIN - it stays busy (`idle` False) until the stream has been quiet for `drain_idle_ms`, which after a cancel at 7 s
-  of a 2 s stereo sample was ~70 s. Everything queued behind it (the Programs tab's reads, a Dashboard refresh) waits that long.
-- **The Samples tab shows both channels** (two `WaveformView`s at 90 px each for a stereo sample, one at 180 for mono, kept in step
-  by `set_view_state`, and drawn as ONE display: zero layout spacing, `WaveformView.set_stack_position("top"/"bottom")` drops the seam border,
-  continues the dashed marker lines across it and gives boundary-marker handles to the top half and loop-marker handles to the bottom), draws progressively (`begin_live_capture`/`append_live_samples`, fed by the session's `on_chunk`) - SMOOTHLY: the unit's ~1.5 s
-  lumps are queued and released ~30x/s at a pace that would just drain them by the next chunk (gap estimate refined from the real
-  ones; measured on the unit: 11 chunks -> 451 growth steps, biggest jump 30 frames; display only, the load finishes once the
-  queue has drained) - and has a
-  Cancel button. The loaded audio is checked against the sample's own `wave_length` and refused if it doesn't match.
-- **Samples tab list + envelope graphs**: rows use the shared `build_sample_list_row_widget` (the name; its grey duration label is
-  deliberately LEFT BLANK, so rows keep the S3000 list's height; the item has NO text of its own, the name is in `Qt.UserRole` - use
-  `tab.sample_names()`). **No per-sample durations in the list** (user decision, 2026-10-07): they needed a background scan of EVERY
-  sample's SP dump, one at a time, which was too slow - don't bring it back (a sample's length is in its own summary line once selected;
-  the Assign dialog's `durations` argument is now unused). The three envelope cards each have a shape-only graph:
-  amplitude reuses the S3000's `ADSREnvelopeGraph` through `envelope_graph.yamaha_adsr_values` (the A4000's attack/decay/release are
-  RATES - higher is FASTER, owner's manual - so they become times; factory sample = instant stages), filter and pitch use the new
-  bipolar `LevelEnvelopeGraph` (init/attack/sustain/release levels -127..+127). No calibrated timing, like the originals.
-- **Layout/styling pass** (Yamaha pages): cards sit in ALIGNED side-by-side pairs, each pair pinned to equal heights
-  (`equalize_card_heights`), so left and right line up top and bottom - the user rejected independent columns ("un-aligned") and
-  collapsible cards (which can't be pinned equal) after trying both. Pairs are chosen so a row's cards are about the same height
-  (Programs: Program/Portamento, LFO/Audio Input, Step Wave full width; Samples: Pitch/Key, Level/Loop, Filter/Filter Envelope,
-  Amplitude/Pitch Envelope, LFO/Controllers, Output/EQ). `Knob`'s value arc grows from ZERO for any range that spans zero - in EVERY editor (S3000/S1000/S950/Yamaha;
-  the user loves it; `setBipolar(False)` opts a knob out; no tick mark - the user didn't want one), and from the minimum otherwise, exactly as before; `=Sample` combos/spinboxes get an `inherited` property that a QSS rule
-  dims; read-only text rows (`Field(muted=True)`) are grey; every labelled row uses `yamaha_fields.LABEL_WIDTH` so values line up;
-  hovering a knob's NAME shows the same tooltip as the knob.
-- **The Transfer Dashboard lists and receives natively too** (`controller/yamaha_transfers.py`, built lazily by `SamplerController`):
-  Refresh = the object list's samples (`sample_list_updated`, index == number == SDS position - measured to stay true after a
-  delete); Receive = SP dump + the wave dump(s) -> a mono or STEREO WAV at the sample's rate. Delete/rename/info are refused (no
-  delete/rename OPCODE; the front-panel remote `58 03` could drive the menus open loop - see the roadmap, untested). **SENDING samples is still plain SDS** (`device_type` "generic"; the native route for loading
-  audio is unmeasured). `is_sds_transfer_busy()` (what the session waits out) vs `is_transfer_busy()` (also counts a running
-  Yamaha receive, which goes THROUGH the session - never make the session wait on that one).
-- SDS facts that still hold (the Dashboard's sends use it): number == the sample's CURRENT list position, also after a delete
-  (measured by audio fingerprint, `tools/a4000_sds_numbering.py`); the unit trims 4 frames off a sent sample; a Dashboard stereo
-  send becomes two unrelated mono samples; **Bulk Protect ON makes the unit CANCEL incoming SDS sends**.
-- **No worker thread.** `SamplerController.yamaha_session()` -> `YamahaSession`, event-driven on the GUI thread, fed incoming
-  0x43 SysEx by the controller. **Never connect `controller.on_sysex_received` to `MidiManager.sysex_received` yourself** - the
-  controller already does, and a second connection delivers every message twice (that once made the next program's read
-  return the previous program's value). The session also refuses any parameter value not preceded by a fresh announce of the
-  right object, so a stray duplicate can't be mistaken for a reply.
-- Verified on a real A4000 (2026-10-06, device number 0): the service manual (MIDI DATA FORMAT, p.32-42) is accurate,
-  with one correction - the bulk byte count is **MSB-first** and a dump is **several blocks inside one F0..F7**
-  (`count(2) span xor-checksum` each; only the first span carries the 26-byte header; XOR, not a sum). Don't rewrite
-  `parse_bulk_dump` to the manual's wording. A select gets NO reply; the unit announces its current object (a select-shaped message) just before answering a parameter request.
-- `tests/fixtures/a4000/*.syx` are REAL captures; the tests rebuild them byte for byte. Never regenerate them from
-  the codec. `tools/a4000_discovery.py` is the read-only probe
-  that captured them; it refuses to send anything but identity / dump / parameter requests and object select.
-- `tools/a4000_verify_params.py` (read-only) and `tools/a4000_write_verify.py` (writes a value per row to a throwaway
-  object and diffs the dump - **only run on a unit with nothing of value in it, app closed**) have proven every program,
-  Easy Edit and sample row's offset/bit position. The manual is wrong about sample `P2=66` (AEG sustain is `P3=2`, not
-  0-1); don't "fix" that back. Real behaviours to remember: every edit sets bit 0 of byte 1 of the object's common block
-  (an "edited" flag); sample controls are mirrored into the first 24 bytes of the sample block; EQ writes update derived
-  coefficient bytes; `sampling_frequency`/`wave_length`/`wave_end_address` writes are accepted and ignored (on a built-in
-  sample); wave/loop addresses are coupled (writing one moves others). Details: `dev_docs/a4000-editor-roadmap.md`.
-- House rules the Yamaha work follows (same intent as the Akai editors, different mechanism): ONE operation on the wire at a time
-  because a select is stateful - done by `YamahaSession`'s FIFO queue on the GUI thread, NOT a worker thread (don't add one); the
-  shared MIDI transport; a `.syx` backup before any write; an experimental warning.
+Goal: a program/sample editor for the user's Yamaha A4000 (they own an A4000 only). **Every measured fact, the open-verification list, the hardware tools and the manual page map are in
+`dev_docs/a4000-editor-roadmap.md` - read it before touching anything here** (and `dev_docs/a4000-native-load-findings.md` for loading). Code map: `core/yamaha_sysex.py` (codec),
+`core/yamaha_params.py` (204 program/Easy Edit/sample rows: P-address + bulk offset), `core/yamaha_wave.py`/`yamaha_load.py`/`yamaha_markers.py`/`yamaha_edit.py`/`yamaha_restore.py`,
+`core/demo_a4000.py` (`FakeA4000`), `controller/yamaha_session.py` (conversation engine), `controller/yamaha_transfers.py` (Dashboard list/receive/send), `ui/yamaha_program_editor.py`/
+`yamaha_samples_tab.py`/`yamaha_fields.py`/`yamaha_writer.py`/`yamaha_sample_edit.py`/`yamaha_tooltips.py`. Not done: effects/controls/system params, delete objects, A5000 bulk/channels.
+Sampler Type `yamaha_a4000`: PROTOCOL FAMILY `generic` (but `sampler_models.is_yamaha()` makes the Dashboard offer the Yamaha editor, list, receive and native send).
+**Demo (no hardware):** `uv run python tools/a4000_demo.py` (see above).
 
-- **Writes (2026-10-06)**: `YamahaSession.write_parameter(row, value, object_name, cb, slot=)` - ONE parameter per op, guarded:
-  (1) the first write to an object per session dumps it and saves a `.syx` backup (`backup_dir`, default
-  `~/.akaisds/a4000_backups`; conftest points `controller.yamaha_session.BACKUP_DIR` at a temp dir) - **no backup, no write**;
-  (2) an edit applies to whichever object was selected LAST and a select gets no reply, so the edit is sent only after a
-  parameter request (the "probe", which also reads the old value) was answered with an announce naming the right object;
-  (3) after the edit (no reply exists) a read-back must equal the value. Refuses read-only/bulk-only/`write_ignored`/A5000-only
-  rows and out-of-range values without touching the unit. `WriteCoordinator` (`ui/yamaha_writer.py`) throttles widget edits
-  (150 ms, latest value per row), shows the one-time experimental warning (`yamaha_write_warning_acknowledged`), and re-reads
-  the object once its writes settle (side effects the read-back can't show). `FieldPanel.set_editable` enables only rows the
-  table says are writable; spinboxes have keyboard tracking OFF (typing "100" is one edit). The window refuses to close/refresh
-  under a write. Hardware menu: "Write Program Back Unchanged (test)" and "Open Backup Folder".
-  **Proven on the real A4000** with `tools/a4000_session_write_check.py` (the session's own write path): 13/13 program + sample
-  rows EXACT, a write of a row's own value leaves the dump identical, every original restored, backups equal the pre-write object.
-  Easy Edit rows through the session: 6/6 EXACT on program 001 slot 0 too.
-- **A write is refused silently by Bulk Protect** (UTILITY > MIDI bulk page): edits get no reply, the read-back shows the old value
-  and the message says so (it also makes the unit cancel incoming SDS sends - check it first when a send "does nothing").
-- The controller drops SDS header/data packets that were already on the wire for 3 s after a user cancel of an SDS receive
-  (`_RECEIVE_CANCEL_GRACE_S`) instead of reporting "unrecognised SysEx" over the "cancelled" status. A stereo sample (non-empty
-  right wave name at payload @80, `yp.is_stereo`) is labelled "stereo" in the Samples tab.
+**Wire rules (don't regress):**
+- **No worker thread.** `SamplerController.yamaha_session()` -> `YamahaSession`, event-driven on the GUI thread, ONE op on the wire at a time (a select is stateful) via a FIFO queue.
+  **Never connect `controller.on_sysex_received` to `MidiManager.sysex_received` yourself** - the controller already does and a second connection delivers every message twice (once made
+  the next program's read return the previous one's value). The session also trusts a parameter value only after a fresh announce naming the right object, so a duplicate can't fool it.
+- A select gets NO reply (the unit announces its object before answering a request). Bulk byte count is MSB-first and a dump is several blocks inside one F0..F7 (XOR checksums) - don't
+  rewrite `parse_bulk_dump` to the manual's wording. `tests/fixtures/a4000/*.syx` are REAL captures - never regenerate them from the codec. `tools/a4000_discovery.py` is read-only (refuses
+  anything but identity/dump/parameter requests/select); `a4000_write_verify.py` WRITES - only on a unit with nothing of value in it, app closed.
+- **Audio uses the native wave dump ("WD"), not SDS** (SDS stalled after a stereo recording and can't reach a stereo sample's right channel). **A bulk dump can't be aborted**, so a cancelled
+  wave makes the session DRAIN (`idle` False until the stream has been quiet for `drain_idle_ms`, up to ~70 s) and everything queued behind it waits.
+  `is_sds_transfer_busy()` (what the session waits out) vs `is_transfer_busy()` (also counts a Yamaha receive, which goes THROUGH the session - never make the session wait on that one).
+- SDS facts that still hold (Dashboard SENDS used it before native loading): number == the sample's CURRENT list position; the unit trims 4 frames; a stereo send becomes two mono samples;
+  **Bulk Protect ON makes the unit CANCEL SDS sends and silently ignore edits** (check it first when something "does nothing"). The controller drops SDS packets already on the wire for 3 s
+  after a user cancel (`_RECEIVE_CANCEL_GRACE_S`).
+- Hardware deviations from the manual: sample `P2=66` (AEG sustain) is `P3=2`, not 0-1 (don't "fix" back); wave/loop addresses are coupled; `sampling_frequency`/`wave_length`/`wave_end_address`
+  are ignored on a BUILT-IN sample (accepted on a user sample - `write_ignored` is gone); every edit sets the object's "edited" flag; sample controls are mirrored into its first 24 bytes; EQ
+  writes update derived bytes.
 
-- **Restore from backup (session 3)**: Hardware > "Restore from Backup..." (`RestoreDialog` picks a `.syx` from `~/.akaisds/a4000_backups`
-  or Browse). `core/yamaha_restore.plan_restore` diffs the backup against the object as it is NOW and `controller/yamaha_restore.RestoreJob`
-  writes only the differing WRITABLE rows through `write_parameter` (so every write keeps its guards) - **a restore is NOT a bulk load**
-  (unmeasured). It saves a SNAPSHOT of the current state first (no snapshot -> nothing written), writes the coupled wave/loop address rows
-  LAST then re-reads and makes up to 3 passes, stops at once on a write the unit swallowed (Bulk Protect), and reports what it cannot put
-  back (`residual_offsets`; assignments are never restored - only slots still holding the same sample). Proven on the real unit
-  (`tools/a4000_restore_check.py`). Details: the roadmap's "Restore from backup" section.
-- **Assigning samples to programs (session 3)**: the OBJECT LINK CHANGE message (`build_object_link_change`, program upper / sample lower,
-  1 link 0 unlink), via `YamahaSession.change_link` (backup once, send, ASK the unit with the link request - the answer is the verification,
-  a change gets no reply). MEASURED: linking appends the next Easy Edit slot with defaults (receive channel -1), unlinking a middle slot
-  COMPACTS the rest (they keep their values), linking twice / an unknown name change nothing. UI: "Assign Sample..." / "Remove" under the
-  assigned-samples column (`AssignDialog`; removal asks first); both lock the window like a restore. `_select_sample_after_load` selects the
-  new slot once the program is re-read; `_counts` follows so the "has samples" filter stays right. Untested on hardware: stereo samples,
-  sample banks (the UI only assigns samples), a full program.
-- **Editable markers + click-to-preview (session 4, 2026-10-06)**: the Samples tab's four waveform markers are editable and a single
-  click on the waveform previews the sample (like the S3000 editor). `core/yamaha_markers.py` is the model: the unit keeps FOUR independent
-  addresses (wave start, wave end, loop start, loop end) and derives the two lengths; it SILENTLY IGNORES a write that would break
-  start <= loop_start <= loop_end <= end (or an end past the wave's own size), so `plan_marker_writes` orders a change (widen the wave,
-  widen the loop, narrow the loop, narrow the wave) and `target_for_edit` builds the target from only the markers that MOVED (the view
-  draws a non-looping sample's loop at the wave end, which is NOT what the unit stores - never write the view's loop markers back
-  wholesale). MEASURED with `tools/a4000_marker_probe.py` and proven with `tools/a4000_marker_check.py` (the real tab + write path on a
-  user sample): `wave_length`/`wave_end_address` are NOT ignored on a USER sample (they were only ever flagged `write_ignored` from a
-  built-in; the flag is gone, a built-in simply ignores an end change and the tab says so); while the loop mode does not loop (0/3/4/5)
-  the loop END follows the wave end (and the loop can end up with start > end and an underflowed length - move the loop first, which the
-  planner does); a loop start may sit AT the wave end (the default of a fresh user sample - a drag can't reach it, the view's last
-  frame is end-1). The tab writes the plan one step at a time (`_run_marker_step`, through `WriteCoordinator`, each step guarded and
-  read back), re-reads the sample, and puts the markers back from the cache if a step fails; a drag made meanwhile waits and is
-  re-planned from a fresh read. The two channel views are linked (`_on_markers_changed`/`WaveformView.apply_markers`): one set of
-  addresses on the unit. **STEREO IS UNMEASURED**: no stereo sample was on the unit - does the unit really move the right channel's
-  twin address bytes with a write? (the tab only ever reads/writes the left addresses). The restore plan now writes the four ADDRESS rows
-  in planner order and never the two length rows (derived). `FakeA4000._edit_geometry` models all of the above. Preview: `SlicePreviewPlayer.play/
-  play_loop` take an optional `right_samples` (real two-channel output; mono callers are untouched); loop modes: 0/4 plain run, 1 held
-  loop (click again to stop), 2 loop for `_RELEASE_PREVIEW_MS`, 3/5 a reversed copy with the playhead mapped back. No pitch shift (the
-  sample plays at its own rate/key). Audio must be loaded first; `audio_matches` now accepts a wave LONGER than the end address (a
-  trimmed end is legal).
-- **Samples tab = the S3000 editor's Loop Controls layout (session 5, 2026-10-07)**: the old "Waveform" card is now **Loop Controls** - zoom row,
-  the waveform(s) (stacked for stereo), then the four marker KNOBS (Start / Loop Start / Loop End / End, swatch + 28 px knob + frame count, the same
-  look as the S3000's), a Loop Mode combo, and the edit buttons (Trim to Markers / Reverse / Fade In/Out / Normalise / Filter Sample... and, right-aligned,
-  Slice Editor...), followed by a **Loop Preview** card (the S3000's `LoopJoinPreview`, left channel). The old "Loop & Wave" card became a read-only
-  **Wave** card (sample rate, wave length, loop length, loop tempo) so the card pairs stay aligned (Pitch/Key, Level/Wave, ...). **The A4000 has NO loop
-  hold or loop tune** (those are S3000 `LDWELL1`/`SHLTO`/loop-tune fields): its loop settings are the 6-mode Loop Mode + a loop tempo. A knob turn calls
-  `WaveformView.set_marker` (pushes neighbours, mirrors to the right channel through the existing `markers_changed` plumbing) and `sliderReleased` (a drag's
-  release AND a typed value) commits through `_on_marker_committed` - the SAME guarded planner/write path as dragging a marker on the waveform, so the
-  unit's order rules still hold. A drag in the Loop Preview reports a frame delta and commits after 400 ms of stillness (`_preview_commit_timer`). Loop
-  knobs/swatches/preview follow the loop mode (`_set_loops_enabled`); everything locks while audio loads or an edit is being sent (`_apply_marker_lock`).
-- **Edits (Trim/Reverse/Fade/Normalise/Filter) and the Slice Editor make NEW samples - nothing is overwritten** (`ui/yamaha_sample_edit.py` +
-  `core/yamaha_edit.py`). The A4000 has no delete or overwrite over MIDI (a sample re-sent under its own name has ALL parameters reset), so the S3000's
-  send-temp/delete/rename pipeline can't exist here: the copy is named `<name> TRIM`/` REV`/` FADE`/` NORM`/` FILT` (cut to 16 chars, a clash gets ` 2`) and every
-  confirmation says the original is unchanged. The pure transforms are `core/sample_editing.py`'s (5-in/5-out, markers from
-  `markers_with_loop_in_range()`), run per channel; a stereo sample is edited as a pair (same trim/fade, one filter per channel, **normalise with ONE gain from
-  both channels' peak** so the balance survives). The copy goes through the native bulk load (`YamahaTransfers.send_file_queue`, wave dump(s) + SP, then read
-  back) with `params` = `yamaha_edit.params_for_copy`: original key, coarse/fine tune, loop mode and the wave/loop ADDRESSES for the new audio (carried through
-  `yamaha_load.CARRIED_ROWS`; everything else - envelopes, filter, EQ, controllers - stays at the template's defaults, NOT the original's). A non-looping copy
-  parks the loop at the wave end with length 0 (measured convention). The window selects the name the loader REALLY gave the sample
-  (`SamplerController.yamaha_loaded_names()`, because a name clash adds a number) after re-reading the sample list (`samples_changed` -> `_on_samples_changed`).
-  The Slice Editor is the S3000's own dialog with two opt-in additions (`extra_channels`: a stereo sample's other channel is sliced at the same frames and
-  handed to the export callback as `extra_slices=`; `hide_bit_depth`); its export callback blocks on a local `QEventLoop` until the controller's
-  `transfer_finished`, like the S3000 window's blocking sends. **Bit depth**: the Slice Editor's bit-depth box is hidden here (`hide_bit_depth`) - a Yamaha wave is
-  always 16-bit words (no bit-depth field exists in a sample's parameters), so a lower depth could only be a bit-crush effect with no memory saving; the sample-rate
-  box still works (`prepare_channels` resamples).
-  **"Also fill a program with the slices"** (the Akai flow's counterpart): the A4000 has no create-program and a program's NAME is read only (`program_name` row), but
-  its 128 programs always exist - so this ASSIGNS the slices, in order, to an EMPTY program picked in the dialog (combo = programs whose scan count is 0, from the
-  window's `_free_programs`; an empty program's name isn't read, so its row is just the number). The dialog is configured, not forked: `program_labels` (checkbox/combo
-  text, `has_name` False hides the name rule), `max_program_slices` (92 = keys 36..127), `program_confirm_message`. Each slice is loaded already mapped: `key_range_low/
-  high` = `original_key` = 36 + i (C1 upward, this app's C3-at-60 names, like the Akai export) and loop mode 4 (one-shot), carried in the sample dump
-  (`yamaha_load.CARRIED_ROWS`) instead of a guarded write per row - ONLY when the checkbox is ticked (`_wants_program` reads the dialog's checkbox, since the
-  dialog calls the export callback before the program callback). Then `_create_program` links each slice with `YamahaSession.change_link` (guarded: program backed up
-  once, the unit asked afterwards) one at a time, stops at the first refusal and says how far it got (`programs_changed(number, names)` still tells the window what DID
-  land). **A link right after loads once left a real unit silent for 28 s - ~8 min (unexplained)**, so it waits `LINK_SETTLE_MS` (4 s) first and lets each link's reply take
-  up to `LINK_REPLY_TIMEOUT_MS` (restored afterwards). The Easy Edit slots a link appends have default key limits/shift, so each slice plays on its own key via its sample's own
-  range. **UNVERIFIED ON HARDWARE**: linking 4-92 samples in a row, the settle wait being enough, and a program's maximum number of samples (unknown - the unit ignores a link
-  it can't make, and the flow reports it).
-  **UNVERIFIED ON HARDWARE**: the whole edit/slice path against a real A4000 (a sample dump with a carried-over loop mode/addresses and non-default key/tune, a
-  copy of a STEREO sample, 4+ samples in one queue), and that the carried loop addresses survive the unit's own bulk-load rules. Everything is proven only
-  against `FakeA4000`, which models the measured rules but is not the unit.
-- **Detect Pitch (session 7, 2026-10-08; UNVERIFIED ON HARDWARE)**: a button in the Samples tab's Pitch card, right of the Original key spinbox
-  (`panel.detect_pitch_button`, built in `build_sample_cards`, wired and enabled in `YamahaSamplesTab` alongside the edit buttons - it needs the
-  shown sample's audio loaded). Same engine as the S3000's Detect Root Note (`core/root_note_detection.py`, left channel; anchor = the current
-  Original key; below `CONFIDENCE_THRESHOLD` it only says it couldn't), then a Yes/No dialog and, on Yes, writes **Original key = the note** and
-  **Fine tune = -cents** through `panel.set_value`, i.e. the ordinary guarded edit path (backup, write, read-back; an unchanged value writes
-  nothing). Coarse tune is untouched; the right channel's key/fine tune are mirrored by the unit (not proven for stereo). **Two guesses, both
-  one-line fixes**: `FINE_TUNE_STEPS_PER_CENT = 1.0` (the Fine tune unit is unmeasured - the row is -63..+63) and the SIGN (a positive Fine tune is
-  assumed to raise the pitch, so a sample sharp by c cents gets -c; the Akai button adds +c to its own tune field, which is a different
-  convention). Check both against a tuner on the real unit. The analysis-window choice (loop region if >= 4096 frames, else an attack-skipped
-  chunk, both capped to 0.3 s) now lives in `root_note_detection.analysis_window` and is shared with the S3000 window, whose old `_MIN_LOOP_ANALYSIS_FRAMES`/
-  `_ROOT_NOTE_*` names remain as aliases for its tests. Tests: `tests/test_yamaha_detect_pitch.py`.
-- **Loading bar (session 7)**: the Yamaha editor has the S3000 editor's indeterminate 120 px bar next to Refresh, with the same debounce (shown
-  after 200 ms busy, hidden 150 ms after idle, a stale "idle" ignored while more work is queued - `_on_session_busy_changed`/`_confirm_session_idle`).
-  The source is the new `YamahaSession.busy_changed(bool)` signal / `working` property: true while a read, write or link is queued or running -
-  **wave loads and bulk sends deliberately do NOT count** (they have their own Cancel/progress and run for minutes; `idle` still counts them, so
-  use `working` for anything bar-like). The window disconnects the signal on close (once - a second `disconnect` warns). Tests:
-  `tests/test_yamaha_busy_indicator.py`.
-- **A5000 gating (session 7; UNVERIFIED ON HARDWARE - the user owns an A4000 only)**: the editor asks the unit for its identity once per session
-  (`YamahaSession.request_identity`, queued ahead of the first object list; a Universal 0x7E message, so the controller routes an identity reply to
-  `YamahaSession.handle_identity` BEFORE its 0x43 branch - the session only gets it while an identity op is waiting; the unit's display isn't touched;
-  1 s timeout, silent failure) and `YamahaProgramEditorWindow.model` becomes `IdentityReply.model` ("A4000" measured: family bytes `5A 03`; "A5000" is the
-  MANUAL's `5B 03`, never seen). Only an A5000 gets the A5000-only dropdown entries - effect4/5/6 as an output target (`yp.A5000_ONLY_ENUM_VALUES`,
-  `yp.enum_items`), via `FieldPanel.set_a5000` on the program, Easy Edit and sample panels (rebuilds the combos, keeps the selection, a held hidden value shows
-  as "(unexpected)"). No reply = treated as an A4000 and asked again at the next Refresh. NOT done: A5000 MIDI-B channels 17-32 are still not named in the
-  receive-channel dropdown, `effect456_connection` has no control, and **bulk requests still use the A4000 header (`HEADER_A4000`) - whether a real A5000
-  answers them is unknown**, so this only decides what the UI offers. `FakeA4000(model="A5000")` answers identity as an A5000. Tests: `tests/test_yamaha_a5000_gating.py`.
-- **Long operations freeze the Yamaha editor's navigation (session 7)**: while an audio load or an edit's/slice export's send runs (`samples_tab.long_operation`,
-  announced by `YamahaSamplesTab.busy_changed`) or a restore/assignment runs, `_apply_lock` disables the program/assigned/sample lists, "Show empty programs",
-  the tab bar, Refresh, the Hardware/Window menu actions that start things, the parameter controls and the assign/remove/Edit Sample buttons (`_is_busy`), and
-  shows a bottom-row **Cancel** (`_cancel_long_operation`: the load's own `_cancel_load`, else `controller.cancel_transfer()`; none for a restore/assignment).
-  WHY: the session is one FIFO, so a click on another sample only QUEUED its read behind the transfer, swapped the cards (and the progress bar with them) for a
-  "Reading..." placeholder, and the window looked hung. Deliberately NOT `main_tabs.setEnabled(False)` like the S3000 editor's `_set_hardware_busy_ui`: that
-  would also grey the tab's own "Cancel load", waveform and progress bar. Programmatic `select_sample` still works while locked (the lists only block clicks).
-  Tests: `tests/test_yamaha_busy_lock.py`.
-- **UI text polish (session 7; dropdown value ORDER unverified on hardware)**: (1) dropdown option text is sentence case ("Effect 1", "Stereo out", "Low-pass 1",
-  "Ch 1"; `yp.OUTPUT1/OUTPUT2/FILTER_TYPES/MIDI_CHANNEL`); the leading `=` of "=Sample"/"=Program" is KEPT - `FieldPanel._style_inherited` dims a combo whose text
-  starts with it. (2) Seven numeric boxes became dropdowns with NAMES from the owner's manual: LFO cycle, LFO initial phase, step wave total steps (2,3,4,6,8,12,16)
-  and slope, program portamento type, AD input source, sample EQ type (`yp.ENUMS`, rows carry `enum=`). **The names are the manual's lists; that the raw value
-  counts up through each list in that order is an ASSUMPTION** - verify each on the unit (set the value on the front panel, read it here) and fix the dict if one is off.
-  Not converted: pitch bend type (the manual lists only some of its 14 names) and the sample's portamento type (not in the UI). (3) `ui/yamaha_tooltips.py`: every
-  row's tooltip is title (the table name in sentence case, abbreviations spelled out) + an optional written sentence (`DESCRIPTIONS`, plus rules for the
-  envelope rows, Easy Edit `_offset`s and the controllers) + `Range:` line (special values from the name's parentheses; loop tempo shown /100; none for a dropdown).
-  Keep sentences short and only say what is known (envelope RATES: higher is faster). The user will review the wording after use. (4) Nothing is written UNDER the
-  Samples waveform any more (the hint/"Receiving the wave" line pushed the controls down; `waveform_hint` is gone - the "Double-click to load" hint lives INSIDE the
-  waveform) and the Programs list's count is the short "125 programs empty". Tests: `tests/test_yamaha_tooltips.py`.
-- **Stereo marker hover + focus-scroll fix (session 7)**: (1) a stacked stereo pair is ONE display, so a marker hovered or dragged in either half is drawn solid in
-  BOTH (`WaveformView._active_marker_names` also consults `_stack_partner`; `_repaint_pair` repaints both wherever hover/drag state changes). (2) **A disabled widget
-  hands its keyboard focus to the next one in the tab order, and a `QScrollArea` scrolls to reveal whatever widget receives focus** - so clicking Reverse (whose button
-  is then disabled) threw the Samples page ~3/4 of the way down. `YamahaSamplesTab._drop_focus` (called when a long operation starts) and the window's `_apply_lock`
-  clear the focus BEFORE disabling anything. Any new "click a button, then disable it" flow inside a scroll area needs the same. Tests: `tests/test_yamaha_stereo_polish.py`.
-- **Edit progress bar (session 7)**: Trim/Reverse/Fade/Normalise/Filter on the Yamaha Samples tab show the S3000 editor's small determinate bar
-  (`tab.edit_progress`, 140 px, right of the zoom buttons) plus a `Reverse "NAME" - 45%` status-bar message while the new sample goes out, fed by
-  `controller.transfer_progress` (bytes on the wire; the "Checking..." read-back afterwards has no bar). It is connected in
-  `YamahaSampleEditor._start_send`/`_on_send_progress` and hidden by `tab._set_edit_busy(False)`. The Slice Editor keeps its own dialog progress. The S1000 uses
-  the S2000/S3000 window (same `sample_edit_progress` bar); the S900/S950 editor has no sample edits to show it for.
-- **Assigning a sample this app loaded over MIDI asks first (session 7)**: linking a natively loaded sample has left the real unit silent
-  (the unit stops answering until OK is pressed on its "MIDI Bulk Received" dialog - session 6; it never needed a power cycle), and nothing known makes it safe. `YamahaTransfers.midi_loaded_names` records
-  every name whose load has been SENT since the app started (recorded as soon as the load goes out, not once verified; any Dashboard or editor send counts,
-  since the Dashboard and the editor share one controller; not reset by a send; `SamplerController.yamaha_midi_loaded_names()`); the Assign dialog marks those
-  with a small grey asterisk (the shared sample-list row's grey label) and a one-line "* Sent with AKAISDS" note, and `_assign_sample` shows a short Cancel-default
-  confirmation (`_confirm_assign_midi_loaded`: "...was sent to the sampler over MIDI by this app. You will likely need to press OK (Knob 5) ...") before
-  linking one. The user wants these messages SHORT - no walls of text.
-  It can only know about THIS run's loads - samples sent by an earlier run, or recorded/loaded any other way, are not flagged. The slice-fill path
-  (`yamaha_sample_edit`) has its own recovery and is unchanged.
-- **NATIVE SAMPLE LOADING (session 4, 2026-10-06; written from `dev_docs/a4000-native-load-findings.md` - read it)**: Dashboard "Send Samples" for the
-  Yamaha Sampler Type no longer uses SDS. `core/yamaha_load.py` builds a load = the wave dump(s) (`yamaha_wave.build_wave_messages`) THEN one sample
-  dump (`SP`, from a real user sample's captured parameters with name/wave names/rate/addresses set); `YamahaSession.send_messages` sends them
-  paced by wire time + `send_gap_ms` (400); `YamahaTransfers.send_file_queue` drives it (WAV -> channels, mono/stereo, rate override) and VERIFIES
-  (wait `verify_delay_ms`, object list holds the sample + waves, SP read-back matches frames/rate/stereo; each read retried - the first read after a
-  load is sometimes unanswered). MEASURED: a bulk dump sent to the unit is never answered ("MIDI Bulk Received" on its LCD - **it DOES need OK pressed before long**: see "Silent unit" below);
-  a WD alone is dropped - it only counts with the SP that names it (either order); a missing/short/duplicated/reordered wave message creates
-  NOTHING; a wave under an existing wave's name is overwritten IN PLACE (so our wave names are random `SMP nnnnnn`, never derived from the sample
-  name); a sample under an existing SAMPLE name is replaced in place with ALL its parameters reset (so the app never overwrites: a clash gets
-  ` 2` added - `yamaha_load.unique_name`); no frames trimmed (SDS trims 4); rates 1..65535 verbatim; ~440-590 frames/s per channel (stereo twice).
-  Stereo is two wave objects + the right name at SP @80 (works, user listened). **Open**: linking a freshly loaded sample to a program once left the
-  unit silent for 28 s / ~8 min (cause unknown - give link generous timeouts); pacing minimum, odd names, wave-memory-full and a failed REPLACE are
-  untested. `FakeA4000._bulk_load` models the measured rules (`same_name_replaces` is a guess flag). **The unit cannot report free memory over
-  MIDI**, so the Yamaha Dashboard has NO memory bar and Settings has no wave-memory field (both removed 2026-10-07 at the user's request:
-  the old estimate read every sample's SP dump on each list refresh - same cost as the removed duration scan; a stale
-  `yamaha_wave_memory_kb` key in `config.json` is simply ignored). Don't re-add one without a cheap source for the sizes. Sending needs a MIDI input (the check reads the unit).
-- **Silent unit after bulk loads (MEASURED 2026-10-07, unattended run - `dev_docs/a4000-editor-roadmap.md` "Session 6")**: after native loads the unit
-  can show a front-panel "MIDI Bulk Received" message and then answers NOTHING over MIDI (identity, object list, links - dead for 20+ min) until a
-  person presses OK (Knob 5) on it. MEASURED with nobody touching it: still silent 716 s after a link, answered the moment OK was pressed (the message was visible the whole time, and the unit was already silent to an identity request right after the load, before the link). Reads often still work right after a load; the first LINK (`change_link`) after loads is what hung it in 5 of 6 runs
-  (mono and stereo; the link itself DOES take effect, only the confirmation never comes). A front-panel-remote Knob 5 push (`58 03`) is NOT processed
-  while it is silent; sent while the unit still answered it once avoided the hang (n=1, a batch of 3 loads + one push still hung) - unproven, not used by the app. The app copes:
-  `yamaha_sample_edit._recover_silent_link` (the slice fill) tells the user to press OK, waits until the unit answers (probing with a General-MIDI
-  IDENTITY request - an object-list request pops "Transmitting Object List" on the unit every time, which is the wrong thing to repeat at a unit
-  waiting for OK), checks whether the link landed and only re-sends it if not (only when the link got NO answer at all: `result.linked is None`); the Assign dialog's failure text carries the same hint. Tell any tester: watch the unit's display during loads/assigns.
-- **HANDOFF (end of session 3, 2026-10-06):** sessions 1-2 are committed on `s1000-support`; session 3's work (restore + assign) may be
-  UNCOMMITTED - check `git status` and offer a commit; the suite had 2060 passing tests. Read `dev_docs/a4000-editor-roadmap.md` "HANDOFF"
-  and "Next steps" before continuing: (markers + preview are DONE, see above - stereo markers still need a real stereo sample), then the missing tables
-  (effects/controllers/system/banks), then native audio loading; a stereo sample is needed to test assigning/restoring one (the unit was
-  cold-booted, only factory samples remain). The user's look-and-feel decisions are listed there too.
-- **Testing the Yamaha code - gotchas:** replies that must arrive over time (cancel mid-stream, progressive fill) use
-  `rig.midi.paced = True` on the shared `_Midi` fake (tests/test_s950_transfers.py) - NEVER swap a test object's `__class__` (an
-  intermittent PySide segfault; the one older `Twice` test still does and works, don't copy it). `dispose(window)` in
-  tests/test_yamaha_program_editor.py calls `samples_tab.disconnect_controller()`; without it a pending duration-scan timer touches
-  deleted row widgets. The `window`/`win` fixtures shorten `_REVEAL_INITIAL_INTERVAL_S`/`_REVEAL_FINISH_S` (real chunks are ~1.5 s
-  apart, the fake's are instant) and an autouse fixture patches the one-time write warning so no test opens a dialog or writes the
-  real config. An unshown window has no layout geometry: `resize()` then `layout().activate()` before measuring positions. A pixel
-  test of a custom-painted widget must call `set_view_height` (WaveformView is fixed at 180 px; `resize` alone does nothing).
-  Never let a bulk string replace touch more than one place in `yamaha_session.py` (one did, and silently cleared `_backups` in
-  `cancel()` - there is a regression test now).
+**Writes:** `YamahaSession.write_parameter(row, value, object_name, cb, slot=)`, ONE parameter per op: (1) the first write to an object per session dumps it and saves a `.syx` backup
+(`~/.akaisds/a4000_backups`; conftest points `controller.yamaha_session.BACKUP_DIR` at a temp dir) - **no backup, no write**; (2) sent only after a probe request was answered by an announce naming
+the right object; (3) a read-back must equal the value. It refuses read-only/bulk-only/`write_ignored`/A5000-only rows and out-of-range values. `WriteCoordinator` throttles widget edits (150 ms),
+shows the one-time warning (`yamaha_write_warning_acknowledged`) and re-reads the object once writes settle. `FieldPanel.set_editable` enables only writable rows; spinboxes have keyboard
+tracking OFF. The window refuses to close/refresh under a write. Hardware menu: "Write Program Back Unchanged (test)", "Open Backup Folder", "Restore from Backup..." (guarded writes of the
+differing rows, NOT a bulk load; a snapshot of the current state is saved first - no snapshot, nothing written). **Assign/Remove sample** = `YamahaSession.change_link` (backup once, send, ASK
+the unit - the answer is the verification); both lock the window like a restore.
+
+**Samples tab / editor UI decisions:**
+- Rows use `build_sample_list_row_widget` with NO item text (the name is in `Qt.UserRole` - use `tab.sample_names()`); the grey duration label is deliberately BLANK. **No per-sample durations in
+  the list and no Dashboard memory bar / Settings wave-memory field** (user decisions: each needed a background scan of every sample's SP dump, one at a time, too slow; a stale
+  `yamaha_wave_memory_kb` key is ignored; the Assign dialog's `durations` argument is unused) - don't bring them back without a cheap source.
+- Layout: cards in ALIGNED side-by-side pairs pinned equal (`equalize_card_heights`); the user rejected independent columns and collapsible cards. The stereo waveform is ONE display (two
+  `WaveformView`s via `set_view_state`/`set_stack_position`; markers hovered/dragged in either half are drawn solid in BOTH via `_stack_partner`/`_repaint_pair`); it draws progressively and
+  smoothly (queued lumps released ~30x/s, display only). `Knob`'s value arc grows from ZERO for any range spanning zero in EVERY editor (`setBipolar(False)` opts out, no tick mark - the user
+  loves it). `=Sample`/`=Program` combos keep the leading `=` (`FieldPanel._style_inherited` dims them). Nothing is written UNDER the waveform (the hint lives inside it).
+- Envelope graphs: amplitude reuses `ADSREnvelopeGraph` via `envelope_graph.yamaha_adsr_values` (A4000 attack/decay/release are RATES - higher is FASTER); filter/pitch use the bipolar
+  `LevelEnvelopeGraph`. Shape-only, like the originals.
+- Samples tab = the S3000 editor's **Loop Controls** layout: four marker KNOBS + Loop Mode combo + edit buttons + a Loop Preview card. The A4000 has NO loop hold/loop tune (a 6-mode Loop Mode +
+  loop tempo). A knob turn calls `WaveformView.set_marker`; `sliderReleased` commits through `_on_marker_committed` (the SAME guarded planner path as dragging); a Loop Preview drag commits after 400 ms
+  of stillness. Everything locks while audio loads or an edit is being sent.
+- **Markers:** `core/yamaha_markers.py` models the unit's FOUR addresses (it SILENTLY IGNORES a write that breaks start <= loop_start <= loop_end <= end, so `plan_marker_writes` orders the writes)
+  and `target_for_edit` builds the target from only the markers that MOVED - **never write the view's loop markers back wholesale** (a non-looping sample's loop is drawn at the wave end, which isn't
+  what the unit stores). The tab writes one step at a time through `WriteCoordinator`, re-reads, and restores markers from cache if a step fails. Restore writes the four ADDRESS rows in planner
+  order and never the two length rows. Click-to-preview: `SlicePreviewPlayer.play/play_loop(right_samples=)`, loop modes 0/4 plain, 1 held (click again stops), 2 loops for `_RELEASE_PREVIEW_MS`, 3/5
+  reversed; no pitch shift; audio must be loaded first; `audio_matches` accepts a wave LONGER than the end address.
+- **Long operations freeze navigation** (`_apply_lock`/`_is_busy`: lists, tab bar, Refresh, menu actions, parameter controls, assign/remove/Edit Sample, plus a bottom Cancel via
+  `_cancel_long_operation`) - because the session is one FIFO, a click on another sample only QUEUED behind the transfer and the window looked hung. Deliberately NOT
+  `main_tabs.setEnabled(False)` (that would grey the tab's own Cancel/waveform/progress). Programmatic `select_sample` still works while locked.
+  **A disabled widget hands its keyboard focus to the next one in the tab order, and a `QScrollArea` scrolls to reveal whatever gets focus** - clicking Reverse (then disabled) threw the page ~3/4
+  down. `YamahaSamplesTab._drop_focus` and `_apply_lock` clear focus BEFORE disabling anything; any new "click a button, then disable it" flow inside a scroll area needs the same.
+- **Loading bar:** the 120 px bar next to Refresh follows `YamahaSession.busy_changed`/`working` (queued/running read, write or link) with the S3000's debounce; wave loads and bulk sends do NOT count
+  (they have their own Cancel/progress; `idle` still counts them - use `working` for bar-like things). Edit progress bar (`tab.edit_progress`) is fed by `controller.transfer_progress`.
+- **UI text:** dropdown options are sentence case; seven numeric boxes are named dropdowns (`yp.ENUMS`, rows carry `enum=`) whose raw order is ASSUMED from the manual's lists (roadmap open item 4);
+  `ui/yamaha_tooltips.py` builds every row's tooltip (title + optional `DESCRIPTIONS` sentence + `Range:` line) - keep sentences short and only say what is known. The user wants messages SHORT.
+
+**Edits and slices make NEW samples - nothing is overwritten** (`ui/yamaha_sample_edit.py` + `core/yamaha_edit.py`): the A4000 has no delete/overwrite over MIDI (a re-sent name resets ALL parameters), so
+the copy is named `<name> TRIM`/` REV`/` FADE`/` NORM`/` FILT` (16 chars, a clash adds ` 2`) and every confirmation says the original is unchanged. Pure transforms are `core/sample_editing.py`'s,
+per channel; a stereo sample is edited as a pair (same trim/fade, one filter per channel, normalise with ONE gain from both peaks). The copy goes through the native bulk load with
+`yamaha_edit.params_for_copy` (key, coarse/fine tune, loop mode and the wave/loop ADDRESSES via `yamaha_load.CARRIED_ROWS`; everything else is the template's defaults). A non-looping copy parks the
+loop at the wave end with length 0. The window selects the name the loader REALLY gave (`SamplerController.yamaha_loaded_names()`). The Slice Editor is the S3000's dialog plus `extra_channels`
+(a stereo sample's other channel sliced at the same frames), `hide_bit_depth` (a Yamaha wave is always 16-bit); its export blocks on a local `QEventLoop` until `transfer_finished`.
+**"Also fill a program with the slices"**: the A4000 has no create-program and a program's NAME is read only, but its 128 programs always exist - so the slices are ASSIGNED in order to an EMPTY program
+picked in the dialog (programs whose scan count is 0, `_free_programs`); configured, not forked: `program_labels`, `max_program_slices` (92 = keys 36..127), `program_confirm_message`. Each slice is loaded
+already mapped (`key_range_low/high` = `original_key` = 36 + i, loop mode 4, only when the checkbox is ticked - `_wants_program`), then `_create_program` links each with `change_link`, stops at the first
+refusal and reports how far it got. It waits `LINK_SETTLE_MS` (4 s) first and lets each link reply take up to `LINK_REPLY_TIMEOUT_MS`.
+
+**Native loading** (`core/yamaha_load.py`, `YamahaTransfers.send_file_queue`; Dashboard Send): wave dump(s) + one SP, paced by wire time + `send_gap_ms`, then VERIFIED (object list has the sample + waves, SP
+read-back matches frames/rate/stereo; each read retried - the first read after a load is sometimes unanswered). The app never overwrites (a clash gets ` 2`, `yamaha_load.unique_name`); wave names are random
+`SMP nnnnnn` (a wave under an existing wave's name is overwritten in place). Sending needs a MIDI input.
+**Silent unit after bulk loads:** the unit can show "MIDI Bulk Received" and answer NOTHING over MIDI until a person presses OK (Knob 5) - most often at the first link after loads. The app copes:
+`yamaha_sample_edit._recover_silent_link` (the slice fill) tells the user to press OK, waits until the unit answers (probing with a General-MIDI IDENTITY request - an object-list request pops
+"Transmitting Object List" on the unit, the wrong thing to repeat), checks whether the link landed and re-sends only if it got NO answer (`result.linked is None`); the Assign dialog's failure text carries the
+hint. **Assigning a sample this app loaded asks first** (`YamahaTransfers.midi_loaded_names` records every name SENT this run; the Assign dialog marks them with a grey asterisk + a one-line note;
+`_confirm_assign_midi_loaded`, Cancel default); it can't know about earlier runs' loads. Tell any tester: watch the unit's display during loads/assigns.
+
+**Detect Pitch** (Samples tab, Pitch card; needs the audio loaded): same engine as the S3000's Detect Root Note (`core/root_note_detection.py`, left channel; the analysis-window choice is
+`root_note_detection.analysis_window`, shared; the S3000 window keeps old `_MIN_LOOP_ANALYSIS_FRAMES`/`_ROOT_NOTE_*` aliases for its tests), then writes Original key and Fine tune = -cents through the
+ordinary guarded path. **Two guesses, one-line fixes each**: `FINE_TUNE_STEPS_PER_CENT = 1.0` and the SIGN (a positive Fine tune raises the pitch) - check against a tuner.
+**A5000 gating** (unverified - the user owns an A4000): the editor asks for the unit's identity once per session (`request_identity`, queued ahead of the first object list; a Universal 0x7E message the
+controller routes to `handle_identity` BEFORE its 0x43 branch; 1 s timeout, silent failure = treated as an A4000 and re-asked at Refresh); only an A5000 gets effect4/5/6 as an output target
+(`yp.A5000_ONLY_ENUM_VALUES`, `FieldPanel.set_a5000`). Bulk requests still use `HEADER_A4000`, MIDI-B channels 17-32 and `effect456_connection` aren't done.
+The Slice Editor/edits fixed bugs worth remembering: the post-load check must expect the carried `wave_length` (`_verify_sample`), not the audio's frame count.
+
+**Testing the Yamaha code:** replies that must arrive over time use `rig.midi.paced = True` on the shared `_Midi` fake (tests/test_s950_transfers.py) - NEVER swap a test object's `__class__` (intermittent
+PySide segfault); `dispose(window)` in tests/test_yamaha_program_editor.py calls `samples_tab.disconnect_controller()`; the `window`/`win` fixtures shorten `_REVEAL_INITIAL_INTERVAL_S`/`_REVEAL_FINISH_S`
+and an autouse fixture patches the one-time write warning; an unshown window has no layout geometry (`resize()` then `layout().activate()`); a pixel test of a custom-painted widget must call
+`set_view_height`. Never let a bulk string replace touch more than one place in `yamaha_session.py` (one silently cleared `_backups` in `cancel()` - there is a regression test).
 
 ## Theme preference (Settings > Settings tab > Appearance)
 
@@ -1232,225 +831,62 @@ fast fake/`DemoBridge` in tests (no latency to hide the race).
 
 ## Root Note & Tune, and Detect Root Note
 
-`sample_root_note_spinbox` (`SPITCH`, `NoteSpinBox`, ranged `21..127`) and
-`sample_tune_spinbox` (`STUNO`, a `QDoubleSpinBox` in SEMITONES not
-literally cents despite the common name, ±50.00st) live in the "Root Note
-& Tune" card.
+`sample_root_note_spinbox` (`SPITCH`, `NoteSpinBox`, `21..127`) and `sample_tune_spinbox` (`STUNO`, a `QDoubleSpinBox` in SEMITONES, not cents despite the common name, +-50.00) live in the "Root Note & Tune" card.
 
-**"Detect Root Note" button** (`core/root_note_detection.py` +
-`_confirm_detect_root_note`) - hand-rolled, pure-Python time-domain
-autocorrelation pitch detection, no new dependency (aubio/librosa/numpy
-were all considered and rejected - pitch tuning is a matter of taste, not
-correctness this app needs to nail perfectly; same reasoning as
-`core/transient_detection.py`'s onset detection). Monophonic only.
-
-**Octave disambiguation is via the CURRENT root note as an anchor, not
-"lowest"/"loudest"**: a periodic signal's autocorrelation is ALSO strongly
-peaked at every integer multiple of the true period (trivially, since
-periodic-with-T implies periodic-with-2T/3T/...), so real audio typically
-shows several genuine candidate peaks, not one. The anchor picks whichever
-candidate is closest in semitones - never biases the measurement itself.
-
-**Real bug found and fixed**: originally picked whichever peak was
-nearest the anchor, full stop - a badly-set (or default) anchor could
-reach past a strong peak and grab a much weaker, spurious one instead, so
-the SAME audio reported wildly different "confidence" (37%-79%, confirmed
-against `tests/test_audio.wav`, a chord stab) purely from the anchor,
-nothing about the audio changing. Fixed: the anchor now only picks among
-CREDIBLE peaks (`_CANDIDATE_CONFIDENCE_RATIO`, 0.8 of the strongest one
-found) - still disambiguates genuine octave ambiguity, can no longer
-manufacture false confidence in noise.
-`test_confidence_does_not_swing_low_based_on_anchor_alone` regression-
-guards this against the real fixture.
-
-**Analysis window** (the choice now lives in `root_note_detection.analysis_window`, shared with the A4000 editor's Detect Pitch): the loop region (`markers_with_loop_in_range()`,
-already-stable/repeating, immune to attack-transient bias) is preferred if
-its span is at least `_MIN_LOOP_ANALYSIS_FRAMES` (≈2 periods of the lowest
-supported note); otherwise an attack-skipped, capped chunk of
-`[start, end]`. **Both paths are capped to the same short length budget**
-(`_ROOT_NOTE_FALLBACK_WINDOW_SECONDS`) - an uncapped loop region's own
-analysis time scales with its length (confirmed: ~1.5s of real audio took
-~1.5 SECONDS to analyse before this cap existed), which would make a
-sustained-pad sample's own loop region noticeably slow to click.
-
-**Confidence threshold** (`CONFIDENCE_THRESHOLD`, currently 0.5): below
-this, the button shows a plain acknowledgement with no note/confidence/
-choice offered - per direct user request, nothing actionable for an
-unreliable guess. Needs real-hardware/real-material validation to actually
-calibrate; the chord-stab fixture still clears 50% (it's polyphonic, not
-pure noise), so this may need raising once tested against real
-monophonic samples.
-
-**Writing the result does NOT overwrite Tune outright.**
-`core/akai_sysex.py`'s `compute_bandwidth_and_tuning` (Transfer Dashboard
-send-time code, an unrelated file) bakes a permanent hardware-engine-speed
-compensation into `STUNO` whenever a sample was originally sent at a
-non-native rate (the Akai playback engine only physically runs at
-22050/44100 Hz) - completely independent of the sample's own recorded
-pitch. `_confirm_detect_root_note` recomputes that baseline fresh from the
-sample's own declared rate and ADDS the detected residual on top, rather
-than blindly discarding it (comes out to 0 - a no-op - for the
-overwhelmingly common native-rate case).
-
-**That baseline must come from the sample's own `SBANDW`, never
-re-derived from its rate - a real bug, found and fixed.** Both
-`_confirm_detect_root_note` and `_on_waveform_preview_requested` used to
-recompute the baseline via `compute_bandwidth_and_tuning(framerate)`,
-which picks whichever native bucket (22050/44100) is numerically NEAREST
-the sample's rate. That's only the rule THIS app's own 16-bit Akai SDATA
-send path actually follows (`sampler_controller._start_unit`,
-`bit_depth == 16`) - a sample sent at any OTHER bit depth goes through
-the generic/universal MIDI SDS path instead (no `STUNO`/`SBANDW` fields
-in that protocol at all), and the SAMPLER ITSELF derives its own
-`SBANDW`/`STUNO` from the incoming dump using an undocumented rule that
-does NOT pick the nearest bucket. Confirmed on real hardware: an 11025 Hz
-sample sent at 16-bit reads back `STUNO` -12.00 (bandwidth=0/22050, the
-nearest bucket); the SAME sample sent at either 8-bit or 12-bit reads
-back -24.00 both times - not "double" by some bit-depth-dependent
-scaling, but exactly what you get from always assuming bandwidth=1/44100
-regardless of which bucket is actually nearest. Re-deriving "nearest
-bucket" for a sample that arrived via the generic path silently computes
-against the WRONG baseline - the real, reported symptom was the Samples
-tab's own click-to-preview playing such a sample back a full octave low
-despite it playing correctly on actual hardware (and round-tripping
-correctly through the Transfer Dashboard's own SDS receive → WAV save).
-Fixed: `SBANDW` is now read directly (`_SAMPLE_DETAIL_FIELDS`, hardware's
-own real value for THIS sample) and passed to
-`baseline_semitones_for_bandwidth(rate, bandwidth)` instead of guessed -
-correct regardless of which path actually produced the sample's `STUNO`.
-`test_preview_requested_uses_real_sbandw_not_nearest_bucket_guess`/
-`test_confirm_detect_root_note_uses_real_sbandw_not_nearest_bucket_guess`
-both deliberately use a rate/bandwidth combination where the two
-computations disagree, so a reversion to "nearest bucket" would actually
-be caught.
+**"Detect Root Note"** (`core/root_note_detection.py` + `_confirm_detect_root_note`): hand-rolled pure-Python time-domain autocorrelation, no new dependency (aubio/librosa/numpy were rejected - pitch
+tuning is a matter of taste; same reasoning as `core/transient_detection.py`). Monophonic only.
+- **Octave disambiguation uses the CURRENT root note as an anchor, not "lowest"/"loudest"**: a periodic signal's autocorrelation also peaks at every multiple of the true period, so real audio shows
+  several genuine candidates. The anchor picks the closest in semitones but only among CREDIBLE peaks (`_CANDIDATE_CONFIDENCE_RATIO`, 0.8 of the strongest) - picking the nearest peak full stop let a bad
+  anchor grab a weak spurious one, so the same audio reported 37%-79% confidence. `test_confidence_does_not_swing_low_based_on_anchor_alone` guards this against `tests/test_audio.wav`.
+- **Analysis window** (`root_note_detection.analysis_window`, shared with the A4000 editor's Detect Pitch): the loop region (`markers_with_loop_in_range()`, stable, immune to attack transients) if its
+  span is at least `_MIN_LOOP_ANALYSIS_FRAMES` (~2 periods of the lowest note), else an attack-skipped chunk of `[start, end]`. **Both are capped to the same short length**
+  (`_ROOT_NOTE_FALLBACK_WINDOW_SECONDS`) - an uncapped loop's analysis time scales with its length (~1.5 s of audio took ~1.5 s).
+- **Confidence threshold** (`CONFIDENCE_THRESHOLD`, 0.5): below it the button shows a plain acknowledgement with nothing actionable (user request). Needs calibrating on real monophonic material; the
+  chord-stab fixture (polyphonic) still clears 50%, so it may need raising.
+- **Writing the result does NOT overwrite Tune outright.** `core/akai_sysex.py`'s `compute_bandwidth_and_tuning` (send-time code) bakes a permanent engine-speed compensation into `STUNO` whenever a
+  sample was sent at a non-native rate (the engine runs only at 22050/44100). `_confirm_detect_root_note` recomputes that baseline and ADDS the detected residual (0 - a no-op - for native-rate samples).
+- **The baseline must come from the sample's own `SBANDW`, never re-derived from its rate (a real bug).** "Nearest native bucket" is only the rule THIS app's 16-bit Akai SDATA send follows; any other
+  bit depth goes through generic SDS (no `STUNO`/`SBANDW` in that protocol) and the SAMPLER derives its own values by an undocumented rule: an 11025 Hz sample sent at 16-bit reads back `STUNO` -12.00
+  (bandwidth 0), at 8- or 12-bit -24.00 (exactly what always assuming bandwidth 1/44100 gives). Re-deriving the baseline made click-to-preview play such a sample an octave low. `SBANDW` is now read
+  directly (`_SAMPLE_DETAIL_FIELDS`) and passed to `baseline_semitones_for_bandwidth(rate, bandwidth)`. `test_preview_requested_uses_real_sbandw_not_nearest_bucket_guess` and
+  `test_confirm_detect_root_note_uses_real_sbandw_not_nearest_bucket_guess` use a rate/bandwidth combination where the two computations disagree, so a reversion is caught.
 
 ## Slice Editor (Samples tab): manual ReCycle-style breakbeat chopping
 
-"Slice Editor…" opens a modal `SliceEditorWindow` over a sample's
-already-loaded audio - place slice markers by hand (Equal Slices, or the
-live Sensitivity slider below), export every slice as a new one-shot
-sample, optionally also building a whole new program (one keygroup per
-slice, Const Pitch, one-shot). Same `has_waveform()` gate as other
-sample-edit actions, but NOT demo-mode-disabled outright like Duplicate
-Sample - only Export needs real hardware (`DemoBridge` has no add-sample
-primitive); marker placement/click-to-preview/detection all work fine
-without it.
+"Slice Editor…" opens a modal `SliceEditorWindow` over a sample's already-loaded audio - place slice markers by hand (Equal Slices, or the live Sensitivity slider), export every slice as a new one-shot
+sample, optionally also building a whole new program (one keygroup per slice, Const Pitch, one-shot). Same `has_waveform()` gate as other sample edits, but NOT demo-mode-disabled outright - only Export
+needs real hardware (`DemoBridge` has no add-sample primitive); placement/preview/detection work without it. `SliceWaveformView` is NOT `WaveformView` reused (two edges + an arbitrary interior list
+that CLAMPS at a neighbour, vs four markers that PUSH); it reuses `waveform_view.py`'s free helper functions.
 
-`SliceWaveformView` is NOT `WaveformView` reused - genuinely different
-marker model (two edges + an arbitrary-length interior list that CLAMPS
-at a neighbour on drag, vs. `WaveformView`'s fixed four markers that PUSH
-each other). Reuses `waveform_view.py`'s free helper functions, not its
-class.
+**Export**: every slice forced to one-shot (`SPTYPE=3`); `SPITCH`/`STUNO`/`SHLTO` copied from the source; the whole batch goes in ONE `send_file_queue` call (one combined `transfer_finished`).
+**With "create program" ticked, at most 92 slices** (`program_editor_window._MAX_SLICES_PER_PROGRAM`, passed as `max_program_slices`): each slice gets its own key from `_FIRST_SLICE_NOTE` (36, C1) up and
+`LONOTE`/`HINOTE` max out at 127 (the old cap of 99 let slices 93-99 queue writes that failed silently). Exporting samples WITHOUT a program isn't capped. Slice names zero-pad to a width computed ONCE
+per batch (`<base>-01`..`<base>-16`). Collision checks re-query `existing_names_provider()` live. The dialog is application-modal so the user can't start a conflicting send from the Dashboard mid-export.
+**Dual-connection race (confirmed)**: the Samples tab's own second connection for audio means a large batch export's sample-list reload can lose a reply to `SamplerController`'s chatter;
+`_reload_sample_list_with_retries` retries up to 3 times - deliberately scoped to `_export_slices` only.
 
-**Export**: every slice forced to one-shot (`SPTYPE=3`) regardless of the
-source's own loop settings; `SPITCH`/`STUNO`/`SHLTO` copied from source;
-the whole batch goes in ONE `send_file_queue` call (not one per slice) -
-`SamplerController` already reports one combined `transfer_finished` for
-a whole queue. **With "create program" ticked, at most 92 slices** (`program_editor_window._MAX_SLICES_PER_PROGRAM`, passed to the dialog as `max_program_slices`): each slice gets its
-own key from `_FIRST_SLICE_NOTE` (36, C1) up, so slice 93+ would need a key above 127 (`LONOTE`/`HINOTE` max 127) even though a program holds 99 keygroups - the old cap of 99
-let slices 93-99 queue writes that failed silently. Exporting samples WITHOUT a program isn't capped by this. Slice names zero-pad to a width computed ONCE per batch
-(`<base>-01`..`<base>-16`, not `-1`..`-16`) so truncation stays consistent
-across it. Collision checks re-query `existing_names_provider()` live,
-never a stale snapshot. The dialog is application-modal specifically so
-the user can't tab back to the Dashboard and start a conflicting send
-mid-export - not a race this window otherwise has to poll for.
+**Click-to-preview** (`core/audio_preview.py`'s `SlicePreviewPlayer`, the app's first non-MIDI audio output - `miniaudio`, not `QAudioSink`, which underran on Linux): a single click (not double,
+which adds a marker) on empty space OR a marker/handle schedules a debounced preview (`QApplication.doubleClickInterval() // 2`) - the double-click event sequence is press→release→doubleClick→release,
+so firing immediately would blip on every marker-adding double-click. **Clicking a marker/handle uses the TARGET's own frame, not the raw cursor pixel** (a click a pixel or two off, still inside the
+hover radius, used to resolve to the wrong neighbouring slice). A real drag cancels the pending preview.
+**A running preview device at interpreter exit CRASHES the process on macOS** (SIGTRAP in `_os_workgroup_tsd_cleanup` on CoreAudio's IO thread - the miniaudio callback takes the GIL while Python is
+finalizing; exit code 133 every time). `audio_preview` keeps a `WeakSet` of players and an `atexit` hook (`_stop_all_players`); `tests/test_audio_preview.py` has an autouse fixture doing the same (a failed
+assert skips a test's own `player.stop()`) and POLLS (`_wait_until`) instead of a fixed sleep (output-device start time varies).
 
-**Confirmed real dual-connection MIDI race** (the Samples tab's OWN second
-connection, to fetch audio via `sampler_controller` - see above): a large
-batch export's own sample-list reload can lose a reply to
-`SamplerController`'s concurrent chatter on the same wire.
-`_reload_sample_list_with_retries` retries up to 3 times - deliberately
-scoped to `_export_slices` only (the biggest/longest send this window
-ever triggers), not retrofitted onto Duplicate/Trim's own single reload
-points without evidence they need it too.
+**Sensitivity slider - live transient detection** (`core/transient_detection.py`): hand-rolled energy-flux onset detection (RMS windows, half-wave-rectified flux, threshold + local peak + min gap), no
+FFT/numpy/aubio. 0% (rest) is OFF; dragging live-regenerates ALL markers from scratch every tick with **no confirmation dialog** (unusable while dragging), so touching it silently replaces hand-placed
+markers. `compute_flux()` (O(n), once per loaded sample) and `markers_from_flux()` (O(peaks), per tick) are split. The slider is `ui/fine_slider.py`'s `FineSlider` (double-click resets, Shift-drag fine
+control with the macOS no-cursor-warp tweak, click-then-type via the generic `_TypeEdit` popup) - deliberately NOT a `Knob` subclass (some duplication accepted to leave that class untouched); its QSS
+(`style.qss.template`'s `QSlider` rules) uses the hardcoded `#3aa88a` like `Knob`'s value arc, not `${accent}`.
 
-**Click-to-preview** (`core/audio_preview.py`'s `SlicePreviewPlayer`, this
-app's first non-MIDI audio output - `miniaudio`, not `QAudioSink`, after
-`QAudioSink` produced measured real buffer underruns on Linux): a plain
-single click (not double, which still adds a marker) on empty space OR a
-marker/handle schedules a debounced preview
-(`QApplication.doubleClickInterval() // 2`) rather than firing
-immediately - the real Qt event sequence for a double-click is
-press→release→doubleClick→release, so an immediate-fire would make every
-marker-adding double-click also blip a stray preview. **Clicking a
-marker/handle uses the TARGET's own frame, not the raw cursor pixel** - a
-real bug: a click a pixel or two either side of a marker (still within its
-own hover/hit radius) used to resolve to the wrong neighbouring slice,
-even though the hover highlight visually said "you're on this marker." A
-real drag (movement, not just a press) cancels the pending preview.
+**Layout fixes (confirmed against the real dialog)**: the zoom scrollbar reserves its height even while hidden (collapsing made every row below jump on zoom-threshold crossings); the info label dropped
+its per-slice "lengths" list (30+ slices wrapped tall enough to push everything down); the waveform is `Expanding` with a 220px FLOOR, the info label `Preferred,Fixed`, plus
+`layout.setStretchFactor(waveform, 1)` (a fixed-height waveform let surplus height land on the label - same failure class as the section cards); a `QWidget` wrapping `export_row` needs
+`setContentsMargins(0,0,0,0)` explicitly or its buttons are clipped.
 
-**A running preview device at interpreter exit CRASHES the process on macOS** (crash report 2026-10-07: SIGTRAP in `_os_workgroup_tsd_cleanup` on
-CoreAudio's IO thread - the miniaudio callback calls back into Python, takes the GIL while Python is finalizing, and the thread is forced to exit;
-reproduced as exit code 133 every time). `audio_preview` keeps a `WeakSet` of players and an `atexit` hook (`_stop_all_players`) that stops them, so
-quitting mid-preview is safe, and `tests/test_audio_preview.py` has an autouse fixture doing the same, because a failed assert skips a test's own
-`player.stop()`. Those tests also POLL (`_wait_until`) instead of sleeping a fixed 0.1 s - how long an output device takes to start varies by
-machine/device (a fixed sleep failed here once the default output changed).
-
-**Sensitivity slider - live transient detection, no separate button**
-(`core/transient_detection.py`): hand-rolled energy-flux onset detection
-(RMS over fixed windows, half-wave-rectified frame-to-frame flux,
-threshold+local-peak+min-gap picking) - deliberately simple, no
-FFT/numpy/aubio. 0% (the default/rest position) is fully OFF; dragging
-the slider live-regenerates ALL slice markers from scratch on every tick,
-same feel as a real ReCycle sensitivity knob - **no confirmation dialog**
-(would be unusable while dragging), so touching it away from 0 silently
-replaces whatever markers exist, hand-placed or not. `compute_flux()`/
-`markers_from_flux()` are split so the expensive O(n) analysis pass runs
-ONCE per loaded sample and only the cheap O(peaks) picking re-runs per
-slider tick.
-
-The slider itself is `ui/fine_slider.py`'s `FineSlider` (not a plain
-`QSlider`) - double-click resets to default, Shift-drag is fine control
-(same macOS no-cursor-warp tweak as `Knob`/`WaveformView`), click-then-
-type opens the same generic `_TypeEdit` popup `Knob` uses. Deliberately
-NOT a `Knob` subclass or refactored to share a base with it (zero risk to
-that already-tested, widely-used class) - some real duplication accepted
-instead. QSS styling (`style.qss.template`'s `QSlider` rules, previously
-nonexistent - it rendered as a plain unstyled Fusion slider) uses
-`#3aa88a`, the SAME hardcoded green `Knob`'s own value arc paints with,
-not `${accent}` (which differs between themes) - deliberately
-theme-independent, matching precedent.
-
-**Layout fixes, all confirmed against the actual dialog, not just
-reasoned about**:
-
-- The zoom scrollbar now reserves its height even while hidden, matching
-  the Samples tab's own `WaveformView` scrollbar - the original
-  "collapse to zero height, no wrapper" choice was reversed after real use
-  showed every row below it visibly jumping on every zoom-threshold
-  crossing.
-- The info label dropped its per-slice "lengths (frames): ..." list - at
-  30+ slices (easy via the sensitivity slider) the wrapped text grew tall
-  enough to push every row below it down the window.
-- The waveform view used to be `setFixedHeight(220)` - resizing the
-  dialog taller did nothing for it; the surplus vertical space instead
-  silently landed on the info label (the only OTHER non-Fixed-policy
-  widget in the layout - same failure class the Program Editor's own
-  section cards needed `Preferred,Fixed` to avoid, see above). Fixed:
-  `Expanding` + a 220px floor (not ceiling) on the waveform,
-  `Preferred,Fixed` explicitly on the info label,
-  `layout.setStretchFactor(waveform, 1)` as a third belt-and-suspenders
-  guarantee.
-- Wrapping `export_row` in a `QWidget` (for the height fix above) needs
-  `setContentsMargins(0,0,0,0)` explicitly - a bare top-level layout picks
-  up Qt's own default margins that a nested `addLayout()`'d one never had,
-  which silently clipped the row's own buttons at the bottom until caught
-  from a screenshot.
-
-`AKAISDS_DEMO_INSTANT` skips `_fetch_demo_sample_audio`'s realistic
-pacing entirely - for iterating on this window without waiting out a
-simulated transfer per sample selected. The standalone launcher (bottom of
-`program_editor_window.py`) needs this AND `AKAISDS_DEMO_SAMPLER=1` both
-set - its `_StandaloneSamplerController` stub needs `cancel_transfer()`
-too, not just `is_transfer_busy()`, or `_open_slice_editor` raises
-`AttributeError` (a real bug, found and fixed).
-
-**Other real bugs found building this window**: `_wait_for_any_signal`
-used to `submit_*()` before connecting listeners (same class as the
-sample-edit bug above); a test holding a real lock across real
-`threading.Thread`s here reproducibly segfaulted the interpreter elsewhere
-in the suite (same instability class the MIDI transport section above
-describes - don't add another).
+`AKAISDS_DEMO_INSTANT` skips `_fetch_demo_sample_audio`'s pacing. The standalone launcher (bottom of `program_editor_window.py`) needs it AND `AKAISDS_DEMO_SAMPLER=1`; its
+`_StandaloneSamplerController` stub needs `cancel_transfer()` too, not just `is_transfer_busy()`, or `_open_slice_editor` raises `AttributeError`. Other bugs found here: `_wait_for_any_signal`
+used to `submit_*()` before connecting listeners (see Sample edit actions); a test holding a real lock across real `threading.Thread`s segfaulted the interpreter (see MIDI transport) - don't add another.
 
 ## Testing
 
