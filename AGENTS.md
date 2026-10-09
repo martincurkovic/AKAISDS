@@ -680,13 +680,27 @@ live edits (wired after the Program tab's own combos exist) AND program
 loads (`blockSignals(True)` during load means the live-edit wire never
 fires then) - miss either half and the mirror silently drifts.
 
-**External controller (Program tab, Modulation card; S2000/S3000 only)**: what the "External" source follows is a SAMPLER-WIDE setting (the GLOBAL page's Breath/Footpedal/Volume),
-not stored in any program. Neither Akai spec nor `s3k` names the register: found with `tools/s2000_misc_probe.py` (read-only dump of every misc byte/word with the setting on each choice,
-measured on a real S2000, 2026-10-09) - **misc byte 38**, Breath 0 / Footpedal 1 / Volume 2, the only register that moved; two dumps of one setting were identical.
-`BridgeWorker.submit_external_controller`/`submit_set_external_controller` use `S3kBridge._misc_byte` / `_misc_write_verify` (private, write-then-READ-back because misc registers can
-answer a good write with an error code). The combo uses `activated` (a load must not write), stays DISABLED until a read succeeds (demo mode - `DemoBridge` has no misc registers -
-and a bad value leave it so), is re-read on Refresh, and a failed write re-reads the real value. **The write path is untested on a real sampler** (the probe only reads): the first
-thing a tester should do is flip it and watch the panel's GLOBAL page. The S1000 has no such source (fixed controller routing) and ignores byte-addressable misc ops, so nothing is sent.
+**Global tab + external controller (S2000/S3000 only; measured 2026-10-09)**: the GLOBAL page's settings are misc BYTE registers that neither Akai spec nor `s3k` names - found with
+`tools/s2000_misc_probe.py` (read-only dumps of every misc byte/word with a setting on 2-4 values; the dumps are in `~/.akaisds/misc_probe/`). `core/global_settings.py` is the registry
+(register + raw<->value maps; its docstring says what each measurement pinned down and what is INFERRED - read it before changing a map). Registers: external controller 38 (Breath 0/Foot 1/Volume 2),
+output level 15, tune semitones 64 (a signed byte holding semitones **+ 9**), fine tune 65 (cents + 50), program-change channel 71 (Off 0, 1-16, Omni 17), play note/channel/velocity 31/57/54,
+SCSI disk ID 11, sector size 14, local SCSI ID 12. **Only the external controller write is confirmed on hardware** (the user: "works amazingly well"); the others were read, not yet written -
+the output level's 6 dB step is inferred from three points, and `s3k` deliberately never writes byte 12 (the sampler's own SCSI ID). Not offered: MIDI sysex channel (would cut the connection),
+MIDI-via-SCSI (never dumped).
+`BridgeWorker.submit_global_settings` (coalesced; reads every register, stops at the first FAILED read so a dead link isn't 11 timeouts, drops a value the panel can't show) /
+`submit_set_global_setting(key, value)` (encode -> `S3kBridge._misc_write_verify`, private, write-then-READ-back because misc registers can answer a good write with an error code). Signals
+`global_settings_loaded`/`global_setting_written`/`*_failed`. `ui/global_tab.py`'s `GlobalSettingsTab` (Ctrl+4, after Samples) is a view only: it emits `setting_chosen` on USER edits (combos
+`activated`, spinboxes debounced 250 ms; loading never emits) and a control stays disabled until its key was read. **External controller is in TWO places** - the Modulation card's combo and the
+Global tab's - mirrored by the window both ways (`_on_mod_external_controller_chosen`/`_on_global_setting_chosen`); a failed write re-reads everything. Demo mode (`DemoBridge` has no misc
+registers) shows "Not available in demo mode."; an S1000 hides the tab and the Modulation card and sends nothing (no such source, and it ignores byte-addressable misc ops).
+
+**Three Global controls are DISABLED on purpose (`ui/global_tab.py` `DISABLED_SETTINGS`; still show the value read)** - found on the real S2000 on 2026-10-09: **Tune and Fine tune**
+(bytes 64/65): the write is accepted and reads back, and the register ends up IDENTICAL to one set on the panel (768-register dump of byte/word/dword banks 0-255, only the panel-cursor byte 49
+differs) - yet the sampler doesn't act on it, so something the panel does besides writing the byte triggers it (same class as `s3k`'s SCSI-ID note / `_force_reread`); **Program change channel**
+(byte 71): the sampler answers OK and the register keeps its old value whatever is written. **Open work, with the steps for the user: the docstring of `tools/s2000_tune_trigger_check.py`**
+(a hardware check of candidate triggers - plain write, rewrite, fine-tune rewrite, page round trip - that saves its answers to `~/.akaisds/misc_probe/tune_trigger_check_*.json`; the
+program-change-channel investigation is described there too). Re-enable a control only after a write is shown to take effect on the machine, and add the trigger to
+`BridgeWorker._handle_set_global_setting`.
 
 ## PRGNUM and Program Change (Multis tab)
 
