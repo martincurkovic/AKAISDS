@@ -24,7 +24,7 @@ panel does:
      That is what this tool tries (below).
   3. Program change channel (byte 71): the sampler answers OK but the register KEEPS ITS OLD VALUE whatever is written (6, 0, 15, 5 all read back 1;
      only writing the value it already held "worked"). A different failure from tune: a refused write, not an unapplied one. NOT covered by this tool.
-     To investigate it, take the same wider dumps as for tune - `dump pc1 --max 255 --banks 1,2,3`, then set the channel to 6 ON THE PANEL and
+     (UPDATE: the whole-block misc data holds the channel at offset 0 - see `tools/s2000_mdata_write_check.py --setting pc`, the thing to try first.) To investigate it otherwise, take the same wider dumps as for tune - `dump pc1 --max 255 --banks 1,2,3`, then set the channel to 6 ON THE PANEL and
      `dump pc6 --max 255 --banks 1,2,3`, then `diff pc1 pc6` (tools/s2000_misc_probe.py) - and look for ANOTHER register that moves (the byte-71
      dumps from 2026-10-09 only covered indices 0-127 of the byte/word banks). Also worth trying: write it while the panel is on the GLOBAL page vs
      another page (the register may only be writable in some state - s3k notes byte 4 "answers OK and ignores the write in one state").
@@ -32,12 +32,32 @@ panel does:
 
 The user said "output level works" (and every other Global control), so not every audible setting needs a trigger - only tune is known not to act.
 
+History of this check (2026-10-09, all on the user's S2000):
+  - 1st attempt: the sampler's tune was already +12 (left by an earlier aborted attempt), so T1/T2 wrote +12 over +12 and proved nothing - `run` now
+    REFUSES to start unless the tune is 0 st. It also crashed in T3 and its restore failed, because of the next point.
+  - The sampler INTERMITTENTLY answers a misc read (or a write's read-back) with a 1-byte-body frame that s3k cannot decode ("extended data: expected
+    at least a 7-byte body, got 1"). It moved between registers and runs (byte 91 and byte 65 in different attempts; byte 64 mostly fine). The tool now
+    retries, writes with a retried READ as the verdict, survives a failed step and prints a "[diagnostic] register N raw reply: ..." line the first time
+    a register fails - if that line shows up, KEEP IT: it is the raw frame, and nobody has seen it yet (likely an OK `REPLY` where data was expected;
+    unconfirmed). The app's own `_handle_set_global_setting` uses s3k's `_misc_write_verify`, so it can in principle hit the same error - the app log
+    (`~/.akaisds/akaisds.log`, "global setting ...") showed none in ~40 writes, but if the Global tab ever reports a spurious failure, give
+    `BridgeWorker` the same retry-the-read treatment (see `misc_write_verified` here).
+  - ANSWERED by the user (same day): the panel's TUNE screen stayed at 0 the whole time, while byte 64 read +12 for at least two sessions (and the
+    sampler really was never detuned). So byte 64 is NOT merely "stored but not yet applied" - it is a copy the sampler neither shows nor uses, and the
+    real tune variable lives somewhere else. That makes the triggers below (T1-T4) a long shot - T4 (page round trip, which makes the panel redisplay) was
+    never reached in the failed first attempt - so DO THE `mdump` EXPERIMENT FIRST if time is short: the whole-block misc data (RMDATA/MDATA, 0x10/0x11)
+    is the most likely home of the real settings. `tools/s2000_misc_probe.py mdump <label>` / `mdiff` (read-only; see its docstring): dump with TUNE at 0
+    and at +50 set ON THE PANEL and diff. If an offset moves, the fix is a read-modify-write of that block (like core/s1000_bridge.py does for the S1000;
+    keep the length the sampler sent, back it up first, test on a spare unit state) - NOT more byte-register writes. The same experiment should be repeated
+    for the program change channel (1 vs 6 on the panel), which also refuses byte writes.
+
 What the user must do (they will run this later; the app must be CLOSED - it owns the MIDI ports):
   a. Connect the S2000 as usual (same MIDI ports as the app: `~/.akaisds/config.json`). Load any program with a sustained sound (a pad/organ) on
      MIDI channel 1 and make sure the sampler is in SINGLE or GLOBAL mode (not busy loading/saving).
   b. On the sampler's front panel go to the GLOBAL page and to the screen showing "TUNE" (semitones/cents). Leave it there.
   c. Have a way to play a HELD note and compare its pitch (the sampler's own Play button on GLOBAL works, or a keyboard on the sampler's MIDI input).
-  d. `uv run python tools/s2000_tune_trigger_check.py status`  - confirm it talks to the sampler and shows tune 0 (note the page it reports).
+  d. `uv run python tools/s2000_tune_trigger_check.py status`  - confirm it talks to the sampler and shows tune 0 (note the page it reports; "unknown"
+     is fine - the page register is the one that most often answers with the undecodable frame). TUNE MUST BE 0 ON THE PANEL: `run` refuses otherwise.
   e. `uv run python tools/s2000_tune_trigger_check.py run` and follow the prompts. After each step it asks two questions, answered y/n/?:
        - Did the PITCH of a held note change (compared with the reference note it asks you to hear first)?
        - Did the TUNE value on the sampler's DISPLAY change (the TUNE screen from step b)?
@@ -73,6 +93,8 @@ os.environ["AKAISDS_SHARED_MIDI_TRANSPORT"] = "1"
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from core.global_settings import GLOBAL_SETTINGS
+from s3k import messages as m
+from s3k.bridge import DeviceError
 
 SNAPSHOT_DIR = os.path.join(os.path.expanduser("~"), ".akaisds", "misc_probe")
 TUNE_SEMITONES = GLOBAL_SETTINGS["tune_semitones"]
@@ -85,7 +107,7 @@ SETTLE_S = 1.0  # let the machine finish a page change / write before the next s
 
 PLAN = """\
 Plan (nothing is written by `plan`):
-  0. read the current tune (byte 64), fine tune (byte 65) and panel page (byte 91) - these are put back at the end
+  0. read the current tune (byte 64), fine tune (byte 65) and panel page (byte 91) - refuses to go on unless the tune is 0 st; the values are put back at the end
   0. you hear a REFERENCE held note at the current tune
   1. T1  write the test tune to byte 64 (default +12 semitones) and read it back  -> pitch? display?
   2. T2  write the same value again                                                  -> pitch? display?
@@ -108,11 +130,85 @@ def open_bridge():
     return bridge
 
 
+_IO_ERRORS = (ValueError, DeviceError, TimeoutError)
+_TRIES = 4
+_diagnosed = set()
+
+
+def diagnose(bridge, index):
+    """Once per register: print the raw frame the sampler answered a read with, so a failure leaves evidence (the decode error alone hides it)."""
+    if index in _diagnosed or not hasattr(bridge, "send_and_receive"):
+        return
+    _diagnosed.add(index)
+    try:
+        frame = m.HeaderRequest(command=m.Command.RMISCDATA, index=index, selector=1, offset=0, count=1,
+                                exclusive_channel=getattr(bridge, "exclusive_channel", m.DEFAULT_EXCLUSIVE_CHANNEL)).encode()
+        reply = bridge.send_and_receive(frame, timeout=1.0)
+        print(f"    [diagnostic] register {index} raw reply: {bytes(reply).hex(' ')}", flush=True)
+    except Exception as e:  # noqa: BLE001
+        print(f"    [diagnostic] register {index}: {e}", flush=True)
+
+
+def misc_read(bridge, index, tries=_TRIES):
+    """One misc byte. On 2026-10-09 the sampler intermittently answered a read (and a write's read-back) with a 1-byte-body frame s3k cannot
+    decode ("extended data: expected at least a 7-byte body, got 1") - the failures moved between registers and runs - so retry before giving up."""
+    last = None
+    for attempt in range(tries):
+        try:
+            return bridge._misc_byte(index)
+        except _IO_ERRORS as e:
+            last = e
+            if attempt == 0:
+                diagnose(bridge, index)
+            time.sleep(0.3)
+    raise last
+
+
+def misc_write_verified(bridge, index, value, what, tries=_TRIES):
+    """Write a misc byte and believe a retried READ, not the ack or s3k's own read-back (which is what raised the decode error)."""
+    last = None
+    for _ in range(tries):
+        try:
+            bridge._misc_byte(index, value)
+        except _IO_ERRORS:
+            pass  # the write may well have taken; the read decides
+        time.sleep(0.15)
+        try:
+            got = misc_read(bridge, index, tries=2)
+        except _IO_ERRORS as e:
+            last = e
+            continue
+        if got == value:
+            return got
+        last = DeviceError(f"{what}: asked for {value}, register reads {got}")
+    raise last
+
+
+def read_page(bridge):
+    """The panel page (byte 91), or None. Tolerant on purpose: on 2026-10-09 the sampler answered this read with a frame s3k could not decode
+    ("extended data: expected at least a 7-byte body, got 1") while the tune registers read fine - so nothing here may depend on it."""
+    try:
+        return misc_read(bridge, 91, tries=2)
+    except _IO_ERRORS as e:
+        print(f"    (could not read the panel page: {e})", flush=True)
+        return None
+
+
+def set_page(bridge, target):
+    """Write the page register without trusting the ack OR the read-back (both have misbehaved). Returns the page it reads back, or None."""
+    assert target in (PAGE_SINGLE, PAGE_MULTI, PAGE_GLOBAL)  # never anything else - 11 hangs the machine
+    try:
+        bridge._misc_byte(91, target)
+    except _IO_ERRORS as e:  # the write may well have taken
+        print(f"    (page write to {target} reported: {e})", flush=True)
+    time.sleep(SETTLE_S)
+    return read_page(bridge)
+
+
 def read_state(bridge):
-    raw_semi = bridge._misc_byte(TUNE_SEMITONES.register)
-    raw_cents = bridge._misc_byte(TUNE_CENTS.register)
-    page = bridge._misc_byte(91)
-    return {"raw_semitones": raw_semi, "raw_cents": raw_cents, "page": page}
+    raw_semi = misc_read(bridge, TUNE_SEMITONES.register)
+    raw_cents = misc_read(bridge, TUNE_CENTS.register)
+    return {"raw_semitones": raw_semi, "raw_cents": raw_cents, "page": read_page(bridge)}
 
 
 def describe(state):
@@ -122,8 +218,10 @@ def describe(state):
         except ValueError:
             return f"? (raw {raw})"
 
+    page = state["page"]
+    page_text = "unknown (not readable)" if page is None else f"{page} ({PAGE_NAMES.get(page, 'unknown')})"
     return (f"tune {shown(TUNE_SEMITONES, state['raw_semitones'])} st, fine tune {shown(TUNE_CENTS, state['raw_cents'])} ct, "
-            f"panel page {state['page']} ({PAGE_NAMES.get(state['page'], 'unknown')})")
+            f"panel page {page_text}")
 
 
 def ask(question):
@@ -138,7 +236,7 @@ def ask_note():
 
 
 def write_tune(bridge, raw):
-    bridge._misc_write_verify(TUNE_SEMITONES.register, raw, "setting the global tune")
+    misc_write_verified(bridge, TUNE_SEMITONES.register, raw, "setting the global tune")
 
 
 def trigger_plain_write(bridge, ctx):
@@ -150,19 +248,17 @@ def trigger_same_value_again(bridge, ctx):
 
 
 def trigger_fine_tune_rewrite(bridge, ctx):
-    raw = bridge._misc_byte(TUNE_CENTS.register)
+    raw = misc_read(bridge, TUNE_CENTS.register)
     TUNE_CENTS.decode(raw)  # refuse to re-write something the editor couldn't have shown
-    bridge._misc_write_verify(TUNE_CENTS.register, raw, "re-writing the fine tune")
+    misc_write_verified(bridge, TUNE_CENTS.register, raw, "re-writing the fine tune")
 
 
 def trigger_page_round_trip(bridge, ctx):
-    page = bridge._misc_byte(91)
+    page = read_page(bridge)  # None if unreadable: assume the sampler is on GLOBAL, as the instructions say
     away = PAGE_MULTI if page != PAGE_MULTI else PAGE_SINGLE
     for target in (away, PAGE_GLOBAL):
-        assert target in (PAGE_SINGLE, PAGE_MULTI, PAGE_GLOBAL)  # never anything else - 11 hangs the machine
-        got = bridge.select_mode(target)  # swallows the (untrustworthy) ack and returns what the register READS
+        got = set_page(bridge, target)
         print(f"    page -> {target} ({PAGE_NAMES[target]}), register now reads {got}", flush=True)
-        time.sleep(SETTLE_S)
 
 
 TRIGGERS = [
@@ -177,10 +273,16 @@ def stage_run(semitones):
     if not sys.stdin.isatty():
         print("`run` is interactive - run it in a terminal.")
         sys.exit(2)
-    test_raw = TUNE_SEMITONES.encode(semitones)  # raises for an out-of-range value
+    TUNE_SEMITONES.encode(semitones)  # raises for an out-of-range value
     bridge = open_bridge()
     original = read_state(bridge)
     print("sampler is at:", describe(original), flush=True)
+    if TUNE_SEMITONES.decode(original["raw_semitones"]) != 0:
+        # a meaningful pitch comparison needs a known start, and a restore to a non-zero tune would leave the sampler detuned: the first
+        # real attempt (2026-10-09) started at +12, wrote +12 over +12 and proved nothing
+        print("\nThe sampler's tune is not 0 st. Set TUNE to 0 on the panel (and make sure the pitch is back to normal), then run this again.")
+        os._exit(2)
+    test_raw = TUNE_SEMITONES.encode(semitones)
     results = {"started": time.strftime("%Y-%m-%d %H:%M:%S"), "original": original, "test_semitones": semitones, "steps": []}
     winner = None
     path = os.path.join(SNAPSHOT_DIR, f"tune_trigger_check_{time.strftime('%Y%m%d_%H%M%S')}.json")
@@ -198,9 +300,16 @@ def stage_run(semitones):
             print(f"\n{name}: {what}", flush=True)
             if name == "T1":
                 print(f"    writing test tune {semitones:+d} st (raw {test_raw})...", flush=True)
-            trigger(bridge, ctx)
-            time.sleep(SETTLE_S)
-            state = read_state(bridge)
+            try:
+                trigger(bridge, ctx)
+                time.sleep(SETTLE_S)
+                state = read_state(bridge)
+            except _IO_ERRORS as e:
+                # a failed step must not abort the run (or skip the restore): record it and go on
+                print(f"    STEP FAILED ({e}) - recorded, moving on.", flush=True)
+                results["steps"].append({"step": name, "what": what, "error": str(e)})
+                save()
+                continue
             print("    sampler now reports:", describe(state), flush=True)
             print("    Play the held note again and look at the sampler's TUNE screen.")
             pitch = ask("Did the PITCH change from the reference?")
@@ -223,8 +332,8 @@ def stage_run(semitones):
             now = read_state(bridge)
             results["restored"] = now
             print("    sampler is now:", describe(now), flush=True)
-            if original["page"] != now["page"] and original["page"] in PAGE_NAMES and original["page"] <= 10:
-                got = bridge.select_mode(original["page"])
+            if original["page"] in (PAGE_SINGLE, PAGE_MULTI, PAGE_GLOBAL) and original["page"] != now["page"]:
+                got = set_page(bridge, original["page"])
                 print(f"    page put back to {original['page']} ({PAGE_NAMES.get(original['page'])}), register reads {got}", flush=True)
         except Exception as e:  # noqa: BLE001 - never lose the measurements to a failed cleanup
             results["restore_error"] = str(e)
@@ -234,7 +343,10 @@ def stage_run(semitones):
 
     print("\nSummary")
     for step in results["steps"]:
-        print(f"  {step['step']}: pitch={step['pitch_changed']} display={step['display_changed']}  {step['what']}")
+        if "error" in step:
+            print(f"  {step['step']}: FAILED ({step['error']})  {step['what']}")
+        else:
+            print(f"  {step['step']}: pitch={step['pitch_changed']} display={step['display_changed']}  {step['what']}")
     print("  ->", f"{results['winner']} makes the sampler act on a written tune." if winner else "no trigger changed the pitch.")
     print("Now play the held note: it should be back at the reference pitch (if not, set TUNE back on the panel).")
     print(f"Saved: {path}\nGive that file to the next agent (see this tool's docstring for what to do with it).")
