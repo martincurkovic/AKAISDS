@@ -115,21 +115,67 @@ def test_a_combo_choice_for_a_channel_or_id_emits_its_number(tab):
         assert tab.chosen[-1] == (key, value)
 
 
-def test_tune_and_program_change_channel_are_shown_but_disabled(tab):
-    # the sampler doesn't act on a written tune and ignores program-change-channel writes
-    # (tools/s2000_tune_trigger_check.py) - the value still shows
-    assert set(DISABLED_SETTINGS) == {"tune_semitones", "tune_cents", "program_change_channel"}
+def test_the_locked_settings_show_their_value_with_a_very_short_tooltip(tab):
+    # tune/fine tune never take effect on the sampler; the SCSI settings are locked for safety (AGENTS.md "Global tab")
+    assert set(DISABLED_SETTINGS) == {
+        "tune_semitones",
+        "tune_cents",
+        "scsi_disk_id",
+        "scsi_sector",
+        "scsi_local_id",
+    }
     tab.set_values(ALL)
+    for key in ("tune_semitones", "tune_cents"):
+        assert not tab._widgets[key].isEnabled()
+        assert tab._widgets[key].toolTip() == "Not working right now."
+    for key in ("scsi_disk_id", "scsi_sector", "scsi_local_id"):
+        assert not tab._widgets[key].isEnabled()
+        assert tab._widgets[key].toolTip() == "Disabled for safety."
+    # the values still read
+    assert tab._widgets["tune_semitones"].value() == -7 and tab._knob_labels["tune_semitones"].text() == "-7"
+    assert tab._widgets["tune_cents"].value() == 12
+    assert tab._widgets["scsi_disk_id"].currentText() == "2"
+    assert tab._widgets["scsi_local_id"].currentText() == "7"
+    assert tab._widgets["scsi_sector"].currentText() == "512 B"
+
+
+def test_every_other_control_stays_live_with_its_normal_tooltip(tab):
+    tab.set_values(ALL)
+    live = set(tab._widgets) - set(DISABLED_SETTINGS)
+    assert live == {
+        "external_controller",
+        "output_level",
+        "program_change_channel",
+        "play_note",
+        "play_channel",
+        "play_velocity",
+    }
+    for key in live:
+        widget = tab._widgets[key]
+        assert widget.isEnabled(), key
+        assert widget.toolTip() and widget.toolTip() not in set(DISABLED_SETTINGS.values()), key
+
+
+def test_a_locked_control_cannot_emit_a_change(tab):
+    tab.set_values(ALL)
+    # a disabled widget takes no user input, so nothing can reach the sampler from it
     for key in DISABLED_SETTINGS:
         assert not tab._widgets[key].isEnabled()
-        assert "Disabled for now" in tab._widgets[key].toolTip()
-    assert tab._widgets["tune_semitones"].value() == -7
-    assert tab._widgets["tune_cents"].value() == 12
-    assert tab._widgets["program_change_channel"].currentText() == "3"
-    # nothing else is locked
-    for key, widget in tab._widgets.items():
-        if key not in DISABLED_SETTINGS:
-            assert widget.isEnabled() and "Disabled" not in widget.toolTip()
+    assert tab.chosen == []
+
+
+def test_another_setting_can_be_locked_with_its_own_reason(qapp, monkeypatch):
+    # the mechanism is generic: add a key + a short reason (the whole tooltip)
+    monkeypatch.setitem(DISABLED_SETTINGS, "play_velocity", "Test reason.")
+    tab = GlobalSettingsTab()
+    try:
+        tab.set_values(ALL)
+        assert not tab._widgets["play_velocity"].isEnabled()
+        assert tab._widgets["play_velocity"].value() == 64
+        assert tab._widgets["play_velocity"].toolTip() == "Test reason."
+        assert tab._widgets["play_note"].isEnabled()
+    finally:
+        tab.deleteLater()
 
 
 def test_a_knob_edit_is_debounced_and_a_release_commits_it(tab):
@@ -175,3 +221,56 @@ def test_set_unavailable_disables_everything_and_says_why(tab):
 
 def test_tooltips_exist_for_every_control(tab):
     assert all(w.toolTip() for w in tab._widgets.values())
+
+
+# --- the test switch: AKAISDS_UNLOCK_GLOBAL unlocks named controls for one run, without touching DISABLED_SETTINGS ---
+
+
+def test_the_unlock_switch_enables_only_the_named_locked_controls(qapp, monkeypatch):
+    monkeypatch.setenv("AKAISDS_UNLOCK_GLOBAL", "tune_semitones, tune_cents")
+    tab = GlobalSettingsTab()
+    try:
+        tab.set_values(ALL)
+        assert tab._widgets["tune_semitones"].isEnabled() and tab._widgets["tune_cents"].isEnabled()
+        assert tab._widgets["tune_semitones"].toolTip() != "Not working right now."
+        # the others stay locked, and the registry itself is untouched
+        assert not tab._widgets["scsi_disk_id"].isEnabled()
+        assert tab._widgets["scsi_disk_id"].toolTip() == "Disabled for safety."
+        assert set(DISABLED_SETTINGS) == {"tune_semitones", "tune_cents", "scsi_disk_id", "scsi_sector", "scsi_local_id"}
+    finally:
+        tab.deleteLater()
+
+
+def test_the_unlock_switch_all_unlocks_everything(qapp, monkeypatch):
+    monkeypatch.setenv("AKAISDS_UNLOCK_GLOBAL", "all")
+    tab = GlobalSettingsTab()
+    try:
+        tab.set_values(ALL)
+        assert all(w.isEnabled() for w in tab._widgets.values())
+    finally:
+        tab.deleteLater()
+
+
+def test_an_unlocked_control_emits_its_change_like_any_other(qapp, monkeypatch):
+    monkeypatch.setenv("AKAISDS_UNLOCK_GLOBAL", "tune_cents")
+    tab = GlobalSettingsTab()
+    chosen = []
+    tab.setting_chosen.connect(lambda k, v: chosen.append((k, v)))
+    try:
+        tab.set_values(ALL)
+        tab._widgets["tune_cents"].setValue(5)
+        tab.flush("tune_cents")
+        assert chosen == [("tune_cents", 5)]
+    finally:
+        tab.deleteLater()
+
+
+def test_without_the_switch_nothing_is_unlocked(qapp, monkeypatch):
+    monkeypatch.delenv("AKAISDS_UNLOCK_GLOBAL", raising=False)
+    tab = GlobalSettingsTab()
+    try:
+        tab.set_values(ALL)
+        for key in DISABLED_SETTINGS:
+            assert not tab._widgets[key].isEnabled()
+    finally:
+        tab.deleteLater()

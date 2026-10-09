@@ -57,6 +57,14 @@ _yamaha_session.BACKUP_DIR = _TEST_LOG_DIR / "a4000_backups"
 from core import program_editor_bridge as _program_editor_bridge
 
 _program_editor_bridge.PROGRAM_BACKUP_DIR = _TEST_LOG_DIR / "program_backups"
+# ...and the whole-block misc-data backups made before the first Global-tab block write.
+_program_editor_bridge.MDATA_BACKUP_DIR = _TEST_LOG_DIR / "mdata_backups"
+# The settle pauses around a block write (a real second or more) must not slow the suite; tests that check the spacing replace this hook.
+_program_editor_bridge._sleep = lambda seconds: None
+
+
+# The Global tab's test switch must never leak in from a developer's shell: the locked-controls tests assume nothing is unlocked.
+os.environ.pop("AKAISDS_UNLOCK_GLOBAL", None)
 
 
 def pytest_sessionfinish(session, exitstatus):

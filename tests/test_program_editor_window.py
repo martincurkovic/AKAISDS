@@ -344,15 +344,21 @@ def editor(qapp):
 
 
 class _FakeBridgeWithMisc(FakeBridge):
-    # the S3kBridge private misc-byte surface the Global tab / external controller combos
-    # use - raw registers as the real S2000 held them (tests/test_program_editor_bridge.py)
+    # the S3kBridge private misc-byte surface AND the raw RMDATA/MDATA frames the Global tab uses - registers as the real
+    # S2000 held them (tests/test_program_editor_bridge.py). Program change / tune / fine tune live in the 48-byte block (the
+    # registers 71/64/65 are deliberately stale/wrong here: the app must not trust them).
+    exclusive_channel = 0
+
     def __init__(self):
         super().__init__()
         self.registers = {
-            38: 1, 15: 12, 64: 9, 65: 50, 71: 17, 31: 60, 57: 0, 54: 100, 11: 5, 14: 1, 12: 6,
+            38: 1, 15: 12, 64: 99, 65: 99, 71: 99, 31: 60, 57: 0, 54: 100, 11: 5, 14: 1, 12: 6,
         }
+        self.block = bytes([15, 1, 1, 0, 0, 0, 50, 9, 12] + [0] * 39)  # Omni, tune 0, fine tune 0
         self.write_verify_calls = []
+        self.block_writes = []
         self.fail_writes = False
+        self._replies = []
 
     def _misc_byte(self, index, value=None, **kwargs):
         return self.registers[index]
@@ -363,6 +369,26 @@ class _FakeBridgeWithMisc(FakeBridge):
             raise RuntimeError("no reply")
         self.registers[index] = value
         return value
+
+    def send_and_receive(self, frame, timeout=None):
+        return s3k_messages.build_frame(
+            s3k_messages.Command.MDATA, s3k_messages.encode_nibbles(self.block)
+        )
+
+    def _drain(self):
+        self._replies.clear()
+
+    def _send(self, frame, write=False):
+        _c, _command, payload = s3k_messages.parse_frame(frame)
+        if self.fail_writes:
+            self._replies.append(s3k_messages.Reply(code=1).encode())
+            return
+        self.block = bytes(s3k_messages.decode_nibbles(list(payload)))
+        self.block_writes.append(self.block)
+        self._replies.append(s3k_messages.Reply(code=0).encode())
+
+    def _receive(self, timeout=None, accept=None):
+        return self._replies.pop(0)
 
 
 @pytest.fixture
@@ -413,26 +439,115 @@ def test_global_tab_shows_every_setting(misc_editor):
     # a knob's readout beside it is filled too (loading silences the knob's own signal)
     assert editor.global_tab._knob_labels["tune_semitones"].text() == "0"
     assert w["scsi_sector"].currentText() == "1 KB"
-    assert all(
-        widget.isEnabled() for key, widget in w.items() if key not in DISABLED_SETTINGS
-    )
+    # tune / fine tune show their values but are locked (the sampler never applies a written tune)
+    assert all(widget.isEnabled() for key, widget in w.items() if key not in DISABLED_SETTINGS)
 
 
-def test_disabled_global_settings_still_show_and_survive_a_refresh(misc_editor, qapp):
+def test_program_change_channel_is_written_through_the_block_not_the_stale_register(
+    misc_editor, qapp
+):
+    editor, bridge = misc_editor
+    combo = editor.global_tab._widgets["program_change_channel"]
+
+    combo.setCurrentIndex(combo.findData(6))
+    combo.activated.emit(combo.currentIndex())
+    _settle(editor, qapp)
+
+    assert bridge.write_verify_calls == []  # never the byte register (71 ignores writes)
+    assert len(bridge.block_writes) == 1
+    # Omni [15,1,1] -> channel 6: channel byte 5, Omni cleared, still enabled
+    assert list(bridge.block_writes[0][:3]) == [5, 0, 1]
+    assert bridge.block_writes[0][3:] == bytes([0, 0, 0, 50, 9, 12] + [0] * 39)
+    assert "program change channel" in editor.status_bar.currentMessage()
+
+
+def test_tune_and_fine_tune_show_the_block_values_but_stay_locked(misc_editor, qapp):
     editor, bridge = misc_editor
     tab = editor.global_tab
-    assert tab._widgets["program_change_channel"].currentText() == "Omni"
-    for key in DISABLED_SETTINGS:
-        assert not tab._widgets[key].isEnabled()
+    bridge.block = bytes([15, 1, 1, 0, 0, 0, 100, 59, 12] + [0] * 39)  # +50 cents, +50 st
 
     editor._refresh_from_hardware()
     editor._worker.wait_until_idle()
-    for _ in range(10):
-        qapp.processEvents()
+    _pump_until(qapp, lambda: tab._widgets["tune_semitones"].value() == 50)
 
-    for key in DISABLED_SETTINGS:
-        assert not tab._widgets[key].isEnabled()
-    assert bridge.write_verify_calls == []
+    assert tab._widgets["tune_cents"].value() == 50
+    for key in ("tune_semitones", "tune_cents"):
+        assert not tab._widgets[key].isEnabled()  # shown, never offered
+    assert bridge.block_writes == [] and bridge.write_verify_calls == []
+
+
+def test_a_failed_block_write_restores_what_the_sampler_holds(misc_editor, qapp):
+    editor, bridge = misc_editor
+    bridge.fail_writes = True
+    combo = editor.global_tab._widgets["program_change_channel"]
+
+    combo.setCurrentIndex(combo.findData(3))
+    combo.activated.emit(combo.currentIndex())
+    editor._worker.wait_until_idle()
+    _pump_until(qapp, lambda: combo.currentText() == "Omni")
+
+    assert bridge.block_writes == []
+
+
+def test_refresh_rereads_the_block_settings(misc_editor, qapp):
+    editor, bridge = misc_editor
+    bridge.block = bytes([5, 0, 1, 0, 0, 0, 100, 59, 12] + [0] * 39)  # ch 6, +50 cents, +50 st
+
+    editor._refresh_from_hardware()
+    editor._worker.wait_until_idle()
+    tab = editor.global_tab
+    _pump_until(qapp, lambda: tab._widgets["program_change_channel"].currentText() == "6")
+
+    assert tab._widgets["tune_semitones"].value() == 50
+    assert tab._widgets["tune_cents"].value() == 50
+    assert all(w.isEnabled() for k, w in tab._widgets.items() if k not in DISABLED_SETTINGS)
+    assert bridge.write_verify_calls == [] and bridge.block_writes == []
+
+
+def test_stray_replies_show_a_brief_warning(misc_editor, monkeypatch):
+    editor, _bridge = misc_editor
+    from PySide6.QtWidgets import QMessageBox
+
+    shown = []
+    monkeypatch.setattr(QMessageBox, "warning", lambda parent, title, text, *a, **k: shown.append((title, text)))
+    editor._on_stray_replies_detected(5)
+
+    assert len(shown) == 1
+    title, text = shown[0]
+    assert title == "Stray MIDI replies"
+    assert "another MIDI program" in text
+    assert "Close or re-configure its MIDI settings before editing." in text
+    assert editor.status_bar.currentMessage() == "Stray MIDI replies detected - close or re-configure other MIDI software."
+
+
+def test_the_stray_replies_warning_comes_back_every_time(misc_editor, monkeypatch):
+    editor, _bridge = misc_editor
+    from PySide6.QtWidgets import QMessageBox
+
+    shown = []
+    monkeypatch.setattr(QMessageBox, "warning", lambda parent, title, text, *a, **k: shown.append(title))
+    for count in (5, 11, 20):
+        editor._on_stray_replies_detected(count)
+    assert shown == ["Stray MIDI replies"] * 3  # each report, after the previous dialog was closed
+
+
+def test_a_report_arriving_while_the_dialog_is_open_does_not_stack_a_second_one(misc_editor, monkeypatch):
+    editor, _bridge = misc_editor
+    from PySide6.QtWidgets import QMessageBox
+
+    shown = []
+
+    def modal_dialog(parent, title, text, *a, **k):
+        shown.append(title)
+        editor._on_stray_replies_detected(99)  # a second report while the modal dialog's event loop is running
+
+    monkeypatch.setattr(QMessageBox, "warning", modal_dialog)
+    editor._on_stray_replies_detected(5)
+    assert shown == ["Stray MIDI replies"]
+    # ...and once it is closed the next report shows again
+    editor._on_stray_replies_detected(12)
+    assert shown == ["Stray MIDI replies"] * 2
+    assert editor._stray_dialog_open is False
 
 
 def test_global_tab_is_the_fourth_tab_with_a_shortcut(misc_editor):
@@ -503,7 +618,7 @@ def test_a_global_tab_edit_writes_its_register(misc_editor, qapp):
 def test_refresh_rereads_the_global_settings(misc_editor, qapp):
     editor, bridge = misc_editor
     bridge.registers[38] = 2
-    bridge.registers[71] = 5
+    bridge.block = bytes([4, 0, 1, 0, 0, 0, 50, 9, 12] + [0] * 39)  # program change channel 5
 
     editor._refresh_from_hardware()
     editor._worker.wait_until_idle()
