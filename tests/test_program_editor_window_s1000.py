@@ -140,6 +140,15 @@ def test_editing_a_knob_writes_the_whole_block_back(editor, qapp):
 # --- S3000-only features are gated ------------------------------------------------------
 
 
+def test_the_global_tab_is_hidden_and_never_asks_the_sampler(editor):
+    assert not editor.main_tabs.isTabVisible(editor._global_tab_index)
+    for menu_action in editor.menuBar().actions():
+        menu = menu_action.menu()
+        if menu is not None:
+            assert editor._global_tab_action not in menu.actions()
+    assert editor._fake.ignored_ops == []  # no misc op reached the S1000
+
+
 def test_s3000_only_cards_are_hidden(editor):
     # Program tab: LFO2, Portamento, the whole Modulation matrix.
     # isVisibleTo, not isHidden, for widgets inside a card - it's the CARD
@@ -314,6 +323,7 @@ def test_s2000_s3000_window_keeps_every_card(qapp):
     editor = _make_editor(qapp, "akai_s2000_s3000", DemoBridge())
     try:
         assert editor.main_tabs.isTabVisible(0)
+        assert editor.main_tabs.isTabVisible(editor._global_tab_index)
         assert not editor.lfo_shape_combo.isHidden()
         assert not editor.bend_down_combo.isHidden()
         assert not editor.resonance_knob.isHidden()

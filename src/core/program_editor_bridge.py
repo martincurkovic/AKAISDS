@@ -14,20 +14,9 @@ import s3k.messages as m
 from s3k.messages import NAME_LENGTH
 import s3k.params as p
 from core import akai_program_file
+from core.global_settings import GLOBAL_SETTINGS
 from core.s1000_bridge import S1000Bridge
 import core.s1000_bridge as s1000_bridge_module
-
-# The sampler's GLOBAL "external controller" setting - what the modulation
-# matrix's "External" source means (the S2000/S3000 manual's EXTRNL, p.200).
-# Neither Akai spec nor s3k names this register: found by dumping every misc
-# byte with the setting on each choice (tools/s2000_misc_probe.py, measured on
-# a real S2000, 2026-10-09) - byte 38 was the only register that moved,
-# Breath 0 / Footpedal 1 / Volume 2, and two dumps of the same setting were
-# identical. An S2000/S3000 machine-wide setting, not per program. The
-# S1000 has no such source (its controller routing is fixed) and ignores
-# byte-addressable misc ops outright.
-MISC_EXTERNAL_CONTROLLER = 38
-EXTERNAL_CONTROLLER_LABELS = ("Breath", "Footpedal", "Volume")
 
 # the sampler holds exactly one resident multi (no list of multis to choose
 # between) with a fixed 16 "multipart" slots
@@ -492,7 +481,7 @@ class BridgeWorker(QThread):
         "detail",
         "multi_parts",
         "sample_detail",
-        "external_controller",
+        "global_settings",
     }
 
     programs_loaded = Signal(list)
@@ -546,13 +535,14 @@ class BridgeWorker(QThread):
     write_succeeded = Signal(str, str, object)
     write_failed = Signal(str, str, str)
 
-    # the sampler-wide "external controller" choice (Breath/Footpedal/
-    # Volume) - not part of any program, so not a submit_write(). The
-    # value is an index into EXTERNAL_CONTROLLER_LABELS.
-    external_controller_loaded = Signal(int)
-    external_controller_load_failed = Signal(str)
-    external_controller_written = Signal(int)
-    external_controller_write_failed = Signal(str)
+    # the sampler's GLOBAL-page settings (core/global_settings.py) - not part
+    # of any program, so not a submit_write(). Loaded together: a dict of
+    # {key: value} holding every setting that read back as a value the panel
+    # can show (a missing key = that one couldn't be read).
+    global_settings_loaded = Signal(dict)
+    global_settings_load_failed = Signal(str)
+    global_setting_written = Signal(str, int)  # key, value
+    global_setting_write_failed = Signal(str, str)  # key, error
 
     # DELP/DELK/DELS - S3kBridge.delete_program/delete_keygroup/delete_sample
     # default to confirm=True, which waits for and raises on the hardware's
@@ -709,12 +699,12 @@ class BridgeWorker(QThread):
             ("write", writer_key, param_name, region, program_index, value, keygroup_index)
         )
 
-    def submit_external_controller(self):
-        self._submit(("external_controller",))
+    def submit_global_settings(self):
+        self._submit(("global_settings",))
 
-    def submit_set_external_controller(self, value):
+    def submit_set_global_setting(self, key, value):
         # not coalesced: every choice must reach the sampler, in order
-        self._submit(("set_external_controller", value))
+        self._submit(("set_global_setting", key, value))
 
     def submit_delete_program(self, program_index):
         self._submit(("delete_program", program_index))
@@ -1058,47 +1048,58 @@ class BridgeWorker(QThread):
             return
         self.write_succeeded.emit(writer_key, param_name, value)
 
-    def _handle_external_controller(self):
-        try:
-            value = self._read_external_controller()
-        except Exception as e:
-            self.external_controller_load_failed.emit(str(e))
-            return
-        self.external_controller_loaded.emit(value)
+    def _misc_call(self, name):
+        # DemoBridge has no misc registers, and the S1000 has no global
+        # settings of this kind (it ignores byte-addressable misc ops)
+        call = getattr(self._bridge, name, None)
+        if call is None or self._s1000:
+            raise DeviceError("not available on this connection")
+        return call
 
-    def _handle_set_external_controller(self, value):
+    def _handle_global_settings(self):
+        log = debug_log.get_logger()
+        values = {}
+        first_error = None
         try:
-            if not 0 <= value < len(EXTERNAL_CONTROLLER_LABELS):
-                raise ValueError(f"external controller {value} is not 0-2")
-            write_verify = getattr(self._bridge, "_misc_write_verify", None)
-            if write_verify is None or self._s1000:
-                raise DeviceError("not available on this connection")
+            read_byte = self._misc_call("_misc_byte")
+        except Exception as e:
+            self.global_settings_load_failed.emit(str(e))
+            return
+        for key, setting in GLOBAL_SETTINGS.items():
+            try:
+                raw = read_byte(setting.register)
+            except Exception as e:
+                # a failed read is the connection, not this register: stop
+                # rather than wait out a timeout per remaining setting
+                log.warning(f"global setting {key}: read failed: {e}")
+                first_error = first_error or str(e)
+                break
+            try:
+                values[key] = setting.decode(raw)
+            except ValueError as e:
+                # a value the panel can't show must not hide the others
+                log.warning(f"global setting {key}: not shown: {e}")
+                first_error = first_error or str(e)
+        if not values:
+            self.global_settings_load_failed.emit(first_error or "nothing read")
+            return
+        self.global_settings_loaded.emit(values)
+
+    def _handle_set_global_setting(self, key, value):
+        log = debug_log.get_logger()
+        try:
+            setting = GLOBAL_SETTINGS[key]
+            raw = setting.encode(value)
+            write_verify = self._misc_call("_misc_write_verify")
             # write, then believe the READ: several misc registers answer a
             # good write with an error code (see S3kBridge._misc_write_verify)
-            write_verify(
-                MISC_EXTERNAL_CONTROLLER, value, "setting the external controller"
-            )
+            write_verify(setting.register, raw, f"setting {key}")
         except Exception as e:
-            debug_log.get_logger().error(
-                f"external controller: write of {value} failed: {e}"
-            )
-            self.external_controller_write_failed.emit(str(e))
+            log.error(f"global setting {key}: write of {value} failed: {e}")
+            self.global_setting_write_failed.emit(key, str(e))
             return
-        debug_log.get_logger().info(
-            f"external controller: set to {EXTERNAL_CONTROLLER_LABELS[value]} ({value})"
-        )
-        self.external_controller_written.emit(value)
-
-    def _read_external_controller(self):
-        read_byte = getattr(self._bridge, "_misc_byte", None)
-        if read_byte is None or self._s1000:
-            raise DeviceError("not available on this connection")
-        value = read_byte(MISC_EXTERNAL_CONTROLLER)
-        if not 0 <= value < len(EXTERNAL_CONTROLLER_LABELS):
-            # a firmware that keeps something else here: show nothing rather
-            # than a wrong choice
-            raise DeviceError(f"unexpected value {value} in the register")
-        return value
+        log.info(f"global setting {key}: set to {value} (register {setting.register} = {raw})")
+        self.global_setting_written.emit(key, value)
 
     def _handle_delete_program(self, program_index):
         try:

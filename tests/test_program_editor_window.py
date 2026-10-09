@@ -12,6 +12,7 @@ import s3k.messages as s3k_messages
 import s3k.params as s3k_params
 from PySide6.QtCore import Qt, QObject, QTimer, Signal
 from PySide6.QtWidgets import QApplication, QLabel, QWidget
+from ui.global_tab import DISABLED_SETTINGS
 from ui.loop_preview_view import HALF_WINDOW_FRAMES
 from ui.program_editor_window import ProgramEditorWindow, _LOOP_TYPE_OPTIONS
 from core.program_editor_bridge import MULTI_PART_COUNT
@@ -343,89 +344,194 @@ def editor(qapp):
 
 
 class _FakeBridgeWithMisc(FakeBridge):
-    # the S3kBridge private misc-byte surface the external controller combo uses
-    def __init__(self, value=1):
+    # the S3kBridge private misc-byte surface the Global tab / external controller combos
+    # use - raw registers as the real S2000 held them (tests/test_program_editor_bridge.py)
+    def __init__(self):
         super().__init__()
-        self.external_controller = value
+        self.registers = {
+            38: 1, 15: 12, 64: 9, 65: 50, 71: 17, 31: 60, 57: 0, 54: 100, 11: 5, 14: 1, 12: 6,
+        }
         self.write_verify_calls = []
         self.fail_writes = False
 
     def _misc_byte(self, index, value=None, **kwargs):
-        assert index == 38
-        return self.external_controller
+        return self.registers[index]
 
     def _misc_write_verify(self, index, value, what, **kwargs):
-        assert index == 38
-        self.write_verify_calls.append(value)
+        self.write_verify_calls.append((index, value))
         if self.fail_writes:
             raise RuntimeError("no reply")
-        self.external_controller = value
+        self.registers[index] = value
         return value
 
 
 @pytest.fixture
 def misc_editor(qapp, monkeypatch):
     monkeypatch.delenv("AKAISDS_DEMO_SAMPLER", raising=False)
-    bridge = _FakeBridgeWithMisc(value=1)
+    bridge = _FakeBridgeWithMisc()
     editor = ProgramEditorWindow(QWidget(), bridge=bridge)
     _wait_for_program_load(editor, qapp)
     editor._worker.wait_until_idle()
+    _pump_until(qapp, lambda: editor.external_controller_combo.isEnabled())
     yield editor, bridge
     editor._worker.stop()
     editor._worker.wait()
 
 
-def test_external_controller_combo_shows_what_the_sampler_holds(misc_editor, qapp):
+def _settle(editor, qapp):
+    editor._worker.wait_until_idle()
+    for _ in range(5):
+        qapp.processEvents()
+
+
+def test_external_controller_combos_show_what_the_sampler_holds(misc_editor):
     editor, _bridge = misc_editor
-    _pump_until(qapp, lambda: editor.external_controller_combo.isEnabled())
+    tab_combo = editor.global_tab.external_controller_combo
     assert editor.external_controller_combo.currentText() == "Footpedal"
+    assert tab_combo.currentText() == "Footpedal"
     assert [
         editor.external_controller_combo.itemText(i)
         for i in range(editor.external_controller_combo.count())
     ] == ["Breath", "Footpedal", "Volume"]
 
 
-def test_loading_the_external_controller_writes_nothing(misc_editor, qapp):
+def test_loading_the_global_settings_writes_nothing(misc_editor, qapp):
     editor, bridge = misc_editor
-    _pump_until(qapp, lambda: editor.external_controller_combo.isEnabled())
-    editor._worker.wait_until_idle()
+    _settle(editor, qapp)
     assert bridge.write_verify_calls == []
 
 
-def test_choosing_an_external_controller_writes_it(misc_editor, qapp):
+def test_global_tab_shows_every_setting(misc_editor):
+    editor, _bridge = misc_editor
+    w = editor.global_tab._widgets
+    assert w["tune_semitones"].value() == 0 and w["tune_cents"].value() == 0
+    assert w["output_level"].currentText() == "0 dB"
+    assert w["program_change_channel"].currentText() == "Omni"
+    assert w["play_note"].value() == 60
+    assert w["play_channel"].currentText() == "1" and w["play_velocity"].value() == 100
+    assert w["scsi_disk_id"].currentText() == "5" and w["scsi_local_id"].currentText() == "6"
+    # a knob's readout beside it is filled too (loading silences the knob's own signal)
+    assert editor.global_tab._knob_labels["tune_semitones"].text() == "0"
+    assert w["scsi_sector"].currentText() == "1 KB"
+    assert all(
+        widget.isEnabled() for key, widget in w.items() if key not in DISABLED_SETTINGS
+    )
+
+
+def test_disabled_global_settings_still_show_and_survive_a_refresh(misc_editor, qapp):
     editor, bridge = misc_editor
-    _pump_until(qapp, lambda: editor.external_controller_combo.isEnabled())
+    tab = editor.global_tab
+    assert tab._widgets["program_change_channel"].currentText() == "Omni"
+    for key in DISABLED_SETTINGS:
+        assert not tab._widgets[key].isEnabled()
 
-    editor.external_controller_combo.setCurrentIndex(2)
-    editor.external_controller_combo.activated.emit(2)
+    editor._refresh_from_hardware()
     editor._worker.wait_until_idle()
-    _pump_until(qapp, lambda: "Volume" in editor.status_bar.currentMessage())
+    for _ in range(10):
+        qapp.processEvents()
 
-    assert bridge.write_verify_calls == [2]
-    assert bridge.external_controller == 2
-    assert editor.status_bar.currentMessage() == "External controller → Volume"
+    for key in DISABLED_SETTINGS:
+        assert not tab._widgets[key].isEnabled()
+    assert bridge.write_verify_calls == []
 
 
-def test_a_failed_external_controller_write_restores_the_real_value(
+def test_global_tab_is_the_fourth_tab_with_a_shortcut(misc_editor):
+    editor, _bridge = misc_editor
+    assert editor.main_tabs.tabText(editor._global_tab_index) == "Global"
+    assert editor._global_tab_index == 3
+    assert editor._global_tab_action.shortcut().toString() == "Ctrl+4"
+    editor._global_tab_action.trigger()
+    assert editor.main_tabs.currentIndex() == editor._global_tab_index
+
+
+def test_choosing_an_external_controller_in_the_modulation_card_writes_and_mirrors(
     misc_editor, qapp
 ):
     editor, bridge = misc_editor
-    _pump_until(qapp, lambda: editor.external_controller_combo.isEnabled())
+
+    editor.external_controller_combo.setCurrentIndex(2)
+    editor.external_controller_combo.activated.emit(2)
+    _settle(editor, qapp)
+
+    assert bridge.write_verify_calls == [(38, 2)]
+    assert editor.global_tab.external_controller_combo.currentText() == "Volume"
+    assert editor.status_bar.currentMessage() == "External controller → Volume"
+
+
+def test_choosing_an_external_controller_on_the_global_tab_writes_and_mirrors(
+    misc_editor, qapp
+):
+    editor, bridge = misc_editor
+    tab_combo = editor.global_tab.external_controller_combo
+
+    tab_combo.setCurrentIndex(0)
+    tab_combo.activated.emit(0)
+    _settle(editor, qapp)
+
+    assert bridge.write_verify_calls == [(38, 0)]
+    assert editor.external_controller_combo.currentText() == "Breath"
+
+
+def test_a_failed_global_write_restores_both_external_controller_combos(
+    misc_editor, qapp
+):
+    editor, bridge = misc_editor
     bridge.fail_writes = True
 
     editor.external_controller_combo.setCurrentIndex(0)
     editor.external_controller_combo.activated.emit(0)
     editor._worker.wait_until_idle()
-    _pump_until(qapp, lambda: editor.external_controller_combo.currentText() == "Footpedal")
+    _pump_until(
+        qapp, lambda: editor.external_controller_combo.currentText() == "Footpedal"
+    )
 
-    assert bridge.external_controller == 1
+    assert editor.global_tab.external_controller_combo.currentText() == "Footpedal"
+    assert bridge.registers[38] == 1
 
 
-def test_external_controller_combo_stays_disabled_when_the_read_fails(editor):
+def test_a_global_tab_edit_writes_its_register(misc_editor, qapp):
+    editor, bridge = misc_editor
+
+    editor.global_tab._widgets["play_velocity"].setValue(20)
+    editor.global_tab.flush("play_velocity")
+    _settle(editor, qapp)
+
+    assert bridge.write_verify_calls == [(54, 20)]
+    assert "play velocity" in editor.status_bar.currentMessage()
+
+
+def test_refresh_rereads_the_global_settings(misc_editor, qapp):
+    editor, bridge = misc_editor
+    bridge.registers[38] = 2
+    bridge.registers[71] = 5
+
+    editor._refresh_from_hardware()
+    editor._worker.wait_until_idle()
+    _pump_until(qapp, lambda: editor.external_controller_combo.currentText() == "Volume")
+
+    assert editor.global_tab.external_controller_combo.currentText() == "Volume"
+    assert editor.global_tab._widgets["program_change_channel"].currentText() == "5"
+
+
+def test_global_controls_stay_disabled_when_the_read_fails(editor):
     # FakeBridge has no misc registers: nothing read, so nothing may be written
     editor._worker.wait_until_idle()
     assert not editor.external_controller_combo.isEnabled()
     assert editor.external_controller_combo.currentIndex() == -1
+    assert not any(w.isEnabled() for w in editor.global_tab._widgets.values())
+    assert not editor.global_tab._unavailable_label.isHidden()
+
+
+def test_global_tab_says_so_in_demo_mode(qapp, monkeypatch):
+    monkeypatch.setenv("AKAISDS_DEMO_SAMPLER", "1")
+    editor = ProgramEditorWindow(QWidget(), bridge=FakeBridge())
+    try:
+        _wait_for_program_load(editor, qapp)
+        assert not any(w.isEnabled() for w in editor.global_tab._widgets.values())
+        assert editor.global_tab._unavailable_label.text() == "Not available in demo mode."
+    finally:
+        editor._worker.stop()
+        editor._worker.wait()
 
 
 class _FakeLeftClick:

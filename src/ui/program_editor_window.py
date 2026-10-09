@@ -97,12 +97,13 @@ from core import sds_encoder
 from core.midi_notes import midi_note_to_name
 from core.program_editor_bridge import (
     BridgeWorker,
-    EXTERNAL_CONTROLLER_LABELS,
     MULTI_PART_COUNT,
     S1000_KEYGROUP_FIELDS,
     S1000_PROGRAM_FIELDS,
 )
+from core.global_settings import EXTERNAL_CONTROLLER_LABELS
 from core.sample_duration import sample_duration_seconds
+from ui.global_tab import GlobalSettingsTab, build_external_controller_combo
 from ui.settings_dialog import MidiSettingsDialog
 
 # shared by every list's "Delete ..." QAction (program/keygroup/sample) -
@@ -595,19 +596,13 @@ class ProgramEditorWindow(QMainWindow):
                 f"Write failed ({param_name}): {e}"
             )
         )
-        self._worker.external_controller_loaded.connect(
-            self._on_external_controller_loaded
+        self._worker.global_settings_loaded.connect(self._on_global_settings_loaded)
+        self._worker.global_settings_load_failed.connect(
+            self._on_global_settings_load_failed
         )
-        self._worker.external_controller_load_failed.connect(
-            self._on_external_controller_load_failed
-        )
-        self._worker.external_controller_written.connect(
-            lambda v: self.status_bar.showMessage(
-                f"External controller → {EXTERNAL_CONTROLLER_LABELS[v]}"
-            )
-        )
-        self._worker.external_controller_write_failed.connect(
-            self._on_external_controller_write_failed
+        self._worker.global_setting_written.connect(self._on_global_setting_written)
+        self._worker.global_setting_write_failed.connect(
+            self._on_global_setting_write_failed
         )
         self._worker.program_deleted.connect(self._on_program_deleted)
         self._worker.program_delete_failed.connect(
@@ -2056,19 +2051,15 @@ class ProgramEditorWindow(QMainWindow):
         mod_footnote_row.addWidget(mod_footnote)
 
         # what the "External" source above actually is - a sampler-wide
-        # setting (its GLOBAL page), not stored in any program. Enabled by
-        # _on_external_controller_loaded once the sampler has answered, so
-        # a failed read (demo mode, an unexpected value) leaves it disabled
+        # setting (its GLOBAL page), not stored in any program, and mirrored
+        # on the Global tab (see _on_global_setting_chosen). Enabled by
+        # _on_global_settings_loaded once the sampler has answered, so a
+        # failed read (demo mode, an unexpected value) leaves it disabled
         # instead of offering a write it can't verify. `activated`, not
         # currentIndexChanged: loading the value must not write it back.
-        self.external_controller_combo = QComboBox()
-        for label in EXTERNAL_CONTROLLER_LABELS:
-            self.external_controller_combo.addItem(label)
-        self.external_controller_combo.setCurrentIndex(-1)
-        self.external_controller_combo.setEnabled(False)
-        self.external_controller_combo.setToolTip(tt.EXTERNAL_CONTROLLER_COMBO)
+        self.external_controller_combo = build_external_controller_combo()
         self.external_controller_combo.activated.connect(
-            self._on_external_controller_chosen
+            self._on_mod_external_controller_chosen
         )
         external_controller_row = QHBoxLayout()
         external_controller_row.addWidget(QLabel("External controller"))
@@ -2163,6 +2154,9 @@ class ProgramEditorWindow(QMainWindow):
         self.main_tabs.addTab(multis_tab_page, "Multi")
         self.main_tabs.addTab(programs_tab_page, "Programs")
         self._samples_tab_index = self.main_tabs.addTab(samples_tab_page, "Samples")
+        self.global_tab = GlobalSettingsTab()
+        self.global_tab.setting_chosen.connect(self._on_global_setting_chosen)
+        self._global_tab_index = self.main_tabs.addTab(self.global_tab, "Global")
         # Multis stays the first tab, but isn't fully working yet - open on
         # Programs instead
         self.main_tabs.setCurrentIndex(1)
@@ -2394,6 +2388,13 @@ class ProgramEditorWindow(QMainWindow):
         )
         window_menu.addAction(self._samples_tab_action)
 
+        self._global_tab_action = QAction("Global Tab", self)
+        self._global_tab_action.setShortcut("Ctrl+4")
+        self._global_tab_action.triggered.connect(
+            lambda: self.main_tabs.setCurrentIndex(self._global_tab_index)
+        )
+        window_menu.addAction(self._global_tab_action)
+
         # Qt has no MenuRole for "check for updates" (only About/Preferences/
         # Quit get auto-relocated into the native app menu on macOS - see
         # QAction.MenuRole), so this stays a plain Help menu on every
@@ -2471,7 +2472,7 @@ class ProgramEditorWindow(QMainWindow):
         self._sample_preview_player.finished.connect(self.waveform_view.clear_playhead)
         self.waveform_scrollbar.valueChanged.connect(self._on_waveform_scrollbar_moved)
         self._worker.submit_program_list()
-        self._request_external_controller()
+        self._request_global_settings()
 
         # enable knobs and wire their (debounced) writes
         self.cutoff_knob.setEnabled(True)
@@ -2637,6 +2638,9 @@ class ProgramEditorWindow(QMainWindow):
             menu = menu_action.menu()
             if menu is not None and self._multi_tab_action in menu.actions():
                 menu.removeAction(self._multi_tab_action)
+                menu.removeAction(self._global_tab_action)
+        # nor the S2000/S3000's global settings (see _request_global_settings)
+        self.main_tabs.setTabVisible(self._global_tab_index, False)
         self.setWindowTitle("AKAISDS - Program Editor (Akai S1000, experimental)")
 
     # -- theme-following colored swatches ----------------------------------------
@@ -3071,30 +3075,62 @@ class ProgramEditorWindow(QMainWindow):
         self._busy_show_timer.stop()
         self._loading_progress.setVisible(False)
 
-    def _request_external_controller(self):
-        # DemoBridge has no misc registers, and an S1000 no such setting
-        # (its Modulation card is hidden); the combo just stays disabled
-        if self._is_s1000 or os.environ.get("AKAISDS_DEMO_SAMPLER"):
+    # -- Global tab / external controller ---------------------------------------------------
+    #
+    # The GLOBAL-page settings (core/global_settings.py) are read together and written one at a
+    # time. External controller lives in TWO places - the Modulation card's combo and the Global
+    # tab's - kept in step both ways: whichever the user picks updates the other without firing
+    # its own write, and a failed write re-reads everything so both show what the sampler holds.
+
+    _GLOBAL_UNAVAILABLE_DEMO = "Not available in demo mode."
+
+    def _request_global_settings(self):
+        # DemoBridge has no misc registers, and an S1000 no such settings
+        # (its tab is hidden); the controls just stay disabled
+        if self._is_s1000:
             return
-        self._worker.submit_external_controller()
+        if os.environ.get("AKAISDS_DEMO_SAMPLER"):
+            self.global_tab.set_unavailable(self._GLOBAL_UNAVAILABLE_DEMO)
+            return
+        self._worker.submit_global_settings()
 
-    def _on_external_controller_loaded(self, value):
-        self.external_controller_combo.setCurrentIndex(value)
-        self.external_controller_combo.setEnabled(True)
+    def _on_global_settings_loaded(self, values):
+        self.global_tab.set_values(values)
+        if "external_controller" in values:
+            self.external_controller_combo.setCurrentIndex(values["external_controller"])
+            self.external_controller_combo.setEnabled(True)
+        else:
+            self.external_controller_combo.setEnabled(False)
 
-    def _on_external_controller_load_failed(self, error):
-        # leave it disabled: nothing was read, so nothing may be written
+    def _on_global_settings_load_failed(self, error):
+        # leave everything disabled: nothing was read, so nothing may be written
         self.external_controller_combo.setEnabled(False)
-        self.status_bar.showMessage(f"Couldn't read the external controller: {error}")
+        self.global_tab.set_unavailable(f"Couldn't read the global settings: {error}")
+        self.status_bar.showMessage(f"Couldn't read the global settings: {error}")
 
-    def _on_external_controller_chosen(self, index):
-        self._worker.submit_set_external_controller(index)
+    def _on_mod_external_controller_chosen(self, index):
+        self.global_tab.set_value("external_controller", index)
+        self._worker.submit_set_global_setting("external_controller", index)
 
-    def _on_external_controller_write_failed(self, error):
-        self.status_bar.showMessage(f"Couldn't set the external controller: {error}")
-        # the combo shows the choice that just failed - put back what the
+    def _on_global_setting_chosen(self, key, value):
+        # from the Global tab
+        if key == "external_controller":
+            self.external_controller_combo.setCurrentIndex(value)
+        self._worker.submit_set_global_setting(key, value)
+
+    def _on_global_setting_written(self, key, value):
+        if key == "external_controller":
+            self.status_bar.showMessage(
+                f"External controller → {EXTERNAL_CONTROLLER_LABELS[value]}"
+            )
+        else:
+            self.status_bar.showMessage(f"Global setting {key.replace('_', ' ')} → {value}")
+
+    def _on_global_setting_write_failed(self, key, error):
+        self.status_bar.showMessage(f"Couldn't set {key.replace('_', ' ')}: {error}")
+        # the controls show the choice that just failed - put back what the
         # sampler really holds
-        self._worker.submit_external_controller()
+        self._worker.submit_global_settings()
 
     def _refresh_multi_parts(self, *, show_confirmation=False):
         if self._is_s1000:
@@ -3152,7 +3188,7 @@ class ProgramEditorWindow(QMainWindow):
         # closing and reopening the window) and the Multis tab's 16 parts,
         # independent of program selection.
         self._worker.submit_program_list()
-        self._request_external_controller()
+        self._request_global_settings()
         self._refresh_multi_parts(show_confirmation=True)
 
         program_index = self.program_list.currentRow()
@@ -3195,6 +3231,7 @@ class ProgramEditorWindow(QMainWindow):
             self._multi_tab_action,
             self._programs_tab_action,
             self._samples_tab_action,
+            self._global_tab_action,
         ):
             action.setEnabled(not busy)
 

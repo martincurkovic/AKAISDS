@@ -435,11 +435,27 @@ MOD_MATRIX_AMOUNT_KNOB = (
     "assigned source."
 )
 
-# the sampler-wide choice behind the "External" modulation source
+# --- Global tab (core/global_settings.py) - settings of the whole sampler ----------------
 EXTERNAL_CONTROLLER_COMBO = (
     "Which controller the \"External\" modulation source follows. This is a "
     "setting of the whole sampler (its Global page), not of this program."
 )
+GLOBAL_TOOLTIPS = {
+    "tune_semitones": "Tunes the whole sampler, in semitones.",
+    "tune_cents": "Fine tuning of the whole sampler, in cents.",
+    "output_level": "Master output level of the sampler.",
+    "external_controller": EXTERNAL_CONTROLLER_COMBO,
+    "program_change_channel": (
+        "The MIDI channel the sampler accepts Program Change messages on. "
+        "Off ignores them; Omni accepts every channel."
+    ),
+    "play_note": "The note the sampler's front-panel Play button plays.",
+    "play_channel": "The MIDI channel the Play button plays on.",
+    "play_velocity": "The velocity the Play button plays with.",
+    "scsi_disk_id": "The SCSI ID of the disk the sampler loads from and saves to.",
+    "scsi_sector": "The sector size the sampler uses on its SCSI disk.",
+    "scsi_local_id": "The SCSI ID the sampler itself answers to.",
+}
 
 # --- Multis tab: per-part level/pan knobs - new -----------------------------
 # shared across every knob built via _build_multi_part_knob for the 16
