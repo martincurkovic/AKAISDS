@@ -24,6 +24,18 @@ What each measurement actually pinned down (the dumps: 2-4 points per setting, s
 offers"); this module can, because the editor was asked to.
 
 Not here: the MIDI sysex channel (changing it would cut this connection) and MIDI-via-SCSI (never dumped).
+
+THE WHOLE-BLOCK MISC DATA (`BLOCK_SETTINGS`, measured on the same S2000, 2026-10-09): three of the settings above - program change channel, tune and fine
+tune - are NOT really set through their byte registers: a write to byte 64/65/71 is accepted and reads back (or, for 71, is silently ignored) but the sampler
+neither shows nor uses it. Their real home is the older whole-block misc data, `RMDATA` (0x10) -> `MDATA` (0x11), a 48-byte block (96 nibbled payload bytes)
+that is READ-MODIFY-WRITTEN whole. Measured layout (decoded block; the rest is zero):
+    offset 0 = program change channel, 0-based    offset 1 = Omni flag    offset 2 = enabled flag (0 = Off)
+        panel states: ch 1 [0,0,1]   ch 6 [5,0,1]   Off [0,0,0]   Omni [15,1,1] (the channel byte keeps its last value under Off/Omni)
+    offset 6 = fine tune (cents + 50)    offset 7 = tune (semitones + 9)    offset 8 = output level (raw 12 = 0 dB; matched by value, never varied)
+**Confirmed on hardware: a block write that changes ONLY offset 0 (channel 1 -> 6) is answered OK, reads back with only that byte changed, and the panel's
+display follows** (`tools/s2000_mdata_write_check.py --setting pc`). Off/Omni writes and the tune/fine-tune offsets were NOT written through the block yet.
+For these keys the block is authoritative: byte register 71 still read 1 after the block write, i.e. the registers are stale copies. `GLOBAL_SETTINGS` keeps its
+register entries for them only for the hardware-check tools; the app reads/writes them through `BLOCK_SETTINGS`.
 """
 
 from dataclasses import dataclass
@@ -109,6 +121,80 @@ def _output_level():
     return decode, encode
 
 
+MDATA_BLOCK_LENGTH = 48
+
+
+@dataclass(frozen=True)
+class BlockSetting:
+    """A setting that lives in the whole-block misc data. `decode(block)` -> the value the editor shows; `encode(block, value)` -> a NEW block
+    with only this setting's byte(s) changed (everything else exactly as read)."""
+
+    key: str
+    decode: Callable[[bytes], int]
+    encode: Callable[[bytes, int], bytes]
+
+
+def _check_block(block):
+    if len(block) != MDATA_BLOCK_LENGTH:
+        raise ValueError(f"misc block is {len(block)} bytes, expected {MDATA_BLOCK_LENGTH}")
+
+
+def _with_bytes(block, changes):
+    _check_block(block)
+    new = bytearray(block)
+    for offset, value in changes.items():
+        new[offset] = value
+    return bytes(new)
+
+
+def _program_change():
+    # shown as the byte register's own value space: 0 Off, 1-16, 17 Omni (so the Global tab's combo is unchanged)
+    def decode(block):
+        _check_block(block)
+        channel, omni, enabled = block[0], block[1], block[2]
+        if omni not in (0, 1) or enabled not in (0, 1):
+            raise ValueError(f"program change bytes {[channel, omni, enabled]} are not a state the panel shows")
+        if enabled == 0:
+            return PROGRAM_CHANGE_OFF
+        if omni == 1:
+            return PROGRAM_CHANGE_OMNI
+        if 0 <= channel <= 15:
+            return channel + 1
+        raise ValueError(f"program change channel byte {channel} is not a channel the panel shows")
+
+    def encode(block, value):
+        _in_range("program change channel", value, PROGRAM_CHANGE_OFF, PROGRAM_CHANGE_OMNI)
+        if value == PROGRAM_CHANGE_OFF:
+            return _with_bytes(block, {1: 0, 2: 0})  # the channel byte keeps its value, as on the panel
+        if value == PROGRAM_CHANGE_OMNI:
+            return _with_bytes(block, {1: 1, 2: 1})
+        return _with_bytes(block, {0: value - 1, 1: 0, 2: 1})
+
+    return decode, encode
+
+
+def _block_offset(name, offset, decode_raw, encode_value):
+    def decode(block):
+        _check_block(block)
+        return decode_raw(block[offset])
+
+    def encode(block, value):
+        return _with_bytes(block, {offset: encode_value(value)})
+
+    return decode, encode
+
+
+def _build_block_settings():
+    semi_decode, semi_encode = _signed_offset("tune", _TUNE_SEMITONES_OFFSET, -50, 50)
+    cents_decode, cents_encode = _offset("fine tune", _TUNE_CENTS_OFFSET, -50, 50)
+    settings = [
+        BlockSetting("program_change_channel", *_program_change()),
+        BlockSetting("tune_semitones", *_block_offset("tune", 7, semi_decode, semi_encode)),
+        BlockSetting("tune_cents", *_block_offset("fine tune", 6, cents_decode, cents_encode)),
+    ]
+    return {s.key: s for s in settings}
+
+
 def _build():
     settings = [
         GlobalSetting("external_controller", 38, *_plain("external controller", 0, 2)),
@@ -128,3 +214,5 @@ def _build():
 
 
 GLOBAL_SETTINGS = _build()
+
+BLOCK_SETTINGS = _build_block_settings()

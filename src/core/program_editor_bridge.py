@@ -1,5 +1,6 @@
 import dataclasses
 import datetime
+import json
 import os
 import threading
 import time
@@ -14,7 +15,8 @@ import s3k.messages as m
 from s3k.messages import NAME_LENGTH
 import s3k.params as p
 from core import akai_program_file
-from core.global_settings import GLOBAL_SETTINGS
+from core.global_settings import BLOCK_SETTINGS, GLOBAL_SETTINGS, MDATA_BLOCK_LENGTH
+from core.reply_matching import make_reply_tolerant
 from core.s1000_bridge import S1000Bridge
 import core.s1000_bridge as s1000_bridge_module
 
@@ -221,10 +223,13 @@ def connect(midi_manager=None, sampler_model=None):
             "program_editor_bridge.connect(): shared transport "
             f"({midi_manager.output_name!r})"
         )
-        bridge = S3kBridge(
-            ThrottledOut(midi_manager.raw_output),
-            midi_manager.raw_input,
-            f"{midi_manager.output_name} (shared)",
+        bridge = make_reply_tolerant(
+            S3kBridge(
+                ThrottledOut(midi_manager.raw_output),
+                midi_manager.raw_input,
+                f"{midi_manager.output_name} (shared)",
+            ),
+            logger,
         )
     else:
         # AKAISDS_SHARED_MIDI_TRANSPORT=1 alone doesn't guarantee the
@@ -237,7 +242,7 @@ def connect(midi_manager=None, sampler_model=None):
         logger.info(
             f"program_editor_bridge.connect(): standard connection ({output_name!r})"
         )
-        bridge = S3kBridge.standard(output_name)  # type: ignore
+        bridge = make_reply_tolerant(S3kBridge.standard(output_name), logger)  # type: ignore
     if s1000:
         logger.info("program_editor_bridge.connect(): S1000 block adapter")
         bridge = S1000Bridge(bridge)
@@ -448,6 +453,18 @@ _PROGRAM_LEVEL_FIELDS = [
 #: where a program's .p1/.p3 backup goes before anything destructive is done to it
 #: (the S1000 delete-keygroup rebuild). tests/conftest.py points it at a temp dir.
 PROGRAM_BACKUP_DIR = Path.home() / ".akaisds" / "program_backups"
+# the sampler's whole-block misc data, saved once per session before the first block write (core/global_settings.py)
+MDATA_BACKUP_DIR = Path.home() / ".akaisds" / "mdata_backups"
+
+# Spacing around a whole-block misc write. MEASURED (2026-10-10, the user's S2000): a block write sent 3 ms after the RMDATA read was ACKED ("OK") and then NEVER applied -
+# every later read of the block, even 5 s on, still held the old bytes - while the standalone check (tools/s2000_mdata_write_check.py), which has seconds before the write
+# and waits 1 s before reading back, applied it every time. Working theory: the sampler acks on receipt and applies afterwards, and a message arriving too soon cancels
+# the pending apply. So: a pause before the write, a pause before the read-back, and a few verify attempts. `_sleep` is a module hook so tests (tests/conftest.py)
+# run instantly and can watch the spacing.
+MISC_BLOCK_BEFORE_WRITE_S = 0.3
+MISC_BLOCK_AFTER_WRITE_S = 1.0
+MISC_BLOCK_VERIFY_ATTEMPTS = 3
+_sleep = time.sleep
 
 
 class _ImportSafetyError(DeviceError):
@@ -534,6 +551,12 @@ class BridgeWorker(QThread):
     # status bar can still show the real field name either way
     write_succeeded = Signal(str, str, object)
     write_failed = Signal(str, str, str)
+
+    # Emitted whenever the reply-matching layer (core/reply_matching.py) has skipped STRAY_REPLY_WARNING_COUNT or more NEW stray frames since the last warning - so it
+    # fires again if the echo comes back later in the same session (the user asked for that). The signature of something sending the sampler's own replies back to it
+    # (measured 2026-10-10 with Ableton open: a stray OK for nearly every reply). Returned replies are executed by the sampler as WRITES, so this is a data-safety
+    # warning, not a curiosity. The int is the session's running total of skipped strays.
+    stray_replies_detected = Signal(int)
 
     # the sampler's GLOBAL-page settings (core/global_settings.py) - not part
     # of any program, so not a submit_write(). Loaded together: a dict of
@@ -641,6 +664,9 @@ class BridgeWorker(QThread):
         # whenever the program list reloads, since a newly created/loaded
         # program may not carry a number distinct from the rest.
         self._programs_renumbered = False
+        # the misc-block backup is saved before the first block WRITE of a session only (see _backup_misc_block)
+        self._misc_block_backed_up = False
+        self._stray_replies_reported = 0  # the skipped_replies total at the last warning
 
     def _submit(self, job):
         with self._idle:
@@ -837,6 +863,20 @@ class BridgeWorker(QThread):
                 "would otherwise have killed the worker thread silently",
                 exc_info=True,
             )
+        self._check_stray_replies()
+
+    STRAY_REPLY_WARNING_COUNT = 3
+
+    def _check_stray_replies(self):
+        count = getattr(self._bridge, "skipped_replies", 0)
+        if not isinstance(count, int):
+            return
+        if count - self._stray_replies_reported >= self.STRAY_REPLY_WARNING_COUNT:
+            self._stray_replies_reported = count
+            debug_log.get_logger().critical(
+                f"{count} stray replies skipped this session - something is probably sending the sampler's replies back to it (another MIDI program?)"
+            )
+            self.stray_replies_detected.emit(count)
 
     def _dispatch(self, job):
         kind = job[0]
@@ -1056,6 +1096,68 @@ class BridgeWorker(QThread):
             raise DeviceError("not available on this connection")
         return call
 
+    # -- the whole-block misc data (RMDATA/MDATA) ---------------------------------------------
+    # Program change channel, tune and fine tune live here, not in their byte registers (see
+    # core/global_settings.py). The sampler intermittently answers with a frame that does not
+    # decode ("extended data: expected at least a 7-byte body, got 1" - measured), so reads retry.
+
+    _MISC_BLOCK_TRIES = 3
+
+    def _read_misc_block(self):
+        self._misc_call("_misc_byte")  # the "is this a real S2000/S3000 connection" gate
+        frame = m.build_frame(
+            m.Command.RMDATA,
+            [],
+            exclusive_channel=getattr(self._bridge, "exclusive_channel", m.DEFAULT_EXCLUSIVE_CHANNEL),
+        )
+        last = None
+        for _ in range(self._MISC_BLOCK_TRIES):
+            try:
+                reply = self._bridge.send_and_receive(frame, timeout=3.0)
+                _channel, command, payload = m.parse_frame(reply)
+                if command != m.Command.MDATA:
+                    raise DeviceError(f"expected MDATA, got command {int(command):#04x}")
+                block = bytes(m.decode_nibbles(list(payload)))
+            except (ValueError, DeviceError, TimeoutError) as e:
+                last = e
+                continue
+            if len(block) != MDATA_BLOCK_LENGTH:
+                # a different firmware/layout: never edit a block we don't understand
+                raise DeviceError(f"unexpected misc block length {len(block)} (expected {MDATA_BLOCK_LENGTH})")
+            return block
+        raise last
+
+    def _write_misc_block(self, block):
+        if len(block) != MDATA_BLOCK_LENGTH:
+            raise ValueError(f"refusing to write a {len(block)}-byte misc block")
+        frame = m.build_frame(
+            m.Command.MDATA,
+            m.encode_nibbles(block),
+            exclusive_channel=getattr(self._bridge, "exclusive_channel", m.DEFAULT_EXCLUSIVE_CHANNEL),
+        )
+        self._bridge._drain()
+        self._bridge._send(frame, write=True)
+        reply = self._bridge._receive(3.0, accept=frozenset({int(m.Command.REPLY)}))
+        decoded = m.Reply.decode(reply)
+        if not decoded.ok:
+            raise DeviceError(f"the sampler refused the misc block (reply code {decoded.code})")
+
+    def _backup_misc_block(self, block):
+        # no backup, no write - the whole block is replaced, so a copy of what was there
+        # must exist first. Once per session: later writes only ever change what the editor
+        # itself wrote.
+        if self._misc_block_backed_up:
+            return
+        MDATA_BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        path = MDATA_BACKUP_DIR / f"mdata_{stamp}.json"
+        path.write_text(
+            json.dumps({"saved": stamp, "block_hex": block.hex(), "block": list(block)}, indent=1),
+            encoding="utf-8",
+        )
+        self._misc_block_backed_up = True
+        debug_log.get_logger().info(f"misc block backed up to {path}")
+
     def _handle_global_settings(self):
         log = debug_log.get_logger()
         values = {}
@@ -1066,6 +1168,8 @@ class BridgeWorker(QThread):
             self.global_settings_load_failed.emit(str(e))
             return
         for key, setting in GLOBAL_SETTINGS.items():
+            if key in BLOCK_SETTINGS:
+                continue  # read from the block below - its byte register is a stale copy
             try:
                 raw = read_byte(setting.register)
             except Exception as e:
@@ -1080,6 +1184,18 @@ class BridgeWorker(QThread):
                 # a value the panel can't show must not hide the others
                 log.warning(f"global setting {key}: not shown: {e}")
                 first_error = first_error or str(e)
+        if first_error is None or values:
+            try:
+                block = self._read_misc_block()
+            except Exception as e:
+                log.warning(f"global settings: misc block not read: {e}")
+                first_error = first_error or str(e)
+            else:
+                for key, setting in BLOCK_SETTINGS.items():
+                    try:
+                        values[key] = setting.decode(block)
+                    except ValueError as e:
+                        log.warning(f"global setting {key}: not shown: {e}")
         if not values:
             self.global_settings_load_failed.emit(first_error or "nothing read")
             return
@@ -1088,18 +1204,47 @@ class BridgeWorker(QThread):
     def _handle_set_global_setting(self, key, value):
         log = debug_log.get_logger()
         try:
-            setting = GLOBAL_SETTINGS[key]
-            raw = setting.encode(value)
-            write_verify = self._misc_call("_misc_write_verify")
-            # write, then believe the READ: several misc registers answer a
-            # good write with an error code (see S3kBridge._misc_write_verify)
-            write_verify(setting.register, raw, f"setting {key}")
+            if key in BLOCK_SETTINGS:
+                self._set_block_setting(BLOCK_SETTINGS[key], value)
+                raw_note = "misc block"
+            else:
+                setting = GLOBAL_SETTINGS[key]
+                raw = setting.encode(value)
+                write_verify = self._misc_call("_misc_write_verify")
+                # write, then believe the READ: several misc registers answer a
+                # good write with an error code (see S3kBridge._misc_write_verify)
+                write_verify(setting.register, raw, f"setting {key}")
+                raw_note = f"register {setting.register} = {raw}"
         except Exception as e:
             log.error(f"global setting {key}: write of {value} failed: {e}")
             self.global_setting_write_failed.emit(key, str(e))
             return
-        log.info(f"global setting {key}: set to {value} (register {setting.register} = {raw})")
+        log.info(f"global setting {key}: set to {value} ({raw_note})")
         self.global_setting_written.emit(key, value)
+
+    def _set_block_setting(self, setting, value):
+        log = debug_log.get_logger()
+        before = self._read_misc_block()  # fresh every time: the panel may have changed it
+        after = setting.encode(before, value)  # raises for a value the block can't hold
+        self._backup_misc_block(before)
+        _sleep(MISC_BLOCK_BEFORE_WRITE_S)  # see MISC_BLOCK_BEFORE_WRITE_S
+        log.info(f"misc block write for {setting.key}: {before[:12].hex(' ')} -> {after[:12].hex(' ')} (first 12 bytes)")
+        self._write_misc_block(after)
+        # believe the READ, not the ack - but give the sampler time to apply it first
+        read_back = None
+        for attempt in range(MISC_BLOCK_VERIFY_ATTEMPTS):
+            _sleep(MISC_BLOCK_AFTER_WRITE_S)
+            read_back = self._read_misc_block()
+            if read_back == after:
+                return
+            log.warning(
+                f"misc block read-back {attempt + 1}/{MISC_BLOCK_VERIFY_ATTEMPTS} for {setting.key} differs: "
+                f"{read_back[:12].hex(' ')} (wanted {after[:12].hex(' ')})"
+            )
+        differing = [i for i in range(MDATA_BLOCK_LENGTH) if read_back[i] != after[i]]
+        raise DeviceError(
+            f"setting {setting.key}: the sampler's block differs from what was written at offsets {differing}"
+        )
 
     def _handle_delete_program(self, program_index):
         try:

@@ -9,6 +9,8 @@ otherwise send a write + read-back per notch; a knob drag also commits on releas
 The External controller combo here mirrors the one in the Program tab's Modulation card (`build_external_controller_combo`); the window keeps the two in step.
 """
 
+import os
+
 from PySide6.QtCore import QTimer, Signal
 from PySide6.QtWidgets import (
     QAbstractSlider,
@@ -39,17 +41,36 @@ from ui.qt_helpers import build_scroll_area, build_section_card
 
 _SPINBOX_DEBOUNCE_MS = 250
 
-# Settings the tab SHOWS (they read fine) but never offers to change, key -> why, for the tooltip. Measured on a real S2000, 2026-10-09:
-# - tune_semitones / tune_cents: a write is accepted and reads back, and the register ends up identical to one set on the panel (a 768-register dump
-#   of byte/word/dword banks 0-255 differs only in the panel-cursor byte 49) - yet it has no effect, so the sampler stores it without acting on it.
-#   tools/s2000_tune_trigger_check.py looks for what makes it act.
-# - program_change_channel: the sampler answers OK and the register keeps its old value, whatever is written.
-# To re-enable one, delete its entry here once a write is known to take effect on the machine (see that tool's docstring).
+# Settings the tab SHOWS (their value still reads) but never offers to change, key -> the ENTIRE tooltip (kept to a few words on purpose). Locked 2026-10-10:
+# - tune_semitones / tune_cents: they WRITE (acked, read back) but the sampler never uses them - the panel's TUNE screen and the pitch don't change, even after a real page
+#   round trip. See AGENTS.md's "Global tab" section for everything tried.
+# - the three SCSI settings: they work, but they steer which disk the sampler talks to and the user's sampler ended up unable to reach its hard disk the same
+#   week (cause unknown - see AGENTS.md); not worth the risk while that is open.
+# To re-enable one, delete its entry. To lock another, add its key with a short reason.
 DISABLED_SETTINGS = {
-    "tune_semitones": "Disabled for now: the sampler doesn't apply a written value yet.",
-    "tune_cents": "Disabled for now: the sampler doesn't apply a written value yet.",
-    "program_change_channel": "Disabled for now: the sampler ignores writes to this setting.",
+    "tune_semitones": "Not working right now.",
+    "tune_cents": "Not working right now.",
+    "scsi_disk_id": "Disabled for safety.",
+    "scsi_sector": "Disabled for safety.",
+    "scsi_local_id": "Disabled for safety.",
 }
+
+
+# A TEST switch, not a setting: `AKAISDS_UNLOCK_GLOBAL=tune_semitones,tune_cents` (or `all`) unlocks the named controls for this run only, so a locked setting can be
+# re-tested on the hardware without editing code. Read each time it is needed (tests set it with monkeypatch). Does not touch DISABLED_SETTINGS.
+UNLOCK_ENV = "AKAISDS_UNLOCK_GLOBAL"
+
+
+def is_locked(key):
+    """True if `key` is in DISABLED_SETTINGS and not unlocked for this run by UNLOCK_ENV."""
+    if key not in DISABLED_SETTINGS:
+        return False
+    unlocked = {part.strip() for part in os.environ.get(UNLOCK_ENV, "").split(",") if part.strip()}
+    return not ("all" in unlocked or key in unlocked)
+
+
+def lock_reason(key):
+    return DISABLED_SETTINGS[key] if is_locked(key) else None
 # the Multi tab's own page margin (ProgramEditorWindow._build_multis_tab): a page with no list
 # beside it sits this far in from the tab frame on every side (the right also clears the scroll bar)
 _PAGE_MARGIN = 14
@@ -159,10 +180,8 @@ class GlobalSettingsTab(QWidget):
         outer.addWidget(build_scroll_area(page))
 
         for key, widget in self._widgets.items():
-            tip = tt.GLOBAL_TOOLTIPS[key]
-            if key in DISABLED_SETTINGS:
-                tip = f"{tip} {DISABLED_SETTINGS[key]}"
-            widget.setToolTip(tip)
+            # a locked control's tooltip is just the short reason
+            widget.setToolTip(lock_reason(key) or tt.GLOBAL_TOOLTIPS[key])
             widget.setEnabled(False)
 
     # -- construction helpers ----------------------------------------------------------
@@ -235,7 +254,7 @@ class GlobalSettingsTab(QWidget):
     # -- values ------------------------------------------------------------------------------
 
     def set_value(self, key, value):
-        """Show a value read from the sampler and enable its control (unless it is in DISABLED_SETTINGS). Never emits."""
+        """Show a value read from the sampler and enable its control (unless it is locked - see `is_locked`). Never emits."""
         widget = self._widgets[key]
         widget.blockSignals(True)
         try:
@@ -251,7 +270,7 @@ class GlobalSettingsTab(QWidget):
         finally:
             widget.blockSignals(False)
         # a disabled setting still shows what the sampler holds
-        widget.setEnabled(key not in DISABLED_SETTINGS)
+        widget.setEnabled(not is_locked(key))
 
     def set_values(self, values):
         """Show every value in `values`; a setting that isn't in it (couldn't be read) stays disabled."""

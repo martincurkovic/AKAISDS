@@ -491,6 +491,7 @@ class ProgramEditorWindow(QMainWindow):
         )
         self._is_s1000 = sampler_models.is_s1000(self._sampler_model)
         self._program_name_on_sampler = None
+        self._stray_dialog_open = False  # see _on_stray_replies_detected
         # (knob, value_label, field, region) for every S1000-only controller
         # knob built by _build_s1000_controller_grid - loaded from
         # keygroups_loaded/detail_loaded by _load_s1000_controls
@@ -596,6 +597,7 @@ class ProgramEditorWindow(QMainWindow):
                 f"Write failed ({param_name}): {e}"
             )
         )
+        self._worker.stray_replies_detected.connect(self._on_stray_replies_detected)
         self._worker.global_settings_loaded.connect(self._on_global_settings_loaded)
         self._worker.global_settings_load_failed.connect(
             self._on_global_settings_load_failed
@@ -3083,6 +3085,25 @@ class ProgramEditorWindow(QMainWindow):
     # its own write, and a failed write re-reads everything so both show what the sampler holds.
 
     _GLOBAL_UNAVAILABLE_DEMO = "Not available in demo mode."
+
+    def _on_stray_replies_detected(self, count):
+        # something is probably sending the sampler's own replies back to it (measured with a DAW open on the same MIDI interface): the sampler executes a returned
+        # reply as a WRITE and acknowledges it with an OK. Shown EVERY time the worker reports it (the echo can come back mid-session), but never stacked: a modal dialog
+        # runs a nested event loop, so a second report arriving while one is open is dropped - the next batch of strays after it closes warns again.
+        self.status_bar.showMessage("Stray MIDI replies detected - close or re-configure other MIDI software.")
+        if self._stray_dialog_open:
+            return
+        self._stray_dialog_open = True
+        try:
+            QMessageBox.warning(
+                self,
+                "Stray MIDI replies",
+                "The sampler is getting its own replies sent back to it, probably by another "
+                "MIDI program (a DAW, a MIDI monitor).\n\n"
+                "Close or re-configure its MIDI settings before editing.",
+            )
+        finally:
+            self._stray_dialog_open = False
 
     def _request_global_settings(self):
         # DemoBridge has no misc registers, and an S1000 no such settings
