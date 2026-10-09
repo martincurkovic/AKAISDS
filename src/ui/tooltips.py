@@ -435,6 +435,12 @@ MOD_MATRIX_AMOUNT_KNOB = (
     "assigned source."
 )
 
+# the sampler-wide choice behind the "External" modulation source
+EXTERNAL_CONTROLLER_COMBO = (
+    "Which controller the \"External\" modulation source follows. This is a "
+    "setting of the whole sampler (its Global page), not of this program."
+)
+
 # --- Multis tab: per-part level/pan knobs - new -----------------------------
 # shared across every knob built via _build_multi_part_knob for the 16
 # parts' own Level/Pan controls

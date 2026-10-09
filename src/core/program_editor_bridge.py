@@ -17,6 +17,18 @@ from core import akai_program_file
 from core.s1000_bridge import S1000Bridge
 import core.s1000_bridge as s1000_bridge_module
 
+# The sampler's GLOBAL "external controller" setting - what the modulation
+# matrix's "External" source means (the S2000/S3000 manual's EXTRNL, p.200).
+# Neither Akai spec nor s3k names this register: found by dumping every misc
+# byte with the setting on each choice (tools/s2000_misc_probe.py, measured on
+# a real S2000, 2026-10-09) - byte 38 was the only register that moved,
+# Breath 0 / Footpedal 1 / Volume 2, and two dumps of the same setting were
+# identical. An S2000/S3000 machine-wide setting, not per program. The
+# S1000 has no such source (its controller routing is fixed) and ignores
+# byte-addressable misc ops outright.
+MISC_EXTERNAL_CONTROLLER = 38
+EXTERNAL_CONTROLLER_LABELS = ("Breath", "Footpedal", "Volume")
+
 # the sampler holds exactly one resident multi (no list of multis to choose
 # between) with a fixed 16 "multipart" slots
 MULTI_PART_COUNT = 16
@@ -475,7 +487,13 @@ class BridgeWorker(QThread):
     # fast should end up showing the fifth, not sit through four stale
     # reads first. Writes and Program Changes are never coalesced: every
     # one of those must reach the hardware.
-    _COALESCE_KINDS = {"keygroups", "detail", "multi_parts", "sample_detail"}
+    _COALESCE_KINDS = {
+        "keygroups",
+        "detail",
+        "multi_parts",
+        "sample_detail",
+        "external_controller",
+    }
 
     programs_loaded = Signal(list)
     programs_load_failed = Signal(str)
@@ -527,6 +545,14 @@ class BridgeWorker(QThread):
     # status bar can still show the real field name either way
     write_succeeded = Signal(str, str, object)
     write_failed = Signal(str, str, str)
+
+    # the sampler-wide "external controller" choice (Breath/Footpedal/
+    # Volume) - not part of any program, so not a submit_write(). The
+    # value is an index into EXTERNAL_CONTROLLER_LABELS.
+    external_controller_loaded = Signal(int)
+    external_controller_load_failed = Signal(str)
+    external_controller_written = Signal(int)
+    external_controller_write_failed = Signal(str)
 
     # DELP/DELK/DELS - S3kBridge.delete_program/delete_keygroup/delete_sample
     # default to confirm=True, which waits for and raises on the hardware's
@@ -682,6 +708,13 @@ class BridgeWorker(QThread):
         self._submit(
             ("write", writer_key, param_name, region, program_index, value, keygroup_index)
         )
+
+    def submit_external_controller(self):
+        self._submit(("external_controller",))
+
+    def submit_set_external_controller(self, value):
+        # not coalesced: every choice must reach the sampler, in order
+        self._submit(("set_external_controller", value))
 
     def submit_delete_program(self, program_index):
         self._submit(("delete_program", program_index))
@@ -1024,6 +1057,48 @@ class BridgeWorker(QThread):
             self.write_failed.emit(writer_key, param_name, str(e))
             return
         self.write_succeeded.emit(writer_key, param_name, value)
+
+    def _handle_external_controller(self):
+        try:
+            value = self._read_external_controller()
+        except Exception as e:
+            self.external_controller_load_failed.emit(str(e))
+            return
+        self.external_controller_loaded.emit(value)
+
+    def _handle_set_external_controller(self, value):
+        try:
+            if not 0 <= value < len(EXTERNAL_CONTROLLER_LABELS):
+                raise ValueError(f"external controller {value} is not 0-2")
+            write_verify = getattr(self._bridge, "_misc_write_verify", None)
+            if write_verify is None or self._s1000:
+                raise DeviceError("not available on this connection")
+            # write, then believe the READ: several misc registers answer a
+            # good write with an error code (see S3kBridge._misc_write_verify)
+            write_verify(
+                MISC_EXTERNAL_CONTROLLER, value, "setting the external controller"
+            )
+        except Exception as e:
+            debug_log.get_logger().error(
+                f"external controller: write of {value} failed: {e}"
+            )
+            self.external_controller_write_failed.emit(str(e))
+            return
+        debug_log.get_logger().info(
+            f"external controller: set to {EXTERNAL_CONTROLLER_LABELS[value]} ({value})"
+        )
+        self.external_controller_written.emit(value)
+
+    def _read_external_controller(self):
+        read_byte = getattr(self._bridge, "_misc_byte", None)
+        if read_byte is None or self._s1000:
+            raise DeviceError("not available on this connection")
+        value = read_byte(MISC_EXTERNAL_CONTROLLER)
+        if not 0 <= value < len(EXTERNAL_CONTROLLER_LABELS):
+            # a firmware that keeps something else here: show nothing rather
+            # than a wrong choice
+            raise DeviceError(f"unexpected value {value} in the register")
+        return value
 
     def _handle_delete_program(self, program_index):
         try:
