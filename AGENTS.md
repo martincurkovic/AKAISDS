@@ -680,6 +680,14 @@ live edits (wired after the Program tab's own combos exist) AND program
 loads (`blockSignals(True)` during load means the live-edit wire never
 fires then) - miss either half and the mirror silently drifts.
 
+**External controller (Program tab, Modulation card; S2000/S3000 only)**: what the "External" source follows is a SAMPLER-WIDE setting (the GLOBAL page's Breath/Footpedal/Volume),
+not stored in any program. Neither Akai spec nor `s3k` names the register: found with `tools/s2000_misc_probe.py` (read-only dump of every misc byte/word with the setting on each choice,
+measured on a real S2000, 2026-10-09) - **misc byte 38**, Breath 0 / Footpedal 1 / Volume 2, the only register that moved; two dumps of one setting were identical.
+`BridgeWorker.submit_external_controller`/`submit_set_external_controller` use `S3kBridge._misc_byte` / `_misc_write_verify` (private, write-then-READ-back because misc registers can
+answer a good write with an error code). The combo uses `activated` (a load must not write), stays DISABLED until a read succeeds (demo mode - `DemoBridge` has no misc registers -
+and a bad value leave it so), is re-read on Refresh, and a failed write re-reads the real value. **The write path is untested on a real sampler** (the probe only reads): the first
+thing a tester should do is flip it and watch the panel's GLOBAL page. The S1000 has no such source (fixed controller routing) and ignores byte-addressable misc ops, so nothing is sent.
+
 ## PRGNUM and Program Change (Multis tab)
 
 No working SysEx write assigns a program to a multi part - only a raw
