@@ -342,6 +342,92 @@ def editor(qapp):
     editor._worker.wait()
 
 
+class _FakeBridgeWithMisc(FakeBridge):
+    # the S3kBridge private misc-byte surface the external controller combo uses
+    def __init__(self, value=1):
+        super().__init__()
+        self.external_controller = value
+        self.write_verify_calls = []
+        self.fail_writes = False
+
+    def _misc_byte(self, index, value=None, **kwargs):
+        assert index == 38
+        return self.external_controller
+
+    def _misc_write_verify(self, index, value, what, **kwargs):
+        assert index == 38
+        self.write_verify_calls.append(value)
+        if self.fail_writes:
+            raise RuntimeError("no reply")
+        self.external_controller = value
+        return value
+
+
+@pytest.fixture
+def misc_editor(qapp, monkeypatch):
+    monkeypatch.delenv("AKAISDS_DEMO_SAMPLER", raising=False)
+    bridge = _FakeBridgeWithMisc(value=1)
+    editor = ProgramEditorWindow(QWidget(), bridge=bridge)
+    _wait_for_program_load(editor, qapp)
+    editor._worker.wait_until_idle()
+    yield editor, bridge
+    editor._worker.stop()
+    editor._worker.wait()
+
+
+def test_external_controller_combo_shows_what_the_sampler_holds(misc_editor, qapp):
+    editor, _bridge = misc_editor
+    _pump_until(qapp, lambda: editor.external_controller_combo.isEnabled())
+    assert editor.external_controller_combo.currentText() == "Footpedal"
+    assert [
+        editor.external_controller_combo.itemText(i)
+        for i in range(editor.external_controller_combo.count())
+    ] == ["Breath", "Footpedal", "Volume"]
+
+
+def test_loading_the_external_controller_writes_nothing(misc_editor, qapp):
+    editor, bridge = misc_editor
+    _pump_until(qapp, lambda: editor.external_controller_combo.isEnabled())
+    editor._worker.wait_until_idle()
+    assert bridge.write_verify_calls == []
+
+
+def test_choosing_an_external_controller_writes_it(misc_editor, qapp):
+    editor, bridge = misc_editor
+    _pump_until(qapp, lambda: editor.external_controller_combo.isEnabled())
+
+    editor.external_controller_combo.setCurrentIndex(2)
+    editor.external_controller_combo.activated.emit(2)
+    editor._worker.wait_until_idle()
+    _pump_until(qapp, lambda: "Volume" in editor.status_bar.currentMessage())
+
+    assert bridge.write_verify_calls == [2]
+    assert bridge.external_controller == 2
+    assert editor.status_bar.currentMessage() == "External controller → Volume"
+
+
+def test_a_failed_external_controller_write_restores_the_real_value(
+    misc_editor, qapp
+):
+    editor, bridge = misc_editor
+    _pump_until(qapp, lambda: editor.external_controller_combo.isEnabled())
+    bridge.fail_writes = True
+
+    editor.external_controller_combo.setCurrentIndex(0)
+    editor.external_controller_combo.activated.emit(0)
+    editor._worker.wait_until_idle()
+    _pump_until(qapp, lambda: editor.external_controller_combo.currentText() == "Footpedal")
+
+    assert bridge.external_controller == 1
+
+
+def test_external_controller_combo_stays_disabled_when_the_read_fails(editor):
+    # FakeBridge has no misc registers: nothing read, so nothing may be written
+    editor._worker.wait_until_idle()
+    assert not editor.external_controller_combo.isEnabled()
+    assert editor.external_controller_combo.currentIndex() == -1
+
+
 class _FakeLeftClick:
     # Knob.mouseDoubleClickEvent only calls .button() - same minimal
     # duck-typed fake tests/test_knob.py's own _FakeMouseEvent uses

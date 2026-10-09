@@ -1660,3 +1660,165 @@ def test_logging_bridge_failures_name_the_field_too():
     failed = [line for line in logger.lines if "FAILED" in line]
     assert failed and "get_parameter(sample.SLNGTH, 0)" in failed[0]
     assert "Parameter(" not in failed[0]
+
+
+# --- external controller (misc byte 38: Breath / Footpedal / Volume) ---------
+
+
+class _MiscBridge:
+    """Duck-types S3kBridge's private misc-byte calls."""
+
+    def __init__(self, value=1, error=None, echo=True):
+        self.registers = {program_editor_bridge.MISC_EXTERNAL_CONTROLLER: value}
+        self.error = error
+        self.echo = echo  # False: the sampler ignores the write
+        self.write_verify_calls = []
+
+    def _misc_byte(self, index, value=None, **kwargs):
+        if self.error:
+            raise self.error
+        return self.registers[index]
+
+    def _misc_write_verify(self, index, value, what, **kwargs):
+        self.write_verify_calls.append((index, value))
+        if self.error:
+            raise self.error
+        if self.echo:
+            self.registers[index] = value
+        if self.registers[index] != value:
+            raise program_editor_bridge.DeviceError(
+                f"{what}: asked for {value}, register reads {self.registers[index]}"
+            )
+        return value
+
+
+def _external_controller_signals(worker):
+    seen = {"loaded": [], "load_failed": [], "written": [], "write_failed": []}
+    worker.external_controller_loaded.connect(seen["loaded"].append)
+    worker.external_controller_load_failed.connect(seen["load_failed"].append)
+    worker.external_controller_written.connect(seen["written"].append)
+    worker.external_controller_write_failed.connect(seen["write_failed"].append)
+    return seen
+
+
+def test_external_controller_register_and_labels_match_the_measurement():
+    # byte 38, Breath 0 / Footpedal 1 / Volume 2 - measured on a real S2000
+    assert program_editor_bridge.MISC_EXTERNAL_CONTROLLER == 38
+    assert program_editor_bridge.EXTERNAL_CONTROLLER_LABELS == (
+        "Breath",
+        "Footpedal",
+        "Volume",
+    )
+
+
+def test_worker_reads_the_external_controller():
+    worker = BridgeWorker(_MiscBridge(value=2))
+    seen = _external_controller_signals(worker)
+
+    worker.submit_external_controller()
+    worker.process_pending()
+
+    assert seen["loaded"] == [2]
+    assert seen["load_failed"] == []
+
+
+@pytest.mark.parametrize("raw", [3, 255])
+def test_worker_refuses_an_unknown_register_value(raw):
+    # a firmware that keeps something else there must show nothing, not a guess
+    worker = BridgeWorker(_MiscBridge(value=raw))
+    seen = _external_controller_signals(worker)
+
+    worker.submit_external_controller()
+    worker.process_pending()
+
+    assert seen["loaded"] == []
+    assert len(seen["load_failed"]) == 1
+
+
+def test_worker_read_failure_is_reported():
+    worker = BridgeWorker(_MiscBridge(error=TimeoutError("no reply")))
+    seen = _external_controller_signals(worker)
+
+    worker.submit_external_controller()
+    worker.process_pending()
+
+    assert seen["loaded"] == []
+    assert seen["load_failed"] == ["no reply"]
+
+
+def test_worker_reports_a_bridge_without_misc_registers_as_unavailable():
+    # DemoBridge has no _misc_byte
+    worker = BridgeWorker(object())
+    seen = _external_controller_signals(worker)
+
+    worker.submit_external_controller()
+    worker.submit_set_external_controller(1)
+    worker.process_pending()
+
+    assert seen["loaded"] == [] and len(seen["load_failed"]) == 1
+    assert seen["written"] == [] and len(seen["write_failed"]) == 1
+
+
+def test_worker_writes_the_external_controller_verified():
+    bridge = _MiscBridge(value=0)
+    worker = BridgeWorker(bridge)
+    seen = _external_controller_signals(worker)
+
+    worker.submit_set_external_controller(2)
+    worker.process_pending()
+
+    assert bridge.write_verify_calls == [(38, 2)]
+    assert seen["written"] == [2]
+    assert seen["write_failed"] == []
+
+
+def test_worker_reports_a_write_the_sampler_did_not_take():
+    bridge = _MiscBridge(value=0, echo=False)
+    worker = BridgeWorker(bridge)
+    seen = _external_controller_signals(worker)
+
+    worker.submit_set_external_controller(2)
+    worker.process_pending()
+
+    assert seen["written"] == []
+    assert len(seen["write_failed"]) == 1
+
+
+@pytest.mark.parametrize("value", [-1, 3])
+def test_worker_never_sends_an_out_of_range_external_controller(value):
+    bridge = _MiscBridge()
+    worker = BridgeWorker(bridge)
+    seen = _external_controller_signals(worker)
+
+    worker.submit_set_external_controller(value)
+    worker.process_pending()
+
+    assert bridge.write_verify_calls == []
+    assert len(seen["write_failed"]) == 1
+
+
+def test_external_controller_is_never_touched_on_an_s1000():
+    bridge = _MiscBridge()
+    worker = BridgeWorker(bridge, s1000=True)
+    seen = _external_controller_signals(worker)
+
+    worker.submit_external_controller()
+    worker.submit_set_external_controller(1)
+    worker.process_pending()
+
+    assert bridge.write_verify_calls == []
+    assert len(seen["load_failed"]) == 1 and len(seen["write_failed"]) == 1
+
+
+def test_queued_external_controller_reads_coalesce_but_writes_do_not():
+    worker = BridgeWorker(_MiscBridge())
+    seen = _external_controller_signals(worker)
+
+    worker.submit_external_controller()
+    worker.submit_external_controller()
+    worker.submit_set_external_controller(1)
+    worker.submit_set_external_controller(2)
+    worker.process_pending()
+
+    assert len(seen["loaded"]) == 1
+    assert seen["written"] == [1, 2]

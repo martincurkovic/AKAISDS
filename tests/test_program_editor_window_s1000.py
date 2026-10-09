@@ -148,6 +148,7 @@ def test_s3000_only_cards_are_hidden(editor):
         editor.portamento_enable_combo,
         editor.mono_legato_combo,
         editor.mod_pan1_combo,
+        editor.external_controller_combo,
         editor.mod_pitch_combo,
     ):
         assert not widget.isVisibleTo(editor)
@@ -319,6 +320,7 @@ def test_s2000_s3000_window_keeps_every_card(qapp):
         assert not editor.env2_graph.isHidden()
         assert editor.lfo2_rate_knob.isVisibleTo(editor)
         assert editor.mod_pan1_combo.isVisibleTo(editor)
+        assert editor.external_controller_combo.isVisibleTo(editor)
         editor.detail_stack.setCurrentIndex(1)
         assert editor.mod_filt1_source_mirror.isVisibleTo(editor)
         assert editor.bend_up_combo.count() == 25
