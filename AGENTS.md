@@ -220,6 +220,9 @@ and its docstring says what each measurement pinned down and what is inferred - 
   the module hook `program_editor_bridge._sleep` (conftest makes it a no-op). Working theory, unproven.
 - **Confirmed on hardware:** a block write changing only offset 0 (channel 1 -> 6) was acked, read back, and the panel followed.
   Off/Omni writes were not tried from the app.
+- **Program change channel is LOCKED too ("Disabled for safety.", before 1.3.0)**: it works (see above) but writes the whole misc block, one of the
+  uncleared suspects in "Real-hardware safety". Unlock with `AKAISDS_UNLOCK_GLOBAL=program_change_channel` or by deleting its `DISABLED_SETTINGS` entry once
+  a misc dump on a healthy drive matches `app_tune_plus50.json`. The block-write path (`_set_block_setting`) is kept and tested.
 - **Locked (`ui/global_tab.py` `DISABLED_SETTINGS`, the whole tooltip is the reason):** tune and fine tune ("Not working right now.")
   - they write and read back but the sampler never uses them: the panel's TUNE screen and the pitch don't change, also after a real
   page round trip, and again in a clean retest with no echo. SCSI controls ("Disabled for safety."). Untried: a power cycle (the
