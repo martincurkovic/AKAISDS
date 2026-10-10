@@ -1,8 +1,7 @@
 # AKAISDS - Yamaha A4000/A5000 editor: measured facts, open items, how to test
 
-Started 2026-10-06, rewritten and condensed 2026-10-09 (the old session-by-session handoff history is in git: `git log -p dev_docs/a4000-editor-roadmap.md`).
-For whoever picks this up (human or agent): read the repo's `AGENTS.md` first (it has the house rules and the "don't regress" list for this editor),
-then this file for the MEASURED protocol facts, the open items and the hardware tools.
+Started 2026-10-06, condensed 2026-10-10 (history is in git). Read the repo's `AGENTS.md` first (house rules and the "don't regress" list),
+then this file for the MEASURED protocol facts, open items and hardware tools.
 
 **State:** the protocol is proven on the real A4000 and the editor works end to end - read AND write of program / Easy Edit / sample parameters,
 native wave dumps (both channels of a stereo sample), editable loop/wave markers + click-to-preview, restore from backup, assign/remove samples,
@@ -27,21 +26,18 @@ native sample LOADING (Dashboard Send), sample edits and the Slice Editor (each 
    Normal, Slow, Slow&Rev, Stop, Stop&Rev, the Up[A]Dwn[B] types and Up&Dwn12 - photograph the unit's own list: Sample > Knob 2 LIST...).
 5. **Edit copies carry less than the original**: envelopes, filter, EQ, LFO, controllers and outputs are the template's defaults. If that matters, build the copy's SP from
    the source's own dump with the name / wave names / object address and the "linked to program" map (+24..+39) cleared - untested.
-6. **Native load leftovers** (`dev_docs/a4000-native-load-findings.md`): pacing minimum, odd names, wave memory full, a failed REPLACE. Samples sent by an earlier run are
-   not flagged by the assign warning (only this run's loads are known).
-7. **Remote-panel delete/rename** (the `58 03` switch remote, below) was never tried - and the unit's silent-state behaviour makes open-loop button pushes unsafe until understood.
-8. Unproven but implemented: the right CHANNEL's playback using its own copy of the address twins (they stay equal, that is all that was shown); restore is a series of
-   guarded writes, NOT a bulk load (a bulk load back into the unit is unmeasured); sample BANKS (link/restore); "other mid-dump messages" as a way to abort a bulk dump
-   (identity and SDS CANCEL do not work). A program took 96 samples with no refusal - the limit, if any, is higher.
-9. The loading bar (200 ms show / 150 ms hide debounce, copied from the S3000 editor) - just look at it during a refresh on the real unit.
+6. **Native load leftovers** (`a4000-native-load-findings.md`): pacing minimum, odd names, wave memory full, a failed REPLACE. Samples sent by an earlier run
+   are not flagged by the assign warning (only this run's loads are known).
+7. **Remote-panel delete/rename** (the `58 03` switch remote, below) was never tried, and open-loop button pushes are unsafe while the silent-unit state is unexplained.
+8. Implemented but unproven: the right CHANNEL playing from its own copy of the address twins (they stay equal, that is all that was shown); restore is a series
+   of guarded writes, NOT a bulk load (a bulk load back into the unit is unmeasured); sample BANKS (link/restore); aborting a bulk dump with other messages (identity
+   and SDS CANCEL don't work). A program took 96 samples with no refusal - the limit, if any, is higher.
 
-**Next steps without the unit:** the missing parameter tables as rows + fake tests (effect blocks P2=21 40 bytes x3 at bulk 96 - read the owner's/service manual p.39 first;
-the four controllers P2=22, 4 bytes x4 at bulk 216; MIDI-channel bitmaps P2=1,2; system parameters = single reads/writes only, no bulk layout is documented; sample banks;
-stereo R wave/loop addresses), verified later with `tools/a4000_verify_params.py` (read-only) then `tools/a4000_write_verify.py` on throwaways. The restore job restores
-whatever rows exist, so new rows are restored for free. **Polish backlog:** remember a loaded waveform per sample (only the last is kept), program names for empty programs
-on demand, remember the last program/tab, a Device Number field in Settings (config.json `yamaha_device_number` only today), the Level & Pan card on the assigned-sample page
-has empty space under its knobs (pinned equal to Key), restoring a program's ASSIGNMENTS (a restore only restores values), A5000 MIDI-B channels 17-32 and
-`effect456_connection`, a "maximum samples per program" check.
+**Next steps without the unit:** the missing parameter tables as rows plus fake tests (effect blocks P2=21, 40 bytes x3 at bulk 96 - read the service manual p.39 first;
+the four controllers P2=22, 4 bytes x4 at bulk 216; MIDI-channel bitmaps P2=1,2; system parameters are single reads/writes only; sample banks; stereo R wave/loop
+addresses), verified later with `a4000_verify_params.py` (read-only) then `a4000_write_verify.py` on throwaways. The restore job restores whatever rows exist, so new
+rows are restored for free. **Polish backlog:** remember a loaded waveform per sample, program names for empty programs on demand, remember the last program/tab, a
+Device Number field in Settings (`yamaha_device_number` in config.json only today), restoring a program's ASSIGNMENTS, A5000 MIDI-B channels 17-32.
 
 ## Decisions made with the user (don't undo without asking)
 
@@ -76,21 +72,17 @@ warning doesn't block a script). A tool that talks to the unit while a window is
 
 ## Source material
 
-The manuals are copyrighted and NOT in this repo (the user has them; ask). **Service manual** (`Yamaha_A4000_A5000_Sampler_Service_Manual.pdf`, 61 pp): PDF pages 32-42
-"MIDI DATA FORMAT", 43 the implementation chart; 35 = SDS tail, identity, bulk dump + request; 36 = parameter change/request/object link; 37 = Table 1 bulk layouts; 38 =
-Control/Sample Parameter/Easy Edit blocks; 39 = effect parameters (never read in detail); 40-41 = Table 2 parameter numbering + value enums; 42 = filter-type enum, outputs,
-system parameters, switch remote. `pdftotext -layout` is useless for its tables (it interleaves columns) - render with `pdftoppm -f 35 -l 42 -r 110 -png` and look; the
-tables were read by eye, so re-check any offset against the page. **Owner's manual** (`~/Desktop/yamaha_a4000_a5000_manual.pdf`, 296 pp, `pdftotext -layout` works; printed page
-numbers differ from the PDF's): assignment p.55-56 (PLAY > PROGRAM > SAMPLE, Knob 2 pick, Knob 4 assign/channel), Easy Edit p.96-101 (PLAY > F3, Knob 1 page, Knob 2 sample,
-Knob 3/4 Level/Pan offset), the effective key range p.99, UTILITY > MIDI bulk (Knob 3 Bulk Protect, Knob 4 Device#) ~p.201, Wave Data Bulk Dump printed p.277-279, error messages
-("Please set device number", "Bulk protect switch is ON") near the end.
+The manuals are copyrighted and NOT in this repo (the owner has them). **Service manual** (61 pp): PDF pages 32-42 "MIDI DATA FORMAT" (35 = SDS tail,
+identity, bulk dump + request; 36 = parameter change/request/object link; 37 = Table 1 bulk layouts; 38 = Control/Sample Parameter/Easy Edit blocks; 39 = effect
+parameters, never read in detail; 40-41 = Table 2 numbering + value enums; 42 = filter types, outputs, system parameters, switch remote), 43 = implementation chart.
+`pdftotext -layout` scrambles its tables - render with `pdftoppm -f 35 -l 42 -r 110 -png` and look; the tables were read by eye, so re-check any offset against
+the page. **Owner's manual** (296 pp, `pdftotext -layout` works): assignment p.55-56, Easy Edit p.96-101, the effective key range p.99, UTILITY > MIDI bulk
+(Bulk Protect, Device #) ~p.201, Wave Data Bulk Dump p.277-279, error messages near the end.
 
-**Switch remote (`F0 43 1n 58 03 <id> 00 00 00 00 00 <value> F7`)** - front-panel key/knob remote control; how delete and rename COULD be done (found in a third-party Ctrlr panel,
-unlicensed as far as we saw - take the protocol facts only, never its code). A button push is `id` = button number (F1-F6 = 0-5, COMMAND 6, Audition 8, Play/Edit/Rec/Disk/Util
-9-13, Knob1-5 push 14-18), value 64; a knob turn is `id` 109 + knob (14-18), value 64 + steps (-63..63). There is NO delete/rename opcode - the panel drives the menus open loop
-with fixed sleeps (1 s per push, 0.3 s per turn): Play, F2, COMMAND, Knob1 left 10, Knob3 push + left 10, Knob4 left 10s to the list top then right N (banks first: N = bank count +
-the sample's index), Knob1 push (confirm), Knob5 push (EXEC), re-read the object list. Rename types the name character by character. UNTESTED by us. Session 6 measured that a
-Knob 5 push is NOT processed while the unit is silent.
+**Switch remote** (`F0 43 1n 58 03 <id> 00 00 00 00 00 <value> F7`): front-panel key/knob remote control, found in a third-party Ctrl panel (unlicensed - protocol
+facts only, never its code). Buttons are `id` 0-18 (F1-F6 = 0-5, Audition 8, Play/Edit/Rec/Disk/Util 9-13, Knob 1-5 push 14-18) with value 64; a knob turn is
+`id` 109 + knob, value 64 + steps. There is NO delete/rename opcode, so delete and rename COULD be driven open loop through the menus with fixed sleeps. Untested; a
+Knob 5 push is not processed while the unit is silent.
 
 ## Protocol facts (service manual + measured; **CORRECTION** marks where the manual was wrong)
 
@@ -169,31 +161,24 @@ the sample as the next Easy Edit slot, count+1, every Easy Edit value at its def
 link bit set, edited flag set; unlinking a MIDDLE slot COMPACTS (later slots keep their values), clears the bit and leaves stale bytes in the vacated last block; linking twice or an unknown
 name changes nothing; unlink restores a dump byte for byte when nothing was edited. Stereo assign + Easy Edit restore round trip + remove: PROVEN.
 
-### Native sample loading (`core/yamaha_load.py`; full measurements in `dev_docs/a4000-native-load-findings.md`)
+### Native sample loading (measurements in `a4000-native-load-findings.md`)
 
-A load = the wave dump(s) THEN one SP, paced by wire time + `send_gap_ms` (400). The unit never answers a bulk dump ("MIDI Bulk Received" on the LCD). A WD alone is dropped - it only counts
-with the SP that names it (either order); a missing/short/duplicated/reordered wave message creates NOTHING; a wave under an existing wave's name is overwritten in place (so wave names are
-random `SMP nnnnnn`); a sample under an existing SAMPLE name is replaced in place with ALL parameters reset (so the app never overwrites - a clash gets ` 2`). No frames are trimmed; rates
-1..65535 verbatim; 330-590 frames/s per channel (stereo twice).
-**Proven through the app code** (`a4000_app_check.py load`): a looping mono sample (loop mode 1, loop 1000..5000, key 57, fine tune 17) and a real stereo sample, params carried, L and R
-audio identical. Edits (Reverse, Normalise, Trim, Fade, Filter) on a looping mono and a stereo sample: copy created, loop/wave addresses as computed, key/tune/rate carried, stereo kept, audio
-identical to the computed transform. Slice Editor + fill a program: 8 stereo slices (109 s) and 6 mono, then 40 mono slices (export 663 s, fill 14 s), each on its own key (C1 up), one-shot,
-linked in order.
+**Proven through the app code** (`a4000_app_check.py load`): a looping mono sample (loop mode 1, loop 1000..5000, key 57, fine tune 17) and a real stereo sample, params
+carried, L and R audio identical. Edits (Reverse, Normalise, Trim, Fade, Filter) on a looping mono and a stereo sample: copy created, loop/wave addresses as computed,
+key/tune/rate carried, stereo kept, audio identical to the computed transform. Slice Editor + fill a program: 8 stereo slices (109 s) and 6 mono, then 40 mono slices
+(export 663 s, fill 14 s), each on its own key (C1 up), one-shot, linked in order.
 
 ## Session 6: the silent unit (2026-10-07, hardware)
 
-After native loads the unit can show "MIDI Bulk Received" and then answers NOTHING over MIDI (identity, object list, links) until a person presses OK (Knob 5) on it: 716 s untouched, then it
-answered the instant OK was pressed (the message was visible the whole time; it was already silent to an identity request right after the load, before the link). It is a dialog, not busyness.
-Reads often still work right after a load; the first LINK after loads was what hung it in 5 of 6 runs (mono and stereo; the link itself DOES take effect, only the confirmation never comes),
-also on a sample loaded 15 min earlier; factory samples (`pulse n`) link fine, and linking at another time (loaded earlier, nothing pending) never hung. Repeated object-list requests at a
-waiting unit just pop "Transmitting Object List" (Knob 5 aborts it) - so the app probes with an identity request instead. The Knob 5 remote (`58 03`) is not processed while blocked; sent while
-the unit still answered it once avoided the hang (n=1, a batch of 3 loads + one push still hung) - unproven, unused. The app copes through `yamaha_sample_edit._recover_silent_link` and the
-assign warning (AGENTS.md). **Bug found and fixed there:** `YamahaTransfers._verify_sample` compared `wave_length` with the audio's frame count, so a copy carrying the source's shorter
-Start/End window was reported "not loaded" although it had landed (it now expects the carried `wave_length`).
+After native loads the unit can show "MIDI Bulk Received" and then answer NOTHING over MIDI (identity, object list, links) until a person presses OK (Knob 5):
+716 s untouched, then it answered the instant OK was pressed. It is a dialog, not busyness. Reads often still work right after a load; the first LINK after loads
+hung it in 5 of 6 runs (mono and stereo; the link itself DOES take effect, only the confirmation never comes), also for a sample loaded 15 minutes earlier. Factory
+samples link fine, and linking at another time (nothing pending) never hung. Repeated object-list requests at a waiting unit just pop "Transmitting Object List", so
+the app probes with an identity request. The Knob 5 remote is not processed while blocked. The app copes through `yamaha_sample_edit._recover_silent_link` and the
+assign warning. **Open (item 1 above): what makes the first link after loads safe?**
 
 ## Working rules
 
-Back up before any write (the session enforces it); throwaway objects first; don't copy code from other projects without checking the licence (the S950 port recorded the MIT notice in
-`THIRD_PARTY_NOTICES.md`; no Yamaha-specific open-source editor has been reviewed); don't edit the pinned `s3k`/`s3ked`; no thread-per-action; no real multi-threaded stress tests. The
-`tests/fixtures/a4000/*.syx` files are REAL captures - never regenerate them from the codec (the byte-for-byte tests would become circular); take a new capture with `a4000_discovery.py` and
-add it alongside. Record measured-vs-guessed facts in `AGENTS.md` as you go.
+Back up before any write (the session enforces it); throwaway objects first; check a licence before borrowing code (the S950 port's MIT notice is in
+`THIRD_PARTY_NOTICES.md`); don't edit the pinned `s3k`/`s3ked`; no thread-per-action; no real multi-threaded stress tests. `tests/fixtures/a4000/*.syx` are REAL
+captures - never regenerate them from the codec; take a new capture with `a4000_discovery.py` and add it alongside.
