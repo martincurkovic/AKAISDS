@@ -21,8 +21,12 @@ try:
 except ImportError:
     APP_VERSION = "1.0.0-dev"  # fallback version number
 GITHUB_URL = "https://github.com/martincurkovic/AKAISDS"
+# the dialog is fixed-size, so its width follows the widest label: wrap the text labels here
+_TEXT_MAX_WIDTH = 440
 # bundled with the rest of ui/help (pysidedeploy.spec's --include-data-dir=ui/help=ui/help)
-_NOTICES_PATH = os.path.join(os.path.dirname(__file__), "help", "THIRD_PARTY_NOTICES.md")
+_NOTICES_PATH = os.path.join(
+    os.path.dirname(__file__), "help", "THIRD_PARTY_NOTICES.md"
+)
 
 
 class NoticesDialog(QDialog):
@@ -31,7 +35,7 @@ class NoticesDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Third-party notices")
-        self.resize(620, 520)
+        self.resize(760, 520)
         viewer = QTextBrowser()
         viewer.setOpenExternalLinks(True)
         try:
@@ -44,6 +48,18 @@ class NoticesDialog(QDialog):
         layout = QVBoxLayout(self)
         layout.addWidget(viewer)
         layout.addWidget(buttons)
+        # the licence text is a preformatted block that doesn't wrap, so size the window to its
+        # longest line (font-dependent) instead of a fixed width that needs a horizontal scrollbar
+        wanted = (
+            int(viewer.document().idealWidth())
+            + 2 * viewer.frameWidth()
+            + viewer.verticalScrollBar().sizeHint().width()
+            + 2 * layout.contentsMargins().left()
+            + 16
+        )
+        screen = self.screen()
+        limit = int(screen.availableGeometry().width() * 0.9) if screen else wanted
+        self.resize(min(max(wanted, self.width()), limit), self.height())
 
 
 class AboutDialog(QDialog):
@@ -65,12 +81,14 @@ class AboutDialog(QDialog):
         layout.addWidget(version_label)
 
         description_label = QLabel(
-            "A cross-platform sample transfer tool and editor for Akai, Yamaha\n"
+            "A cross-platform sample transfer tool and editor for Akai, Yamaha "
             "and generic MIDI SDS-compatible samplers."
         )
         description_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         description_label.setWordWrap(True)
-        layout.addWidget(description_label)
+        description_label.setFixedWidth(_TEXT_MAX_WIDTH)
+        description_label.setFixedHeight(description_label.heightForWidth(_TEXT_MAX_WIDTH))
+        layout.addWidget(description_label, alignment=Qt.AlignmentFlag.AlignHCenter)
 
         link_label = QLabel(f'<a href="{GITHUB_URL}">{GITHUB_URL}</a>')
         link_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -86,7 +104,9 @@ class AboutDialog(QDialog):
         )
         credits_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         credits_label.setWordWrap(True)
-        layout.addWidget(credits_label)
+        credits_label.setFixedWidth(_TEXT_MAX_WIDTH)
+        credits_label.setFixedHeight(credits_label.heightForWidth(_TEXT_MAX_WIDTH))
+        layout.addWidget(credits_label, alignment=Qt.AlignmentFlag.AlignHCenter)
 
         self._update_runner = UpdateCheckRunner(self)
 
@@ -120,7 +140,9 @@ class AboutDialog(QDialog):
     def _check_for_updates(self):
         self._check_updates_button.setEnabled(False)
         self._update_progress.setVisible(True)
-        self._update_runner.start(manual=True, on_finished=self._on_update_check_finished)
+        self._update_runner.start(
+            manual=True, on_finished=self._on_update_check_finished
+        )
 
     def _on_update_check_finished(self):
         self._update_progress.setVisible(False)
