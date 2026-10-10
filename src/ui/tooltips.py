@@ -435,6 +435,17 @@ MOD_MATRIX_AMOUNT_KNOB = (
     "assigned source."
 )
 
+# --- Keygroup tab: mute group and velocity-driven sample start ---------------------------------
+MUTE_GROUP_COMBO = (
+    "Keygroups in the same mute group cut each other off - a closed hi-hat "
+    "choking an open one. Off lets this keygroup ring freely."
+)
+VELOCITY_START_KNOB = (
+    "Moves this zone's sample start point with note-on velocity, in sample "
+    "points (-9999 to +9999). 0 = the start never moves. Shift-drag for fine "
+    "control; click, then type a number."
+)
+
 # --- Global tab (core/global_settings.py) - settings of the whole sampler ----------------
 EXTERNAL_CONTROLLER_COMBO = (
     "Which controller the \"External\" modulation source follows. This is a "

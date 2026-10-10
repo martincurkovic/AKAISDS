@@ -310,6 +310,14 @@ _KEYGROUP_DETAIL_FIELDS = [
     "VPANO4",
     "ZPLAY4",
     "CP4",
+    # keygroup mute group (0xFF = off, 0-31 = a group - see s3k.params' own notes: a zero-filled header is an ACTIVE group 0)
+    # and the per-velocity-zone sample START dependence on velocity (signed, sample points). S2000/S3000 only: an S1000 reads KGMUTE (offset 160,
+    # past its 150-byte block) as a neutral zero, and its editor hides both.
+    "KGMUTE",
+    "VSS1",
+    "VSS2",
+    "VSS3",
+    "VSS4",
 ]
 
 #: sample-header fields the Samples tab's waveform view needs. LOOPAT1 is

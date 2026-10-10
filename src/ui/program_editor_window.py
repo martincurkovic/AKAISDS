@@ -216,6 +216,12 @@ _PORTAMENTO_TYPE_OPTIONS = [
 # not env3 itself) - but this app has no Envelope 3 editor page yet, so
 # offering it as a source with no way to shape its ADSR would be confusing
 # rather than useful. Revisit once/if an Envelope 3 page exists.
+# Keygroup mute group (KGMUTE): the raw byte is 0xFF for OFF and 0-31 for a real group - raw 0 is a REAL group (the panel's group "1"), so a zero-filled header is an
+# active one (s3k.params' notes, measured: two keygroups at 0 over the same notes and only one sounds). The panel numbers the groups 1-32 (confirmed on the user's S2000).
+# The combo therefore maps by item DATA (label = raw + 1), never by index.
+_MUTE_GROUP_OFF = 255
+_MUTE_GROUP_COUNT = 32
+
 _MOD_SOURCE_LABELS = [
     "None",
     "Modwheel",
@@ -799,6 +805,22 @@ class ProgramEditorWindow(QMainWindow):
         note_range_row.addWidget(self.note_hi_spinbox)
         note_range_row.addStretch()
 
+        # keygroup mute group - a choke group (closed hi-hat cuts the open one). Item DATA is the raw byte (Off = 255); see _MUTE_GROUP_OFF
+        self.mute_group_combo = QComboBox()
+        self.mute_group_combo.addItem("Off", _MUTE_GROUP_OFF)
+        for group in range(_MUTE_GROUP_COUNT):
+            # the PANEL numbers the groups 1-32 (confirmed on the user's S2000, 2026-10-10); the raw byte is 0-31
+            self.mute_group_combo.addItem(str(group + 1), group)
+        self.mute_group_combo.setToolTip(tt.MUTE_GROUP_COMBO)
+        self.mute_group_combo.setFixedWidth(70)
+        self.mute_group_combo.currentIndexChanged.connect(self._on_mute_group_chosen)
+        mute_group_row = QHBoxLayout()
+        mute_group_label = QLabel("Mute Group")
+        mute_group_label.setFixedWidth(80)
+        mute_group_row.addWidget(mute_group_label)
+        mute_group_row.addWidget(self.mute_group_combo)
+        mute_group_row.addStretch()
+
         self.cutoff_knob = Knob()
         self.cutoff_knob.setRange(0, 99)
         self.cutoff_knob.setDefaultValue(99)  # fully open - no filtering
@@ -1001,6 +1023,9 @@ class ProgramEditorWindow(QMainWindow):
         self._zone_pan = []
         self._zone_looptype = []
         self._zone_keytrack = []
+        self._zone_vss = []  # per-zone sample START dependence on velocity (VSS1-4): small bipolar knobs
+        self._zone_vss_labels = []  # their value readouts
+        self._zone_vss_rows = []  # the layouts holding them, hidden on an S1000 (_apply_s1000_gating)
 
         _ZONE_FIELDS = [
             (
@@ -1140,10 +1165,33 @@ class ProgramEditorWindow(QMainWindow):
             vel_row.addSpacing(12)
             vel_row.addWidget(vel_hi_label)
             vel_row.addWidget(vel_hi)
+
+            # velocity-driven sample start (VSS<n>): a signed start-point offset in sample points, as a small bipolar knob (the editor's 28px
+            # convention) right of Velocity High. -9999..9999 is coarse on a knob: Shift-drag is fine control and a click types an exact value,
+            # like every Knob. Its own layout so an S1000 (no VSS) can hide just this part of the row.
+            vss_group = QHBoxLayout()
+            vss_group.setSpacing(4)
+            vss_group.addSpacing(12)
+            vss_label = QLabel("Vel. start")
+            vss_label.setFixedWidth(60)
+            vss = Knob()
+            vss.setRange(-9999, 9999)
+            vss.setDefaultValue(0)
+            vss.setFixedSize(28, 28)
+            vss.setToolTip(tt.VELOCITY_START_KNOB)
+            vss.setEnabled(True)
+            vss_knob_row, vss_value_label = build_knob_value_row(vss)
+            vss_value_label.setFixedWidth(44)  # "-9999"
+            vss_group.addWidget(vss_label)
+            vss_group.addLayout(vss_knob_row)
+            vel_row.addLayout(vss_group)
             vel_row.addStretch()
             page_layout.addLayout(vel_row)
             self._zone_vel_lo.append(vel_lo)
             self._zone_vel_hi.append(vel_hi)
+            self._zone_vss.append(vss)
+            self._zone_vss_labels.append(vss_value_label)
+            self._zone_vss_rows.append(vss_group)
 
             # tune stays as a spinbox — precision decimal values need it
             tune_row = QHBoxLayout()
@@ -1217,6 +1265,12 @@ class ProgramEditorWindow(QMainWindow):
                 value_converter=self._semitones_to_tune_offset,
             )
             self._wire_knob_write(
+                vss,
+                f"VSS{zone_idx + 1}",
+                "keygroup",
+                keygroup_index_getter=self.keygroup_list.currentRow,
+            )
+            self._wire_knob_write(
                 loud_knob,
                 vloud,
                 "keygroup",
@@ -1251,7 +1305,7 @@ class ProgramEditorWindow(QMainWindow):
         # independently meaningful generators (a genuine ADSR vs. ENV2's
         # 4-stage rate/level shape, see Envelope2Graph's own comment), and a
         # shared "Envelopes" title read as one thing when it's really two.
-        range_section = self._build_section_card("Range", note_range_row)
+        range_section = self._build_section_card("Range", note_range_row, mute_group_row)
         filter_section = self._build_section_card("Filter", knobs_layout)
         env1_section = self._build_section_card(
             "Envelope 1", env1_graph_row, env1_controls_row
@@ -2578,6 +2632,8 @@ class ProgramEditorWindow(QMainWindow):
                     resonance_column,
                     env2_grid,
                     env2_graph_row,
+                    mute_group_row,
+                    *self._zone_vss_rows,
                 ],
                 env_sections=(env1_section, env2_section),
                 bend_up_column=bend_up_column,
@@ -8783,6 +8839,40 @@ class ProgramEditorWindow(QMainWindow):
             keytrack_combo.blockSignals(True)
             keytrack_combo.setCurrentIndex(values.get(cp, 0))
             keytrack_combo.blockSignals(False)
+
+            vss_value = values.get(f"VSS{z + 1}", 0)
+            self._zone_vss[z].blockSignals(True)
+            self._zone_vss[z].setValue(vss_value)
+            self._zone_vss_labels[z].setText(str(vss_value))
+            self._zone_vss[z].blockSignals(False)
+
+        self._show_mute_group(values.get("KGMUTE", _MUTE_GROUP_OFF))
+
+    def _show_mute_group(self, raw):
+        """Show the keygroup's mute group WITHOUT writing it. A raw byte the sampler holds that the combo has no entry for (32-254) gets its own temporary item
+        (\"Raw N\") - never silently shown as Off or as another group."""
+        combo = self.mute_group_combo
+        combo.blockSignals(True)
+        try:
+            # drop a "Raw N" item left by the previous keygroup
+            for i in range(combo.count() - 1, -1, -1):
+                if combo.itemData(i) is not None and combo.itemData(i) != _MUTE_GROUP_OFF and combo.itemData(i) >= _MUTE_GROUP_COUNT:
+                    combo.removeItem(i)
+            index = combo.findData(raw)
+            if index < 0:
+                combo.addItem(f"Raw {raw}", raw)
+                index = combo.count() - 1
+            combo.setCurrentIndex(index)
+        finally:
+            combo.blockSignals(False)
+
+    def _on_mute_group_chosen(self, index):
+        raw = self.mute_group_combo.itemData(index)
+        if raw is None:
+            return
+        self._schedule_write(
+            "KGMUTE", "keygroup", raw, keygroup_index=self.keygroup_list.currentRow()
+        )
 
 
 if __name__ == "__main__":
