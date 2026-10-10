@@ -1,3 +1,5 @@
+import os
+
 from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
@@ -5,6 +7,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QProgressBar,
     QPushButton,
+    QTextBrowser,
     QVBoxLayout,
     QLayout,
 )
@@ -18,6 +21,29 @@ try:
 except ImportError:
     APP_VERSION = "1.0.0-dev"  # fallback version number
 GITHUB_URL = "https://github.com/martincurkovic/AKAISDS"
+# bundled with the rest of ui/help (pysidedeploy.spec's --include-data-dir=ui/help=ui/help)
+_NOTICES_PATH = os.path.join(os.path.dirname(__file__), "help", "THIRD_PARTY_NOTICES.md")
+
+
+class NoticesDialog(QDialog):
+    """Third-party licence notices (help/THIRD_PARTY_NOTICES.md), shown from the About dialog."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Third-party notices")
+        self.resize(620, 520)
+        viewer = QTextBrowser()
+        viewer.setOpenExternalLinks(True)
+        try:
+            with open(_NOTICES_PATH, "r", encoding="utf-8") as f:
+                viewer.setMarkdown(f.read())
+        except OSError as e:
+            viewer.setPlainText(f"Couldn't load the notices: {e}")
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        buttons.rejected.connect(self.reject)
+        layout = QVBoxLayout(self)
+        layout.addWidget(viewer)
+        layout.addWidget(buttons)
 
 
 class AboutDialog(QDialog):
@@ -39,8 +65,8 @@ class AboutDialog(QDialog):
         layout.addWidget(version_label)
 
         description_label = QLabel(
-            "A cross-platform MIDI Sample Dump Standard transfer tool\n"
-            "for Akai and generic SDS-compatible samplers."
+            "A cross-platform sample transfer tool and editor for Akai, Yamaha\n"
+            "and generic MIDI SDS-compatible samplers."
         )
         description_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         description_label.setWordWrap(True)
@@ -52,8 +78,10 @@ class AboutDialog(QDialog):
         layout.addWidget(link_label)
 
         credits_label = QLabel(
-            "Built with PySide6 (Qt), mido, python-rtmidi, soundfile, s3ked and Nuitka.\n"
-            "Many thanks to Jan Lentfer for their hard work on s3ked.\n"
+            "Built with PySide6 (Qt), mido, python-rtmidi, soundfile, miniaudio, s3ked and Nuitka.\n"
+            "Many thanks to Jan Lentfer for their hard work on s3ked, and to Frank Neumann "
+            "for transcribing the Akai SysEx documentation (lakai.sourceforge.net).\n"
+            "S900/S950 support is partly ported from s950tools by Brandon Ivers (MIT).\n"
             "Licensed under GPL-3.0"
         )
         credits_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -67,6 +95,9 @@ class AboutDialog(QDialog):
         self._check_updates_button.clicked.connect(self._check_for_updates)
         check_updates_row.addStretch()
         check_updates_row.addWidget(self._check_updates_button)
+        notices_button = QPushButton("Licences")
+        notices_button.clicked.connect(lambda: NoticesDialog(self).exec())
+        check_updates_row.addWidget(notices_button)
         check_updates_row.addStretch()
         layout.addLayout(check_updates_row)
 
