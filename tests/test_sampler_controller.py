@@ -1600,12 +1600,58 @@ def test_cancel_disarms_the_watchdog(controller):
     assert not any("No reply" in s for s in statuses)
 
 
-def test_unexpected_sysex_is_logged(controller, caplog):
+def test_unexpected_sysex_is_logged_but_never_shown_in_the_status_bar(controller, caplog):
     import logging
 
-    with caplog.at_level(logging.WARNING, logger="akaisds"):
+    statuses = _statuses(controller)
+    with caplog.at_level(logging.DEBUG, logger="akaisds"):
+        controller._on_sysex_received_impl(bytes([0x47, 0, 0x55, 1, 2]))  # an Akai message nobody asked for (e.g. the editor's reply, a panel edit)
+    assert any("unrecognised Akai message (function 85)" in r.message for r in caplog.records)
+    assert not any("unrecognised" in s.lower() or "unexpected" in s.lower() for s in statuses)
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        bytes([0x47, 0, 0x0B, 0x48, 1, 2, 3]),  # an SDATA nobody asked for
+        bytes([0x47, 0, 0x01, 0x48, 1, 2, 3]),  # a STAT nobody asked for
+        bytes([0x47, 0, 0x16, 0x48, 7]),  # a REPLY with an odd result byte
+        bytes([0x47, 0, 0x55, 1, 2]),  # an unknown Akai function
+        bytes([0x43, 0x10, 0x20]),  # not Akai at all
+    ],
+)
+def test_no_unexpected_message_reaches_the_status_bar(controller, message):
+    statuses = _statuses(controller)
+    controller._on_sysex_received_impl(message)
+    assert statuses == []
+
+
+def test_unexpected_sysex_lines_are_debug_and_capped(controller, caplog, monkeypatch):
+    import logging
+
+    from controller import sampler_controller as sc
+    from core import sysex_trace
+
+    clock = [0.0]
+    monkeypatch.setattr(sc, "_UNEXPECTED_LOG_BUDGET", sysex_trace.LineBudget(max_lines=5, window_s=10, clock=lambda: clock[0]))
+    with caplog.at_level(logging.DEBUG, logger="akaisds"):
+        for _ in range(12):
+            controller._on_sysex_received_impl(bytes([0x47, 0, 0x55, 1, 2]))
+        clock[0] += 11
         controller._on_sysex_received_impl(bytes([0x47, 0, 0x55, 1, 2]))
-    assert any("unrecognised Akai message" in r.message for r in caplog.records)
+    lines = [r for r in caplog.records if "SamplerController" in r.message]
+    received = [r for r in lines if "received unrecognised Akai message" in r.message]
+    assert len(received) == 5 + 1  # 5 in the first window, then logging resumes in the next
+    assert all(r.levelno == logging.DEBUG for r in received)  # no longer warnings
+    assert any("7 more unexpected SysEx message(s) not logged in the last 10 s" in r.message for r in lines)
+
+
+def test_a_real_transfer_anomaly_is_still_a_warning(controller, caplog):
+    import logging
+
+    with caplog.at_level(logging.DEBUG, logger="akaisds"):
+        controller._log_unexpected_sysex("data packet before any header", bytes([1, 2, 3]))
+    assert [r.levelno for r in caplog.records if "data packet before any header" in r.message] == [logging.WARNING]
 
 
 # --- Sampler Type: S1000 vs S2000/S3000 vs Generic ------------------------------

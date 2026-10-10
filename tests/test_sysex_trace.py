@@ -121,3 +121,17 @@ def test_outgoing_sysex_is_traced_on_the_shared_transport(manager, monkeypatch, 
     manager.send_sysex(bytes([0x47, 0x00, 0x00, 0x48]))
     assert sent == [[0xF0, 0x47, 0x00, 0x00, 0x48, 0xF7]]
     assert any("MIDI out SysEx 47 00 00 48 (4 B)" in r.getMessage() for r in caplog.records)
+
+
+# --- LineBudget (shared by the wire trace and the controller's "unexpected SysEx" lines) --------------------
+
+
+def test_line_budget_allows_max_lines_then_reports_the_drops_once_per_window():
+    clock = _Clock()
+    budget = sysex_trace.LineBudget(max_lines=3, window_s=10, clock=clock)
+    assert [budget.allow() for _ in range(5)] == [True, True, True, False, False]
+    assert budget.take_suppressed() == 0  # the window has not ended
+    clock.now += 10.5
+    assert budget.allow() is True
+    assert budget.take_suppressed() == 2
+    assert budget.take_suppressed() == 0  # reading it resets it

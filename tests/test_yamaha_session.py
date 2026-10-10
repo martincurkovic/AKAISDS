@@ -203,9 +203,9 @@ def test_the_session_only_exists_for_the_yamaha_model(qapp):  # noqa: F811
     other = build(demo.FakeA4000(), model="generic")
     with pytest.raises(RuntimeError):
         other.controller.yamaha_session()
-    # and a stray 0x43 message there is still reported as unrecognised, exactly as before
+    # and a stray 0x43 message there takes the generic path - which now only LOGS it (never the status bar)
     other.controller.on_sysex_received(y.build_object_select(0, "001", "program"))
-    assert any("unrecognised" in s for s in other.statuses)
+    assert not any("unrecognised" in s for s in other.statuses)
 
 
 def test_yamaha_transfers_use_the_generic_family(rig):
