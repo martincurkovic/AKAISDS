@@ -532,6 +532,14 @@ this app should log here, not `print()`.
   (>1 s) ACKs and the per-unit summary. Log rotation is 8 MB x 3 backups.
 - Not done: logging the sampler's identity/firmware at editor open, and the S1000 gating state at open.
 
+**Wire trace and session lifecycle logs for the non-S3000 editors (added 2026-10-10, after an incident that could only be diagnosed because the S3000 path logged raw frames):**
+`core/sysex_trace.py`'s `SysexTrace`, owned by `MidiManager`, writes a DEBUG line `MIDI out|in SysEx <first 16 bytes hex> (<N> B)` for every SysEx the Dashboard, the S900/S950 editor and the Yamaha editor send (`send_sysex`) or receive
+(`sysex_received`) - never the payload, capped at 300 lines per 10 s per direction with ONE "N more not logged" line per window (a sample transfer is tens of thousands of packets; the log rotates at 8 MB x 3). The S3000 Program Editor still
+logs through `LoggingBridge` (every call with timing + the raw frames; `reply_matching` adds a WARNING at the first skipped stray). `YamahaSession` now logs the lifecycle of every operation - `start <write P=value on '001' | assign/remove sample |
+bulk dump FMT name | wave dump | bulk send | read N parameter(s)>` (INFO; reads DEBUG) and `... done|FAILED in N ms - <reason>` (FAILED is a WARNING) - and counts UNSOLICITED SysEx that arrive while nothing is in flight (DEBUG each; one WARNING
+at the 10th: front-panel edits do this, but so does another MIDI program sending the sampler's replies back to it). `S950Transfers` logs `begin <op> (<what>)` and counts unexpected Akai messages the same way (WARNING at the 10th). Still NOT logged:
+per-parameter old->new values of Yamaha writes beyond the op line, S950 program-write diffs beyond what the editor already logs, and the sampler's identity/firmware at editor open.
+
 ## MIDI transport consolidation (`core/midi_transport.py`)
 
 Default as of real-hardware validation. The Dashboard
@@ -648,6 +656,15 @@ empty. Also: a custom item widget's own `sizeHint()` is used as the row's
 size AS-IS - it does NOT also inherit `QListWidget::item`'s own QSS
 `padding`, so a row widget needs its own matching margins or every row
 comes out shorter/more cramped than a plain-text row would.
+
+## Keygroup mute group (choke) and velocity-driven sample start (S2000/S3000 only; added 2026-10-10)
+
+Keygroup tab: **Range card -> "Mute Group" combo (`mute_group_combo`, field `KGMUTE`)** and **each zone page -> a "Vel. start" 28px bipolar KNOB right of the Velocity High spinbox, with a 44px readout (`_zone_vss[z]`/`_zone_vss_labels[z]`, fields `VSS1`-`VSS4`, signed -9999..9999 "data points"; Shift-drag is fine control, click-then-type enters an exact value)**. Both are read with the rest of a
+keygroup (`_KEYGROUP_DETAIL_FIELDS`) and written through the ordinary debounced `_schedule_write` path. **`KGMUTE` gotchas (`s3k.params` notes, measured on hardware 2026-08-23): the raw byte is 0xFF for OFF and 0-31 for a real group - 0 is a REAL
+group, not "off"** - so the combo maps by item DATA (`Off` = 255, then `0`..`31`), never by index; a keygroup header that is zero-filled lands in an ACTIVE group 0 and two keygroups over the same notes in group 0 mute each other (only one sounds, ~19 dB louder
+when both are set to 255). A raw value the combo has no entry for (32-254) is shown as a temporary "Raw N" item (`_show_mute_group`), never as Off or another group; showing a keygroup never writes. **VERIFIED on the user's S2000 (2026-10-10): the PANEL numbers the groups 1-32** - the combo shows raw + 1 (item data stays the raw 0-31, Off = 255), so panel group 1 is raw 0. **Hidden on an S1000**: `KGMUTE` is at offset 160, past the S1000's 150-byte keygroup block (it would read as a neutral zero and refuse writes) and `VSS` has not
+been verified on an S1000. Not done (deliberately, user decision): Envelope 3 (needs the expansion board that also adds the second filter - untestable on the user's unit), `PLAYLO`/`PLAYHI`/`TRANSPOSE`, the voice toggles, `KGTUNO`, per-zone `VFREQ`/`VZOUT`, loops 2-4.
+**Heads up for the Slice Editor / duplicate flows:** they clone a template keygroup, so every new keygroup inherits its `KGMUTE` - a template left at 0 makes all slices choke each other.
 
 ## Envelope graphs (`ui/envelope_graph.py`)
 
