@@ -123,12 +123,13 @@ def test_the_locked_settings_show_their_value_with_a_very_short_tooltip(tab):
         "scsi_disk_id",
         "scsi_sector",
         "scsi_local_id",
+        "program_change_channel",
     }
     tab.set_values(ALL)
     for key in ("tune_semitones", "tune_cents"):
         assert not tab._widgets[key].isEnabled()
         assert tab._widgets[key].toolTip() == "Not working right now."
-    for key in ("scsi_disk_id", "scsi_sector", "scsi_local_id"):
+    for key in ("scsi_disk_id", "scsi_sector", "scsi_local_id", "program_change_channel"):
         assert not tab._widgets[key].isEnabled()
         assert tab._widgets[key].toolTip() == "Disabled for safety."
     # the values still read
@@ -137,6 +138,7 @@ def test_the_locked_settings_show_their_value_with_a_very_short_tooltip(tab):
     assert tab._widgets["scsi_disk_id"].currentText() == "2"
     assert tab._widgets["scsi_local_id"].currentText() == "7"
     assert tab._widgets["scsi_sector"].currentText() == "512 B"
+    assert tab._widgets["program_change_channel"].currentText() == "3"
 
 
 def test_every_other_control_stays_live_with_its_normal_tooltip(tab):
@@ -145,7 +147,6 @@ def test_every_other_control_stays_live_with_its_normal_tooltip(tab):
     assert live == {
         "external_controller",
         "output_level",
-        "program_change_channel",
         "play_note",
         "play_channel",
         "play_velocity",
@@ -236,7 +237,14 @@ def test_the_unlock_switch_enables_only_the_named_locked_controls(qapp, monkeypa
         # the others stay locked, and the registry itself is untouched
         assert not tab._widgets["scsi_disk_id"].isEnabled()
         assert tab._widgets["scsi_disk_id"].toolTip() == "Disabled for safety."
-        assert set(DISABLED_SETTINGS) == {"tune_semitones", "tune_cents", "scsi_disk_id", "scsi_sector", "scsi_local_id"}
+        assert set(DISABLED_SETTINGS) == {
+            "tune_semitones",
+            "tune_cents",
+            "scsi_disk_id",
+            "scsi_sector",
+            "scsi_local_id",
+            "program_change_channel",
+        }
     finally:
         tab.deleteLater()
 

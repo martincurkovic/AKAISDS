@@ -46,6 +46,8 @@ _SPINBOX_DEBOUNCE_MS = 250
 #   round trip. See AGENTS.md's "Global tab" section for everything tried.
 # - the three SCSI settings: they work, but they steer which disk the sampler talks to and the user's sampler ended up unable to reach its hard disk the same
 #   week (cause unknown - see AGENTS.md); not worth the risk while that is open.
+# - program_change_channel: it works (a channel change was confirmed on hardware), but it writes the whole 48-byte misc block back, one of the suspects for that
+#   same disk trouble that was never excluded. Locked before 1.3.0 until a misc dump on a healthy drive clears it (AGENTS.md, "Real-hardware safety").
 # To re-enable one, delete its entry. To lock another, add its key with a short reason.
 DISABLED_SETTINGS = {
     "tune_semitones": "Not working right now.",
@@ -53,6 +55,7 @@ DISABLED_SETTINGS = {
     "scsi_disk_id": "Disabled for safety.",
     "scsi_sector": "Disabled for safety.",
     "scsi_local_id": "Disabled for safety.",
+    "program_change_channel": "Disabled for safety.",
 }
 
 
