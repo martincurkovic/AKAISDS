@@ -540,6 +540,11 @@ bulk dump FMT name | wave dump | bulk send | read N parameter(s)>` (INFO; reads 
 at the 10th: front-panel edits do this, but so does another MIDI program sending the sampler's replies back to it). `S950Transfers` logs `begin <op> (<what>)` and counts unexpected Akai messages the same way (WARNING at the 10th). Still NOT logged:
 per-parameter old->new values of Yamaha writes beyond the op line, S950 program-write diffs beyond what the editor already logs, and the sampler's identity/firmware at editor open.
 
+**Unexpected SysEx is LOG-ONLY on the Dashboard (2026-10-10, user decision: it appeared in the status bar after closing the editor or editing a parameter on the front panel and is not for users).** `SamplerController` no longer emits
+`status_changed` for an unexpected SDATA/STAT, a REPLY with an odd byte, an unrecognised Akai function or an unrecognised SysEx; `_log_unexpected_sysex(what, data, quiet=True)` writes them at DEBUG, capped by `_UNEXPECTED_LOG_BUDGET` (50 lines per 10 s,
+then one "N more not logged" line - the Program Editor's replies reach the Dashboard on the shared port, so a loaded editor produces hundreds a second). Without `quiet` (a data packet before any header, an S1000 error REPLY) it stays a WARNING: those mean a
+transfer went wrong. `core/sysex_trace.py`'s `LineBudget` is the shared cap. **Still shown: "Sampler confirmed: OK" / "ERROR creating/replacing sample"** (a REPLY from the sampler) - those also fire for the editor's writes; say so if they should go too.
+
 ## MIDI transport consolidation (`core/midi_transport.py`)
 
 Default as of real-hardware validation. The Dashboard
