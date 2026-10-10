@@ -30,6 +30,7 @@ from ui.qt_helpers import (
     widen_popup_to_fit_items,
 )
 from ui import theme, tooltips
+from ui.loopback_results_dialog import LoopbackResultsDialog
 import time
 import mido
 
@@ -676,27 +677,11 @@ class MidiSettingsDialog(QDialog):
         )
 
     def _show_loopback_results(self, results):
-        lines = []
-        any_failed = False
-        for size, passed, detail in results:
-            status = "PASS" if passed else "FAIL"
-            if not passed:
-                any_failed = True
-            lines.append(
-                f"{size:>5} bytes: {status}" + ("" if passed else f" - {detail}")
-            )
-
-        summary = "\n".join(lines)
-        if any_failed:
-            first_failure_size = next(size for size, passed, _ in results if not passed)
-            summary += (
-                f"\n\nThis interface starts failing around {first_failure_size} bytes. "
-                f"Real MIDI SDS data packets are 127 bytes, and larger responses "
-                f"(like a sample list with many samples can be well over 1000 bytes - "
-                f"if failures start below that, this interface may struggle with "
-                f"real transfers too."
-            )
-        else:
-            summary += "\n\nAll sizes tested passed cleanly."
-
-        QMessageBox.information(self, "Loopback Test Results", summary)
+        failed = [size for size, passed, _ in results if not passed]
+        debug_log.get_logger().info(
+            f"loopback test: {len(results) - len(failed)}/{len(results)} sizes passed"
+            + (f", first failure at {failed[0]} bytes" if failed else "")
+        )
+        LoopbackResultsDialog(
+            results, self.combo_input.currentData(), self.combo_output.currentData(), self
+        ).exec()
