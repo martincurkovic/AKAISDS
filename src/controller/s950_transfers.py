@@ -120,6 +120,10 @@ class _Pending:
 
 
 class S950Transfers(QObject):
+    # an Akai message the transfer did not ask for (see _on_akai): a few are normal (a late reply after a timeout); a steady stream is another MIDI program
+    # sending the sampler's own replies back to it
+    _UNEXPECTED_WARNING_COUNT = 10
+
     def __init__(self, controller):
         super().__init__()
         self._c = controller
@@ -139,6 +143,7 @@ class S950Transfers(QObject):
         self.programs = []
 
         self._op = None
+        self._unexpected_akai = 0  # unexpected Akai messages this session (see _on_akai)
         self._pending = None
         self._step_fn = None
         self._silent = False
@@ -391,6 +396,7 @@ class S950Transfers(QObject):
             return False
         self._op = op
         self._phase = None
+        debug_log.get_logger().info(f"S950Transfers: begin {op} ({what})")
         return True
 
     def _reset(self):
@@ -531,10 +537,16 @@ class S950Transfers(QObject):
             or message.function != pending.function
             or (pending.num is not None and message.num != pending.num)
         ):
+            self._unexpected_akai += 1
             debug_log.get_logger().debug(
                 f"S950Transfers: ignoring unexpected Akai message "
-                f"(function {message.function}, num {message.num})"
+                f"(function {message.function}, num {message.num}) (#{self._unexpected_akai})"
             )
+            if self._unexpected_akai == self._UNEXPECTED_WARNING_COUNT:
+                debug_log.get_logger().warning(
+                    f"S950Transfers: {self._unexpected_akai} unexpected Akai messages this session - late replies do this, but so does another MIDI program "
+                    "sending the sampler's replies back to it (see AGENTS.md's incident notes)"
+                )
             return
         self._pending = None
         self._reply_timer.stop()

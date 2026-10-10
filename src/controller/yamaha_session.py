@@ -110,6 +110,7 @@ class _Op:
         # wave bookkeeping
         self.assembler = None
         self.request_sent = False
+        self.started_at = None  # monotonic time the op went on the wire (for the log)
 
 
 class YamahaSession(QObject):
@@ -163,6 +164,7 @@ class YamahaSession(QObject):
         self._send_tick = QTimer(self)
         self._send_tick.timeout.connect(self._tick_send_progress)
         self._draining = False
+        self._unsolicited_idle = 0  # unsolicited SysEx while idle, this session (see _note_unsolicited)
         self._drain = QTimer(self)
         self._drain.setSingleShot(True)
         self._drain.timeout.connect(self._end_drain)
@@ -308,6 +310,56 @@ class YamahaSession(QObject):
 
     # -- the queue ------------------------------------------------------------------------------------
 
+    # -- logging (core/debug_log.py: the log is what a bug report from a tester is built from) -----------------------
+
+    @staticmethod
+    def _describe_op(op):
+        kw = op.kw
+        name = (kw.get("name") or "").rstrip()
+        if op.kind == "write":
+            row = kw.get("row")
+            return f"write {getattr(row, 'key', '?')}={kw.get('value')} on {name!r}" + (f" slot {kw['slot']}" if kw.get("slot") is not None else "")
+        if op.kind == "link":
+            return f"{'assign' if kw.get('linked') else 'remove'} sample {kw.get('sample', '').rstrip()!r} on program {name!r}"
+        if op.kind == "bulk":
+            return f"bulk dump {kw.get('fmt')} {name!r}"
+        if op.kind == "wave":
+            return f"wave dump {name!r}"
+        if op.kind == "send":
+            return f"bulk send of {len(kw.get('messages', ()))} message(s)"
+        if op.kind == "params":
+            return f"read {len(kw.get('params', ()))} parameter(s) of {name!r}"
+        return op.kind
+
+    def _log_op_started(self, op):
+        # reads are frequent (a whole editor page of parameters): DEBUG. Anything that writes, loads or dumps: INFO
+        op.started_at = time.monotonic()
+        log = debug_log.get_logger()
+        (log.debug if op.kind in ("params", "identity") else log.info)(f"YamahaSession: start {self._describe_op(op)}")
+
+    def _log_op_finished(self, op, failed, message):
+        log = debug_log.get_logger()
+        elapsed_ms = (time.monotonic() - op.started_at) * 1000 if op.started_at is not None else 0.0
+        text = f"YamahaSession: {self._describe_op(op)} {'FAILED' if failed else 'done'} in {elapsed_ms:.0f} ms" + (f" - {message}" if message else "")
+        if failed:
+            log.warning(text)
+        else:
+            (log.debug if op.kind in ("params", "identity") else log.info)(text)
+
+    # a SysEx the session did not ask for, arriving while nothing is in flight. Normal in small numbers (the unit announces front-panel edits, and our own announce can
+    # arrive after a timeout); a steady stream means something else is talking to it - another MIDI program sending replies back, say (see AGENTS.md's incident notes)
+    _UNSOLICITED_WARNING_COUNT = 10
+
+    def _note_unsolicited(self, kind, size):
+        self._unsolicited_idle += 1
+        log = debug_log.get_logger()
+        log.debug(f"YamahaSession: unsolicited {kind} message ({size} B) while idle (#{self._unsolicited_idle})")
+        if self._unsolicited_idle == self._UNSOLICITED_WARNING_COUNT:
+            log.warning(
+                f"YamahaSession: {self._unsolicited_idle} unsolicited messages while idle this session - front-panel edits do this, but so does another MIDI "
+                "program sending the sampler's replies back to it"
+            )
+
     def _enqueue(self, op):
         self._queue.append(op)
         self._emit_busy_if_changed()
@@ -340,6 +392,7 @@ class YamahaSession(QObject):
             return
         op = self._queue.pop(0)
         self._op = op
+        self._log_op_started(op)
         try:
             if op.kind == "identity":
                 self._send(ysx.build_identity_request())
@@ -571,6 +624,8 @@ class YamahaSession(QObject):
         op, self._op = self._op, None
         self._timeout.stop()
         self._settle.stop()
+        if op is not None:
+            self._log_op_finished(op, failed, message)
         if op is not None and failed:
             self._maybe_drain(op, only_if_streaming=True)
         if message:
@@ -663,6 +718,8 @@ class YamahaSession(QObject):
         if op is None:
             if self._draining and kind == "bulk_dump":
                 self._drain.start(self.drain_idle_ms)  # the abandoned wave is still streaming: keep waiting
+            else:
+                self._note_unsolicited(kind, len(data))
             return  # a stray/late message, or our own announce arriving after a timeout
         if op.kind == "wave":
             self._handle_wave_message(op, data, kind)
