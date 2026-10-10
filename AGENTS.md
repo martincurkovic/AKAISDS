@@ -253,7 +253,7 @@ A DIFFERENT protocol from the S1000 family: device byte `0x40`, function codes 0
 10-char ASCII names, XOR checksums, a sample dump that is ONE SysEx with 4-byte handshakes (`F0 7E code F7`; the standard 6-byte
 SDS ACK is silently ignored). Plan, staging and the long handoff: `dev_docs/s950-support-plan.md`. **Nothing has run against
 hardware**; every guess is listed in `tests/s950_test_plan.md`. Ported from [s950tools](https://github.com/diemonster/s950tools)
-(MIT, `THIRD_PARTY_NOTICES.md` - keep the notice when porting more). `dxzl/akai-s950` has NO licence: don't copy it.
+(MIT, `src/ui/help/THIRD_PARTY_NOTICES.md`, bundled and shown from About > Licences - keep the notice when porting more). `dxzl/akai-s950` has NO licence: don't copy it.
 
 - `core/s950_sysex.py` (codecs, framing, catalog, SPRM, sample dump) and `core/s950_program.py` (76-byte header + 1-31 x 140-byte
   keygroups). Only the program HEADER offsets are pinned by real captures; keygroup and SPRM offsets are as good as s950tools'.
