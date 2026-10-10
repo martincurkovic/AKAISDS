@@ -25,12 +25,38 @@ def describe(data, limit=PREVIEW_BYTES):
     return f"{data[:limit].hex(' ')}{more} ({len(data)} B)"
 
 
+class LineBudget:
+    """At most `max_lines` log lines per `window_s`; `allow()` says whether to log this one. When a window that suppressed lines ends, the next `allow()` also hands back
+    how many were dropped (`take_suppressed()`) so the caller can write ONE summary line."""
+
+    def __init__(self, max_lines=MAX_LINES, window_s=WINDOW_S, clock=time.monotonic):
+        self.max_lines, self.window_s, self._clock = max_lines, window_s, clock
+        self._start = None
+        self._count = 0
+        self._suppressed = 0
+        self._dropped_last_window = 0
+
+    def allow(self):
+        now = self._clock()
+        if self._start is None or now - self._start >= self.window_s:
+            self._dropped_last_window = self._suppressed
+            self._start, self._count, self._suppressed = now, 0, 0
+        if self._count < self.max_lines:
+            self._count += 1
+            return True
+        self._suppressed += 1
+        return False
+
+    def take_suppressed(self):
+        """Lines dropped in the window that just ended (0 if none); reading it resets it."""
+        dropped, self._dropped_last_window = self._dropped_last_window, 0
+        return dropped
+
+
 class SysexTrace:
     def __init__(self, logger, clock=time.monotonic):
         self._logger = logger
-        self._clock = clock
-        # direction -> [window start, lines logged in the window, lines suppressed in the window]
-        self._windows = {"out": [None, 0, 0], "in": [None, 0, 0]}
+        self._budgets = {"out": LineBudget(clock=clock), "in": LineBudget(clock=clock)}
 
     def out(self, data):
         self._record("out", data)
@@ -39,16 +65,10 @@ class SysexTrace:
         self._record("in", data)
 
     def _record(self, direction, data):
-        window = self._windows[direction]
-        now = self._clock()
-        if window[0] is None or now - window[0] >= WINDOW_S:
-            if window[2]:
-                self._logger.debug(
-                    f"MIDI {direction}: {window[2]} more SysEx message(s) not logged in the last {WINDOW_S:.0f} s (log volume cap)"
-                )
-            window[0], window[1], window[2] = now, 0, 0
-        if window[1] < MAX_LINES:
-            window[1] += 1
+        budget = self._budgets[direction]
+        allowed = budget.allow()
+        dropped = budget.take_suppressed()
+        if dropped:
+            self._logger.debug(f"MIDI {direction}: {dropped} more SysEx message(s) not logged in the last {WINDOW_S:.0f} s (log volume cap)")
+        if allowed:
             self._logger.debug(f"MIDI {direction} SysEx {describe(data)}")
-        else:
-            window[2] += 1

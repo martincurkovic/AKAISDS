@@ -1,7 +1,11 @@
 from PySide6.QtCore import QObject, Signal, QTimer
-from core import akai_sysex, sds_encoder, midi_identity, debug_log, sampler_models
+from core import akai_sysex, sds_encoder, midi_identity, debug_log, sampler_models, sysex_trace
 import os
 import time
+
+
+# the cap on the DEBUG lines for "normal on a shared port" unexpected SysEx (see SamplerController._log_unexpected_sysex(quiet=True)): 50 per 10 s, then one summary line
+_UNEXPECTED_LOG_BUDGET = sysex_trace.LineBudget(max_lines=50)
 
 
 class SamplerController(QObject):
@@ -795,10 +799,7 @@ class SamplerController(QObject):
                 elif self._receiving and self._receive_header_info is None:
                     self._on_receive_sdata_header(data_bytes)
                 else:
-                    self._log_unexpected_sysex("unexpected SDATA", data_bytes)
-                    self.status_changed.emit(
-                        f"Received unexpected SDATA message: {bytes(data_bytes).hex(' ')}"
-                    )
+                    self._log_unexpected_sysex("unexpected SDATA", data_bytes, quiet=True)
 
             elif function_code == 0x01:
                 # STAT reponse to RSTAT
@@ -809,10 +810,7 @@ class SamplerController(QObject):
                     self.memory_status_updated.emit(info)
                     self._send_rslist_request()
                 else:
-                    self._log_unexpected_sysex("unexpected STAT", data_bytes)
-                    self.status_changed.emit(
-                        f"Received unexpected STAT message {bytes(data_bytes).hex(' ')}"
-                    )
+                    self._log_unexpected_sysex("unexpected STAT", data_bytes, quiet=True)
 
             elif function_code == 0x16:
                 # S1000 command reply: F0, 47, cc, 16, 48, mm, F7 - mm: 0=ok, 1=error
@@ -825,17 +823,10 @@ class SamplerController(QObject):
                         "Sampler confirmed: ERROR creating/replacing sample"
                     )
                 else:
-                    self._log_unexpected_sysex("REPLY with unexpected byte", data_bytes)
-                    self.status_changed.emit(
-                        f"Received REPLY with unexpected byte: {bytes(data_bytes).hex(' ')}"
-                    )
+                    self._log_unexpected_sysex("REPLY with unexpected byte", data_bytes, quiet=True)
             else:
                 self._log_unexpected_sysex(
-                    f"unrecognised Akai message (function {function_code})", data_bytes
-                )
-                self.status_changed.emit(
-                    f"Received unrecognised Akai message (function {function_code}): "
-                    f"{bytes(data_bytes).hex(' ')}"
+                    f"unrecognised Akai message (function {function_code})", data_bytes, quiet=True
                 )
             return
 
@@ -870,18 +861,26 @@ class SamplerController(QObject):
             self._on_handshake_message(handshake, data_bytes)
             return
 
-        # anything else - log it for now rather than crash so i can figure out wtf is going on
-        self._log_unexpected_sysex("unrecognised SysEx", data_bytes)
-        self.status_changed.emit(
-            f"Received unrecognised SysEx: {bytes(data_bytes).hex(' ')}"
-        )
+        # anything else: logged, never shown - the status bar is for the user's own operations
+        self._log_unexpected_sysex("unrecognised SysEx", data_bytes, quiet=True)
 
     @staticmethod
-    def _log_unexpected_sysex(what, data_bytes):
-        # rare by nature, so safe to log; capped so a huge stray dump can't bloat the log
+    def _log_unexpected_sysex(what, data_bytes, quiet=False):
+        """Log a SysEx the controller did not expect. `quiet=True` is for messages that are NORMAL on a shared MIDI port - the Program Editor's replies, a front-panel edit
+        announcing itself, another program's traffic - so they are DEBUG and capped (a loaded editor produces hundreds a second); they are never shown in the status bar.
+        Without it (a data packet before any header, an S1000 error REPLY) it is a WARNING: something went wrong in a transfer."""
         raw = bytes(data_bytes)
         shown = raw[:64].hex(" ") + (f" ... ({len(raw)} bytes)" if len(raw) > 64 else "")
-        debug_log.get_logger().warning(f"SamplerController: received {what}: {shown}")
+        log = debug_log.get_logger()
+        if not quiet:
+            log.warning(f"SamplerController: received {what}: {shown}")
+            return
+        allowed = _UNEXPECTED_LOG_BUDGET.allow()
+        dropped = _UNEXPECTED_LOG_BUDGET.take_suppressed()
+        if dropped:
+            log.debug(f"SamplerController: {dropped} more unexpected SysEx message(s) not logged in the last {sysex_trace.WINDOW_S:.0f} s (log volume cap)")
+        if allowed:
+            log.debug(f"SamplerController: received {what}: {shown}")
 
     def _log_status(self, message):
         if message != self._last_logged_status:  # a repeating status isn't news
