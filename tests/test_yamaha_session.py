@@ -568,3 +568,63 @@ def test_a_request_made_during_a_send_waits_for_it_and_cancel_stops_it(rig):
     assert done[-1] is False and rig.session.idle
     QCoreApplication.processEvents()
     assert len(rig.midi.sent) == sent
+
+
+# --- logging: what a tester's log must show (operation lifecycle, ignored strays) -------------------------
+
+
+def _messages(caplog):
+    return [r.getMessage() for r in caplog.records]
+
+
+def test_a_bulk_dump_logs_its_start_and_finish_with_a_duration(rig, caplog):
+    import logging
+
+    caplog.set_level(logging.DEBUG, logger="akaisds")
+    collect(rig, lambda cb: rig.session.request_bulk("PG", "001", cb))
+    lines = _messages(caplog)
+    assert any(line == "YamahaSession: start bulk dump PG '001'" for line in lines)
+    done = [line for line in lines if line.startswith("YamahaSession: bulk dump PG '001' done in ")]
+    assert done and done[0].endswith(" ms")
+
+
+def test_a_parameter_read_is_logged_at_debug_not_info(rig, caplog):
+    import logging
+
+    caplog.set_level(logging.DEBUG, logger="akaisds")
+    level = yp.get("program", "program_level")
+    collect(rig, lambda cb: rig.session.request_parameters("program", "001", [level.p], cb))
+    starts = [r for r in caplog.records if r.getMessage().startswith("YamahaSession: start read 1 parameter(s) of '001'")]
+    assert starts and all(r.levelno == logging.DEBUG for r in starts)
+
+
+def test_a_failed_operation_is_a_warning_with_the_reason(rig, caplog):
+    import logging
+
+    caplog.set_level(logging.DEBUG, logger="akaisds")
+    # program "200" does not exist: the select gets no announce, so the read times out and fails
+    collect(rig, lambda cb: rig.session.request_parameters("program", "200", [(1, 10, 0, 0, 0, 0)], cb))
+    failed = [r for r in caplog.records if "FAILED in" in r.getMessage() and "read 1 parameter(s) of '200'" in r.getMessage()]
+    assert failed and failed[0].levelno == logging.WARNING
+
+
+def test_unsolicited_messages_while_idle_are_counted_and_warn_once(rig, caplog):
+    import logging
+
+    caplog.set_level(logging.DEBUG, logger="akaisds")
+    assert rig.session.idle
+    for _ in range(25):
+        rig.session.handle_sysex(b"\x43\x73\x01\x02")  # something the session never asked for
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING and "unsolicited messages while idle" in r.getMessage()]
+    assert len(warnings) == 1  # at the 10th, once
+    assert "another MIDI program" in warnings[0].getMessage()
+    debug = [r for r in caplog.records if "unsolicited" in r.getMessage() and "while idle (#" in r.getMessage()]
+    assert len(debug) == 25
+
+
+def test_a_message_that_belongs_to_the_operation_is_not_counted_as_unsolicited(rig, caplog):
+    import logging
+
+    caplog.set_level(logging.DEBUG, logger="akaisds")
+    collect(rig, lambda cb: rig.session.request_bulk("PG", "001", cb))
+    assert not [r for r in caplog.records if "while idle (#" in r.getMessage()]

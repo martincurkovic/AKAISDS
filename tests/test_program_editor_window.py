@@ -12,6 +12,7 @@ import s3k.messages as s3k_messages
 import s3k.params as s3k_params
 from PySide6.QtCore import Qt, QObject, QTimer, Signal
 from PySide6.QtWidgets import QApplication, QLabel, QWidget
+from ui import tooltips as tt
 from ui.global_tab import DISABLED_SETTINGS
 from ui.loop_preview_view import HALF_WINDOW_FRAMES
 from ui.program_editor_window import ProgramEditorWindow, _LOOP_TYPE_OPTIONS
@@ -1482,6 +1483,138 @@ def test_zone_panels_load_loop_type_keytrack_and_tune_from_hardware(editor, qapp
     assert [c.currentIndex() for c in editor._zone_keytrack] == [1, 0, 1, 0]
     for tune_spinbox in editor._zone_tune:
         assert tune_spinbox.value() == pytest.approx(0.12)
+
+
+def _select_keygroup_1(editor, qapp):
+    editor.keygroup_list.setCurrentRow(1)
+    editor._worker.wait_until_idle()
+    _pump_until(qapp, lambda: editor.cutoff_knob.value() == 72)
+    editor._bridge.set_parameter_calls.clear()
+
+
+def test_the_mute_group_combo_maps_off_to_255_and_groups_to_0_31(editor):
+    combo = editor.mute_group_combo
+    assert combo.count() == 33
+    assert (combo.itemText(0), combo.itemData(0)) == ("Off", 255)
+    assert [combo.itemData(i) for i in range(1, 33)] == list(range(32))
+    # the PANEL numbers the groups 1-32 (confirmed on the real S2000); the raw byte is 0-31
+    assert [combo.itemText(i) for i in range(1, 33)] == [str(n) for n in range(1, 33)]
+    assert combo.toolTip() == tt.MUTE_GROUP_COMBO
+
+
+def test_mute_group_and_velocity_start_load_from_the_keygroup(editor, qapp):
+    editor.keygroup_list.setCurrentRow(1)
+    editor._worker.wait_until_idle()
+    _pump_until(qapp, lambda: editor.cutoff_knob.value() == 72)
+    # FakeBridge's generic value is 30 for any field it has no branch for
+    assert editor.mute_group_combo.currentData() == 30
+    assert [spin.value() for spin in editor._zone_vss] == [30, 30, 30, 30]
+
+
+def test_showing_a_keygroup_never_writes_the_mute_group_or_velocity_start(editor):
+    bridge = editor._bridge
+    before = len(bridge.set_parameter_calls)
+    editor._update_zone_panels({"KGMUTE": 255, "VSS1": -50, "VSS2": 0, "VSS3": 9999, "VSS4": -9999})
+    editor._flush_write("KGMUTE")
+    editor._worker.wait_until_idle()
+    assert editor.mute_group_combo.currentData() == 255 and editor.mute_group_combo.currentText() == "Off"
+    assert [spin.value() for spin in editor._zone_vss] == [-50, 0, 9999, -9999]
+    assert len(bridge.set_parameter_calls) == before
+
+
+def test_choosing_off_writes_255_and_a_group_writes_its_raw_number(editor, qapp):
+    bridge = editor._bridge
+    _select_keygroup_1(editor, qapp)
+    editor.mute_group_combo.setCurrentIndex(0)  # Off
+    editor._flush_write("KGMUTE")
+    editor._worker.wait_until_idle()
+    _pump_until(qapp, lambda: bridge.set_parameter_calls and bridge.set_parameter_calls[-1][0] == "KGMUTE")
+    assert bridge.set_parameter_calls[-1] == ("KGMUTE", 0, 255, 1)
+
+    # panel group 8 is raw 7
+    editor.mute_group_combo.setCurrentIndex(editor.mute_group_combo.findText("8"))
+    editor._flush_write("KGMUTE")
+    editor._worker.wait_until_idle()
+    _pump_until(qapp, lambda: bridge.set_parameter_calls[-1] == ("KGMUTE", 0, 7, 1))
+
+
+def test_raw_zero_is_panel_group_1_a_real_group_not_off(editor, qapp):
+    # s3k.params' measured note: raw 0 is an ACTIVE group (the panel's group 1), only 255 is off
+    bridge = editor._bridge
+    _select_keygroup_1(editor, qapp)
+    editor.mute_group_combo.setCurrentIndex(editor.mute_group_combo.findData(0))
+    editor._flush_write("KGMUTE")
+    editor._worker.wait_until_idle()
+    _pump_until(qapp, lambda: bridge.set_parameter_calls and bridge.set_parameter_calls[-1][0] == "KGMUTE")
+    assert bridge.set_parameter_calls[-1] == ("KGMUTE", 0, 0, 1)
+    assert editor.mute_group_combo.currentText() == "1"
+
+
+def test_a_raw_mute_group_the_combo_has_no_entry_for_is_shown_not_hidden(editor):
+    bridge = editor._bridge
+    before = len(bridge.set_parameter_calls)
+    editor._show_mute_group(100)
+    assert editor.mute_group_combo.currentText() == "Raw 100" and editor.mute_group_combo.currentData() == 100
+    editor._show_mute_group(3)
+    assert editor.mute_group_combo.currentText() == "4"  # raw 3 = the panel's group 4
+    assert editor.mute_group_combo.count() == 33  # the temporary "Raw 100" item is gone
+    editor._show_mute_group(255)
+    assert editor.mute_group_combo.currentText() == "Off"
+    assert len(bridge.set_parameter_calls) == before
+
+
+def test_editing_a_zone_velocity_start_writes_vss_for_that_zone(editor, qapp):
+    bridge = editor._bridge
+    _select_keygroup_1(editor, qapp)
+    editor._zone_vss[2].setValue(-1234)
+    editor._flush_write("VSS3")
+    editor._worker.wait_until_idle()
+    _pump_until(qapp, lambda: bridge.set_parameter_calls and bridge.set_parameter_calls[-1][0] == "VSS3")
+    assert bridge.set_parameter_calls[-1] == ("VSS3", 0, -1234, 1)
+
+    editor._zone_vss[0].setValue(9999)
+    editor._flush_write("VSS1")
+    editor._worker.wait_until_idle()
+    _pump_until(qapp, lambda: bridge.set_parameter_calls[-1] == ("VSS1", 0, 9999, 1))
+
+
+def test_velocity_start_is_a_28px_bipolar_knob_with_the_documented_range(editor):
+    from ui.knob import Knob
+
+    for knob in editor._zone_vss:
+        assert isinstance(knob, Knob)
+        assert (knob.width(), knob.height()) == (28, 28)
+        assert (knob.minimum(), knob.maximum()) == (-9999, 9999)
+        assert knob._bipolar and knob.defaultValue() == 0 and knob.isEnabled()
+        assert knob.toolTip() == tt.VELOCITY_START_KNOB
+
+
+def test_velocity_start_sits_right_of_velocity_high_in_the_same_row(editor):
+    for z, knob in enumerate(editor._zone_vss):
+        page_layout = editor._zone_vel_hi[z].parentWidget().layout()
+        # find the velocity row: the page layout's child layout that holds the Velocity High spinbox
+        vel_row = next(
+            item.layout()
+            for item in (page_layout.itemAt(i) for i in range(page_layout.count()))
+            if item.layout() is not None
+            and any(item.layout().itemAt(j).widget() is editor._zone_vel_hi[z] for j in range(item.layout().count()))
+        )
+        items = [vel_row.itemAt(i) for i in range(vel_row.count())]
+        hi_at = next(i for i, item in enumerate(items) if item.widget() is editor._zone_vel_hi[z])
+        vss_at = next(i for i, item in enumerate(items) if item.layout() is editor._zone_vss_rows[z])
+        lo_at = next(i for i, item in enumerate(items) if item.widget() is editor._zone_vel_lo[z])
+        assert lo_at < hi_at < vss_at  # Velocity Low, Velocity High, then Vel. start
+        # and the knob really is inside that group (not a separate row)
+        group = editor._zone_vss_rows[z]
+        assert any(group.itemAt(i).layout() is not None for i in range(group.count()))
+
+
+def test_the_velocity_start_readout_follows_the_knob_and_a_load(editor):
+    editor._update_zone_panels({"VSS1": -1234, "VSS2": 0, "VSS3": 9999, "VSS4": -9999})
+    assert [lbl.text() for lbl in editor._zone_vss_labels] == ["-1234", "0", "9999", "-9999"]
+    assert editor._zone_vss_labels[0].width() >= 40  # room for "-9999"
+    editor._zone_vss[1].setValue(55)  # a user edit updates its own readout
+    assert editor._zone_vss_labels[1].text() == "55"
 
 
 def test_loop_type_combo_has_a_tooltip_per_option(editor):

@@ -961,3 +961,31 @@ def test_an_unreadable_sprm_answers_none(rig, monkeypatch):
     assert wait_until(lambda: rec.received)
     assert rec.received == [(0, None)]
     assert rig.engine.idle
+
+
+# --- logging: operation start, and the stream of unexpected messages that points at something echoing replies ---
+
+
+def test_unexpected_akai_messages_are_counted_and_warn_once(caplog):
+    import logging
+    import types
+
+    caplog.set_level(logging.DEBUG, logger="akaisds")
+    transfers = s950_transfers.S950Transfers(types.SimpleNamespace())
+    assert transfers._pending is None
+    for _ in range(25):
+        transfers._on_akai(types.SimpleNamespace(function=3, num=1))  # nothing asked for it
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING and "unexpected Akai messages this session" in r.getMessage()]
+    assert len(warnings) == 1  # at the 10th, once
+    assert "another MIDI program" in warnings[0].getMessage()
+    assert len([r for r in caplog.records if "ignoring unexpected Akai message" in r.getMessage()]) == 25
+
+
+def test_starting_an_operation_is_logged(caplog):
+    import logging
+    import types
+
+    caplog.set_level(logging.DEBUG, logger="akaisds")
+    transfers = s950_transfers.S950Transfers(types.SimpleNamespace(is_open_loop=lambda: False))
+    assert transfers._begin("program", "Reading program 3")
+    assert any(r.getMessage() == "S950Transfers: begin program (Reading program 3)" for r in caplog.records)
