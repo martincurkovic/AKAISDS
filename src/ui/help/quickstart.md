@@ -191,7 +191,7 @@ If you edit a parameter on the front display of your sampler, the edit is unlike
 
 ## Yamaha A4000/A5000 Editor (experimental)
 
-This editor was built and tested on an A4000. The A5000 should work for the same things but hasn't been tried, so treat it as experimental and back up first - the sampler's memory is RAM only, so save anything you care about to disk on the sampler.
+This editor was built and tested on an A4000. The A5000 should work for the same things but hasn't been tried, so treat it as experimental and back up any important data first.
 
 **Setup:** set the Sampler Type to *Yamaha A4000/A5000 (experimental)*, pick your MIDI ports (both input and output are required), and on the sampler set its *Device Number* to 0 and switch *Bulk Protect* **off** (Utility > MIDI bulk). If Bulk Protect is on, the sampler ignores every edit and cancels sample transfers - check it first if something "does nothing". Then click **Open Editor**.
 
@@ -209,7 +209,7 @@ This editor was built and tested on an A4000. The A5000 should work for the same
 
 **Sending and receiving samples** use the Transfer Dashboard as usual: *Currently Loaded Samples* lists the sampler's samples, and Receive saves them as WAV files (both channels of a stereo sample). Sending needs a MIDI input as well as an output, is slow (a stereo sample takes about twice as long as a mono one), and never overwrites: if the name is taken the new sample gets a ` 2` on the end.
 
-**If the sampler goes quiet.** After samples have been sent, the sampler can show *MIDI Bulk Received* and stop answering over MIDI until you press **OK (Knob 5)** on it - most often when you assign a freshly sent sample to a program. AKAISDS warns you before assigning one it sent, and tells you when to press **OK**.
+**If the sampler goes quiet.** After samples have been sent, the sampler can show *MIDI Bulk Received* and stop answering over MIDI until you press **OK (Knob 5)** on it - most often when you assign a freshly sent sample to a program. AKAISDS tries to warn you when this happens, and tells you when to press **OK**. It's not perfect though, so always refer to your sampler's display after making an edit.
 
 **Not supported:** creating or deleting programs and samples (the sampler has no MIDI command for it), effects, controller and system settings.
 
