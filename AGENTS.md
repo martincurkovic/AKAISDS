@@ -62,6 +62,14 @@ Where this project's own measurement overrides `s3k.params` (don't "fix" back wi
   `AKAISDS_DEMO_INSTANT=1` skips the pacing. The standalone launcher at the bottom of `program_editor_window.py` needs both.
 - `uv run python tools/a4000_demo.py` runs the real Dashboard on `core/demo_a4000.FakeA4000` (`--editor`, `--smoke`).
   `tools/s950_demo.py` does the same for `core/demo_s950.FakeS950`.
+- `uv run python tools/make_screenshots.py` regenerates the manual's pictures (`ui/help/screenshots/`) from these demo fakes, offscreen
+  at 2x: `--list`, `--only NAME`, `--overwrite`, `--out DIR`. It never replaces an existing picture without `--overwrite` (the
+  hand-captured ones have the macOS title bar), and it points config, log, backups and queue copies at a temp dir and stubs out
+  MIDI and the update check: creating a real rtmidi client can abort the process (OSStatus -304, see `midi_transport.list_input_names`).
+  Add a picture by writing a `@shot` recipe in `tools/screenshot_recipes.py`; `tests/test_make_screenshots.py` checks every picture
+  `quickstart.md` mentions has one.
+- `uv run python tools/make_diagrams.py` redraws the MIDI cabling diagrams (`ui/help/diagrams/`, needs `rsvg-convert`) used by the manual and the
+  Settings > Troubleshooting cards. They are NOT in `screenshots/` on purpose: `test_make_screenshots.py` wants a recipe for every picture there.
 - The fakes fake the MIDI PORTS, so the real bridge/session code runs on top. `FakeS1000` ignores 0x20+ ops like the
   real machine and pads blocks with `0xA5` junk so dropped or misread trailing bytes are caught.
 
