@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QPixmap
 from core import (
     app_config,
     audio_preview,
@@ -31,8 +32,13 @@ from ui.qt_helpers import (
 )
 from ui import theme, tooltips
 from ui.loopback_results_dialog import LoopbackResultsDialog
+import os
 import time
 import mido
+
+_DIAGRAM_DIR = os.path.join(os.path.dirname(__file__), "help", "diagrams")
+# the diagrams are drawn at 2x (see tools/make_diagrams.py), same as the manual's screenshots
+_DIAGRAM_PIXEL_RATIO = 2.0
 
 _LOOPBACK_TEST_SIZES = [8, 32, 64, 127, 256, 512, 1024, 1536, 2048, 2560, 3072]
 
@@ -269,6 +275,20 @@ class MidiSettingsDialog(QDialog):
 
     # --- Troubleshooting tab --------------------------------------------------
 
+    @staticmethod
+    def _diagram_label(filename, description):
+        """A centred cabling picture for a test card, or None if the file is missing (the card just has no picture)."""
+        pixmap = QPixmap(os.path.join(_DIAGRAM_DIR, filename))
+        if pixmap.isNull():
+            return None
+        pixmap.setDevicePixelRatio(_DIAGRAM_PIXEL_RATIO)
+        label = QLabel()
+        label.setPixmap(pixmap)
+        label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        label.setAccessibleDescription(description)
+        label.setToolTip(description)
+        return label
+
     def _build_troubleshooting_page(self):
         hardware_test_layout = QVBoxLayout()
 
@@ -282,6 +302,13 @@ class MidiSettingsDialog(QDialog):
             Qt.AlignmentFlag.AlignCenter | Qt.AlignmentFlag.AlignTop
         )
         hardware_test_layout.addWidget(hardware_test_note)
+
+        sampler_diagram = self._diagram_label(
+            "midi-sampler-cable.png",
+            "Interface MIDI OUT to sampler MIDI IN, and sampler MIDI OUT to interface MIDI IN",
+        )
+        if sampler_diagram is not None:
+            hardware_test_layout.addWidget(sampler_diagram)
 
         self.id_results_label = QLabel()
         self.id_results_label.setWordWrap(True)
@@ -311,6 +338,13 @@ class MidiSettingsDialog(QDialog):
             Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop
         )
         interface_test_layout.addWidget(loopback_note)
+
+        loopback_diagram = self._diagram_label(
+            "midi-loopback-cable.png",
+            "One MIDI cable from the interface's MIDI OUT to its own MIDI IN",
+        )
+        if loopback_diagram is not None:
+            interface_test_layout.addWidget(loopback_diagram)
 
         self.btn_loopback_test = QPushButton("Run Loopback Test")
         self.btn_loopback_test.setToolTip(tooltips.LOOPBACK_TEST_BUTTON)

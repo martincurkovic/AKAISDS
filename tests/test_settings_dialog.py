@@ -213,6 +213,16 @@ def test_troubleshooting_notes_point_at_the_renamed_tab(qapp):
     assert "Settings tab" in notes
 
 
+def test_troubleshooting_tests_each_show_their_cabling_diagram(qapp):
+    from PySide6.QtWidgets import QLabel
+
+    dialog = MidiSettingsDialog(_FakeMidiManager(["In A"], ["Out A"]), _FakeSamplerController())
+    pictures = [l for l in dialog.findChildren(QLabel) if l.pixmap() is not None and not l.pixmap().isNull()]
+    assert len(pictures) == 2
+    # drawn at 2x (~900 px wide), so only fits if the pixel ratio is applied - well inside the dialog's own minimum width
+    assert all(p.sizeHint().width() <= _MINIMUM_DIALOG_WIDTH - 80 for p in pictures)
+
+
 def test_appearance_card_offers_system_light_dark_defaulting_to_system(qapp, monkeypatch, tmp_path):
     from core import app_config
     from PySide6.QtWidgets import QLabel
