@@ -2,11 +2,12 @@
 
 ```
 uv sync
+uv run python tools/build_velociloops.py   # the REX2 reader; needs a C++ compiler
 uv run pytest tests/ -q
 ```
 
 The whole suite takes about 3-4 minutes. CI runs the same command with `AKAISDS_CI_NO_AUDIO_DEVICE=1`, which skips the tests that
-need a real audio output device. When you fix a bug, add a test that would have caught it.
+need a real audio output device. Without the library built, the `.rx2` tests are skipped, not failed. When you fix a bug, add a test that would have caught it.
 
 ## What's covered
 
