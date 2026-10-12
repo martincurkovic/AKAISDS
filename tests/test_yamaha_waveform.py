@@ -156,7 +156,7 @@ def test_the_two_channel_views_zoom_and_pan_together(window):
 
 
 def test_the_waveform_fills_in_progressively_while_the_wave_arrives(window):
-    window.fake.add_sample("long", audio=[(i * 7) % 20000 - 10000 for i in range(20000)])
+    window.fake.add_sample("long", audio=[(i * 7) % 20000 - 10000 for i in range(200000)])
     window.samples_tab.set_samples(list(window.fake.samples))
     window.midi.paced = True
     tab = window.samples_tab
@@ -164,10 +164,10 @@ def test_the_waveform_fills_in_progressively_while_the_wave_arrives(window):
     assert wait_until(lambda: tab._selected == "long" and "long" in tab._cache and not tab.cards_scroll.isHidden())
     tab._load_audio()
     view = tab.waveform_view
-    assert wait_until(lambda: view._samples is not None and 0 < len(view._samples) < 20000)
+    assert wait_until(lambda: view._samples is not None and 0 < len(view._samples) < 200000)
     assert tab.loading and not tab.cancel_load_button.isHidden() and tab._audio_name is None
     assert wait_until(lambda: tab._audio_name == "long")
-    assert len(view._samples) == 20000 and not tab.loading
+    assert len(view._samples) == 200000 and not tab.loading
 
 
 def test_audio_that_does_not_match_the_sample_is_refused(window):
@@ -205,7 +205,7 @@ def test_a_wave_the_unit_no_longer_has_leaves_the_tab_usable(window):
 
 def test_cancel_stops_a_long_load_and_the_session_drains_before_working_again(window):
     window.fake.audio["square"] = [0] * 40000
-    window.fake.add_sample("long", audio=[(i * 3) % 2000 for i in range(40000)])
+    window.fake.add_sample("long", audio=[(i * 3) % 2000 for i in range(400000)])
     window.samples_tab.set_samples(list(window.fake.samples))
     window.midi.paced = True
     tab = window.samples_tab
@@ -238,7 +238,7 @@ def test_cancel_with_nothing_loading_does_nothing(window):
 
 
 def test_closing_the_window_abandons_a_running_load(window):
-    window.fake.add_sample("long", audio=[(i * 3) % 2000 for i in range(30000)])
+    window.fake.add_sample("long", audio=[(i * 3) % 2000 for i in range(300000)])
     window.samples_tab.set_samples(list(window.fake.samples))
     window.midi.paced = True
     tab = window.samples_tab
