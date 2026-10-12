@@ -1166,3 +1166,18 @@ def test_dropping_a_corrupt_rx2_adds_nothing_and_says_why(dashboard):
 
     assert dashboard.list_local.count() == 0
     assert "ErrorCorrupt.rx2" in dashboard.status_bar.currentMessage()
+
+
+def test_dropping_an_mp3_queues_it_like_a_wav_and_an_m4a_is_refused(dashboard, tmp_path):
+    import numpy as np
+    import soundfile as sf
+
+    mp3 = tmp_path / "loop.mp3"
+    sf.write(str(mp3), np.full((4000, 1), 0.25, dtype="float32"), 44100, format="MP3", subtype="MPEG_LAYER_III")
+    m4a = tmp_path / "loop.m4a"
+    m4a.write_bytes(b"not decodable")
+
+    dashboard.on_files_dropped([str(mp3), str(m4a)])
+
+    assert _row_names(dashboard) == ["loop"]
+    assert "unsupported" in dashboard.status_bar.currentMessage() or "Added 1" in dashboard.status_bar.currentMessage()
