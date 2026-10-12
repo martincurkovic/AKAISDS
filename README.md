@@ -22,6 +22,7 @@ A simple way to send and receive audio samples (WAV, AIFF, FLAC, MP3, Ogg) to an
   - Audio preview
   - Generate new Program with slices
 - Import ReCycle `.rx2` loops: each slice becomes a sample, optionally with a program built from them
+- File > Import Audio in the editors: open any audio file (or `.rx2`) in the Slice Editor to trim, slice and send it, optionally as a program
 - WAV/AIFF/FLAC/MP3/Ogg Vorbis/Opus support (compressed files are decoded to PCM before sending)
 - Drag-and-drop support for adding samples
 - Audio preview for samples
