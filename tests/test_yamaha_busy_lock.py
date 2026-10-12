@@ -20,7 +20,7 @@ def navigation(w):
 
 
 def actions(w):
-    return [w._refresh_action, w._restore_action, w._unchanged_action, w._import_rx2_action, *w._tab_actions]
+    return [w._refresh_action, w._restore_action, w._unchanged_action, w._import_audio_action, *w._tab_actions]
 
 
 def test_everything_that_navigates_or_starts_something_is_off_during_a_long_operation(win):

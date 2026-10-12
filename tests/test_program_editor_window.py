@@ -5241,7 +5241,7 @@ def test_import_rx2_opens_the_slice_editor_with_the_cut_points_marked(editor, mo
     _fake_rx2_dialogs(monkeypatch, path, captured)
     editor._main_window.sampler_controller = FakeSamplerController(editor._bridge)
 
-    editor._import_rx2()
+    editor._import_audio()
 
     assert captured["name"] == "120STEREO"
     assert captured["framerate"] == 44100
@@ -5254,16 +5254,16 @@ def test_import_rx2_opens_the_slice_editor_with_the_cut_points_marked(editor, mo
 
 
 def test_import_rx2_is_a_file_menu_action_that_needs_no_selected_sample(editor):
-    assert editor._import_rx2_action.shortcut().toString() == "Ctrl+Shift+I"
-    assert editor._import_rx2_action.isEnabled() is True
+    assert editor._import_audio_action.shortcut().toString() == "Ctrl+Shift+I"
+    assert editor._import_audio_action.isEnabled() is True
     assert "File" in [a.text().replace("&", "") for a in editor.menuBar().actions()]
 
 
-def test_import_rx2_action_is_frozen_with_the_rest_of_the_window(editor):
+def test_import_audio_action_is_frozen_with_the_rest_of_the_window(editor):
     editor._set_hardware_busy_ui(True)
-    assert editor._import_rx2_action.isEnabled() is False
+    assert editor._import_audio_action.isEnabled() is False
     editor._set_hardware_busy_ui(False)
-    assert editor._import_rx2_action.isEnabled() is True
+    assert editor._import_audio_action.isEnabled() is True
 
 
 def test_import_rx2_with_a_bad_file_says_why_and_opens_nothing(editor, monkeypatch, tmp_path):
@@ -5273,7 +5273,7 @@ def test_import_rx2_with_a_bad_file_says_why_and_opens_nothing(editor, monkeypat
     _fake_rx2_dialogs(monkeypatch, str(bad), captured)
     editor._main_window.sampler_controller = FakeSamplerController(editor._bridge)
 
-    editor._import_rx2()
+    editor._import_audio()
 
     assert captured == {}
     assert editor.status_bar.currentMessage()
@@ -5335,3 +5335,23 @@ def test_create_program_from_stereo_slices_puts_left_in_zone_1_and_right_in_zone
     assert (first["VPANO1"], first["VPANO2"]) == (-50, 50)
     assert (first["SNAME3"], first["SNAME4"]) == ("", "")
     assert (1, "VPANO1") not in writes
+
+
+# --- Import Audio: a plain audio file ----------------------------------------------------------------------------------
+
+
+def test_import_audio_opens_a_plain_stereo_file_with_no_markers(editor, monkeypatch, tmp_path):
+    import numpy as np
+    import soundfile as sf
+
+    path = tmp_path / "pad.wav"
+    sf.write(str(path), np.full((4410, 2), 0.2, dtype="float32"), 44100)
+    captured = {}
+    _fake_rx2_dialogs(monkeypatch, str(path), captured)
+    editor._main_window.sampler_controller = FakeSamplerController(editor._bridge)
+
+    editor._import_audio()
+
+    assert captured["name"] == "PAD" and captured["framerate"] == 44100
+    assert len(captured["samples"]) == 4410 and captured["markers"] is None  # no cut points: one sample unless the user adds some
+    assert len(captured["extra_channels"]) == 1 and captured["channel_suffixes"] == ("-L", "-R")

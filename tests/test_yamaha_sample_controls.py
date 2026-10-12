@@ -618,14 +618,14 @@ def drive_rx2_import(window, monkeypatch, path=RX2_STEREO, *, into_program=False
 
 
 def test_the_menu_action_is_ctrl_shift_i_and_opens_the_import(window):
-    assert window._import_rx2_action.shortcut().toString() == "Ctrl+Shift+I"
+    assert window._import_audio_action.shortcut().toString() == "Ctrl+Shift+I"
     assert "File" in [a.text().replace("&", "") for a in window.menuBar().actions()]
 
 
 @needs_rx2
 def test_importing_an_rx2_sends_each_slice_as_a_stereo_sample(window, monkeypatch):
     shown = drive_rx2_import(window, monkeypatch)
-    window._import_rx2_action.trigger()  # needs no sample selected or loaded
+    window._import_audio_action.trigger()  # needs no sample selected or loaded
     tab = window.samples_tab
     assert shown == {"markers": 9, "extra_channels": 1, "name": "120STEREO", "dirty": False, "succeeded": True}
     names = sorted(n for n in window.fake.samples if n.startswith("120STEREO-"))
@@ -642,7 +642,7 @@ def test_importing_an_rx2_sends_each_slice_as_a_stereo_sample(window, monkeypatc
 @needs_rx2
 def test_importing_an_rx2_can_fill_an_empty_program(window, monkeypatch):
     shown = drive_rx2_import(window, monkeypatch, into_program=True, program_row=1)  # row 1 = program 003
-    window._import_rx2_action.trigger()
+    window._import_audio_action.trigger()
     assert shown["succeeded"] is True
     names = sorted(n for n in window.fake.samples if n.startswith("120STEREO-"))
     assert assigned_names(window, 3) == names
@@ -660,7 +660,7 @@ def test_a_file_that_is_not_an_rx2_says_so_and_opens_nothing(window, monkeypatch
     monkeypatch.setattr(QFileDialog, "getOpenFileName", lambda *a, **k: (str(bad), ""))
     messages = []
     window.samples_tab.status_message.connect(messages.append)
-    window._import_rx2_action.trigger()
+    window._import_audio_action.trigger()
     assert opened == [] and messages
 
 
@@ -670,5 +670,20 @@ def test_a_busy_transfer_blocks_an_import(window, monkeypatch):
     monkeypatch.setattr(window.controller, "is_transfer_busy", lambda: True)
     messages = []
     window.samples_tab.status_message.connect(messages.append)
-    window._import_rx2_action.trigger()
+    window._import_audio_action.trigger()
     assert opened == [] and any("already in progress" in m for m in messages)
+
+
+def test_importing_a_plain_audio_file_sends_it_as_one_stereo_sample(window, monkeypatch, tmp_path):
+    import numpy as np
+    import soundfile as sf
+
+    path = tmp_path / "pad.wav"
+    tone = np.sin(np.arange(4000) / 20.0).astype("float32") * 0.4
+    sf.write(str(path), np.stack([tone, -tone], axis=1), 44100)
+    shown = drive_rx2_import(window, monkeypatch, path=str(path))
+    window._import_audio_action.trigger()
+    # no cut points: the whole file, as one stereo sample named for the file
+    assert shown["markers"] == 0 and shown["extra_channels"] == 1 and shown["succeeded"] is True
+    assert yp.is_stereo(window.fake.samples["PAD"])
+    settle_edit(window.samples_tab)
