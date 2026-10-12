@@ -16,6 +16,7 @@ from ui import tooltips as tt
 from ui.global_tab import DISABLED_SETTINGS
 from ui.loop_preview_view import HALF_WINDOW_FRAMES
 from ui.program_editor_window import ProgramEditorWindow, _LOOP_TYPE_OPTIONS
+from core import rx2
 from core.program_editor_bridge import MULTI_PART_COUNT
 
 
@@ -5206,3 +5207,68 @@ def test_the_s3000_editors_signed_knobs_draw_their_arc_from_zero_and_the_unsigne
     assert editor.pan_knob.minimum() == -50 and abs(editor.pan_knob._origin_fraction() - 0.5) < 1e-9
     assert abs(editor.key_filter_track_knob._origin_fraction() - 0.5) < 1e-9  # -24..+24
     assert editor.attack1_knob.minimum() == 0 and editor.attack1_knob._origin_fraction() == 0.0
+
+
+
+# --- Import RX2 ---------------------------------------------------------------
+
+
+def _fake_rx2_dialogs(monkeypatch, path, captured):
+    class _FakeSliceEditorWindow:
+        export_succeeded = False
+
+        def __init__(self, parent, name, samples, framerate, spitch, stuno, shlto, *a, **kwargs):
+            captured.update(
+                name=name, samples=samples, framerate=framerate, spitch=spitch,
+                markers=kwargs.get("initial_markers"),
+            )
+
+        def exec(self):
+            pass
+
+    monkeypatch.setattr("ui.program_editor_window.SliceEditorWindow", _FakeSliceEditorWindow)
+    monkeypatch.setattr(
+        "ui.program_editor_window.QFileDialog.getOpenFileName", lambda *a, **k: (path, "")
+    )
+
+
+@pytest.mark.skipif(not rx2.is_available(), reason="VelociLoops not built")
+def test_import_rx2_opens_the_slice_editor_with_the_cut_points_marked(editor, monkeypatch):
+    path = os.path.join(os.path.dirname(__file__), "fixtures", "rx2", "120Stereo.rx2")
+    captured = {}
+    _fake_rx2_dialogs(monkeypatch, path, captured)
+    editor._main_window.sampler_controller = FakeSamplerController(editor._bridge)
+
+    editor._import_rx2()
+
+    assert captured["name"] == "120STEREO"
+    assert captured["framerate"] == 44100
+    assert len(captured["samples"]) == 2 * 44100  # the ten slices end to end
+    assert len(captured["markers"]) == 9
+    assert "mixed to mono" in editor.status_bar.currentMessage()
+
+
+def test_import_rx2_is_a_file_menu_action_that_needs_no_selected_sample(editor):
+    assert editor._import_rx2_action.shortcut().toString() == "Ctrl+Shift+I"
+    assert editor._import_rx2_action.isEnabled() is True
+    assert "File" in [a.text().replace("&", "") for a in editor.menuBar().actions()]
+
+
+def test_import_rx2_action_is_frozen_with_the_rest_of_the_window(editor):
+    editor._set_hardware_busy_ui(True)
+    assert editor._import_rx2_action.isEnabled() is False
+    editor._set_hardware_busy_ui(False)
+    assert editor._import_rx2_action.isEnabled() is True
+
+
+def test_import_rx2_with_a_bad_file_says_why_and_opens_nothing(editor, monkeypatch, tmp_path):
+    bad = tmp_path / "bad.rx2"
+    bad.write_bytes(b"not a rex file")
+    captured = {}
+    _fake_rx2_dialogs(monkeypatch, str(bad), captured)
+    editor._main_window.sampler_controller = FakeSamplerController(editor._bridge)
+
+    editor._import_rx2()
+
+    assert captured == {}
+    assert editor.status_bar.currentMessage()

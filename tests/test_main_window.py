@@ -10,3 +10,7 @@ def test_audio_filter_string_includes_every_supported_extension():
     filter_string = _build_audio_filter_string()
     for ext in sds_encoder.SUPPORTED_AUDIO_EXTENSIONS:
         assert f"*{ext}" in filter_string
+
+
+def test_audio_filter_string_offers_rx2_loops():
+    assert "*.rx2" in _build_audio_filter_string()

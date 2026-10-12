@@ -21,7 +21,7 @@ import pytest
 from PySide6.QtCore import QCoreApplication, QEvent, Qt
 from PySide6.QtWidgets import QApplication, QLineEdit
 
-from core import dropped_files, sample_slicing, sds_encoder
+from core import dropped_files, rx2, sample_slicing, sds_encoder
 from core.midi_manager import MidiManager
 from controller.sampler_controller import SamplerController
 from ui.dashboard import SETTINGS_ROLE, TransferDashboard
@@ -1012,3 +1012,40 @@ def test_yamaha_editor_refuses_without_a_midi_input(yamaha_dashboard, monkeypatc
     yamaha_dashboard.midi_manager.input_name = None  # every answer comes back on the input
     yamaha_dashboard.open_program_editor()
     assert "MIDI input" in yamaha_dashboard.status_bar.currentMessage()
+
+
+# --- Dropping a ReCycle .rx2 queues one row per slice ---------------------
+
+
+_RX2_FIXTURES = os.path.join(os.path.dirname(__file__), "fixtures", "rx2")
+
+
+def _row_names(dashboard):
+    return [
+        dashboard.list_local.itemWidget(dashboard.list_local.item(i))
+        .findChild(QLineEdit)
+        .text()
+        for i in range(dashboard.list_local.count())
+    ]
+
+
+@pytest.mark.skipif(not rx2.is_available(), reason="VelociLoops not built")
+def test_dropping_an_rx2_queues_one_numbered_row_per_slice(dashboard):
+    dashboard.on_files_dropped([os.path.join(_RX2_FIXTURES, "120Stereo.rx2")])
+
+    assert _row_names(dashboard) == [f"120STEREO-{i:02d}" for i in range(1, 11)]
+    for i in range(dashboard.list_local.count()):
+        item = dashboard.list_local.item(i)
+        # stereo slices stay stereo whatever the global mono default is
+        assert item.data(SETTINGS_ROLE)["mono"] is False
+        with wave.open(item.data(Qt.ItemDataRole.UserRole), "rb") as wf:
+            assert wf.getnchannels() == 2 and wf.getframerate() == 44100
+    assert "Added 10 slices" in dashboard.status_bar.currentMessage()
+
+
+@pytest.mark.skipif(not rx2.is_available(), reason="VelociLoops not built")
+def test_dropping_a_corrupt_rx2_adds_nothing_and_says_why(dashboard):
+    dashboard.on_files_dropped([os.path.join(_RX2_FIXTURES, "ErrorCorrupt.rx2")])
+
+    assert dashboard.list_local.count() == 0
+    assert "ErrorCorrupt.rx2" in dashboard.status_bar.currentMessage()

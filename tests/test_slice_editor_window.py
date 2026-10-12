@@ -824,3 +824,16 @@ def test_scrollbar_appears_once_zoomed_in_and_hides_again_on_fit(qapp):
     assert not window.scrollbar.isHidden()
     window.zoom_fit_button.click()
     assert window.scrollbar.isHidden()
+
+
+# --- initial_markers (an .rx2's own cut points) -----------------------------
+
+
+def test_initial_markers_are_placed_and_do_not_count_as_an_edit(qapp):
+    window = SliceEditorWindow(
+        None, "LOOP", list(range(-5000, 5000)), 44100, 60, 0, 0,
+        lambda: [], lambda *a, **k: (True, "ok"),
+        initial_markers=[2000, 4000, 7000],
+    )
+    assert window.waveform.slice_markers() == [2000, 4000, 7000]
+    assert window._dirty is False
