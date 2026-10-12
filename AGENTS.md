@@ -502,6 +502,24 @@ No hardware primitive exists - only `SamplerController.send_file_queue` + `Bridg
   `fade_in_out_samples`'s docstring before "fixing" it. Normalise is whole-buffer (like Reverse), deliberately.
 - All five send-confirmation dialogs default to Yes (owner's request); Filter Sample has a second confirmation after Preview.
 
+## Edit in External App (Samples tabs, written 2026-10-13, NOT tried on hardware)
+
+"Edit in External App..." writes the loaded audio to a WAV, opens it in the app chosen in Settings > External Audio Editor (`config.json` `external_editor`;
+empty = the OS default for .wav), and "Send Edited Audio" (enabled once the file was saved over) sends it back. Pure parts: `core/external_edit.py`; files and
+watching, shared by both editors: `ui/external_edit_tracker.py` (exports to `dropped_files.session_dir()/external_edit/<n>/<sample name>.wav`; a `QFileSystemWatcher`
+on the directory AND the file, debounced 600 ms; `is_ready` re-reads the file's mtime/size itself so a missed event never hides a save).
+- **Program Editor (S1000 + S2000/S3000, same code):** Send runs the existing `_perform_sample_edit` with a closure that returns the edited audio, label "Replace" -
+  i.e. the send-as-`-TMP` / delete original / rename back / rewrite 8 header fields path of Trim/Reverse. `_perform_sample_edit` now RETURNS True when the audio landed
+  (None for every refusal/failure); only Send uses it, to `mark_sent`. A copy of the original goes to `~/.akaisds/external_edit_backups/` BEFORE anything is sent (no copy, no send).
+  The file is read back mono at the sample's own rate: another rate is resampled to it (`resample_to_target_rate`, lo-fi), stereo is averaged. Through the S1000 adapter this is as
+  untested as Trim/Reverse (see the S1000 section).
+- **Markers:** same length = untouched; otherwise `remap_markers` keeps Start/End positions clamped into the new audio (markers that covered the whole sample cover the whole new
+  one) and clamps the loop inside, in order. Tell the user to check the loop if you extend this.
+- **Yamaha:** the unit can't overwrite, so Send makes a NEW sample `<name> EDIT` (`EXTERNAL_SUFFIX`) through `_send_copy` (the tail of the five edits, factored out of `_run`),
+  carrying the original's parameters; stereo stays stereo (a mono return for a mono sample is kept mono). The original is untouched, so no backup.
+- After a successful send the exported file stays and the button waits for the NEXT save, so the user can keep editing. Windows/Linux launching (`os.startfile`, `xdg-open`) is untested; macOS uses `open [-a app]`.
+- Tests: `tests/test_external_edit.py` (pure + tracker), `tests/test_external_edit_window.py` (Program Editor in demo mode, Yamaha against `FakeA4000`; the app is stubbed by patching `external_edit.launch`).
+
 ## Root Note & Tune, and Detect Root Note
 
 `sample_root_note_spinbox` (`SPITCH`, `NoteSpinBox` 21..127) and `sample_tune_spinbox` (`STUNO`, semitones +-50.00).
