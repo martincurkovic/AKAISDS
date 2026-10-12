@@ -1,26 +1,32 @@
 # Packaging AKAISDS for Homebrew, AUR and Flathub
 
-A draft, **not active**: nothing here is under `.github/workflows/`. Condensed 2026-10-10. The files were drafted against the public v1.1.1
-release and carry real sha256 checksums from its assets; update the version and checksums for a newer release.
+Updated 2026-10-12. **Homebrew is live** (tap `martincurkovic/homebrew-akaisds`, tested by hand against v1.2.1). AUR and Flathub are still drafts.
 
 ```
+.github/workflows/publish-packages.yml   bumps the tap (and, when enabled, the AUR) when a release is published
 dev_docs/packaging/
-  publish-packages.yml   GitHub Actions workflow (would go in .github/workflows/)
-  homebrew/akaisds.rb    draft Cask for a tap repo
+  homebrew/akaisds.rb    copy of the cask in the tap repo (the tap's copy is the real one)
   aur/PKGBUILD           draft AUR "-bin" package (downloads the AppImage)
   aur/akaisds.desktop, aur/icon_512x512.png   bundled with the AUR package
 ```
 
 How it fits: `build.yml` builds all platforms on a pushed tag and creates a DRAFT release (asset URLs 404 until you publish it).
-`publish-packages.yml` runs on `release: published` (never on draft creation) and can also be run by hand (`workflow_dispatch`, with a tag).
+`publish-packages.yml` runs on `release: published` (never on a draft, never on a pre-release such as `-rc1`) and can also be run by hand
+(`workflow_dispatch`, with a tag). It only works once it is on `master`.
 
 ## Homebrew (own tap)
 
-1. Create an empty public repo named exactly `homebrew-akaisds`; add `Casks/akaisds.rb` from `homebrew/akaisds.rb`.
-2. Test: `brew tap martincurkovic/akaisds && brew install --cask akaisds`.
-3. Gatekeeper will prompt on first launch (the app is unsigned) - the cask's `caveats` say so. There is deliberately no `postflight` that strips the
-   quarantine attribute: overriding a macOS security prompt silently should be a conscious decision. No `zap` stanza yet (no bundle identifier is set in
-   `build_macos.sh`); find it with `plutil -p /Applications/AKAISDS.app/Contents/Info.plist | grep Bundle`.
+Why a tap: Homebrew 5.0 dropped `--no-quarantine`, and the official homebrew-cask stops supporting casks that fail Gatekeeper (1 Sept 2026);
+AKAISDS is unsigned. Don't suggest `--no-quarantine` to users.
+
+1. Public repo named exactly `homebrew-akaisds` with `Casks/akaisds.rb` (start from `homebrew/akaisds.rb`; it requires macOS 15+).
+2. Test: `brew tap martincurkovic/akaisds && brew audit --cask --online martincurkovic/akaisds/akaisds && brew install --cask martincurkovic/akaisds/akaisds`.
+3. Gatekeeper will prompt on first launch - the cask's `caveats` say so. There is deliberately no `postflight` that strips the quarantine
+   attribute: overriding a macOS security prompt silently should be a conscious decision.
+4. No `zap` stanza on purpose: `~/.akaisds` holds the user's sampler backups, and `brew uninstall --zap` must not delete them. The bundle
+   identifier is `AKAISDS` (`CFBundleIdentifier`).
+5. The workflow edits only the `version` and two `sha256` lines of the tap's cask. **Keep those three line shapes** (two-space indent,
+   `sha256 arm: "..."`, `intel: "..."` on the next line) or the workflow's grep check fails the job. Everything else in the cask is edited by hand in the tap.
 
 ## AUR
 
@@ -31,10 +37,10 @@ How it fits: `build.yml` builds all platforms on a pushed tag and creates a DRAF
 
 ## Automation
 
-Copy `publish-packages.yml` into `.github/workflows/` and `aur/` into `packaging/aur/` (or adjust the path in the workflow). Add repo secrets:
-`TAP_REPO_TOKEN` (a **fine-grained** token scoped to the tap repo only, Contents: read and write), `AUR_SSH_PRIVATE_KEY` (the key above) and
-`AUR_COMMIT_EMAIL`. Bootstrap by running the workflow by hand against an existing tag (e.g. `v1.1.1`), since `release: published` never fired
-for it. The Homebrew and AUR jobs are independent, so one failing doesn't stop the other. Don't reuse the AUR key or the tap token elsewhere.
+Add repo secret `TAP_REPO_TOKEN` (a **fine-grained** token scoped to `homebrew-akaisds` only, Contents: read and write). The `aur` job is OFF
+until the repo variable `PUBLISH_AUR` is `true` and the secrets `AUR_SSH_PRIVATE_KEY` (the key above) and `AUR_COMMIT_EMAIL` exist. Bootstrap
+by running the workflow by hand against an existing tag, since `release: published` never fired for old releases. Don't reuse the AUR key or
+the tap token elsewhere. A failing job leaves the tap untouched; re-run it from the Actions tab.
 
 ## Flathub (separate, more manual)
 
