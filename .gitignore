@@ -41,3 +41,6 @@ src/ui/_version.py
 /dmg-staging
 scratch_*.py
 /errors
+
+# Compiled by tools/build_velociloops.py
+src/core/native/
