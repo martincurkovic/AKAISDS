@@ -54,7 +54,7 @@ If AKAISDS notices this happening, it shows a **Stray MIDI replies** warning. Cl
 
 **1. Drag audio files into the queue**
 
-WAV, AIFF and FLAC are all supported. Dragging in entire folders works too. AKAISDS does not support compressed formats like MP3.
+WAV, AIFF, FLAC, MP3, Ogg Vorbis and Opus are all supported (compressed files are converted to PCM when sent), as are ReCycle `.rx2` loops, which are queued as one row and sent as individual slices. Dragging in entire folders works too. AAC/M4A is not supported.
 
 ![File Queue](screenshots/file-queue.png)
 

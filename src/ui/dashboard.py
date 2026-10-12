@@ -486,7 +486,7 @@ class TransferDashboard(QWidget):
                     added += 1
             else:
                 self.status_bar.showMessage(
-                    f"Skipped non-WAV file: {os.path.basename(path)}"
+                    f"Skipped unsupported file: {os.path.basename(path)}"
                 )
         if added:
             self.status_bar.showMessage(f"Added {added} file(s) to the queue")
