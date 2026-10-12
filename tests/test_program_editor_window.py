@@ -5221,6 +5221,8 @@ def _fake_rx2_dialogs(monkeypatch, path, captured):
             captured.update(
                 name=name, samples=samples, framerate=framerate, spitch=spitch,
                 markers=kwargs.get("initial_markers"),
+                extra_channels=kwargs.get("extra_channels"),
+                channel_suffixes=kwargs.get("channel_suffixes"),
             )
 
         def exec(self):
@@ -5245,7 +5247,10 @@ def test_import_rx2_opens_the_slice_editor_with_the_cut_points_marked(editor, mo
     assert captured["framerate"] == 44100
     assert len(captured["samples"]) == 2 * 44100  # the ten slices end to end
     assert len(captured["markers"]) == 9
-    assert "mixed to mono" in editor.status_bar.currentMessage()
+    # a stereo loop stays stereo: the right channel rides along and each slice will go out as a -L/-R pair
+    assert len(captured["extra_channels"]) == 1 and len(captured["extra_channels"][0]) == 2 * 44100
+    assert captured["channel_suffixes"] == ("-L", "-R")
+    assert "-L/-R" in editor.status_bar.currentMessage()
 
 
 def test_import_rx2_is_a_file_menu_action_that_needs_no_selected_sample(editor):
@@ -5272,3 +5277,61 @@ def test_import_rx2_with_a_bad_file_says_why_and_opens_nothing(editor, monkeypat
 
     assert captured == {}
     assert editor.status_bar.currentMessage()
+
+
+# --- stereo slices (an imported stereo .rx2): a -L/-R sample pair per slice, left/right zones in the program ----------
+
+
+def test_export_slices_sends_a_stereo_slice_as_a_left_and_a_right_sample(editor, qapp, monkeypatch):
+    monkeypatch.delenv("AKAISDS_DEMO_SAMPLER", raising=False)
+    bridge = editor._bridge
+    fake_sampler = FakeSamplerController(bridge)
+    editor._main_window.sampler_controller = fake_sampler
+    left = [list(range(0, 50)), list(range(50, 120))]
+    right = [list(range(1000, 1050)), list(range(1050, 1120))]
+
+    success, message = editor._export_slices(
+        ["LOOP-1", "LOOP-2"], left, 44100, 16, None, 60, 0, 0,
+        lambda *_: None, lambda *_: None, extra_slices=[right],
+    )
+
+    assert success is True
+    assert "2 stereo slices" in message and "4 samples" in message
+    sent = fake_sampler.sent_entries
+    assert [e["name"] for e in sent] == ["LOOP-1-L", "LOOP-1-R", "LOOP-2-L", "LOOP-2-R"]
+    assert [e["samples"] for e in sent] == [left[0], right[0], left[1], right[1]]
+    assert all(e["mono"] is True for e in sent)  # each is a mono resident sample
+    for name, samples in zip(["LOOP-1-L", "LOOP-1-R", "LOOP-2-L", "LOOP-2-R"], [left[0], right[0], left[1], right[1]]):
+        index = bridge.sample_list().index(name)
+        header = {c[0]: c[2] for c in bridge.set_parameter_calls if c[1] == index}
+        assert header["SPTYPE"] == 3 and header["SMPEND"] == len(samples) - 1
+
+
+def test_create_program_from_stereo_slices_puts_left_in_zone_1_and_right_in_zone_2(editor, qapp):
+    bridge = editor._bridge
+    names = ["LOOP-1", "LOOP-2", "LOOP-3"]
+
+    success, _message = editor._create_program_from_slices(
+        names, 0, "LOOP", lambda *_: None, lambda *_: None, stereo=True
+    )
+
+    assert success is True
+    new_index = bridge.program_list().index("LOOP")
+    assert len(bridge._keygroups[new_index]) == 3
+    writes = {
+        (keygroup, param): value
+        for param, index, value, keygroup in bridge.set_parameter_calls
+        if index == new_index
+    }
+    for i, name in enumerate(names):
+        assert writes[(i, "SNAME1")] == name + "-L"
+        assert writes[(i, "SNAME2")] == name + "-R"
+        assert writes[(i, "LONOTE")] == writes[(i, "HINOTE")] == 36 + i
+    # everything else is written once, on keygroup 0, and inherited by the clones: Const Pitch on both zones, the whole velocity
+    # range for both, left hard left and right hard right, zones 3-4 empty
+    first = {param: value for (keygroup, param), value in writes.items() if keygroup == 0}
+    assert (first["CP1"], first["CP2"]) == (1, 1)
+    assert (first["LOVEL1"], first["HIVEL1"], first["LOVEL2"], first["HIVEL2"]) == (0, 127, 0, 127)
+    assert (first["VPANO1"], first["VPANO2"]) == (-50, 50)
+    assert (first["SNAME3"], first["SNAME4"]) == ("", "")
+    assert (1, "VPANO1") not in writes

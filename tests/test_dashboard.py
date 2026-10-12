@@ -572,6 +572,12 @@ def test_open_slice_editor_wires_both_channels_through_to_export(
             self._shlto,
             _noop,
             _noop,
+            # what the real dialog adds for a stereo file: the right channel, cut at the same frames
+            extra_slices=[
+                sample_slicing.slice_samples(
+                    self._extra_channels[0], self.waveform.start(), self.waveform.end(), [2205]
+                )
+            ],
         )
         return 0
 
@@ -1033,7 +1039,9 @@ def _row_names(dashboard):
 def test_dropping_an_rx2_queues_one_numbered_row_per_slice(dashboard):
     dashboard.on_files_dropped([os.path.join(_RX2_FIXTURES, "120Stereo.rx2")])
 
-    assert _row_names(dashboard) == [f"120STEREO-{i:02d}" for i in range(1, 11)]
+    # a stereo slice is sent as <name>-L / <name>-R, so the base is cut to leave room for the suffix (12 characters in all)
+    assert _row_names(dashboard) == [f"120STER-{i:02d}" for i in range(1, 11)]
+    assert all(len(n + "-L") <= 12 for n in _row_names(dashboard))
     for i in range(dashboard.list_local.count()):
         item = dashboard.list_local.item(i)
         # stereo slices stay stereo whatever the global mono default is

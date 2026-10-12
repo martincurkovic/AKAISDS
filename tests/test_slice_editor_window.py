@@ -837,3 +837,60 @@ def test_initial_markers_are_placed_and_do_not_count_as_an_edit(qapp):
     )
     assert window.waveform.slice_markers() == [2000, 4000, 7000]
     assert window._dirty is False
+
+
+# --- stereo: two lanes, -L/-R names ------------------------------------------------------------------------------------
+
+
+def _stereo_window(export_calls=None, existing=()):
+    left = list(range(-5000, 5000))
+    right = [-v for v in left]
+
+    def export_callback(*args, **kwargs):
+        if export_calls is not None:
+            export_calls.append((args, kwargs))
+        return True, "ok"
+
+    return SliceEditorWindow(
+        None, "LOOP", left, 44100, 60, 0, 0, lambda: list(existing), export_callback,
+        extra_channels=[right], channel_suffixes=("-L", "-R"), initial_markers=[2500, 5000],
+    )
+
+
+def test_a_stereo_pair_is_shown_as_two_lanes_and_analysed_as_the_mix(qapp):
+    window = _stereo_window()
+    assert window.waveform._right is not None
+    assert window.waveform.minimumHeight() > 220
+    # left and right are exact opposites here, so their mix is silence - and silence is what the analysis and snapping read
+    assert set(window._analysis) == {0}
+
+
+def test_stereo_slice_names_leave_room_for_the_channel_suffix():
+    # one uniform base for the whole batch (see the function's own docstring), 10 chars in all so "-L"/"-R" still fits in 12
+    assert slice_export_names("120STEREO", 10, 10) == [f"120STER-{i:02d}" for i in range(1, 11)]
+    assert all(len(n + "-L") <= 12 for n in slice_export_names("120STEREO", 10, 10))
+    assert slice_export_names("LOOP", 1, 10) == ["LOOP"]
+
+
+def test_stereo_export_checks_the_suffixed_names_for_clashes(qapp, monkeypatch):
+    warnings = []
+    monkeypatch.setattr(sew.QMessageBox, "warning", lambda *a, **k: warnings.append(a[2]))
+    calls = []
+    window = _stereo_window(export_calls=calls, existing=["LOOP-2-R"])
+    window.name_edit.setText("LOOP")
+    window.export_button.click()
+    assert calls == [] and warnings and "LOOP-2-R" in warnings[0]
+
+
+def test_stereo_export_passes_the_right_channel_slices_and_asks_about_a_pair(qapp, monkeypatch):
+    asked = []
+    monkeypatch.setattr(sew.QMessageBox, "question", lambda *a, **k: asked.append(a[2]) or sew.QMessageBox.StandardButton.Yes)
+    monkeypatch.setattr(sew.QMessageBox, "information", lambda *a, **k: None)
+    calls = []
+    window = _stereo_window(export_calls=calls)
+    window.name_edit.setText("LOOP")
+    window.export_button.click()
+    (args, kwargs), = calls
+    assert args[0] == ["LOOP-1", "LOOP-2", "LOOP-3"]
+    assert len(kwargs["extra_slices"]) == 1 and len(kwargs["extra_slices"][0]) == 3
+    assert "stereo" in asked[0] and "6 samples" in asked[0]
