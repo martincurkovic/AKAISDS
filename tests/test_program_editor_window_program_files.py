@@ -175,3 +175,168 @@ def test_load_reports_an_unreadable_file(qapp, s1000, tmp_path, monkeypatch):
     monkeypatch.setattr(QMessageBox, "warning", lambda *a, **k: warnings.append(a[2]))
     editor._load_program_from_file()
     assert warnings and "Couldn't read this file" in warnings[0]
+
+
+# --- drag and drop: a program file dropped on the window loads it; a program dragged out of the list becomes a file -----------------
+
+
+from PySide6.QtCore import QMimeData, QPointF, QUrl, Qt
+from PySide6.QtGui import QDropEvent
+
+
+_KEEP_ALIVE = []  # a drop event only POINTS at its QMimeData: if Python frees it first, the next read segfaults
+
+
+def _mime(*paths):
+    mime = QMimeData()
+    mime.setUrls([QUrl.fromLocalFile(str(p)) for p in paths])
+    _KEEP_ALIVE.append(mime)
+    return mime
+
+
+def _drop_event(*paths):
+    return QDropEvent(
+        QPointF(20, 20), Qt.DropAction.CopyAction, _mime(*paths), Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier
+    )
+
+
+def _program_file(fake, tmp_path, name="DRUMS.p1"):
+    path = tmp_path / name
+    program, keygroups = fake.programs[0]["block"], fake.programs[0]["keygroups"]
+    path.write_bytes(apf.build_file(bytes(program), [bytes(k) for k in keygroups]))
+    return path
+
+
+def test_dropping_a_program_file_loads_it_like_the_load_button(qapp, s1000, tmp_path, monkeypatch):
+    fake, editor = s1000
+    path = _program_file(fake, tmp_path)
+    monkeypatch.setattr(editor, "_prompt_akai_name", lambda *a: "DRUMS DROP")
+    asked = []
+    monkeypatch.setattr(
+        QMessageBox, "question", lambda *a, **k: asked.append(a[2]) or QMessageBox.StandardButton.Yes
+    )
+    warnings = []
+    monkeypatch.setattr(QMessageBox, "warning", lambda *a, **k: warnings.append(a[2]))
+
+    event = _drop_event(path)
+    editor.dropEvent(event)
+    assert event.isAccepted()
+    # answered after the drop has returned (the dialogs must not hold the dragging app open)
+    assert asked == []
+    _pump_until(qapp, lambda: editor.program_list.count() == 3 or warnings)
+
+    assert warnings == []
+    assert editor.program_list.item(2).text() == "DRUMS DROP"
+    assert asked and "keygroups" in asked[0]  # it asked before loading, like the Load button
+
+
+def test_only_program_files_are_accepted_for_a_drop(qapp, s1000, tmp_path):
+    _fake, editor = s1000
+    from PySide6.QtGui import QDragEnterEvent
+
+    def enter(*paths):
+        event = QDragEnterEvent(
+            QPointF(5, 5).toPoint(), Qt.DropAction.CopyAction, _mime(*paths), Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier
+        )
+        event.setAccepted(False)
+        editor.dragEnterEvent(event)
+        return event.isAccepted()
+
+    assert enter(tmp_path / "A.p1") and enter(tmp_path / "B.P3")
+    assert not enter(tmp_path / "loop.wav")
+
+
+def test_dropping_two_program_files_loads_neither(qapp, s1000, tmp_path, monkeypatch):
+    fake, editor = s1000
+    first, second = _program_file(fake, tmp_path, "A.p1"), _program_file(fake, tmp_path, "B.p1")
+    loaded = []
+    monkeypatch.setattr(editor, "_load_program_path", loaded.append)
+    editor.dropEvent(_drop_event(first, second))
+    _pump_until(qapp, lambda: "one program file" in editor.status_bar.currentMessage())
+    assert loaded == []
+
+
+def test_a_drop_is_refused_while_the_window_is_busy_or_in_demo_mode(qapp, s1000, tmp_path, monkeypatch):
+    fake, editor = s1000
+    path = _program_file(fake, tmp_path)
+    loaded = []
+    monkeypatch.setattr(editor, "_load_program_path", loaded.append)
+
+    editor.main_tabs.setEnabled(False)  # what a long hardware operation does
+    editor.dropEvent(_drop_event(path))
+    _pump_until(qapp, lambda: "try again" in editor.status_bar.currentMessage())
+    editor.main_tabs.setEnabled(True)
+
+    editor._load_program_action.setEnabled(False)  # demo mode
+    editor.dropEvent(_drop_event(path))
+    _pump_until(qapp, lambda: "demo mode" in editor.status_bar.currentMessage())
+    assert loaded == []
+
+
+def test_a_program_read_for_dragging_becomes_a_file_a_load_can_read(qapp, s1000):
+    _fake, editor = s1000
+    path = editor._export_program_to_temp_file(0)
+    assert path and path.endswith("DRUMS.p1")
+    parsed = apf.parse_file(open(path, "rb").read())
+    assert parsed.name == "DRUMS" and len(parsed.keygroups) == 2
+
+
+def test_dragging_a_program_out_starts_a_copy_drag_of_that_file(qapp, s1000, monkeypatch):
+    _fake, editor = s1000
+    seen = {}
+
+    def fake_exec(drag, actions=None):
+        seen["urls"] = [u.toLocalFile() for u in drag.mimeData().urls()]
+        return Qt.DropAction.CopyAction
+
+    monkeypatch.setattr("ui.program_editor_window.QDrag.exec", fake_exec)
+    editor._drag_program_out(0)
+    assert len(seen["urls"]) == 1 and seen["urls"][0].endswith("DRUMS.p1") and os.path.exists(seen["urls"][0])
+    assert editor.status_bar.currentMessage() == "Saved DRUMS.p1"
+    assert editor._program_drag_active is False
+
+
+def test_a_drag_dropped_nowhere_says_nothing_was_saved(qapp, s1000, monkeypatch):
+    _fake, editor = s1000
+    monkeypatch.setattr("ui.program_editor_window.QDrag.exec", lambda drag, actions=None: Qt.DropAction.IgnoreAction)
+    editor._drag_program_out(0)
+    assert "nothing saved" in editor.status_bar.currentMessage()
+
+
+def test_the_program_list_reports_which_row_was_dragged(qapp, s1000):
+    _fake, editor = s1000
+    rows = []
+    editor.program_list.drag_out_requested.connect(rows.append)
+    editor.program_list.setCurrentRow(1)
+    editor.program_list.startDrag(Qt.DropAction.CopyAction)
+    assert rows == [1]
+
+
+def test_drag_and_drop_decisions_are_logged(qapp, s1000, tmp_path, monkeypatch):
+    import logging
+    from core import debug_log
+
+    fake, editor = s1000
+    lines = []
+
+    class _Capture(logging.Handler):
+        def emit(self, record):
+            lines.append(record.getMessage())
+
+    logger = debug_log.get_logger()
+    handler = _Capture(level=logging.DEBUG)
+    logger.addHandler(handler)
+    try:
+        path = _program_file(fake, tmp_path)
+        monkeypatch.setattr(editor, "_load_program_path", lambda p: None)
+        editor.main_tabs.setEnabled(False)
+        editor.dropEvent(_drop_event(path))
+        _pump_until(qapp, lambda: any("drop refused - the window is busy" in l for l in lines))
+        editor.main_tabs.setEnabled(True)
+        monkeypatch.setattr("ui.program_editor_window.QDrag.exec", lambda drag, actions=None: Qt.DropAction.CopyAction)
+        editor._drag_program_out(0)
+    finally:
+        logger.removeHandler(handler)
+    assert any("program file(s) dropped" in l for l in lines)
+    assert any("read for a drag" in l and "DRUMS" in l for l in lines)
+    assert any("drag of DRUMS.p1 ended with CopyAction" in l for l in lines)
