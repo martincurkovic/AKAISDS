@@ -357,6 +357,26 @@ assigning a sample this run loaded (`midi_loaded_names`). Watch the unit's displ
   crop to a temp file and deletes it before Send. Orphaned sessions are swept at next launch.
 - **32-bit float WAVs read as silence** through `sf.read(dtype="int16")`; `sds_encoder` always reads float and scales by hand.
 
+## ReCycle `.rx2` import (VelociLoops)
+
+`core/rx2.py` reads `.rx2` through VelociLoops (`third_party/velociloops/`, public domain, vendored UNMODIFIED, commit `f77609e`) over
+`ctypes`. The library is compiled by `tools/build_velociloops.py` into `src/core/native/` (git-ignored); the three `scripts/build_*`
+run it and bundle the result, `test.yml` runs it before the tests. **Windows/Linux builds of it and the bundling are untested** (written on
+macOS arm64); upstream marks no exports, so on MSVC the tool writes a `.def` from the header. No library = `Rx2Unavailable`, a short message, and the
+`.rx2` tests skip.
+- **Slices are RAW length** (`VLSliceInfo.sample_length`), not `vl_get_slice_frame_count()`: with the file's transient-stretch on, that adds a synthetic
+  decay tail for slower playback, wrong for a sampler playing slices at their own pitch. Measured: the raw slices of `120Stereo.rx2` tile exactly 2.0 s (one bar at
+  120 BPM). Muted slices are kept (mute is ReCycle editing state).
+- Two entry points, both over the same decode: **Dashboard** (drop or Open an `.rx2`): `TransferDashboard._import_rx2` queues one row per slice,
+  `<STEM>-01..` (stereo stays stereo). **Program Editor File > "Import RX2 Loop..." (Ctrl+Shift+I)**: opens the Slice Editor on the slices laid end to end
+  (`Rx2Loop.mono_buffer`, stereo averaged to mono) with the cut points as `initial_markers`, so Export and "Create new program" are the
+  Slice Editor's own paths. `_run_slice_editor` is shared with the resident-sample flow; `resident_source=False` skips the audio retention.
+- **Updating VelociLoops:** `uv run python tools/update_velociloops.py` (`--ref`, `--dry-run`): fetches all four files before writing any, records the sha in `third_party/velociloops/VERSION` and the two docs that quote it, rebuilds and runs `tests/test_rx2.py`. Run by hand, review the diff; never from a build (the library parses untrusted files).
+- Only `.rx2` is accepted; the library also reads `.rex`/`.rcy` (not wired up). Float -> int16 is a plain Python loop (no numpy at runtime).
+- **Not done:** VelociLoops' SuperFlux onset detector (it is only reachable through `vl_create_from_superflux`, which builds a whole RX2) is NOT used
+  by the Slice Editor yet. Measured 2026-10-12 on VelociLoops' own fixtures vs ReCycle's markers it beats `transient_detection` clearly on drum breaks;
+  the plan is a "fast" (current) / "high quality" (SuperFlux) detection choice. Real `.rx2` loops from outside VelociLoops' fixtures are untested.
+
 ## Sample send hardening (`SamplerController._send_current_packet` and friends)
 
 Akai SDATA and generic SDS sends share ONE packet loop; every batch (Dashboard Send, editor Trim/Duplicate, Slice export) uses it.
