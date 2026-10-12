@@ -21,6 +21,7 @@ A simple way to send and receive audio samples (WAV, AIFF, FLAC) to an Akai S100
   - Transient detection
   - Audio preview
   - Generate new Program with slices
+- Import ReCycle `.rx2` loops: each slice becomes a sample, optionally with a program built from them
 - WAV/AIFF/FLAC support
 - Drag-and-drop support for adding samples
 - Audio preview for samples
