@@ -3,6 +3,7 @@
 ## Prerequisites
 
 - Python 3.12 or higher
+- A C++17 compiler: the build scripts compile the small REX2 reader (`third_party/velociloops`, via `tools/build_velociloops.py`) for your machine
 - Other dependencies are in the `pyproject.toml` file which will be installed automatically when running one of the build scripts below
 
 #### macOS
