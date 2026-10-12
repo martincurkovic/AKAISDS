@@ -679,8 +679,8 @@ class YamahaSamplesTab(QWidget):
     def _markers_editable(self):
         return self._writer is not None and self._loading_name is None and not self._edit_busy
 
-    def import_rx2(self):
-        self._edits.import_rx2()
+    def import_audio(self):
+        self._edits.import_audio()
 
     def free_programs(self):
         return list(self.free_programs_provider()) if self.free_programs_provider is not None else []

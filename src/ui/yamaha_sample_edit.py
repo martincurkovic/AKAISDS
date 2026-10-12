@@ -19,16 +19,16 @@ import shutil
 import tempfile
 
 from PySide6.QtCore import QEventLoop, QObject, QTimer
-from PySide6.QtWidgets import QFileDialog, QMessageBox
+from PySide6.QtWidgets import QMessageBox
 
 from controller.yamaha_session import LinkResult
 from core import debug_log
-from core import rx2
 from core import sample_editing as se
 from core import yamaha_edit as ye
 from core import yamaha_load as yl
 from core import yamaha_params as yp
 from core import yamaha_sysex as ysx
+from ui import import_audio
 from ui.filter_sample_dialog import FilterSampleDialog
 from ui.slice_editor_window import SliceEditorWindow
 
@@ -273,29 +273,28 @@ class YamahaSampleEditor(QObject):
             },
         )
 
-    def import_rx2(self):
-        """File > Import RX2 Loop: a ReCycle loop in the Slice Editor with its cut points already marked, a stereo loop kept stereo.
-        Export sends each slice as a new sample (and can fill an empty program) - nothing RX2-specific goes to the unit. Needs no
-        sample selected or loaded."""
+    def import_audio(self):
+        """File > Import Audio: an audio file or a ReCycle .rx2 loop in the Slice Editor (ui/import_audio.py) - an .rx2 with its cut points
+        already marked, any other file with none. A stereo file stays stereo. Export sends each slice as a new sample (and can fill an
+        empty program) - nothing import-specific goes to the unit. Needs no sample selected or loaded."""
         tab = self._tab
         if tab._edit_busy or tab._loading_name is not None or tab._controller.is_transfer_busy():
             tab.status_message.emit("A transfer is already in progress - wait for it to finish")
             return
-        path, _ = QFileDialog.getOpenFileName(tab, "Import RX2 Loop", os.path.expanduser("~"), "ReCycle loops (*.rx2)")
-        if not path:
+        imported = import_audio.pick_and_load(tab, tab.status_message.emit)
+        if imported is None:
             return
-        try:
-            loop = rx2.load(path)
-        except rx2.Rx2Error as e:
-            _log(f"couldn't import {path!r}: {e}")
-            debug_log.get_logger().error(f"YamahaEditor: couldn't import {path!r}", exc_info=True)
-            tab.status_message.emit(str(e))
-            return
-        channels, markers = loop.channel_buffers()
-        _log(f"import rx2 {os.path.basename(path)!r}: {len(loop.slices)} slices, {loop.channels} channel(s), {loop.sample_rate} Hz")
+        _log(
+            f"import audio {imported.name!r}: {len(imported.channels)} channel(s), {imported.rate} Hz, "
+            f"{len(imported.channels[0])} frames, {len(imported.markers)} cut points"
+        )
         # no sample to copy a key from: a plain C3 (60) root; the unit's own defaults for the rest (a fresh sample's tuning is 0)
         self._run_slicer(
-            rx2.slice_base_name(path), channels, loop.sample_rate, {"original_key_l": 60, "original_key_r": 60}, initial_markers=markers
+            imported.name,
+            imported.channels,
+            imported.rate,
+            {"original_key_l": 60, "original_key_r": 60},
+            initial_markers=imported.markers or None,
         )
 
     def _run_slicer(self, name, channels, rate, slice_params, initial_markers=None):
