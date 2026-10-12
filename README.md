@@ -7,7 +7,7 @@
 [![Platforms: macOS, Windows, Linux](https://img.shields.io/badge/platforms-macOS%20%7C%20Windows%20%7C%20Linux-lightgrey)](#download--installation)
 [![License: GPLv3](https://img.shields.io/badge/license-GPLv3-blue)](LICENSE)
 
-A simple way to send and receive audio samples (WAV, AIFF, FLAC) to an Akai S1000/S2000/S3000 series sampler over MIDI using the sample dump standard (MIDI SDS). Also supports generic MIDI SDS transmission for non-Akai samplers.
+A simple way to send and receive audio samples (WAV, AIFF, FLAC, MP3, Ogg) to an Akai S1000/S2000/S3000 series sampler over MIDI using the sample dump standard (MIDI SDS). Also supports generic MIDI SDS transmission for non-Akai samplers.
 
 ![Main window dark](src/ui/help/screenshots/main-window-dark.png "Main window dark")
 
@@ -22,7 +22,7 @@ A simple way to send and receive audio samples (WAV, AIFF, FLAC) to an Akai S100
   - Audio preview
   - Generate new Program with slices
 - Import ReCycle `.rx2` loops: each slice becomes a sample, optionally with a program built from them
-- WAV/AIFF/FLAC support
+- WAV/AIFF/FLAC/MP3/Ogg Vorbis/Opus support (compressed files are decoded to PCM before sending)
 - Drag-and-drop support for adding samples
 - Audio preview for samples
 - Batch transmission queue for sending and receiving samples
