@@ -55,6 +55,16 @@ def test_mono_buffer_markers_sit_on_slice_boundaries():
 
 
 @needs_library
+def test_channel_buffers_keep_stereo_and_share_the_markers():
+    stereo = rx2.load(os.path.join(FIXTURES, "120Stereo.rx2"))
+    channels, markers = stereo.channel_buffers()
+    assert len(channels) == 2 and len(channels[0]) == len(channels[1]) == 2 * 44100
+    assert markers == stereo.mono_buffer()[1] and len(markers) == 9
+    mono = rx2.load(os.path.join(FIXTURES, "120Mono.rx2"))
+    assert len(mono.channel_buffers()[0]) == 1
+
+
+@needs_library
 def test_corrupt_file_raises_a_short_error():
     with pytest.raises(rx2.Rx2Error) as e:
         rx2.load(os.path.join(FIXTURES, "ErrorCorrupt.rx2"))

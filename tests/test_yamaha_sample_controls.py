@@ -7,9 +7,10 @@ import os
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
-from PySide6.QtWidgets import QMessageBox
+from PySide6.QtWidgets import QFileDialog, QMessageBox
 
 from controller.yamaha_session import LinkResult
+from core import rx2
 from core import sample_editing as se
 from core import yamaha_markers as ym
 from core import yamaha_params as yp
@@ -585,3 +586,89 @@ def test_a_unit_that_went_silent_without_making_the_link_gets_it_sent_again(wind
 
 def test_the_most_slices_a_program_takes_is_what_fits_on_the_keyboard():
     assert edit_module.MAX_PROGRAM_SLICES == 92 and edit_module.FIRST_SLICE_NOTE + edit_module.MAX_PROGRAM_SLICES - 1 == 127
+
+
+# --- File > Import RX2 Loop ---------------------------------------------------------------------------------------------
+
+RX2_STEREO = os.path.join(os.path.dirname(__file__), "fixtures", "rx2", "120Stereo.rx2")
+needs_rx2 = pytest.mark.skipif(not rx2.is_available(), reason="VelociLoops not built")
+
+
+def drive_rx2_import(window, monkeypatch, path=RX2_STEREO, *, into_program=False, program_row=0):
+    """Pick the file the way the menu action does, then drive the REAL dialog: its cut points are already placed, so just Export."""
+    shown = {}
+
+    def drive(self):
+        shown["markers"] = len(self.waveform.slice_markers())
+        shown["extra_channels"] = len(self._extra_channels or [])
+        shown["name"] = self.name_edit.text()
+        shown["dirty"] = self._dirty
+        if into_program:
+            self.create_program_checkbox.setChecked(True)
+            self.template_program_combo.setCurrentIndex(program_row)
+        self.export_button.click()
+        shown["succeeded"] = self.export_succeeded
+        return 1
+
+    monkeypatch.setattr(edit_module.SliceEditorWindow, "exec", drive)
+    monkeypatch.setattr(QFileDialog, "getOpenFileName", lambda *a, **k: (path, ""))
+    monkeypatch.setattr(QMessageBox, "information", lambda *a, **k: QMessageBox.StandardButton.Ok)
+    monkeypatch.setattr(QMessageBox, "warning", lambda *a, **k: QMessageBox.StandardButton.Ok)
+    return shown
+
+
+def test_the_menu_action_is_ctrl_shift_i_and_opens_the_import(window):
+    assert window._import_rx2_action.shortcut().toString() == "Ctrl+Shift+I"
+    assert "File" in [a.text().replace("&", "") for a in window.menuBar().actions()]
+
+
+@needs_rx2
+def test_importing_an_rx2_sends_each_slice_as_a_stereo_sample(window, monkeypatch):
+    shown = drive_rx2_import(window, monkeypatch)
+    window._import_rx2_action.trigger()  # needs no sample selected or loaded
+    tab = window.samples_tab
+    assert shown == {"markers": 9, "extra_channels": 1, "name": "120STEREO", "dirty": False, "succeeded": True}
+    names = sorted(n for n in window.fake.samples if n.startswith("120STEREO-"))
+    assert len(names) == 10
+    assert all(yp.is_stereo(window.fake.samples[n]) for n in names)
+    # the ten slices are the whole bar: 2 s at 44.1 kHz
+    frames = sum(yp.extract(yp.get("sample", "wave_length"), window.fake.samples[n]) for n in names)
+    assert frames == 2 * 44100
+    assert yp.extract(yp.get("sample", "original_key_l"), window.fake.samples[names[0]]) == 60
+    settle_edit(tab)
+    assert wait_until(lambda: all(n in tab.sample_names() for n in names))
+
+
+@needs_rx2
+def test_importing_an_rx2_can_fill_an_empty_program(window, monkeypatch):
+    shown = drive_rx2_import(window, monkeypatch, into_program=True, program_row=1)  # row 1 = program 003
+    window._import_rx2_action.trigger()
+    assert shown["succeeded"] is True
+    names = sorted(n for n in window.fake.samples if n.startswith("120STEREO-"))
+    assert assigned_names(window, 3) == names
+    note = edit_module.FIRST_SLICE_NOTE + 3
+    data = window.fake.samples[names[3]]
+    assert yp.extract(yp.get("sample", "key_range_low"), data) == note
+    settle_edit(window.samples_tab)
+
+
+def test_a_file_that_is_not_an_rx2_says_so_and_opens_nothing(window, monkeypatch, tmp_path):
+    bad = tmp_path / "bad.rx2"
+    bad.write_bytes(b"not a rex file")
+    opened = []
+    monkeypatch.setattr(edit_module.SliceEditorWindow, "exec", lambda self: opened.append(1) or 0)
+    monkeypatch.setattr(QFileDialog, "getOpenFileName", lambda *a, **k: (str(bad), ""))
+    messages = []
+    window.samples_tab.status_message.connect(messages.append)
+    window._import_rx2_action.trigger()
+    assert opened == [] and messages
+
+
+def test_a_busy_transfer_blocks_an_import(window, monkeypatch):
+    opened = []
+    monkeypatch.setattr(QFileDialog, "getOpenFileName", lambda *a, **k: opened.append(1) or ("", ""))
+    monkeypatch.setattr(window.controller, "is_transfer_busy", lambda: True)
+    messages = []
+    window.samples_tab.status_message.connect(messages.append)
+    window._import_rx2_action.trigger()
+    assert opened == [] and any("already in progress" in m for m in messages)
