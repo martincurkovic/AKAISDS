@@ -226,3 +226,140 @@ def test_a_stereo_yamaha_sample_stays_stereo_through_the_external_editor(window,
     tab.external_send_button.click()
     assert wait_until(lambda: "ST EDIT" in window.fake.samples, timeout=10)
     assert yp.is_stereo(window.fake.samples["ST EDIT"])
+
+
+# --- Time Stretch / Pitch Shift (core/time_stretch.py, ui/time_stretch_dialog.py) ----------------------------------------
+
+
+def _accepting_dialog(monkeypatch, *, percent=100, grain_ms=20, mode="stretch", semitones=0, cents=0):
+    """Stand-in for the dialog's exec(): turn the knobs and accept, as a user would."""
+    from ui.time_stretch_dialog import PITCH, STRETCH, TimeStretchDialog
+
+    def fake_exec(self):
+        self.mode_combo.setCurrentIndex(self.mode_combo.findData(PITCH if mode == "pitch" else STRETCH))
+        self.length_knob.setValue(percent)
+        self.semitones_knob.setValue(semitones)
+        self.cents_knob.setValue(cents)
+        self.grain_knob.setValue(grain_ms)
+        return True
+
+    monkeypatch.setattr(TimeStretchDialog, "exec", fake_exec)
+
+
+def test_the_time_stretch_dialog_reports_the_result_and_refuses_no_change(qapp):
+    from PySide6.QtWidgets import QDialogButtonBox
+
+    from ui.time_stretch_dialog import TimeStretchDialog
+
+    dialog = TimeStretchDialog(None, "KICK", [0] * 44100, 44100)
+    ok = dialog._button_box.button(QDialogButtonBox.StandardButton.Ok)
+    assert not ok.isEnabled() and "44,100 frames" in dialog.result_label.text()  # 100%: nothing to do
+    dialog.length_knob.setValue(200)
+    assert ok.isEnabled() and "88,200 frames" in dialog.result_label.text() and dialog.factor() == 2.0
+    assert dialog.edit()[0] == "stretch" and dialog.summary() == "stretched to 200% of its length"
+    dialog.grain_knob.setValue(10)
+    assert dialog.grain_frames() == pytest.approx(441.0)
+
+
+def test_the_dialogs_knobs_are_live_and_double_click_resets_to_the_neutral_value(qapp):
+    from ui.time_stretch_dialog import TimeStretchDialog
+
+    dialog = TimeStretchDialog(None, "KICK", [0] * 1000, 44100)
+    knobs = (dialog.length_knob, dialog.semitones_knob, dialog.cents_knob, dialog.grain_knob)
+    assert all(k.isEnabled() for k in knobs)
+    assert [k.defaultValue() for k in knobs] == [100, 0, 0, 40]
+    assert (dialog.length_knob.value(), dialog.grain_knob.value()) == (100, 40)
+
+
+def test_pitch_mode_swaps_the_knobs_keeps_the_length_and_describes_the_shift(qapp):
+    from PySide6.QtWidgets import QDialogButtonBox
+
+    from ui.time_stretch_dialog import PITCH, TimeStretchDialog
+
+    dialog = TimeStretchDialog(None, "KICK", [0] * 1000, 44100)
+    ok = dialog._button_box.button(QDialogButtonBox.StandardButton.Ok)
+    assert not dialog._length_column.isHidden() and dialog._semitones_column.isHidden()
+    dialog.mode_combo.setCurrentIndex(dialog.mode_combo.findData(PITCH))
+    assert dialog._length_column.isHidden() and not dialog._semitones_column.isHidden() and not dialog._cents_column.isHidden()
+    assert not ok.isEnabled()  # 0 semitones, 0 cents
+    dialog.semitones_knob.setValue(3)
+    dialog.cents_knob.setValue(10)
+    assert ok.isEnabled() and "1,000 frames" in dialog.result_label.text()
+    kind, options = dialog.edit()
+    assert kind == "pitch" and options["ratio"] == pytest.approx(2 ** (3.1 / 12))
+    assert dialog.summary() == "shifted by +3.1 semitones"
+    dialog.semitones_knob.setValue(-12)
+    dialog.cents_knob.setValue(0)
+    assert dialog.summary() == "shifted by -12 semitones" and dialog.edit()[1]["ratio"] == pytest.approx(0.5)
+
+
+def test_the_time_stretch_dialog_refuses_a_result_too_long_for_the_sampler(qapp):
+    from PySide6.QtWidgets import QDialogButtonBox
+
+    from core import time_stretch
+    from ui.time_stretch_dialog import TimeStretchDialog
+
+    dialog = TimeStretchDialog(None, "LONG", [0] * (time_stretch.MAX_OUTPUT_FRAMES // 3), 44100)
+    dialog.length_knob.setValue(400)
+    assert not dialog._button_box.button(QDialogButtonBox.StandardButton.Ok).isEnabled()
+    assert "Too long" in dialog.result_label.text()
+
+
+def test_time_stretch_replaces_the_sample_with_a_longer_one_and_scales_the_markers(editor, qapp, monkeypatch):
+    _load_demo_audio(editor, qapp, monkeypatch, [int(8000 * ((i % 100) / 50 - 1)) for i in range(1000)])
+    assert editor.time_stretch_button.isEnabled()
+    editor.waveform_view.set_marker("start", 100)
+    editor.waveform_view.set_marker("end", 800)
+    _accepting_dialog(monkeypatch, percent=200)
+
+    editor.time_stretch_button.click()
+
+    entry = editor._sample_waveform_cache[0]
+    assert entry["frame_count"] == 2000 and len(entry["samples"]) == 2000
+    assert entry["start"] == round(100 * 1999 / 999) and entry["end"] == round(800 * 1999 / 999)
+
+
+def test_pitch_shift_replaces_the_sample_keeping_its_length_and_markers(editor, qapp, monkeypatch):
+    original = [int(8000 * ((i % 100) / 50 - 1)) for i in range(1000)]
+    _load_demo_audio(editor, qapp, monkeypatch, original)
+    editor.waveform_view.set_marker("start", 100)
+    editor.waveform_view.set_marker("end", 800)
+    _accepting_dialog(monkeypatch, mode="pitch", semitones=12, grain_ms=10)
+
+    editor.time_stretch_button.click()
+
+    entry = editor._sample_waveform_cache[0]
+    assert entry["frame_count"] == 1000 and entry["samples"] != original
+    assert (entry["start"], entry["end"]) == (100, 800)
+    assert "Pitch Shift" in editor.status_bar.currentMessage()
+
+
+def test_declining_the_time_stretch_dialog_changes_nothing(editor, qapp, monkeypatch):
+    from ui.time_stretch_dialog import TimeStretchDialog
+
+    _load_demo_audio(editor, qapp, monkeypatch, list(range(500)))
+    monkeypatch.setattr(TimeStretchDialog, "exec", lambda self: False)
+    editor.time_stretch_button.click()
+    assert editor._sample_waveform_cache[0]["frame_count"] == 500
+
+
+def test_yamaha_time_stretch_makes_a_new_longer_sample_and_keeps_stereo(window, yamaha_fast, monkeypatch):  # noqa: F811
+    tab = user_sample(window, "ST", mode=4, end=4000, right=True)
+    original = list(window.fake.audio["ST"])
+    _accepting_dialog(monkeypatch, percent=150, grain_ms=10)
+    tab.time_stretch_button.click()
+    assert wait_until(lambda: "ST STR" in window.fake.samples, timeout=20)
+    data = window.fake.samples["ST STR"]
+    assert yp.is_stereo(data)
+    assert yp.extract(yp.get("sample", "wave_length"), data) == 6000  # the 4000-frame wave end x 1.5
+    assert list(window.fake.audio["ST"]) == original
+
+
+def test_yamaha_pitch_shift_makes_a_new_sample_of_the_same_length(window, yamaha_fast, monkeypatch):  # noqa: F811
+    tab = user_sample(window, mode=4, end=4000)
+    original = list(window.fake.audio["UM"])
+    _accepting_dialog(monkeypatch, mode="pitch", semitones=-5, grain_ms=40)
+    tab.time_stretch_button.click()
+    assert wait_until(lambda: "UM PITCH" in window.fake.samples, timeout=20)
+    assert yp.extract(yp.get("sample", "wave_length"), window.fake.samples["UM PITCH"]) == 4000
+    assert list(window.fake.audio["UM"]) == original

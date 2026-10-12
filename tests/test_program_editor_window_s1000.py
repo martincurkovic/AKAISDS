@@ -1178,3 +1178,4 @@ def test_the_external_editor_buttons_are_offered_on_an_s1000(editor):
     # same send/delete/rename replace as Trim/Reverse, so the S1000 gets the round trip too (untested on a real S1000)
     assert not editor.external_edit_button.isHidden()
     assert not editor.external_send_button.isHidden()
+    assert not editor.time_stretch_button.isHidden()
