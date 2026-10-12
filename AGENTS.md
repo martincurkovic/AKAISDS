@@ -151,6 +151,10 @@ before guessing at a hardware bug. New unhandled-exception backstops log here, n
 - **Unexpected SysEx is log-only on the Dashboard** (owner's decision): `_log_unexpected_sysex(..., quiet=True)` writes DEBUG,
   capped at 50 lines per 10 s, never `status_changed`. A data packet before any header or an S1000 error REPLY stays a
   WARNING. Still shown: "Sampler confirmed: OK" / "ERROR creating/replacing sample" (they also fire for editor writes).
+- **Imports** log a trail: `rx2: VelociLoops loaded from <path>` / `didn't load from <path>: <why>` (WARNING - the first thing to look for in "can't import / SuperFlux greyed out"), `rx2: read '<file>': N slices, ch, Hz, BPM, stretch, ms`,
+  `ImportAudio:` (format/subtype/frames, the length question and the answer, refusals, decode time), `superflux:` (sensitivity -> threshold -> cut points, ms), `TransferDashboard: queued ... / cut queued loop ... into N slices`,
+  `SliceEditor: detection mode ->`, `ProgramEditor:` import / stereo export / program creation (`stereo: left in zone 1...`) and the drag-and-drop lines. The startup `config (...)` line carries `slice_detection=` and
+  `rx2_library=ok|MISSING`. `yamaha_backups.list_backups` now warns about an unreadable backup it skips (it used to skip silently). The static `QMessageBox` calls these features make are logged by `diagnostics_ui` like any other.
 - Not logged: sampler identity/firmware at editor open, the S1000 gating state, Yamaha per-write old->new values.
 
 ## Akai S1000 support (`core/s1000_bridge.py`) - written without hardware
@@ -199,6 +203,15 @@ Akai disk format: 150-byte header + N x 150-byte keygroups (`.p1`) or 192 + N x 
 - Delete Keygroup by REBUILD (`_delete_keygroup_s1000_rebuild`, off): `.p1` backup -> drop the keygroup locally -> load as
   `-TMP` -> DELP the original only after checks pass -> rename. Tests: `tests/test_s1000_keygroup_delete_rebuild.py`.
 - Layout and pointers are not yet checked against a file from another tool: `tests/akai_program_file_test_plan.md`.
+
+### Drag and drop of program files (Program Editor)
+
+- **In:** a `.p1`/`.p3` dropped anywhere on the editor window loads like Programs > Load... (`dropEvent` -> `_load_dropped_program_files` -> `_load_program_path`, the same checks, conversion prompt and name rules as the dialog).
+  The load runs from a `QTimer.singleShot(0)`, NOT inside the drop (its dialogs would hold the dragging app open). **One file at a time**: each load checks names against the programs on the sampler NOW, and a second would be checked before the first landed.
+  Refused while the window is frozen (`main_tabs` disabled) or in demo mode. Non-program files are left alone (the event is ignored).
+- **Out:** `ProgramListWidget` (DragOnly) emits `drag_out_requested(row)`; `_drag_program_out` reads the program FROM THE SAMPLER first (`_export_program_to_temp_file`: the same safe reads as Save, blocking with a wait cursor via `_wait_for_any_signal`, 60 s timeout),
+  writes `<NAME>.p1|.p3` under `dropped_files.session_dir()/program_drag/` and starts a `QDrag` carrying that file URL (copy). The file has to exist before the drag can start, so a big program can pause the drag for a few seconds. Untested in a real Finder/Explorer drop (tests stub `QDrag.exec`).
+- Test trap: a `QDropEvent` only POINTS at its `QMimeData` - keep the mime object referenced or the next read segfaults (`_KEEP_ALIVE` in `tests/test_program_editor_window_program_files.py`).
 
 ## Akai S2000/S3000: measured behaviour (real S2000, 2026-10-07)
 
