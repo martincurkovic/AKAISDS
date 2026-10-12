@@ -63,6 +63,14 @@ _program_editor_bridge.MDATA_BACKUP_DIR = _TEST_LOG_DIR / "mdata_backups"
 _program_editor_bridge._sleep = lambda seconds: None
 
 
+# The user's real ~/.akaisds/config.json must never decide a test's outcome. It once did: the Yamaha editor's one-time
+# "experimental write" warning is a modal QMessageBox unless the config says it was acknowledged, so tests passed on the
+# owner's machine and hung forever in CI (no config, nobody to click the dialog). Tests start from a fresh install's config.
+from core import app_config as _app_config
+
+_app_config.CONFIG_PATH = _TEST_LOG_DIR / "config.json"
+
+
 # The Global tab's test switch must never leak in from a developer's shell: the locked-controls tests assume nothing is unlocked.
 os.environ.pop("AKAISDS_UNLOCK_GLOBAL", None)
 

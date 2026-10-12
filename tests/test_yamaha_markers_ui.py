@@ -16,6 +16,7 @@ from core import yamaha_params as yp
 from core import yamaha_sysex as y
 
 from test_s950_transfers import qapp, wait_until  # noqa: F401
+from test_yamaha_program_editor import warning_acknowledged  # noqa: F401  (autouse: no modal warning)
 from test_yamaha_waveform import load, window  # noqa: F401
 
 
