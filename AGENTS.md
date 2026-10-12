@@ -372,14 +372,14 @@ macOS arm64); upstream marks no exports, so on MSVC the tool writes a `.def` fro
   (stereo stays stereo), the cut points in `RX2_MARKERS_ROLE`, a "N slices" badge. **Send cuts it into one sample per slice** (`_expand_rx2_entry`: writes
   `<row name>-01..` WAVs under `dropped_files.session_dir()/rx2_slices/` at Send time, using the row's CURRENT name and settings; a stereo slice's base is 10 chars so `-L`/`-R` fits, 12 if
   sent mono or to a Yamaha). The row's Slice Editor opens with the cut points marked (`initial_markers`); exporting from it replaces the row with ordinary slice rows (no role, not cut again).
-  **Program Editor File > "Import RX2 Loop..." (Ctrl+Shift+I)**: opens the Slice Editor on the slices laid end to end
+  **Program Editor File > "Import Audio..." (Ctrl+Shift+I)**: opens the Slice Editor on the slices laid end to end
   (`Rx2Loop.channel_buffers`) with the cut points as `initial_markers`, so Export and "Create new program" are the Slice Editor's own paths.
-  `_run_slice_editor` is shared with the resident-sample flow; `resident_source=False` skips the audio retention. **A stereo loop stays stereo:** each slice is
+  `_run_slice_editor` is shared with the resident-sample flow (the menu item is `_import_audio`; it is the one entry for audio files AND `.rx2`, see below); `resident_source=False` skips the audio retention. **A stereo loop stays stereo:** each slice is
   sent as TWO mono samples, `<name>-L` / `<name>-R` (`_STEREO_SUFFIXES`; the dialog's `channel_suffixes` shortens the slice names to 10 chars and checks the
   suffixed ones for clashes), and the program (`_create_program_from_slices(stereo=True)`) puts left in zone 1 and right in zone 2 of each keygroup: `SNAME1/2`,
   `CP1/2`=1, `LOVEL/HIVEL` 0..127 on both, `VPANO1`=-50 / `VPANO2`=+50 (zone pan offset), zones 3-4 empty. **Unverified on hardware** (S2000 or S1000): whether
   +-50 pans a zone hard left/right, and the two-zone keygroup writes; the single-zone builder it extends is proven.
-  **Yamaha editor File > "Import RX2 Loop..." (Ctrl+Shift+I)**: `YamahaSampleEditor.import_rx2` -> `_run_slicer` (shared with the resident-sample Slice Editor); a stereo loop STAYS stereo
+  **Yamaha editor File > "Import Audio..." (Ctrl+Shift+I)**: `YamahaSampleEditor.import_audio` -> `_run_slicer` (shared with the resident-sample Slice Editor); a stereo loop STAYS stereo
   (the dialog slices the right channel at the same frames), root key 60, the unit's defaults for the rest, "fill a program" is the existing empty-program assignment.
   The S950 editor has no entry point (read-only Samples tab, no Slice Editor); the Dashboard route still queues slices for it.
 - **Updating VelociLoops:** `uv run python tools/update_velociloops.py` (`--ref`, `--dry-run`): fetches all four files before writing any, records the sha in `third_party/velociloops/VERSION` and the two docs that quote it, rebuilds and runs `tests/test_rx2.py`. Run by hand, review the diff; never from a build (the library parses untrusted files).
@@ -553,3 +553,11 @@ A "Detection" combo beside the Sensitivity slider: **Simple (fast)** = `core/tra
 - Sensitivity -> `threshold` is logarithmic, 4.0 (least) to 0.05 (most); ~30% is VelociLoops' default 1.1. Measured against ReCycle's own cut points on 7 of VelociLoops' drum loops:
   60/60 found with 0 extra markers up to ~50%, then more markers each step (3 extra at 60%, 35 at 100%); the simple detector found 20-70% at its best setting.
 - To get real-time dragging on long samples, VelociLoops would need to expose its activation curve (the FFT stage) separately from peak picking; then analyse once and re-pick per tick like Simple does.
+
+## File > Import Audio (`ui/import_audio.py`)
+
+One File item in the Program Editor and the Yamaha editor (Ctrl+Shift+I) for any audio file (WAV/AIFF/FLAC/MP3/Ogg/Opus) or `.rx2`, opened in the Slice Editor: an `.rx2` with its cut points marked, a plain
+file with NONE (exporting with no markers sends the whole selection as one sample, so it doubles as a trimmer). Stereo stays stereo exactly as for an `.rx2` (see above). `pick_and_load` is shared by both editors.
+- **Length guard:** the Slice Editor holds the file as Python lists. Measured 2026-10-12, 10 min stereo MP3: decode ~1.2 s, peak RSS ~2.2 GB (~3 GB with the editor's mixes) = ~3.7 MB per second of stereo. So a file over
+  `WARN_SECONDS` (60 s, the owner's choice) asks first (default No), and over `REFUSE_SECONDS` (15 min) is not opened. Checked with `sf.info` BEFORE decoding. `.rx2` loops skip the check (short).
+- More than 2 channels is refused by `read_wav_channels` with a message. Decoding runs on the GUI thread (wait cursor), not a worker.
