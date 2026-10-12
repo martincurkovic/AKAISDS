@@ -498,6 +498,7 @@ class YamahaSamplesTab(QWidget):
         marker_row = self._build_marker_row()
         loop_mode_row = self.panel.labeled_row(_combo("loop_mode", "Loop Mode"), label_width=70)
         edit_row = self._build_edit_row()
+        external_row = self._build_external_row()
         waveform_card = build_section_card(
             "Loop Controls",
             zoom_row,
@@ -506,6 +507,7 @@ class YamahaSamplesTab(QWidget):
             marker_row,
             loop_mode_row,
             edit_row,
+            external_row,
         )
         # what the loop makes of the audio at its join (left channel), kept live with the markers
         self.loop_preview = LoopJoinPreview()
@@ -604,6 +606,21 @@ class YamahaSamplesTab(QWidget):
         self.slice_button.setToolTip(tt.YAMAHA_SLICE_EDITOR_BUTTON)
         self.slice_button.setEnabled(False)
         row.addWidget(self.slice_button)
+        return row
+
+    def _build_external_row(self):
+        """Edit the audio in the user's own audio editor, then send the saved file back as a NEW sample (ui/yamaha_sample_edit.py)."""
+        row = QHBoxLayout()
+        row.setSpacing(8)
+        self.external_edit_button = QPushButton("Edit in External App\u2026")
+        self.external_edit_button.setToolTip(tt.YAMAHA_EXTERNAL_EDIT_BUTTON)
+        self.external_edit_button.setEnabled(False)
+        self.external_send_button = QPushButton("Send Edited Audio")
+        self.external_send_button.setToolTip(tt.YAMAHA_EXTERNAL_SEND_BUTTON)
+        self.external_send_button.setEnabled(False)
+        row.addWidget(self.external_edit_button)
+        row.addWidget(self.external_send_button)
+        row.addStretch()
         return row
 
     def _swatch_color(self, swatch):
@@ -1262,6 +1279,9 @@ class YamahaSamplesTab(QWidget):
         for button in self.edit_buttons.values():
             button.setEnabled(ready)
         self.slice_button.setEnabled(ready)
+        self.external_edit_button.setEnabled(ready)
+        edits = getattr(self, "_edits", None)  # (built after the first call)
+        self.external_send_button.setEnabled(ready and edits is not None and edits.edited_audio_ready(self._selected))
         self.panel.detect_pitch_button.setEnabled(ready)
 
     def _detect_pitch(self):

@@ -22,13 +22,15 @@ from PySide6.QtCore import QEventLoop, QObject, QTimer
 from PySide6.QtWidgets import QMessageBox
 
 from controller.yamaha_session import LinkResult
-from core import debug_log
+from core import app_config, debug_log
+from core import external_edit
 from core import sample_editing as se
 from core import yamaha_edit as ye
 from core import yamaha_load as yl
 from core import yamaha_params as yp
 from core import yamaha_sysex as ysx
 from ui import import_audio
+from ui.external_edit_tracker import ExternalEditTracker
 from ui.filter_sample_dialog import FilterSampleDialog
 from ui.slice_editor_window import SliceEditorWindow
 
@@ -52,6 +54,9 @@ LINK_REPLY_TIMEOUT_MS = 60000
 SILENCE_GIVE_UP_S = 900
 SILENCE_POLL_MS = 3000
 
+#: the name suffix of a sample made from audio edited in an external app ("DRUM LOOP EDIT")
+EXTERNAL_SUFFIX = " EDIT"
+
 _NOT_CHANGED = (
     "\n\nThe original sample is not changed - the A4000 can't delete or overwrite samples over MIDI, so remove it on the "
     "front panel if you don't need it."
@@ -74,6 +79,11 @@ class YamahaSampleEditor(QObject):
         buttons["normalise"].clicked.connect(self.normalise)
         buttons["filter"].clicked.connect(self.filter)
         tab.slice_button.clicked.connect(self.open_slicer)
+        self._external = ExternalEditTracker(self)
+        self._external.changed.connect(tab.update_edit_buttons)
+        self._external_sending = None  # the sample whose edited audio is going out as a new one
+        tab.external_edit_button.clicked.connect(self.edit_externally)
+        tab.external_send_button.clicked.connect(self.send_edited)
 
     # -- what the edits act on ------------------------------------------------------------------------------
 
@@ -197,24 +207,84 @@ class YamahaSampleEditor(QObject):
 
     def _run(self, kind, ctx, filter_options=None):
         suffix, label = ye.EDITS[kind]
-        tab = self._tab
         try:
             channels, markers = ye.apply_edit(
                 kind, ctx["channels"], ctx["markers"], framerate=ctx["rate"], filter_options=filter_options
             )
+        except Exception as e:  # the pure transform runs before anything touches the unit
+            _log(f"{label} of {ctx['name']!r} failed before sending: {e!r}")
+            self._tab.status_message.emit(f"Couldn't {label.lower()} the sample: {e}")
+            return
+        self._send_copy(ctx, channels, markers, suffix, label)
+
+    def _send_copy(self, ctx, channels, markers, suffix, label):
+        """Send `channels` (with `markers`) as a NEW sample named from the original's name + `suffix`, carrying its parameters over."""
+        tab = self._tab
+        try:
             name = ye.copy_name(ctx["name"], suffix)
             params = ye.params_for_copy(ctx["data"], markers)
             temp_dir = tempfile.mkdtemp(prefix="akaisds_yamaha_edit_")
             path = os.path.join(temp_dir, "edit.wav")
             ye.write_wav(path, channels, ctx["rate"])
-        except Exception as e:  # the pure transform/WAV step runs before anything touches the unit
+        except Exception as e:  # the WAV step runs before anything touches the unit
             _log(f"{label} of {ctx['name']!r} failed before sending: {e!r}")
             tab.status_message.emit(f"Couldn't {label.lower()} the sample: {e}")
-            return
+            return False
         entry = {"filepath": path, "name": name, "sample_rate": ctx["rate"], "mono": False, "params": params}
         _log(f"{label} of {ctx['name']!r} -> new sample {name!r} ({len(channels[0]):,} frames, {len(channels)} ch)")
         expected = yl.unique_name(yl.sample_name_for(name), tab._names)
-        self._start_send([entry], temp_dir, expected, f'{label} "{ctx["name"]}"')
+        return self._start_send([entry], temp_dir, expected, f'{label} "{ctx["name"]}"')
+
+    # -- an external audio editor -------------------------------------------------------------------------------
+
+    def edited_audio_ready(self, name):
+        """True when the editor has saved over the file exported for sample `name` (what enables Send Edited Audio)."""
+        return name is not None and self._external.is_ready(name)
+
+    def edit_externally(self):
+        ctx = self._context()
+        if ctx is None:
+            return
+        name, channels, rate = ctx["name"], ctx["channels"], ctx["rate"]
+        problem = self._external.open(name, name, lambda path: ye.write_wav(path, channels, rate))
+        if problem:
+            self._tab.status_message.emit(problem)
+            return
+        hint = "" if app_config.get_saved_external_editor() else " (pick an editor in Settings)"
+        self._tab.status_message.emit(f'Opened "{name}"{hint} - save it there, then click Send Edited Audio')
+        self._tab.update_edit_buttons()
+
+    def send_edited(self):
+        ctx = self._context()
+        if ctx is None:
+            return
+        name = ctx["name"]
+        if not self._external.is_ready(name):
+            self._tab.status_message.emit("Save the file in the editor first")
+            return
+        try:
+            channels, source_rate = external_edit.read_edited(self._external.path(name), ctx["rate"])
+        except ValueError as e:
+            _log(f"couldn't read the edited file for {name!r}: {e}")
+            self._tab.status_message.emit(f"Couldn't read the edited file: {e}")
+            return
+        if len(ctx["channels"]) == 1 and len(channels) == 2:
+            channels = [external_edit.mix_to_mono(channels)]  # a mono sample stays mono
+        frames = len(channels[0])
+        markers = external_edit.remap_markers(ctx["frames"], frames, *ctx["markers"])
+        new_name = ye.copy_name(name, EXTERNAL_SUFFIX)
+        _log(
+            f"{name!r} edited externally: {ctx['frames']:,} -> {frames:,} frames, {len(channels)} ch at {source_rate} Hz "
+            f"(sample rate {ctx['rate']}), markers {ctx['markers']} -> {markers}"
+        )
+        if not self._confirm(
+            "Send Edited Audio",
+            f'Make "{new_name}" from the edited audio of "{name}" ({frames:,} frames, was {ctx["frames"]:,})?' + _NOT_CHANGED,
+        ):
+            return
+        self._external_sending = name
+        if not self._send_copy(ctx, channels, markers, EXTERNAL_SUFFIX, "Send edited audio"):
+            self._external_sending = None
 
     # -- sending ---------------------------------------------------------------------------------------------
 
@@ -243,6 +313,9 @@ class YamahaSampleEditor(QObject):
         tab._controller.transfer_progress.disconnect(self._on_send_progress)
         self._cleanup()
         tab._set_edit_busy(False)
+        sent, self._external_sending = self._external_sending, None
+        if ok and sent is not None:
+            self._external.mark_sent(sent)  # Send Edited Audio waits for the next save
         landed = tab._controller.yamaha_loaded_names()  # the name it REALLY got (a clash adds a number)
         select, self._select_name = (landed[-1] if landed else self._select_name), None
         tab.samples_changed.emit(select if ok else "")

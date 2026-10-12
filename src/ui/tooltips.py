@@ -343,6 +343,18 @@ SLICE_EDITOR_BUTTON = (
     "Chop this sample's audio into slices "
     "and export them back to the sampler as new samples."
 )
+EXTERNAL_EDIT_BUTTON = (
+    "Open this sample's audio in your audio editor (choose it in Settings). "
+    "Save the file there, then click Send Edited Audio."
+)
+EXTERNAL_SEND_BUTTON = (
+    "Replace this sample on the sampler with the version you saved in the editor. "
+    "Enabled once the file has been saved."
+)
+EXTERNAL_EDITOR_SETTING = (
+    "The audio editor that Edit in External App opens samples in.\n"
+    "Leave empty to use your system's default app for WAV files."
+)
 IMPORT_AUDIO_ACTION = (
     "Open an audio file (WAV, AIFF, FLAC, MP3, Ogg) or a ReCycle .rx2 loop in the Slice Editor. "
     "Export sends the slices as samples, optionally with a program."
@@ -593,4 +605,13 @@ YAMAHA_FILTER_SAMPLE_BUTTON = "Apply a highpass and/or lowpass filter (with a pr
 YAMAHA_SLICE_EDITOR_BUTTON = (
     "Chop the sample into slices and send each one to the sampler as a new sample (ReCycle-style). "
     "Needs the audio loaded (double-click the waveform)."
+)
+
+YAMAHA_EXTERNAL_EDIT_BUTTON = (
+    "Open this sample's audio in your audio editor (choose it in Settings). "
+    "Save the file there, then click Send Edited Audio."
+)
+YAMAHA_EXTERNAL_SEND_BUTTON = (
+    "Send the version you saved in the editor to the sampler as a NEW sample "
+    "(the original is not changed). Enabled once the file has been saved."
 )

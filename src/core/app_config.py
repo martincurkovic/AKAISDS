@@ -250,6 +250,18 @@ def save_theme(theme):
     save_config(config)
 
 
+def get_saved_external_editor():
+    # the audio editor app "Edit in External App" opens samples in; "" means the system default for .wav
+    editor = load_config().get("external_editor", "")
+    return editor if isinstance(editor, str) else ""
+
+
+def save_external_editor(path):
+    config = load_config()
+    config["external_editor"] = (path or "").strip()
+    save_config(config)
+
+
 SLICE_DETECTION_SIMPLE = "simple"
 SLICE_DETECTION_SUPERFLUX = "superflux"
 SLICE_DETECTION_VALUES = (SLICE_DETECTION_SIMPLE, SLICE_DETECTION_SUPERFLUX)

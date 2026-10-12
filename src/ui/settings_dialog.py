@@ -3,8 +3,11 @@ from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
     QDialogButtonBox,
+    QFileDialog,
     QFormLayout,
+    QHBoxLayout,
     QLabel,
+    QLineEdit,
     QMessageBox,
     QPushButton,
     QSpinBox,
@@ -33,6 +36,7 @@ from ui.qt_helpers import (
 from ui import theme, tooltips
 from ui.loopback_results_dialog import LoopbackResultsDialog
 import os
+import sys
 import time
 import mido
 
@@ -260,16 +264,31 @@ class MidiSettingsDialog(QDialog):
         appearance_form.addRow(QLabel("Theme:"), self.combo_theme)
         appearance_card = build_section_card("Appearance", appearance_form)
 
+        # the app "Edit in External App" (Samples tabs) opens a sample in;
+        # empty = the system's default for .wav. Saved on OK like the rest.
+        editor_form = QFormLayout()
+        self.edit_external_editor = QLineEdit(app_config.get_saved_external_editor())
+        self.edit_external_editor.setPlaceholderText("System default")
+        self.edit_external_editor.setToolTip(tooltips.EXTERNAL_EDITOR_SETTING)
+        self.button_external_editor = QPushButton("Choose\u2026")
+        self.button_external_editor.clicked.connect(self._choose_external_editor)
+        editor_row = QHBoxLayout()
+        editor_row.addWidget(self.edit_external_editor, 1)
+        editor_row.addWidget(self.button_external_editor)
+        editor_form.addRow(QLabel("Audio Editor:"), editor_row)
+        editor_card = build_section_card("External Audio Editor", editor_form)
+
         # one shared label-column width across all three cards, so every
         # entry field starts at the same x (each form would otherwise size
         # its own label column to its own widest label)
-        align_form_label_columns(midi_form, audio_form, appearance_form)
+        align_form_label_columns(midi_form, audio_form, appearance_form, editor_form)
 
         page = QWidget()
         page_layout = QVBoxLayout(page)
         page_layout.addWidget(midi_card)
         page_layout.addWidget(audio_card)
         page_layout.addWidget(appearance_card)
+        page_layout.addWidget(editor_card)
         page_layout.addStretch()
         return page
 
@@ -435,8 +454,20 @@ class MidiSettingsDialog(QDialog):
         app_config.save_device_type(device_type)
         app_config.save_audio_output_device(self.combo_audio_output.currentData())
         app_config.save_audio_buffer_samples(self.combo_audio_buffer.currentData())
+        app_config.save_external_editor(self.edit_external_editor.text())
 
         self.accept()
+
+    def _choose_external_editor(self):
+        # an application on macOS (a .app bundle), an executable elsewhere
+        start = self.edit_external_editor.text() or (
+            "/Applications" if sys.platform == "darwin" else ""
+        )
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Choose an audio editor", start
+        )
+        if path:
+            self.edit_external_editor.setText(path)
 
     def _on_theme_chosen(self, index):
         # saved and applied the moment the user picks an option - every open

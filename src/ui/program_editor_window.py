@@ -52,7 +52,10 @@ from PySide6.QtWidgets import (
 )
 from s3k.messages import AKAI_CHARSET, NAME_LENGTH
 from core import akai_program_file
+from core import app_config
 from core import dropped_files
+from core import external_edit
+from ui.external_edit_tracker import ExternalEditTracker
 from ui.diagnostics_ui import add_open_log_folder_action
 from ui.knob import Knob
 from ui.program_list_widget import ProgramListWidget
@@ -5614,6 +5617,7 @@ class ProgramEditorWindow(QMainWindow):
         # _on_waveform_preview_requested) - closing the window must not
         # leave it sounding forever in the background
         self._sample_preview_player.stop()
+        self._external_edit.close()
 
         # runs regardless of how the window closes (close button, command + w,
         # etc) - stop() lets anything already queued (in particular, pending
@@ -6391,6 +6395,28 @@ class ProgramEditorWindow(QMainWindow):
         self.slice_editor_button.clicked.connect(self._open_slice_editor)
         sample_edit_row.addWidget(self.slice_editor_button)
 
+        # round trip through the user's own audio editor (Settings > External
+        # Audio Editor): export the loaded audio to a WAV, open it, and when
+        # the editor has saved over it, send it back through the same
+        # send/delete/rename replace Trim/Reverse use (_perform_sample_edit).
+        # Its own row: sample_edit_row is already as wide as the page allows.
+        self._external_edit = ExternalEditTracker(self)
+        self._external_edit.changed.connect(self._refresh_external_edit_buttons)
+        self._sample_edit_ready = False
+        self.external_edit_button = QPushButton("Edit in External App\u2026")
+        self.external_edit_button.setToolTip(tt.EXTERNAL_EDIT_BUTTON)
+        self.external_edit_button.setEnabled(False)
+        self.external_edit_button.clicked.connect(self._edit_in_external_app)
+        self.external_send_button = QPushButton("Send Edited Audio")
+        self.external_send_button.setToolTip(tt.EXTERNAL_SEND_BUTTON)
+        self.external_send_button.setEnabled(False)
+        self.external_send_button.clicked.connect(self._confirm_send_edited_audio)
+        external_edit_row = QHBoxLayout()
+        external_edit_row.setSpacing(8)
+        external_edit_row.addWidget(self.external_edit_button)
+        external_edit_row.addWidget(self.external_send_button)
+        external_edit_row.addStretch()
+
         # two section cards, same style as the Programs tab's own (see
         # _build_section_card) - one for the loop editor itself, one for
         # the sample-wide root note/tune fields
@@ -6402,6 +6428,7 @@ class ProgramEditorWindow(QMainWindow):
         loop_controls_content.addLayout(legend_row)
         loop_controls_content.addLayout(loop_meta_row)
         loop_controls_content.addLayout(sample_edit_row)
+        loop_controls_content.addLayout(external_edit_row)
         loop_controls_card = self._build_section_card(
             "Loop Controls", loop_controls_content
         )
@@ -7248,6 +7275,19 @@ class ProgramEditorWindow(QMainWindow):
         # needs real audio to analyse, but (unlike Duplicate/Export) never
         # needs actual hardware, so no demo_mode restriction here
         self.detect_root_note_button.setEnabled(enabled)
+        self._sample_edit_ready = enabled
+        self._refresh_external_edit_buttons()
+
+    def _refresh_external_edit_buttons(self):
+        # Edit needs the audio in memory like the other edits; Send also needs
+        # the editor to have saved over the exported file for THIS sample
+        # (is_ready re-reads the file, so it doesn't rely on a watcher event)
+        ready = self._sample_edit_ready
+        name = self._sample_name_at_row(self.sample_list_widget.currentRow())
+        self.external_edit_button.setEnabled(ready)
+        self.external_send_button.setEnabled(
+            ready and bool(name) and self._external_edit.is_ready(name)
+        )
 
     def _update_sample_meta_controls(
         self, sptype, spitch, shlto=None, stuno=None, ldwell1=None
@@ -8436,7 +8476,107 @@ class ProgramEditorWindow(QMainWindow):
         )
         self._perform_sample_edit(sample_index, transform, "Filter")
 
+    def _edit_in_external_app(self):
+        sample_index = self.sample_list_widget.currentRow()
+        entry = self._sample_waveform_cache.get(sample_index)
+        if (
+            sample_index < 0
+            or entry is None
+            or entry["samples"] is None
+            or not self.waveform_view.has_waveform()
+        ):
+            return
+        name = self._sample_name_at_row(sample_index)
+        samples, framerate = entry["samples"], entry["framerate"]
+        problem = self._external_edit.open(
+            name,
+            name,
+            lambda path: sds_encoder.write_wav_file(
+                path, samples, framerate, bit_depth=16
+            ),
+        )
+        if problem:
+            self.status_bar.showMessage(problem)
+            return
+        hint = "" if app_config.get_saved_external_editor() else " (pick an editor in Settings)"
+        self.status_bar.showMessage(
+            f'Opened "{name}"{hint} - save it there, then click Send Edited Audio'
+        )
+        self._refresh_external_edit_buttons()
+
+    def _confirm_send_edited_audio(self):
+        sample_index = self.sample_list_widget.currentRow()
+        entry = self._sample_waveform_cache.get(sample_index)
+        if (
+            sample_index < 0
+            or entry is None
+            or entry["samples"] is None
+            or not self.waveform_view.has_waveform()
+        ):
+            return
+        name = self._sample_name_at_row(sample_index)
+        if not self._external_edit.is_ready(name):
+            self.status_bar.showMessage("Save the file in the editor first")
+            return
+        logger = debug_log.get_logger()
+        try:
+            channels, source_rate = external_edit.read_edited(
+                self._external_edit.path(name), entry["framerate"]
+            )
+        except ValueError as e:
+            logger.info(f"ExternalEdit: couldn't read the edited file for {name!r}: {e}")
+            self.status_bar.showMessage(f"Couldn't read the edited file: {e}")
+            return
+        new_samples = external_edit.mix_to_mono(channels)
+        old_frames = len(entry["samples"])
+        m = self.waveform_view.markers_with_loop_in_range()
+        new_markers = external_edit.remap_markers(
+            old_frames,
+            len(new_samples),
+            m["start"],
+            m["loop_start"],
+            m["loop_end"],
+            m["end"],
+        )
+        logger.info(
+            f"ExternalEdit: {name!r} edited: {old_frames} -> {len(new_samples)} frames, "
+            f"{len(channels)} ch at {source_rate} Hz (sampler rate {entry['framerate']}), "
+            f"markers {tuple(m.values())} -> {new_markers}"
+        )
+        answer = QMessageBox.question(
+            self,
+            "Send Edited Audio",
+            f'Replace "{name}" on the sampler with the edited audio '
+            f"({len(new_samples):,} frames, was {old_frames:,})?\n\n"
+            "This overwrites the sample's audio and cannot be undone. "
+            "A copy of the original is saved first.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            backup = external_edit.backup_original(
+                name, entry["samples"], entry["framerate"]
+            )
+        except OSError:
+            logger.error("ExternalEdit: couldn't save the backup", exc_info=True)
+            self.status_bar.showMessage(
+                "Couldn't save a copy of the original - nothing was sent"
+            )
+            return
+        logger.info(f"ExternalEdit: original of {name!r} saved to {backup}")
+
+        def _edited(*_markers):
+            return (new_samples, *new_markers)
+
+        if self._perform_sample_edit(sample_index, _edited, "Replace"):
+            self._external_edit.mark_sent(name)
+
     def _perform_sample_edit(self, sample_index, transform, action_label):
+        # returns True once the edited audio is on the sampler (or, in demo
+        # mode, in the view); None for every refusal and failure, which have
+        # already said why in the status bar
         # shared by _confirm_trim_sample/_confirm_reverse_sample/
         # _confirm_fade_sample/_confirm_normalize_sample/
         # _confirm_filter_sample - all five are
@@ -8515,7 +8655,7 @@ class ProgramEditorWindow(QMainWindow):
 
         try:
             if demo_mode:
-                self._perform_sample_edit_demo(
+                return self._perform_sample_edit_demo(
                     sample_index,
                     entry,
                     new_samples,
@@ -8527,7 +8667,7 @@ class ProgramEditorWindow(QMainWindow):
                     action_label,
                 )
             else:
-                self._perform_sample_edit_real(
+                return self._perform_sample_edit_real(
                     sample_index,
                     sampler_controller,
                     original_name,
@@ -8592,6 +8732,7 @@ class ProgramEditorWindow(QMainWindow):
                 new_samples, new_start, new_loop_start, new_loop_end, new_end
             )
         self.status_bar.showMessage(f"{action_label} complete (demo)")
+        return True
 
     def _perform_sample_edit_real(
         self,
@@ -8837,6 +8978,7 @@ class ProgramEditorWindow(QMainWindow):
                     self.sample_list_widget.setCurrentRow(
                         final_samples.index(original_name)
                     )
+            return True
         except Exception:
             # same reasoning as _perform_duplicate_sample_real's own
             # matching except clause - this function already handles every
