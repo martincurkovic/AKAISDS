@@ -12,6 +12,9 @@ echo "Syncing environment with uv..."
 uv sync
 uv pip install pip
 
+# the REX2 reader (third_party/velociloops) is a small C++ library, compiled for THIS machine's architecture into src/core/native
+uv run python "$ROOT_DIR/tools/build_velociloops.py"
+
 cd "$SRC_DIR"
 
 # derive version from nearest git tag - falls back to dev placeholder if no tags exist yet
@@ -37,7 +40,7 @@ if [ ! -f "pysidedeploy.spec" ]; then
 fi
 
 # re-generate extra_args on EVERY run, that way version number can update correctly
-sed -i '' "s|^extra_args = .*|extra_args = --quiet --noinclude-qt-translations --assume-yes-for-downloads --macos-app-name=AKAISDS --macos-app-version=$VERSION --include-module=mido.backends.rtmidi --include-data-dir=ui/icons=ui/icons --include-data-files=ui/style.qss.template=ui/style.qss.template --include-data-dir=ui/help=ui/help|" pysidedeploy.spec
+sed -i '' "s|^extra_args = .*|extra_args = --quiet --noinclude-qt-translations --assume-yes-for-downloads --macos-app-name=AKAISDS --macos-app-version=$VERSION --include-module=mido.backends.rtmidi --include-data-dir=ui/icons=ui/icons --include-data-files=ui/style.qss.template=ui/style.qss.template --include-data-dir=ui/help=ui/help --include-data-files=core/native/libvelociloops.dylib=core/native/libvelociloops.dylib|" pysidedeploy.spec
 
 echo "Building AKAISDS.app..."
 uv run pyside6-deploy -c pysidedeploy.spec

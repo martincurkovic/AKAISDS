@@ -19,6 +19,9 @@ echo "Syncing environment with uv..."
 uv sync
 uv pip install pip
 
+# the REX2 reader (third_party/velociloops) is a small C++ library compiled into src/core/native
+uv run python "$ROOT_DIR/tools/build_velociloops.py"
+
 cd "$SRC_DIR"
 
 # derive version from nearest git tag
@@ -45,7 +48,7 @@ fi
 
 # re-generate extra_args on EVERY run, so changes to it (like new bundled data
 # dirs) still apply against a spec file left over from an earlier build
-sed -i 's|^extra_args = .*|extra_args = --quiet --noinclude-qt-translations --assume-yes-for-downloads --include-module=mido.backends.rtmidi --include-data-dir=ui/icons=ui/icons --include-data-files=ui/style.qss.template=ui/style.qss.template --include-data-dir=ui/help=ui/help|' pysidedeploy.spec
+sed -i 's|^extra_args = .*|extra_args = --quiet --noinclude-qt-translations --assume-yes-for-downloads --include-module=mido.backends.rtmidi --include-data-dir=ui/icons=ui/icons --include-data-files=ui/style.qss.template=ui/style.qss.template --include-data-dir=ui/help=ui/help --include-data-files=core/native/libvelociloops.so=core/native/libvelociloops.so|' pysidedeploy.spec
 
 echo "Building AKAISDS..."
 uv run pyside6-deploy -c pysidedeploy.spec
