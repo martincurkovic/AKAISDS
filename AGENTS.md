@@ -355,6 +355,7 @@ assigning a sample this run loaded (`midi_loaded_names`). Watch the unit's displ
   `setAlignment(child, AlignVCenter)`, not spacing.
 - **Dropped/opened files get a stable local copy** (`core/dropped_files.py`, `~/.akaisds/dropped_files/<pid>/`): an editor renders a
   crop to a temp file and deletes it before Send. Orphaned sessions are swept at next launch.
+- **Compressed audio** (`.mp3`, `.ogg`, `.oga`, `.opus`) is just more extensions in `sds_encoder.SUPPORTED_AUDIO_EXTENSIONS`: everything reads through soundfile, whose libsndfile 1.2.2 decodes them (checked 2026-10-12 on an ffmpeg-made MP3: frame count exact, no padding trimmed). AAC/M4A fails (libsndfile can't) - it would need ffmpeg or a platform decoder. A lossy file has no native bit depth, so `read_wav_native_bit_depth` falls back to 16.
 - **32-bit float WAVs read as silence** through `sf.read(dtype="int16")`; `sds_encoder` always reads float and scales by hand.
 
 ## ReCycle `.rx2` import (VelociLoops)
