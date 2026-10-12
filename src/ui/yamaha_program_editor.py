@@ -478,6 +478,13 @@ class YamahaProgramEditorWindow(QMainWindow):
         return page
 
     def _build_menus(self):
+        # not a button on the Samples tab: unlike the edits there it acts on no selected sample, it opens a file
+        self._import_rx2_action = QAction("Import RX2 Loop...", self)
+        self._import_rx2_action.setShortcut("Ctrl+Shift+I")
+        self._import_rx2_action.setToolTip(tt.IMPORT_RX2_ACTION)
+        self._import_rx2_action.triggered.connect(lambda: self.samples_tab.import_rx2())
+        self.menuBar().addMenu("&File").addAction(self._import_rx2_action)
+
         hardware = self.menuBar().addMenu("&Hardware")
         self._refresh_action = QAction("Refresh from Hardware", self)
         self._refresh_action.setShortcut("Ctrl+R")
@@ -1053,7 +1060,7 @@ class YamahaProgramEditorWindow(QMainWindow):
             focused = QApplication.focusWidget()  # (see YamahaSamplesTab._drop_focus: a disabled widget's focus scrolls a page)
             if focused is not None and self.isAncestorOf(focused):
                 focused.clearFocus()
-        for action in (self._restore_action, self._unchanged_action, self._refresh_action, *self._tab_actions):
+        for action in (self._restore_action, self._unchanged_action, self._refresh_action, self._import_rx2_action, *self._tab_actions):
             action.setEnabled(not busy)
         self.refresh_button.setEnabled(not busy)
         for widget in (

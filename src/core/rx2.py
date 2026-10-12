@@ -143,19 +143,24 @@ class Rx2Loop:
     def name(self):
         return os.path.splitext(os.path.basename(self.path))[0]
 
-    def mono_buffer(self):
-        """(samples, markers): the slices laid end to end as ONE mono buffer (stereo averaged), plus the frame each
-        slice after the first begins at - exactly the input the Slice Editor takes (a buffer and interior markers)."""
-        samples = []
-        markers = []
+    def channel_buffers(self):
+        """(channels, markers): the slices laid end to end as one buffer per channel (1 or 2), plus the frame each slice after the
+        first begins at - a buffer and interior markers, exactly what the Slice Editor takes."""
+        left, right, markers = [], [], []
         for index, piece in enumerate(self.slices):
             if index:
-                markers.append(len(samples))
-            if piece.right is None:
-                samples.extend(piece.left)
-            else:
-                samples.extend((l + r) // 2 for l, r in zip(piece.left, piece.right))
-        return samples, markers
+                markers.append(len(left))
+            left.extend(piece.left)
+            if piece.right is not None:
+                right.extend(piece.right)
+        return ([left, right] if right else [left]), markers
+
+    def mono_buffer(self):
+        """(samples, markers) like channel_buffers, with stereo averaged to mono (the Akai's resident samples are mono)."""
+        channels, markers = self.channel_buffers()
+        if len(channels) == 1:
+            return channels[0], markers
+        return [(l + r) // 2 for l, r in zip(*channels)], markers
 
 
 def load(path):
