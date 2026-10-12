@@ -10,8 +10,9 @@
 
 import array
 import ctypes
+import time
 
-from core import rx2
+from core import debug_log, rx2
 
 #: the slider's 0-100% maps to SuperFlux's peak-picking threshold on a log scale: 100% is the most sensitive (a low bar to count as
 #: an onset), ~30% is VelociLoops' own default (1.1). Higher thresholds only ever drop the weaker hits.
@@ -56,6 +57,7 @@ def detect(buffer, sample_rate, sensitivity):
     if sensitivity <= 0 or len(buffer) == 0:
         return []
     lib = rx2._load_library()
+    started = time.monotonic()
     options = _Options()
     lib.vl_superflux_default_options(ctypes.byref(options))
     options.threshold = threshold_for_sensitivity(sensitivity)
@@ -65,6 +67,9 @@ def detect(buffer, sample_rate, sensitivity):
         1, int(sample_rate), 120000, ctypes.c_void_p(address), None, length, ctypes.byref(options), ctypes.byref(error)
     )
     if not handle:
+        debug_log.get_logger().warning(
+            f"superflux: refused {length} frames at {sample_rate} Hz: {rx2._error_text(lib, error.value)} (code {error.value})"
+        )
         raise rx2.Rx2Error(f"SuperFlux couldn't analyse this audio: {rx2._error_text(lib, error.value)}")
     try:
         info = rx2._FileInfo()
@@ -74,6 +79,11 @@ def detect(buffer, sample_rate, sensitivity):
             slice_info = rx2._SliceInfo()
             if lib.vl_get_slice_info(handle, index, ctypes.byref(slice_info)) == 0 and 0 < slice_info.sample_start < length:
                 markers.append(slice_info.sample_start)
-        return sorted(set(markers))
+        found = sorted(set(markers))
+        debug_log.get_logger().debug(
+            f"superflux: {length} frames at {sample_rate} Hz, sensitivity {sensitivity} (threshold "
+            f"{options.threshold:.2f}) -> {len(found)} cut points in {(time.monotonic() - started) * 1000:.0f} ms"
+        )
+        return found
     finally:
         lib.vl_close(handle)

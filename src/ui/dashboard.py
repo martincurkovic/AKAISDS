@@ -552,6 +552,10 @@ class TransferDashboard(QWidget):
                 "Edit > Slice Editor to adjust the cut points first."
             )
             badge.setVisible(True)
+        debug_log.get_logger().info(
+            f"TransferDashboard: queued {name!r} as one row: {len(markers) + 1} slices, {len(channels)} ch, "
+            f"{loop.sample_rate} Hz, {loop.tempo_bpm:g} BPM"
+        )
         self.status_bar.showMessage(
             f"Added {name}: {len(markers) + 1} slices at {loop.tempo_bpm:g} BPM - sent as separate samples "
             "(Edit > Slice Editor to adjust them first)"
@@ -597,6 +601,11 @@ class TransferDashboard(QWidget):
                     "mono": settings["mono"],
                 }
             )
+        debug_log.get_logger().info(
+            f"TransferDashboard: cut queued loop {name!r} into {len(entries)} slices {names[0]!r}..{names[-1]!r} "
+            f"({len(channels)} ch, {rate} Hz, name length {self._slice_name_length(len(channels), settings)}, "
+            f"mono={settings['mono']}, bit_depth={settings['bit_depth']})"
+        )
         return entries
 
     def _update_empty_queue_placeholder(self):

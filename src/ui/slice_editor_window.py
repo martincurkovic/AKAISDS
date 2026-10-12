@@ -879,6 +879,9 @@ class SliceEditorWindow(QDialog):
         return self.detection_combo.currentData()
 
     def _on_detection_mode_chosen(self, _index):
+        debug_log.get_logger().info(
+            f"SliceEditor: detection mode -> {self._detection_mode()} (sensitivity {self.transient_sensitivity_slider.value()})"
+        )
         app_config.save_slice_detection(self._detection_mode())
         # same rule as the slider itself: with it above 0 the chosen detector takes over the markers (0 = off touches nothing)
         value = self.transient_sensitivity_slider.value()

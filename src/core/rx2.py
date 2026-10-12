@@ -13,8 +13,10 @@ import array
 import ctypes
 import os
 import sys
+import time
 from dataclasses import dataclass, field
 
+from core import debug_log
 from s3k.messages import AKAI_CHARSET
 
 RX2_EXTENSION = ".rx2"
@@ -93,7 +95,10 @@ def _load_library():
         lib.vl_error_string.argtypes = [ctypes.c_int]
     except (OSError, AttributeError) as e:
         _library_error = f"Can't read .rx2 files: the VelociLoops library didn't load ({e})"
+        # the first thing to look for in any "can't import / SuperFlux greyed out" report
+        debug_log.get_logger().warning(f"rx2: VelociLoops didn't load from {path!r}: {e}")
         raise Rx2Unavailable(_library_error) from e
+    debug_log.get_logger().info(f"rx2: VelociLoops loaded from {path!r}")
     _library = lib
     return lib
 
@@ -175,9 +180,11 @@ class Rx2Loop:
 def load(path):
     """Decode *path* into an Rx2Loop. Raises Rx2Unavailable (no library) or Rx2Error (bad/unsupported file)."""
     lib = _load_library()
+    started = time.monotonic()
     error = ctypes.c_int(0)
     handle = lib.vl_open(os.fsencode(path), ctypes.byref(error))
     if not handle:
+        debug_log.get_logger().warning(f"rx2: couldn't open {path!r}: {_error_text(lib, error.value)} (code {error.value})")
         raise Rx2Error(f"Couldn't open {os.path.basename(path)}: {_error_text(lib, error.value)}")
     try:
         info = _FileInfo()
@@ -214,6 +221,11 @@ def load(path):
             )
         if not loop.slices:
             raise Rx2Error(f"{os.path.basename(path)} has no audio slices")
+        debug_log.get_logger().debug(
+            f"rx2: read {os.path.basename(path)!r}: {len(loop.slices)} slices (file says {info.slice_count}), "
+            f"{loop.channels} ch, {loop.sample_rate} Hz, {loop.tempo_bpm:g} BPM, {info.total_frames} frames, "
+            f"stretch={'on' if info.transient_stretch else 'off'} in {(time.monotonic() - started) * 1000:.0f} ms"
+        )
         return loop
     finally:
         lib.vl_close(handle)

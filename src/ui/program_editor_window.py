@@ -21,8 +21,9 @@ from PySide6.QtGui import (
     QRegularExpressionValidator,
     QPainter,
     QColor,
+    QDrag,
 )
-from PySide6.QtCore import QEventLoop, QTimer, QRegularExpression
+from PySide6.QtCore import QEventLoop, QMimeData, QTimer, QRegularExpression, QUrl
 from PySide6.QtWidgets import (
     QAbstractSpinBox,
     QApplication,
@@ -51,8 +52,10 @@ from PySide6.QtWidgets import (
 )
 from s3k.messages import AKAI_CHARSET, NAME_LENGTH
 from core import akai_program_file
+from core import dropped_files
 from ui.diagnostics_ui import add_open_log_folder_action
 from ui.knob import Knob
+from ui.program_list_widget import ProgramListWidget
 from ui.note_spinbox import NoteSpinBox
 from ui.editor_layout import (
     add_keygroup_row,
@@ -676,8 +679,9 @@ class ProgramEditorWindow(QMainWindow):
         self._worker.start()
 
         # placeholder - real program, keygroup panels come later
-        self.program_list = QListWidget()
+        self.program_list = ProgramListWidget()
         self.program_list.setObjectName("programList")
+        self.program_list.drag_out_requested.connect(self._drag_program_out)
         self.program_list.setFixedWidth(160)
 
         self.keygroup_list = QListWidget()
@@ -2256,6 +2260,10 @@ class ProgramEditorWindow(QMainWindow):
         # not a button on the Samples tab: unlike every control there it acts on
         # no selected sample - it opens a file. Disabled with the rest of the
         # window by _set_hardware_busy_ui.
+        # a .p1/.p3 dropped anywhere on the window loads like Programs > Load... (dropEvent below)
+        self.setAcceptDrops(True)
+        self._program_drag_active = False
+
         self._import_audio_action = QAction("Import Audio...", self)
         self._import_audio_action.setShortcut("Ctrl+Shift+I")
         self._import_audio_action.setToolTip(tt.IMPORT_AUDIO_ACTION)
@@ -4085,6 +4093,10 @@ class ProgramEditorWindow(QMainWindow):
         )
         if not path:
             return
+        self._load_program_path(path)
+
+    def _load_program_path(self, path):
+        # everything after a file has been chosen - by the Load dialog or by dropping it on the window
         self._last_program_file_dir = os.path.dirname(path)
         try:
             with open(path, "rb") as handle:
@@ -4166,6 +4178,117 @@ class ProgramEditorWindow(QMainWindow):
             return
         self.status_bar.showMessage(f'Loading program "{name}"…')
         self._worker.submit_import_program(program_file, name)
+
+    # -- drag a program file in (load) or out (save) ------------------------------------------------------------
+
+    @staticmethod
+    def _program_paths_in(mime_data):
+        """The local .p1/.p3 files in a drag/drop's URLs."""
+        if not mime_data.hasUrls():
+            return []
+        paths = [url.toLocalFile() for url in mime_data.urls() if url.isLocalFile()]
+        return [p for p in paths if os.path.splitext(p)[1].lower() in (".p1", ".p3")]
+
+    def dragEnterEvent(self, event):
+        # only program files are taken; anything else (audio, say) is left to whatever is under the cursor
+        if self._program_paths_in(event.mimeData()):
+            event.acceptProposedAction()
+        else:
+            super().dragEnterEvent(event)
+
+    def dragMoveEvent(self, event):
+        if self._program_paths_in(event.mimeData()):
+            event.acceptProposedAction()
+        else:
+            super().dragMoveEvent(event)
+
+    def dropEvent(self, event):
+        paths = self._program_paths_in(event.mimeData())
+        if not paths:
+            super().dropEvent(event)
+            return
+        event.acceptProposedAction()
+        debug_log.get_logger().info(f"ProgramEditor: program file(s) dropped: {paths}")
+        # answered later, not in here: Load asks questions in modal dialogs, which would hold the drag open in the app it came from
+        QTimer.singleShot(0, lambda: self._load_dropped_program_files(paths))
+
+    def _load_dropped_program_files(self, paths):
+        logger = debug_log.get_logger()
+        if not self.main_tabs.isEnabled():
+            logger.info("ProgramEditor: drop refused - the window is busy")
+            self.status_bar.showMessage("Can't load a program while something else is running - try again in a moment")
+            return
+        if not self._load_program_action.isEnabled():
+            logger.info("ProgramEditor: drop refused - loading is unavailable (demo mode)")
+            self.status_bar.showMessage("Loading programs isn't available in demo mode")
+            return
+        if len(paths) > 1:
+            logger.info(f"ProgramEditor: drop refused - {len(paths)} files at once")
+            # each load is checked against the programs on the sampler NOW (a name that matches one deletes it), and a second one would
+            # be checked before the first has landed
+            self.status_bar.showMessage("Drop one program file at a time")
+            return
+        self.main_tabs.setCurrentIndex(1)  # the Programs tab, where the new program appears
+        self._load_program_path(paths[0])
+
+    def _export_program_to_temp_file(self, row):
+        """Read program *row* from the sampler into a .p1/.p3 file in this session's temp area, WAITING for the read (a few seconds for a
+        big program, with a busy cursor): the file has to exist before a drag can start. Returns its path, or None after saying why."""
+        item = self.program_list.item(row)
+        if item is None:
+            return None
+        self.status_bar.showMessage(f'Reading program "{item.text()}" from the sampler…')
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            which, args = self._wait_for_any_signal(
+                [self._worker.program_exported, self._worker.program_export_failed],
+                start=lambda: self._worker.submit_export_program(row),
+                timeout_ms=60000,
+            )
+        finally:
+            QApplication.restoreOverrideCursor()
+        if which != 0 or args[0] != row:
+            reason = args[1] if which == 1 and args else "the sampler didn't answer"
+            debug_log.get_logger().warning(f"ProgramEditor: reading program {row} for a drag failed: {reason}")
+            self.status_bar.showMessage(f"Couldn't read program: {reason}")
+            return None
+        program_file = args[1]
+        try:
+            directory = dropped_files.session_dir() / "program_drag"
+            directory.mkdir(parents=True, exist_ok=True)
+            path = directory / (akai_program_file.safe_file_stem(program_file.name) + program_file.extension)
+            path.write_bytes(akai_program_file.build_file(program_file.program, program_file.keygroups))
+        except (OSError, akai_program_file.ProgramFileError) as e:
+            debug_log.get_logger().warning(f"ProgramEditor: couldn't write the drag file for program {row}: {e}", exc_info=True)
+            self.status_bar.showMessage(f"Couldn't make the program file: {e}")
+            return None
+        debug_log.get_logger().info(
+            f"ProgramEditor: program {row} {program_file.name!r} ({len(program_file.keygroups)} keygroups) read for a drag -> {path}"
+        )
+        return str(path)
+
+    def _drag_program_out(self, row):
+        if self._program_drag_active or not self.main_tabs.isEnabled():
+            return
+        self._program_drag_active = True
+        try:
+            path = self._export_program_to_temp_file(row)
+            if path is None:
+                return
+            mime = QMimeData()
+            mime.setUrls([QUrl.fromLocalFile(path)])
+            drag = QDrag(self.program_list)
+            drag.setMimeData(mime)
+            name = os.path.basename(path)
+            self.status_bar.showMessage(f"Drag {name} to a folder to save it")
+            result = drag.exec(Qt.DropAction.CopyAction)
+            debug_log.get_logger().info(f"ProgramEditor: drag of {name} ended with {result.name}")
+            if result == Qt.DropAction.CopyAction:
+                self.status_bar.showMessage(f"Saved {name}")
+            else:
+                self.status_bar.showMessage("Drag cancelled - nothing saved")
+        finally:
+            self._program_drag_active = False
 
     def _on_program_imported(self, new_index, name):
         self.status_bar.showMessage(f'Loaded program "{name}"')
@@ -4770,6 +4893,10 @@ class ProgramEditorWindow(QMainWindow):
         imported = import_audio.pick_and_load(self, self.status_bar.showMessage)
         if imported is None:
             return
+        debug_log.get_logger().info(
+            f"ProgramEditor: import {imported.name!r} into the Slice Editor: {len(imported.channels)} ch, "
+            f"{imported.rate} Hz, {len(imported.channels[0])} frames, {len(imported.markers)} cut points"
+        )
         if imported.stereo:
             self.status_bar.showMessage("Stereo: each slice is sent as a -L/-R pair, panned left and right in the program")
         self._run_slice_editor(
@@ -4866,6 +4993,7 @@ class ProgramEditorWindow(QMainWindow):
         # what actually goes to the sampler, [(resident name, samples)]: one sample per slice, or - for a stereo loop
         # (extra_slices = the right channel's slices) - a -L and a -R sample per slice, since resident samples are mono
         if extra_slices:
+            debug_log.get_logger().info(f"ProgramEditor: exporting {len(names)} stereo slices as {2 * len(names)} -L/-R samples")
             items = []
             for slice_index, slice_name in enumerate(names):
                 items.append((slice_name + _STEREO_SUFFIXES[0], slices[slice_index]))
@@ -5112,6 +5240,10 @@ class ProgramEditorWindow(QMainWindow):
                 busy_callback(busy)
 
         logger = debug_log.get_logger()
+        logger.info(
+            f'ProgramEditor: creating program "{program_name}" from {slice_count} slices '
+            f"({'stereo: left in zone 1, right in zone 2' if stereo else 'mono'})"
+        )
         status_callback(f'Creating program "{program_name}"...')
         which, args = self._wait_for_any_signal(
             [self._worker.program_created, self._worker.program_create_failed],

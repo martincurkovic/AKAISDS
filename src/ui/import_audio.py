@@ -10,13 +10,14 @@ WARN_SECONDS asks first, and one longer than REFUSE_SECONDS is not opened.
 """
 
 import os
+import time
 from dataclasses import dataclass, field
 
 import soundfile as sf
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication, QFileDialog, QMessageBox
 
-from core import rx2, sds_encoder
+from core import debug_log, rx2, sds_encoder
 
 WARN_SECONDS = 60  # about 0.2 GB of memory for a stereo file, and already longer than most samplers' memory holds as a sample
 REFUSE_SECONDS = 15 * 60  # about 3.5 GB
@@ -49,25 +50,35 @@ def pick_and_load(parent, report):
     report(text) (the editor's status bar)."""
     path, _ = QFileDialog.getOpenFileName(parent, "Import Audio", os.path.expanduser("~"), FILTER)
     if not path:
+        debug_log.get_logger().debug("ImportAudio: cancelled")
         return None
     return load_path(parent, path, report)
 
 
 def load_path(parent, path, report):
     base = os.path.basename(path)
+    logger = debug_log.get_logger()
+    started = time.monotonic()
     QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
     try:
         if os.path.splitext(path)[1].lower() == rx2.RX2_EXTENSION:
             loop = rx2.load(path)
             channels, markers = loop.channel_buffers()
+            logger.info(f"ImportAudio: {base!r} (.rx2): {len(markers) + 1} slices, {len(channels)} ch, {loop.sample_rate} Hz")
             return ImportedAudio(rx2.slice_base_name(path), channels, loop.sample_rate, markers, is_loop=True)
         try:
             info = sf.info(path)
         except Exception as e:
+            logger.warning(f"ImportAudio: couldn't read {path!r}: {e}")
             report(f"Couldn't read {base}: {e}")
             return None
         seconds = info.frames / info.samplerate if info.samplerate else 0
+        logger.debug(
+            f"ImportAudio: {base!r}: {info.format}/{info.subtype}, {info.channels} ch, {info.samplerate} Hz, "
+            f"{info.frames} frames ({seconds:.1f} s)"
+        )
         if seconds > REFUSE_SECONDS:
+            logger.warning(f"ImportAudio: refused {base!r}: {seconds:.0f} s is over the {REFUSE_SECONDS} s limit")
             report(
                 f"{base} is {format_duration(seconds)} long - the Slice Editor opens files up to "
                 f"{format_duration(REFUSE_SECONDS)}. Trim it first."
@@ -84,11 +95,17 @@ def load_path(parent, path, report):
                 QMessageBox.StandardButton.No,
             )
             QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+            logger.info(f"ImportAudio: {base!r} is {seconds:.0f} s (over {WARN_SECONDS} s): user said {answer.name}")
             if answer != QMessageBox.StandardButton.Yes:
                 return None
         channels, rate = sds_encoder.read_wav_channels(path)
+        logger.info(
+            f"ImportAudio: {base!r}: {len(channels)} ch, {rate} Hz, {len(channels[0])} frames decoded in "
+            f"{(time.monotonic() - started) * 1000:.0f} ms"
+        )
         return ImportedAudio(rx2.slice_base_name(path), channels, rate)
     except (rx2.Rx2Error, ValueError, OSError) as e:
+        logger.warning(f"ImportAudio: couldn't open {path!r}: {e}")
         report(str(e))
         return None
     finally:

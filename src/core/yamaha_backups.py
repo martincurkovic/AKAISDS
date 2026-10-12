@@ -5,6 +5,7 @@ import dataclasses
 import os
 import time
 
+from core import debug_log
 from core import yamaha_restore as yr
 
 
@@ -39,7 +40,9 @@ def list_backups(directory):
         try:
             dump = yr.load_backup(path)
             entries.append(BackupEntry(path, dump.fmt, dump.name, os.path.getmtime(path)))
-        except (yr.RestoreError, OSError):
+        except (yr.RestoreError, OSError) as e:
+            # skipped, but not silently: a corrupt backup that never appears in the Restore list is hard to explain otherwise
+            debug_log.get_logger().warning(f"yamaha_backups: skipping unreadable backup {path!r}: {e}")
             continue
     entries.sort(key=lambda e: (e.saved_at, e.path), reverse=True)
     return entries

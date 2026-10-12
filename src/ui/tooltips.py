@@ -271,11 +271,11 @@ LOAD_PROGRAM_DEMO_MODE = (
 )
 SAVE_PROGRAM_BUTTON = (
     "Save the selected program to an Akai program file (.p1 for an S1000, .p3 for "
-    "an S2000/S3000). Samples are not included."
+    "an S2000/S3000). Samples are not included. You can also drag the program out of the list into a folder."
 )
 LOAD_PROGRAM_BUTTON = (
     "Load an Akai program file (.p1/.p3) onto the sampler as a new program. "
-    "Its samples must be loaded separately - zones refer to them by name."
+    "Its samples must be loaded separately - zones refer to them by name. You can also drop a program file onto the window."
 )
 DUPLICATE_KEYGROUP_DEMO_MODE = (
     "Not available in demo mode - the fake sampler has no way to create new keygroups"

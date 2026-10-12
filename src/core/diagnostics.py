@@ -80,6 +80,7 @@ def log_session_config(reason):
     # starts with "which model was this?"
     log = debug_log.get_logger()
     try:
+        from core import rx2
         from core.midi_manager import shared_transport_enabled
 
         input_name, output_name = app_config.get_saved_ports()
@@ -88,7 +89,9 @@ def log_session_config(reason):
             f"in={input_name!r} out={output_name!r} "
             f"channel={app_config.get_saved_channel()} "
             f"shared_midi_transport={shared_transport_enabled()} "
-            f"theme={app_config.get_saved_theme()}"
+            f"theme={app_config.get_saved_theme()} "
+            f"slice_detection={app_config.get_saved_slice_detection()} "
+            f"rx2_library={'ok' if rx2.is_available() else 'MISSING'}"
         )
     except Exception:
         log.error(f"couldn't read the config for the log ({reason})", exc_info=True)
