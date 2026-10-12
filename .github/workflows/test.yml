@@ -4,6 +4,7 @@ on:
   push:
     branches: [master]
   pull_request:
+  workflow_call: # build.yml runs this as its release gate
 
 concurrency:
   group: test-${{ github.ref }}
