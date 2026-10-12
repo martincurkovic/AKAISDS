@@ -520,6 +520,26 @@ on the directory AND the file, debounced 600 ms; `is_ready` re-reads the file's 
 - After a successful send the exported file stays and the button waits for the NEXT save, so the user can keep editing. Windows/Linux launching (`os.startfile`, `xdg-open`) is untested; macOS uses `open [-a app]`.
 - Tests: `tests/test_external_edit.py` (pure + tracker), `tests/test_external_edit_window.py` (Program Editor in demo mode, Yamaha against `FakeA4000`; the app is stubbed by patching `external_edit.launch`).
 
+## Time Stretch / Pitch Shift (Samples tabs, written 2026-10-13, NOT tried on hardware)
+
+"Time Stretch / Pitch..." (second button row, with Edit in External App) opens `ui/time_stretch_dialog.py`: a Mode dropdown and Filter-style knobs - Length (LogKnob 25-400 %, 100 % in the
+middle), or Semitones (+-24) and Cents (+-50) in Pitch Shift mode, and Grain (LogKnob 5-500 ms) in both. A double-click resets a knob. Preview plays through the speakers (a settled knob restarts a
+playing preview after 350 ms). OK is disabled at 100 % / 0 st 0 ct and above `MAX_OUTPUT_FRAMES` = 16 M (the S3000's RAM). Then a confirmation, then `_perform_sample_edit` (Program Editor:
+the usual replace, label "Time Stretch"/"Pitch Shift") or `YamahaSampleEditor.time_stretch` (a NEW sample `<name> STR` / `<name> PITCH`, stereo channels edited identically). `dialog.edit()`
+returns `(kind, options)` for `time_stretch.EDITS` / `transform_for`; the Yamaha `ye.EDITS` carries the same two kinds. The engine is `core/time_stretch.py`, a Python port of
+potenza-time-stretch's `TimeStretch.h` (GPL-3, see `THIRD_PARTY_NOTICES.md`).
+- **The port is checked against the real C++**: `tests/fixtures/time_stretch_golden.json` came from compiling the header (`tools/make_time_stretch_golden.py --header ...`, header kept out of
+  the repo; 5 stretch + 4 pitch cases); `test_time_stretch.py` needs agreement within 1e-5. Don't "tidy" `TimeStretch`'s arithmetic without re-running that.
+- **NOT measured: that it equals the sampler's own time stretch.** The upstream project only says "Akai style". The default grain (40 ms) is a guess. A real comparison = stretch one sample
+  with the S2000's own TIME STRETCH and with this, and listen/diff. (The owner listened to the stretch and found it "very akai-esque".)
+- It is a playback engine driven offline (`_render`: one output sample per step, pitch delta 1; stretch = `round(n x factor)` samples, pitch shift = the engine's `comp` mode, `n` samples with the
+  grains reading the source `ratio` times faster; ~0.7 s per 10 s of mono audio, pure Python).
+- **Grains are not phase aligned**, so a sustained tone phases/warbles (measured: a 100-sample sine stretched x1.5 drifts 92-114 samples per cycle) unless the step between grain starts is
+  a whole number of cycles. **Pitch shift on a pure 441 Hz tone is only approximate and depends on the grain** (measured 2026-10-13, dominant FFT peak vs expected: +3 st at 10 ms -> 440 Hz instead of 524,
+  at 80 ms -> 515; +12 st at 10 ms -> 770 instead of 882, at 80 ms -> 899): short grains pull a tone back toward its original pitch, 60-100 ms tracks it best. Drums and loops are the use case.
+- Time Stretch scales the markers in proportion (`stretch_with_markers`); Pitch Shift keeps the length, so the markers don't move. Both act on the whole buffer (Start/End don't limit them, like
+  Normalise/Reverse). Root note/tune are untouched on purpose (a pitch-shifted sample should now play at its new pitch on the same key).
+
 ## Root Note & Tune, and Detect Root Note
 
 `sample_root_note_spinbox` (`SPITCH`, `NoteSpinBox` 21..127) and `sample_tune_spinbox` (`STUNO`, semitones +-50.00).
