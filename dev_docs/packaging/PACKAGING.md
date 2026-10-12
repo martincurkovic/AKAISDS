@@ -28,6 +28,12 @@ AKAISDS is unsigned. Don't suggest `--no-quarantine` to users.
 5. The workflow edits only the `version` and two `sha256` lines of the tap's cask. **Keep those three line shapes** (two-space indent,
    `sha256 arm: "..."`, `intel: "..."` on the next line) or the workflow's grep check fails the job. Everything else in the cask is edited by hand in the tap.
 
+### Second cask: akaiutil-gui
+
+The same tap also holds `Casks/akaiutil-gui.rb` (start from `homebrew/akaiutil-gui.rb`; needs macOS 14.4+, expressed as `:sonoma`).
+Its repo (`martincurkovic/akaiutil-gui`) has its own `update-homebrew-tap.yml`, which bumps that cask on a published release; it needs a
+`TAP_REPO_TOKEN` secret too (the same tap-scoped token works). Asset names there are `akaiutil-GUI-macos-{arm,intel}.dmg`.
+
 ## AUR
 
 1. Register at aur.archlinux.org and add a dedicated SSH public key (`ssh-keygen -t ed25519 -f ~/.ssh/aur_akaisds`).
