@@ -61,6 +61,10 @@ _program_editor_bridge.PROGRAM_BACKUP_DIR = _TEST_LOG_DIR / "program_backups"
 _program_editor_bridge.MDATA_BACKUP_DIR = _TEST_LOG_DIR / "mdata_backups"
 # The settle pauses around a block write (a real second or more) must not slow the suite; tests that check the spacing replace this hook.
 _program_editor_bridge._sleep = lambda seconds: None
+# ...and the copies of audio saved before an externally edited sample replaces it.
+from core import external_edit as _external_edit
+
+_external_edit.BACKUP_DIR = _TEST_LOG_DIR / "external_edit_backups"
 
 
 # The user's real ~/.akaisds/config.json must never decide a test's outcome. It once did: the Yamaha editor's one-time
