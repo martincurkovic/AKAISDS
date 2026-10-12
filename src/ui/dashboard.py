@@ -42,6 +42,9 @@ from ui.ascii_logo import LOGO
 from ui import tooltips
 
 SETTINGS_ROLE = Qt.ItemDataRole.UserRole + 1
+# a queued ReCycle loop: the frames (in the row's WAV, the slices laid end to end) where each slice after the first begins. Present =
+# "send this as individual slices"; the Slice Editor opens on it with these as markers, and exporting from there replaces the row.
+RX2_MARKERS_ROLE = Qt.ItemDataRole.UserRole + 2
 # the longest slice name that still takes a "-L"/"-R" within the sampler's 12 characters
 _MAX_STEREO_BASE = NAME_LENGTH - 2
 
@@ -492,10 +495,9 @@ class TransferDashboard(QWidget):
         self._update_empty_queue_placeholder()
 
     def _import_rx2(self, path):
-        # A ReCycle .rx2 -> one ordinary queued WAV per slice, the same rows
-        # the Slice Editor's queue export makes (core/rx2.py: slices are the
-        # raw cut-point audio). From here it is the normal Send path.
-        # Returns True if rows were added.
+        # A ReCycle .rx2 -> ONE queue row, like any other file: the loop's slices laid end to end as a WAV, carrying the cut points
+        # (RX2_MARKERS_ROLE). Send cuts it into one sample per slice (_expand_rx2_entry); the row's Slice Editor opens on it with the
+        # cut points already marked, for adjusting first (core/rx2.py: slices are the raw cut-point audio). Returns True if a row was added.
         name = os.path.basename(path)
         try:
             loop = rx2.load(path)
@@ -506,68 +508,96 @@ class TransferDashboard(QWidget):
             self.status_bar.showMessage(str(e))
             return False
 
-        # same shared numbering the Slice Editor uses (zero-padded to the batch's width)
-        stereo = loop.channels == 2
-        # a stereo slice is sent as <name>-L / <name>-R, and the send path cuts the BASE down to fit "-L" into 12 characters - which
-        # would eat the slice number of a 12-character name and give every slice the same pair of names. So leave room for it here.
-        names = slice_export_names(
-            rx2.slice_base_name(path), len(loop.slices), _MAX_STEREO_BASE if stereo else NAME_LENGTH
-        )
-        new_items = []
-        temp_paths = []
+        channels, markers = loop.channel_buffers()
+        fd, temp_path = tempfile.mkstemp(suffix=".wav", prefix="akaisds_rx2_")
+        os.close(fd)
         try:
-            for piece, slice_name in zip(loop.slices, names):
-                fd, temp_path = tempfile.mkstemp(suffix=".wav", prefix="akaisds_rx2_")
-                os.close(fd)
-                temp_paths.append(temp_path)
-                if stereo:
-                    sds_encoder.write_wav_file_stereo(
-                        temp_path, piece.left, piece.right, loop.sample_rate, bit_depth=16
-                    )
-                else:
-                    sds_encoder.write_wav_file(
-                        temp_path, piece.left, loop.sample_rate, bit_depth=16
-                    )
-                if not self.create_local_row(temp_path):
-                    self._remove_rows(new_items)
-                    return False
-                new_item = self.list_local.item(self.list_local.count() - 1)
-                new_items.append(new_item)
-                row_widget = self.list_local.itemWidget(new_item)
-                edit_field = row_widget.findChild(QLineEdit) if row_widget else None
-                if edit_field is not None:
-                    edit_field.setText(slice_name)
-                    edit_field.setCursorPosition(0)
-                if stereo:
-                    # a stereo slice keeps both channels whatever the dashboard's
-                    # global mono default says (same rule as the Slice Editor export)
-                    settings = dict(new_item.data(SETTINGS_ROLE), mono=False)
-                    new_item.setData(SETTINGS_ROLE, settings)
-                    if row_widget is not None:
-                        self._refresh_row_indicators(
-                            row_widget, new_item.data(Qt.ItemDataRole.UserRole), settings
-                        )
+            if len(channels) == 2:
+                sds_encoder.write_wav_file_stereo(
+                    temp_path, channels[0], channels[1], loop.sample_rate, bit_depth=16
+                )
+            else:
+                sds_encoder.write_wav_file(
+                    temp_path, channels[0], loop.sample_rate, bit_depth=16
+                )
+            if not self.create_local_row(temp_path):
+                return False
         except Exception:
             debug_log.get_logger().error(
                 "TransferDashboard: unexpected error importing an .rx2", exc_info=True
             )
-            self._remove_rows(new_items)
             self.status_bar.showMessage(
                 f"Couldn't import {name} - see {debug_log.LOG_PATH}"
             )
             return False
         finally:
-            for temp_path in temp_paths:
-                try:
-                    os.remove(temp_path)
-                except OSError:
-                    pass
+            try:
+                os.remove(temp_path)  # create_local_row keeps its own copy
+            except OSError:
+                pass
 
+        item = self.list_local.item(self.list_local.count() - 1)
+        item.setData(RX2_MARKERS_ROLE, markers)
+        row_widget = self.list_local.itemWidget(item)
+        edit_field = row_widget.findChild(QLineEdit) if row_widget else None
+        if edit_field is not None:
+            edit_field.setText(rx2.slice_base_name(path))
+            edit_field.setCursorPosition(0)
+        badge = row_widget.findChild(QLabel, "sliceBadge") if row_widget else None
+        if badge is not None:
+            count = len(markers) + 1
+            badge.setText(f"{count} slices")
+            badge.setToolTip(
+                f"A ReCycle loop: Send puts each of its {count} slices on the sampler as its own sample. "
+                "Edit > Slice Editor to adjust the cut points first."
+            )
+            badge.setVisible(True)
         self.status_bar.showMessage(
-            f"Added {len(new_items)} slices from {name} "
-            f"({names[0]}..{names[-1]}, {loop.tempo_bpm:g} BPM)"
+            f"Added {name}: {len(markers) + 1} slices at {loop.tempo_bpm:g} BPM - sent as separate samples "
+            "(Edit > Slice Editor to adjust them first)"
         )
         return True
+
+    def _slice_name_length(self, n_channels, settings):
+        # a stereo slice goes out as <name>-L / <name>-R (the Akai send path cuts the BASE to fit "-L" in 12 characters, which would
+        # eat a slice number), so leave room for that - unless it is sent mono, or the unit takes a stereo file as one sample (Yamaha)
+        stereo_pair = n_channels == 2 and not settings["mono"] and not self._is_yamaha()
+        return _MAX_STEREO_BASE if stereo_pair else NAME_LENGTH
+
+    def _expand_rx2_entry(self, item, name, settings):
+        """The send entries for a queued ReCycle loop: one WAV (written now, kept until this session ends) per slice, named
+        <row name>-01.. . Raises OSError/ValueError if the loop's WAV can't be read or written."""
+        channels, rate = sds_encoder.read_wav_channels(item.data(Qt.ItemDataRole.UserRole))
+        markers = item.data(RX2_MARKERS_ROLE)
+        sliced = [
+            sample_slicing.slice_samples(channel, 0, len(channel) - 1, markers)
+            for channel in channels
+        ]
+        names = slice_export_names(
+            rx2.sanitize_name(name), len(sliced[0]), self._slice_name_length(len(channels), settings)
+        )
+        directory = dropped_files.session_dir() / "rx2_slices"
+        directory.mkdir(parents=True, exist_ok=True)
+        batch = tempfile.mkdtemp(prefix="send_", dir=directory)
+        entries = []
+        for index, slice_name in enumerate(names):
+            slice_path = os.path.join(batch, f"slice_{index:03d}.wav")
+            if len(channels) == 2:
+                sds_encoder.write_wav_file_stereo(
+                    slice_path, sliced[0][index], sliced[1][index], rate, bit_depth=16
+                )
+            else:
+                sds_encoder.write_wav_file(slice_path, sliced[0][index], rate, bit_depth=16)
+            entries.append(
+                {
+                    "filepath": slice_path,
+                    "name": slice_name,
+                    "bit_depth": settings["bit_depth"],
+                    "sample_rate": settings["sample_rate"],
+                    "mono": settings["mono"],
+                }
+            )
+        return entries
 
     def _update_empty_queue_placeholder(self):
         self.empty_queue_label.setVisible(self.list_local.count() == 0)
@@ -944,6 +974,7 @@ class TransferDashboard(QWidget):
             # a stereo file shows both channels; its slices are sent as -L/-R pairs, so the names leave room for the suffix
             extra_channels=[right_channel] if right_channel is not None else None,
             channel_suffixes=("-L", "-R") if right_channel is not None else None,
+            initial_markers=item.data(RX2_MARKERS_ROLE),
             export_confirm_message=lambda slice_count, names: (
                 f'Replace "{sample_name}" in the queue with {slice_count} '
                 f'slice{"s" if slice_count != 1 else ""} '
@@ -1097,6 +1128,20 @@ class TransferDashboard(QWidget):
                 "sample_rate": self._global_sample_rate,
                 "mono": self._global_mono,
             }
+
+            if item.data(RX2_MARKERS_ROLE) is not None:
+                # a queued ReCycle loop goes out as its individual slices
+                try:
+                    entries.extend(
+                        self._expand_rx2_entry(item, override_name or "RX2", settings)
+                    )
+                except (OSError, ValueError) as e:
+                    debug_log.get_logger().error(
+                        f"TransferDashboard: couldn't cut {filepath!r} into slices", exc_info=True
+                    )
+                    self.status_bar.showMessage(f"Couldn't cut the loop into slices: {e}")
+                    return
+                continue
 
             entries.append(
                 {
@@ -1532,6 +1577,11 @@ class TransferDashboard(QWidget):
         lbl_override.setFixedSize(12, 24)
         lbl_override.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
+        # "N slices": only shown for a queued ReCycle loop (see _import_rx2)
+        lbl_slices = QLabel()
+        lbl_slices.setObjectName("sliceBadge")
+        lbl_slices.setVisible(False)
+
         # mono/stereo indicator icon - set by _refresh_row_indicators
         lbl_channels = QLabel()
         lbl_channels.setObjectName("channelIcon")
@@ -1554,6 +1604,7 @@ class TransferDashboard(QWidget):
         row_layout.addWidget(
             edit_field, stretch=1
         )  # stretch=1 forces file name to take maximum room
+        row_layout.addWidget(lbl_slices)
         row_layout.addWidget(lbl_override)
         row_layout.addWidget(lbl_channels)
         row_layout.addWidget(btn_edit)

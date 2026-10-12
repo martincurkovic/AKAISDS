@@ -83,6 +83,12 @@ def _load_library():
         lib.vl_decode_slice.argtypes = [
             void_p, ctypes.c_int32, void_p, void_p, ctypes.c_int32, ctypes.c_int32, ctypes.POINTER(ctypes.c_int32),
         ]
+        lib.vl_superflux_default_options.restype = None
+        lib.vl_superflux_default_options.argtypes = [void_p]
+        lib.vl_create_from_superflux.restype = void_p
+        lib.vl_create_from_superflux.argtypes = [
+            ctypes.c_int32, ctypes.c_int32, ctypes.c_int32, void_p, void_p, ctypes.c_int32, void_p, ctypes.POINTER(ctypes.c_int),
+        ]
         lib.vl_error_string.restype = ctypes.c_char_p
         lib.vl_error_string.argtypes = [ctypes.c_int]
     except (OSError, AttributeError) as e:
@@ -105,11 +111,14 @@ def _error_text(lib, code):
     return text.decode("utf-8", "replace") if text else f"error {code}"
 
 
+def sanitize_name(text):
+    """Uppercase, with anything outside the sampler's name alphabet (no underscore, for one) turned into a hyphen."""
+    return "".join(c if c in AKAI_CHARSET else "-" for c in text.strip().upper()) or "RX2"
+
+
 def slice_base_name(file_name):
-    """Uppercase, with anything outside the sampler's name alphabet (no underscore, for one) turned into a hyphen -
-    the stem slice names are numbered from."""
-    stem = os.path.splitext(os.path.basename(file_name))[0].strip().upper()
-    return "".join(c if c in AKAI_CHARSET else "-" for c in stem) or "RX2"
+    """The stem slice names are numbered from, from a file name (extension dropped)."""
+    return sanitize_name(os.path.splitext(os.path.basename(file_name))[0])
 
 
 def _to_int16(buffer, count):

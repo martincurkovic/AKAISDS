@@ -250,6 +250,23 @@ def save_theme(theme):
     save_config(config)
 
 
+SLICE_DETECTION_SIMPLE = "simple"
+SLICE_DETECTION_SUPERFLUX = "superflux"
+SLICE_DETECTION_VALUES = (SLICE_DETECTION_SIMPLE, SLICE_DETECTION_SUPERFLUX)
+
+
+def get_saved_slice_detection():
+    # the Slice Editor's detection mode, remembered from the last time it was changed; anything unrecognised is "simple"
+    mode = load_config().get("slice_detection", SLICE_DETECTION_SIMPLE)
+    return mode if mode in SLICE_DETECTION_VALUES else SLICE_DETECTION_SIMPLE
+
+
+def save_slice_detection(mode):
+    config = load_config()
+    config["slice_detection"] = mode if mode in SLICE_DETECTION_VALUES else SLICE_DETECTION_SIMPLE
+    save_config(config)
+
+
 # keys with a real default value worth persisting to disk, so a hand-edited
 # or version-upgraded config.json that's missing one of them gets it filled
 # back in rather than only ever defaulting implicitly in the getter above

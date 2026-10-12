@@ -1,4 +1,6 @@
-from PySide6.QtCore import QRegularExpression, Qt
+from concurrent.futures import ThreadPoolExecutor
+
+from PySide6.QtCore import QRegularExpression, Qt, QTimer
 from PySide6.QtGui import QKeySequence, QRegularExpressionValidator, QShortcut
 from PySide6.QtWidgets import (
     QApplication,
@@ -19,8 +21,12 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from core import app_config
+from core import debug_log
 from core import sample_slicing
+from core import superflux
 from core import transient_detection
+from core.rx2 import Rx2Error
 from core.audio_preview import SlicePreviewPlayer
 from s3k.messages import AKAI_CHARSET, NAME_LENGTH
 from ui.fine_slider import FineSlider
@@ -48,6 +54,11 @@ _EQUAL_SLICE_DEFAULT = 8
 # own docstring on why 0 is special-cased rather than just "a very high
 # threshold"
 _TRANSIENT_SENSITIVITY_DEFAULT = 0
+
+# SuperFlux redoes its whole analysis for every slider value (core/superflux.py), so while the slider is dragged it waits for a
+# pause this long, then analyses off the GUI thread; _SUPERFLUX_POLL_MS is how often the finished job is looked for
+_SUPERFLUX_DEBOUNCE_MS = 120
+_SUPERFLUX_POLL_MS = 30
 
 
 def slice_export_names(base_name, count, name_length=NAME_LENGTH):
@@ -431,6 +442,39 @@ class SliceEditorWindow(QDialog):
         self.transient_sensitivity_slider.valueChanged.connect(
             self._on_transient_sensitivity_changed
         )
+        # which detector the slider drives. Simple is the original (instant); SuperFlux is the better one but analyses off the GUI
+        # thread. The choice is remembered (core/app_config.py), and SuperFlux is greyed out if the VelociLoops library isn't there.
+        self.detection_combo = QComboBox()
+        self.detection_combo.addItem("Simple (fast)", app_config.SLICE_DETECTION_SIMPLE)
+        self.detection_combo.addItem("SuperFlux (high quality)", app_config.SLICE_DETECTION_SUPERFLUX)
+        self.detection_combo.setToolTip(tooltips.SLICE_DETECTION_MODE)
+        saved_mode = app_config.get_saved_slice_detection()
+        if not superflux.is_available():
+            item = self.detection_combo.model().item(1)
+            item.setEnabled(False)
+            item.setToolTip(tooltips.SLICE_DETECTION_SUPERFLUX_UNAVAILABLE)
+            saved_mode = app_config.SLICE_DETECTION_SIMPLE
+        self.detection_combo.setCurrentIndex(self.detection_combo.findData(saved_mode))
+        self.detection_combo.activated.connect(self._on_detection_mode_chosen)
+        # SuperFlux's analysis runs on one worker thread, polled from the GUI thread (no cross-thread Qt signals, so closing the
+        # dialog mid-analysis can't touch a deleted object)
+        self._sf_executor = None
+        self._sf_future = None
+        self._sf_job_id = 0  # the request a running job was started for
+        self._sf_request_id = 0  # bumped by every slider change/mode switch: only the newest result is applied
+        self._sf_applied_id = 0
+        self._sf_buffer = None  # the mono mix as floats, built by the first job and reused
+        self._sf_error_shown = False
+        self._sf_debounce = QTimer(self)
+        self._sf_debounce.setSingleShot(True)
+        self._sf_debounce.setInterval(_SUPERFLUX_DEBOUNCE_MS)
+        self._sf_debounce.timeout.connect(self._superflux_pump)
+        self._sf_poll = QTimer(self)
+        self._sf_poll.setInterval(_SUPERFLUX_POLL_MS)
+        self._sf_poll.timeout.connect(self._superflux_poll)
+        transient_row.addWidget(QLabel("Detection:"))
+        transient_row.addWidget(self.detection_combo)
+        transient_row.addSpacing(12)
         transient_row.addWidget(QLabel("Sensitivity:"))
         transient_row.addWidget(self.transient_sensitivity_slider)
         transient_row.addWidget(self.transient_sensitivity_value_label)
@@ -804,6 +848,10 @@ class SliceEditorWindow(QDialog):
         # (silence, too-short buffer - see compute_flux) still behaves
         # identically: no markers, full stop.
         self.transient_sensitivity_value_label.setText(f"{value}%")
+        if self._detection_mode() == app_config.SLICE_DETECTION_SUPERFLUX:
+            self._request_superflux()
+            return
+        self._cancel_superflux()
         candidates = transient_detection.markers_from_flux(
             self._transient_flux,
             self._transient_window_frames,
@@ -824,6 +872,99 @@ class SliceEditorWindow(QDialog):
             sample_slicing.find_nearest_zero_crossing(self._analysis, m) for m in markers
         ]
         self.waveform.set_markers(snapped)
+
+    # --- detection mode / SuperFlux ------------------------------------------------
+
+    def _detection_mode(self):
+        return self.detection_combo.currentData()
+
+    def _on_detection_mode_chosen(self, _index):
+        app_config.save_slice_detection(self._detection_mode())
+        # same rule as the slider itself: with it above 0 the chosen detector takes over the markers (0 = off touches nothing)
+        value = self.transient_sensitivity_slider.value()
+        if value > 0:
+            self._on_transient_sensitivity_changed(value)
+        else:
+            self._cancel_superflux()
+
+    def _request_superflux(self):
+        """The slider (or the mode) changed: analyse for the newest value once the slider pauses; older results are dropped."""
+        self._sf_request_id += 1
+        if self.transient_sensitivity_slider.value() <= 0:
+            # off needs no analysis - clear at once, and anything still running is for a stale request
+            self._sf_debounce.stop()
+            self._sf_applied_id = self._sf_request_id
+            self.waveform.set_markers([])
+            return
+        self.transient_sensitivity_value_label.setText("...")
+        self._sf_debounce.start()
+
+    def _superflux_pump(self):
+        """Start an analysis for the newest request, unless one is already running (the poll starts the next when it finishes)."""
+        if self._sf_future is not None or self._sf_applied_id == self._sf_request_id:
+            return
+        if self._sf_executor is None:
+            self._sf_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="superflux")
+        value = self.transient_sensitivity_slider.value()
+        self._sf_job_id = self._sf_request_id
+        self._sf_future = self._sf_executor.submit(self._superflux_job, value)
+        self._sf_poll.start()
+
+    def _superflux_job(self, value):
+        # (worker thread) the float buffer is built here, on the first job, not on the GUI thread
+        if self._sf_buffer is None:
+            self._sf_buffer = superflux.to_float_buffer(self._analysis)
+        return superflux.detect(self._sf_buffer, self._framerate, value)
+
+    def _superflux_poll(self):
+        future = self._sf_future
+        if future is None or not future.done():
+            return
+        self._sf_poll.stop()
+        self._sf_future = None
+        try:
+            candidates = future.result()
+        except Rx2Error as e:
+            self._superflux_failed(str(e))
+            return
+        except Exception as e:  # a bug in the wrapper must not take the dialog down
+            debug_log.get_logger().error("SliceEditor: SuperFlux analysis failed", exc_info=True)
+            self._superflux_failed(str(e))
+            return
+        if self._sf_job_id == self._sf_request_id:
+            self._sf_applied_id = self._sf_job_id
+            self.transient_sensitivity_value_label.setText(f"{self.transient_sensitivity_slider.value()}%")
+            start, end = self.waveform.start(), self.waveform.end()
+            markers = [m for m in candidates if start < m < end]
+            self.waveform.set_markers(
+                [sample_slicing.find_nearest_zero_crossing(self._analysis, m) for m in markers]
+            )
+        else:
+            self._superflux_pump()  # the slider moved on while this ran
+
+    def _superflux_failed(self, reason):
+        # fall back to the simple detector for the rest of the session rather than leaving a slider that does nothing
+        debug_log.get_logger().warning(f"SliceEditor: SuperFlux unavailable ({reason})")
+        self.detection_combo.setCurrentIndex(self.detection_combo.findData(app_config.SLICE_DETECTION_SIMPLE))
+        self.detection_combo.model().item(1).setEnabled(False)
+        self.detection_combo.model().item(1).setToolTip(reason)
+        if not self._sf_error_shown:
+            self._sf_error_shown = True
+            QMessageBox.warning(self, "Slice Editor", f"SuperFlux couldn't analyse this sample, so Simple detection is used.\n\n{reason}")
+        self._on_transient_sensitivity_changed(self.transient_sensitivity_slider.value())
+
+    def _cancel_superflux(self):
+        """Drop any pending or running SuperFlux request (its result will not be applied)."""
+        self._sf_request_id += 1
+        self._sf_applied_id = self._sf_request_id
+        self._sf_debounce.stop()
+
+    def _stop_superflux(self):
+        self._sf_debounce.stop()
+        self._sf_poll.stop()
+        if self._sf_executor is not None:
+            self._sf_executor.shutdown(wait=False, cancel_futures=True)
+            self._sf_executor = None
 
     # --- export --------------------------------------------------------------
 
@@ -1102,6 +1243,7 @@ class SliceEditorWindow(QDialog):
             self.equal_count_spin,
             self.equal_slices_button,
             self.transient_sensitivity_slider,
+            self.detection_combo,
             self.name_edit,
             self.bit_depth_combo,
             self.rate_combo,
@@ -1146,11 +1288,13 @@ class SliceEditorWindow(QDialog):
     def reject(self):
         if self._confirm_discard():
             self._preview_player.stop()
+            self._stop_superflux()
             super().reject()
 
     def closeEvent(self, event):
         if self._confirm_discard():
             self._preview_player.stop()
+            self._stop_superflux()
             super().closeEvent(event)
         else:
             event.ignore()

@@ -209,6 +209,12 @@ CREATE_PROGRAM_NO_TEMPLATE = (
 # new
 EQUAL_SLICES_BUTTON = "Replace any existing slice markers with N evenly-spaced ones."
 
+SLICE_DETECTION_MODE = (
+    "Simple: fast, follows loudness, updates live as you drag. "
+    "SuperFlux: finds hits by how the sound changes (better on drum loops), "
+    "but needs a moment to analyse - markers update when you pause."
+)
+SLICE_DETECTION_SUPERFLUX_UNAVAILABLE = "SuperFlux isn't available - the VelociLoops library didn't load."
 TRANSIENT_SENSITIVITY_SLIDER = (
     "Live transient detection - replaces the current slice markers as you "
     "drag. 0% is off; higher sensitivity detects more, quieter transients."
