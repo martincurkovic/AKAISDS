@@ -33,6 +33,7 @@ from ui import import_audio
 from ui.external_edit_tracker import ExternalEditTracker
 from ui.filter_sample_dialog import FilterSampleDialog
 from ui.slice_editor_window import SliceEditorWindow
+from ui.time_stretch_dialog import TimeStretchDialog
 
 
 def _log(message):
@@ -79,6 +80,7 @@ class YamahaSampleEditor(QObject):
         buttons["normalise"].clicked.connect(self.normalise)
         buttons["filter"].clicked.connect(self.filter)
         tab.slice_button.clicked.connect(self.open_slicer)
+        tab.time_stretch_button.clicked.connect(self.time_stretch)
         self._external = ExternalEditTracker(self)
         self._external.changed.connect(tab.update_edit_buttons)
         self._external_sending = None  # the sample whose edited audio is going out as a new one
@@ -205,11 +207,29 @@ class YamahaSampleEditor(QObject):
         )
         self._run("filter", ctx, options)
 
-    def _run(self, kind, ctx, filter_options=None):
+    def time_stretch(self):
+        """Time Stretch / Pitch Shift: one dialog, two edits (the unit's copy is named ' STR' or ' PITCH')."""
+        ctx = self._context()
+        if ctx is None:
+            return
+        # the dialog previews the left (or only) channel; both channels of a stereo sample get the same edit
+        dialog = TimeStretchDialog(self._tab, ctx["name"], ctx["channels"][0], ctx["rate"])
+        if not dialog.exec():
+            return
+        kind, options = dialog.edit()
+        name = ye.copy_name(ctx["name"], ye.EDITS[kind][0])
+        if not self._confirm(
+            ye.EDITS[kind][1], f'Make "{name}" from "{ctx["name"]}", {dialog.summary()}?' + _NOT_CHANGED
+        ):
+            return
+        _log(f"{ye.EDITS[kind][1]} of {ctx['name']!r}: {options}, grain {dialog.grain_ms()} ms")
+        self._run(kind, ctx, options)
+
+    def _run(self, kind, ctx, options=None):
         suffix, label = ye.EDITS[kind]
         try:
             channels, markers = ye.apply_edit(
-                kind, ctx["channels"], ctx["markers"], framerate=ctx["rate"], filter_options=filter_options
+                kind, ctx["channels"], ctx["markers"], framerate=ctx["rate"], options=options
             )
         except Exception as e:  # the pure transform runs before anything touches the unit
             _log(f"{label} of {ctx['name']!r} failed before sending: {e!r}")

@@ -85,6 +85,7 @@ from ui.waveform_view import WaveformView
 from ui.loop_preview_view import LoopJoinPreview, HALF_WINDOW_FRAMES
 from ui.slice_editor_window import SliceEditorWindow
 from ui.filter_sample_dialog import FilterSampleDialog
+from ui.time_stretch_dialog import TimeStretchDialog
 from core.audio_preview import SlicePreviewPlayer
 from ui import theme
 from ui.about_dialog import AboutDialog
@@ -100,6 +101,7 @@ from ui import import_audio
 from core import s1000_bridge as s1000_bridge_module
 from core import sampler_models
 from core import sample_editing
+from core import time_stretch
 from core import sds_encoder
 from core.midi_notes import midi_note_to_name
 from core.program_editor_bridge import (
@@ -6403,6 +6405,13 @@ class ProgramEditorWindow(QMainWindow):
         self._external_edit = ExternalEditTracker(self)
         self._external_edit.changed.connect(self._refresh_external_edit_buttons)
         self._sample_edit_ready = False
+        # Akai-style granular time stretch (core/time_stretch.py): own dialog
+        # with a Preview, then the same replace path as the five edits above.
+        # Here rather than in sample_edit_row, which has no width left.
+        self.time_stretch_button = QPushButton("Time Stretch / Pitch\u2026")
+        self.time_stretch_button.setToolTip(tt.TIME_STRETCH_BUTTON)
+        self.time_stretch_button.setEnabled(False)
+        self.time_stretch_button.clicked.connect(self._confirm_time_stretch)
         self.external_edit_button = QPushButton("Edit in External App\u2026")
         self.external_edit_button.setToolTip(tt.EXTERNAL_EDIT_BUTTON)
         self.external_edit_button.setEnabled(False)
@@ -6413,6 +6422,7 @@ class ProgramEditorWindow(QMainWindow):
         self.external_send_button.clicked.connect(self._confirm_send_edited_audio)
         external_edit_row = QHBoxLayout()
         external_edit_row.setSpacing(8)
+        external_edit_row.addWidget(self.time_stretch_button)
         external_edit_row.addWidget(self.external_edit_button)
         external_edit_row.addWidget(self.external_send_button)
         external_edit_row.addStretch()
@@ -7256,6 +7266,7 @@ class ProgramEditorWindow(QMainWindow):
         self.fade_sample_button.setEnabled(enabled)
         self.normalize_sample_button.setEnabled(enabled)
         self.filter_sample_button.setEnabled(enabled)
+        self.time_stretch_button.setEnabled(enabled)
         # Duplicate Sample needs the same loaded audio (it re-sends it
         # under a new name - see its own construction comment) AND is
         # unavailable in demo mode (DemoBridge has no add-sample
@@ -8475,6 +8486,42 @@ class ProgramEditorWindow(QMainWindow):
             lowpass_slope_db_per_octave=dialog.lowpass_slope_db_per_octave(),
         )
         self._perform_sample_edit(sample_index, transform, "Filter")
+
+    def _confirm_time_stretch(self):
+        # same two-step shape as _confirm_filter_sample (a dialog with a
+        # Preview, then a plain confirmation), then the standard replace
+        sample_index = self.sample_list_widget.currentRow()
+        if sample_index < 0 or not self.waveform_view.has_waveform():
+            return
+        entry = self._sample_waveform_cache.get(sample_index)
+        if entry is None or entry["samples"] is None:
+            return
+        sample_name = self._sample_name_at_row(sample_index)
+        dialog = TimeStretchDialog(
+            self, sample_name, entry["samples"], entry["framerate"]
+        )
+        if not dialog.exec():
+            return
+        kind, options = dialog.edit()
+        label = time_stretch.EDITS[kind][2]
+        answer = QMessageBox.question(
+            self,
+            label,
+            f'Send "{sample_name}", {dialog.summary()}, to the sampler now?\n\n'
+            "This overwrites the sample's audio on the sampler and cannot "
+            "be undone.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        debug_log.get_logger().info(
+            f"TimeStretch: {sample_name!r} {kind} {options}, grain "
+            f"{dialog.grain_ms()} ms ({len(entry['samples'])} frames at "
+            f"{entry['framerate']} Hz)"
+        )
+        transform = time_stretch.transform_for(kind, **options)
+        self._perform_sample_edit(sample_index, transform, label)
 
     def _edit_in_external_app(self):
         sample_index = self.sample_list_widget.currentRow()

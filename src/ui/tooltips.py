@@ -331,6 +331,23 @@ NORMALIZE_SAMPLE_BUTTON = (
     "Gain up the whole sample until its loudest point hits maximum "
     "amplitude, overwriting it on the sampler. Cannot be undone."
 )
+TIME_STRETCH_BUTTON = (
+    "Time Stretch makes the sample longer or shorter without changing its pitch; "
+    "Pitch Shift changes the pitch without changing its length "
+    "(Akai-style granular, with a preview)."
+)
+TIME_STRETCH_MODE = "Time Stretch keeps the pitch and changes the length. Pitch Shift keeps the length and changes the pitch."
+TIME_STRETCH_LENGTH = "The new length as a percentage of the old one: 200% is twice as long, 50% half. Double-click to reset."
+PITCH_SHIFT_SEMITONES = "How far to shift the pitch, in semitones (12 = an octave). Double-click to reset."
+PITCH_SHIFT_CENTS = "Fine pitch, in hundredths of a semitone. Double-click to reset."
+TIME_STRETCH_GRAIN = (
+    "The size of the pieces the audio is cut into. Short grains suit drums and loops; "
+    "longer ones (60-100 ms) keep the pitch of a sustained tone closer, but can sound less tight. "
+    "Tones can warble whatever you pick. Double-click to reset."
+)
+TIME_STRETCH_PREVIEW_BUTTON = (
+    "Play the result through your computer's speakers - doesn't write anything to the sampler."
+)
 FILTER_SAMPLE_BUTTON = (
     "Apply a highpass or lowpass filter to the whole sample, "
     "overwriting it on the sampler. Cannot be undone."
@@ -601,6 +618,10 @@ YAMAHA_TRIM_SAMPLE_BUTTON = "Trim the sample down to the Start/End markers." + _
 YAMAHA_REVERSE_SAMPLE_BUTTON = "Reverse the sample so it plays backwards." + _YAMAHA_COPY_NOTE
 YAMAHA_FADE_SAMPLE_BUTTON = "Fade in up to the Start marker and out from the End marker." + _YAMAHA_COPY_NOTE
 YAMAHA_NORMALISE_SAMPLE_BUTTON = "Gain the sample up so its loudest point hits maximum amplitude (one gain for both channels of a stereo sample)." + _YAMAHA_COPY_NOTE
+YAMAHA_TIME_STRETCH_BUTTON = (
+    "Change the sample's length without its pitch (Time Stretch) or its pitch without its length (Pitch Shift), "
+    "Akai-style, with a preview." + _YAMAHA_COPY_NOTE
+)
 YAMAHA_FILTER_SAMPLE_BUTTON = "Apply a highpass and/or lowpass filter (with a preview)." + _YAMAHA_COPY_NOTE
 YAMAHA_SLICE_EDITOR_BUTTON = (
     "Chop the sample into slices and send each one to the sampler as a new sample (ReCycle-style). "

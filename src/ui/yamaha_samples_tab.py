@@ -612,6 +612,10 @@ class YamahaSamplesTab(QWidget):
         """Edit the audio in the user's own audio editor, then send the saved file back as a NEW sample (ui/yamaha_sample_edit.py)."""
         row = QHBoxLayout()
         row.setSpacing(8)
+        self.time_stretch_button = QPushButton("Time Stretch / Pitch\u2026")
+        self.time_stretch_button.setToolTip(tt.YAMAHA_TIME_STRETCH_BUTTON)
+        self.time_stretch_button.setEnabled(False)
+        row.addWidget(self.time_stretch_button)
         self.external_edit_button = QPushButton("Edit in External App\u2026")
         self.external_edit_button.setToolTip(tt.YAMAHA_EXTERNAL_EDIT_BUTTON)
         self.external_edit_button.setEnabled(False)
@@ -1279,6 +1283,7 @@ class YamahaSamplesTab(QWidget):
         for button in self.edit_buttons.values():
             button.setEnabled(ready)
         self.slice_button.setEnabled(ready)
+        self.time_stretch_button.setEnabled(ready)
         self.external_edit_button.setEnabled(ready)
         edits = getattr(self, "_edits", None)  # (built after the first call)
         self.external_send_button.setEnabled(ready and edits is not None and edits.edited_audio_ready(self._selected))

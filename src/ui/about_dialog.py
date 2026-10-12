@@ -100,6 +100,8 @@ class AboutDialog(QDialog):
             "Many thanks to Jan Lentfer for their hard work on s3ked, and to Frank Neumann "
             "for transcribing the Akai SysEx documentation (lakai.sourceforge.net).\n"
             "S900/S950 support is partly ported from s950tools by Brandon Ivers (MIT).\n"
+            "Time Stretch is ported from potenza-time-stretch by dar-io-p (GPL-3.0).\n"
+            ".rx2 import uses VelociLoops by kunitoki (public domain).\n"
             "Licensed under GPL-3.0"
         )
         credits_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
