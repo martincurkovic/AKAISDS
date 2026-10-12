@@ -1451,6 +1451,8 @@ def test_marker_handles_belong_to_the_half_that_owns_them_but_the_lines_cross_bo
     alone, palette = _stack_view(None)
     top, _ = _stack_view("top")
     bottom, _ = _stack_view("bottom")
+    for view in (alone, top, bottom):
+        view.set_header_hint("")  # the hint is centered on the seam, so a wider font (Linux CI) spills it onto the pixels probed below
     bg = QColor(palette["bg_input"]).name()
     # loop marker (frame 100 -> x ~ 30): its triangle sits at the BOTTOM of a stand-alone view...
     assert _color_at(alone, 33, 88) != bg
