@@ -367,10 +367,13 @@ macOS arm64); upstream marks no exports, so on MSVC the tool writes a `.def` fro
 - **Slices are RAW length** (`VLSliceInfo.sample_length`), not `vl_get_slice_frame_count()`: with the file's transient-stretch on, that adds a synthetic
   decay tail for slower playback, wrong for a sampler playing slices at their own pitch. Measured: the raw slices of `120Stereo.rx2` tile exactly 2.0 s (one bar at
   120 BPM). Muted slices are kept (mute is ReCycle editing state).
-- Two entry points, both over the same decode: **Dashboard** (drop or Open an `.rx2`): `TransferDashboard._import_rx2` queues one row per slice,
+- Three entry points, all over the same decode: **Dashboard** (drop or Open an `.rx2`): `TransferDashboard._import_rx2` queues one row per slice,
   `<STEM>-01..` (stereo stays stereo). **Program Editor File > "Import RX2 Loop..." (Ctrl+Shift+I)**: opens the Slice Editor on the slices laid end to end
   (`Rx2Loop.mono_buffer`, stereo averaged to mono) with the cut points as `initial_markers`, so Export and "Create new program" are the
   Slice Editor's own paths. `_run_slice_editor` is shared with the resident-sample flow; `resident_source=False` skips the audio retention.
+  **Yamaha editor File > "Import RX2 Loop..." (Ctrl+Shift+I)**: `YamahaSampleEditor.import_rx2` -> `_run_slicer` (shared with the resident-sample Slice Editor); a stereo loop STAYS stereo
+  (`Rx2Loop.channel_buffers`, the dialog slices the right channel at the same frames), root key 60, the unit's defaults for the rest, "fill a program" is the existing empty-program assignment.
+  The S950 editor has no entry point (read-only Samples tab, no Slice Editor); the Dashboard route still queues slices for it.
 - **Updating VelociLoops:** `uv run python tools/update_velociloops.py` (`--ref`, `--dry-run`): fetches all four files before writing any, records the sha in `third_party/velociloops/VERSION` and the two docs that quote it, rebuilds and runs `tests/test_rx2.py`. Run by hand, review the diff; never from a build (the library parses untrusted files).
 - Only `.rx2` is accepted; the library also reads `.rex`/`.rcy` (not wired up). Float -> int16 is a plain Python loop (no numpy at runtime).
 - **Not done:** VelociLoops' SuperFlux onset detector (it is only reachable through `vl_create_from_superflux`, which builds a whole RX2) is NOT used
