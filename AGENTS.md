@@ -367,8 +367,11 @@ macOS arm64); upstream marks no exports, so on MSVC the tool writes a `.def` fro
 - **Slices are RAW length** (`VLSliceInfo.sample_length`), not `vl_get_slice_frame_count()`: with the file's transient-stretch on, that adds a synthetic
   decay tail for slower playback, wrong for a sampler playing slices at their own pitch. Measured: the raw slices of `120Stereo.rx2` tile exactly 2.0 s (one bar at
   120 BPM). Muted slices are kept (mute is ReCycle editing state).
-- Three entry points, all over the same decode: **Dashboard** (drop or Open an `.rx2`): `TransferDashboard._import_rx2` queues one row per slice,
-  `<STEM>-01..` (stereo stays stereo). **Program Editor File > "Import RX2 Loop..." (Ctrl+Shift+I)**: opens the Slice Editor on the slices laid end to end
+- Three entry points, all over the same decode: **Dashboard** (drop or Open an `.rx2`): `TransferDashboard._import_rx2` queues ONE row - the slices laid end to end as an ordinary WAV
+  (stereo stays stereo), the cut points in `RX2_MARKERS_ROLE`, a "N slices" badge. **Send cuts it into one sample per slice** (`_expand_rx2_entry`: writes
+  `<row name>-01..` WAVs under `dropped_files.session_dir()/rx2_slices/` at Send time, using the row's CURRENT name and settings; a stereo slice's base is 10 chars so `-L`/`-R` fits, 12 if
+  sent mono or to a Yamaha). The row's Slice Editor opens with the cut points marked (`initial_markers`); exporting from it replaces the row with ordinary slice rows (no role, not cut again).
+  **Program Editor File > "Import RX2 Loop..." (Ctrl+Shift+I)**: opens the Slice Editor on the slices laid end to end
   (`Rx2Loop.channel_buffers`) with the cut points as `initial_markers`, so Export and "Create new program" are the Slice Editor's own paths.
   `_run_slice_editor` is shared with the resident-sample flow; `resident_source=False` skips the audio retention. **A stereo loop stays stereo:** each slice is
   sent as TWO mono samples, `<name>-L` / `<name>-R` (`_STEREO_SUFFIXES`; the dialog's `channel_suffixes` shortens the slice names to 10 chars and checks the
@@ -380,9 +383,7 @@ macOS arm64); upstream marks no exports, so on MSVC the tool writes a `.def` fro
   The S950 editor has no entry point (read-only Samples tab, no Slice Editor); the Dashboard route still queues slices for it.
 - **Updating VelociLoops:** `uv run python tools/update_velociloops.py` (`--ref`, `--dry-run`): fetches all four files before writing any, records the sha in `third_party/velociloops/VERSION` and the two docs that quote it, rebuilds and runs `tests/test_rx2.py`. Run by hand, review the diff; never from a build (the library parses untrusted files).
 - Only `.rx2` is accepted; the library also reads `.rex`/`.rcy` (not wired up). Float -> int16 is a plain Python loop (no numpy at runtime).
-- **Not done:** VelociLoops' SuperFlux onset detector (it is only reachable through `vl_create_from_superflux`, which builds a whole RX2) is NOT used
-  by the Slice Editor yet. Measured 2026-10-12 on VelociLoops' own fixtures vs ReCycle's markers it beats `transient_detection` clearly on drum breaks;
-  the plan is a "fast" (current) / "high quality" (SuperFlux) detection choice. Real `.rx2` loops from outside VelociLoops' fixtures are untested.
+- **SuperFlux detection** is in the Slice Editor, see the section below. Real `.rx2` loops from outside VelociLoops' fixtures are untested.
 
 ## Sample send hardening (`SamplerController._send_current_packet` and friends)
 
@@ -539,3 +540,15 @@ See `TESTING.md`. `tests/conftest.py` points the debug log, backups and the `_sl
 detector, click-to-preview and zero-crossing snaps all read it, so a hit loud on one side only still counts (this changed the Yamaha editor's stereo slicing too, which read the left
 channel only). The Dashboard's Slice Editor passes the right channel as well and now takes it from `extra_slices` rather than re-cutting it; it also passes `channel_suffixes`, which fixes
 a latent clash: the send path builds `-L`/`-R` names by cutting the BASE to 10 chars, so 11-12 character slice names (e.g. `120STEREO-01`, `-02`...) all collapsed to one `120STEREO--L`/`--R` pair.
+
+## Slice Editor: SuperFlux detection (`core/superflux.py`)
+
+A "Detection" combo beside the Sensitivity slider: **Simple (fast)** = `core/transient_detection.py` (the default, unchanged: analyse once, re-pick per tick) or **SuperFlux (high quality)**
+(VelociLoops' onset detector). The choice is remembered (`app_config` `slice_detection`); SuperFlux is greyed out if the library didn't load, and an analysis error falls back to Simple with one message.
+- VelociLoops only exposes detection as `vl_create_from_superflux()`, which builds a whole RX2; `superflux.detect` reads the cut points back from its slices. So **every slider value redoes the
+  whole analysis** (measured 2026-10-12: about 36 ms per second of audio - 0.09 s for a 3 s loop, 2.8 s for 77 s). The dialog therefore debounces (120 ms), analyses on ONE worker thread
+  (`ThreadPoolExecutor`, polled by a QTimer - deliberately no cross-thread Qt signals or QThread: closing the dialog mid-analysis can't touch a deleted object), and applies only the newest
+  request's result. 0% is off and clears at once. It analyses the mono mix (`_analysis`).
+- Sensitivity -> `threshold` is logarithmic, 4.0 (least) to 0.05 (most); ~30% is VelociLoops' default 1.1. Measured against ReCycle's own cut points on 7 of VelociLoops' drum loops:
+  60/60 found with 0 extra markers up to ~50%, then more markers each step (3 extra at 60%, 35 at 100%); the simple detector found 20-70% at its best setting.
+- To get real-time dragging on long samples, VelociLoops would need to expose its activation curve (the FFT stage) separately from peak picking; then analyse once and re-pick per tick like Simple does.
