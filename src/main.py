@@ -3,8 +3,8 @@ import sys
 
 import mido
 from PySide6.QtWidgets import QApplication
-from core import debug_log
-from ui import theme
+from core import debug_log, diagnostics
+from ui import diagnostics_ui, theme
 from ui._version import APP_VERSION
 from ui.main_window import ApplicationWindow
 
@@ -18,14 +18,21 @@ def _log_startup():
             f"=== AKAISDS {APP_VERSION} on {platform.platform()}, python "
             f"{platform.python_version()}, mido backend {mido.backend.name}"
         )
+        import PySide6
+        from PySide6.QtCore import qVersion
+
+        log.info(f"PySide6 {PySide6.__version__}, Qt {qVersion()}")
         log.info(f"MIDI inputs: {mido.get_input_names()}")
         log.info(f"MIDI outputs: {mido.get_output_names()}")
     except Exception:
         log.error("startup: couldn't enumerate MIDI ports", exc_info=True)
+    diagnostics.log_session_config("startup")
 
 if __name__ == "__main__":
+    diagnostics.install_crash_handlers()
     _log_startup()
     app = QApplication(sys.argv)
+    diagnostics_ui.install_dialog_logging()
     theme.apply_to_app(app)
 
     window = ApplicationWindow()

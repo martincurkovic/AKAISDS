@@ -14,16 +14,31 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 from PySide6.QtCore import Qt
-from core import app_config, audio_preview, debug_log, midi_identity
+from PySide6.QtGui import QPixmap
+from core import (
+    app_config,
+    audio_preview,
+    debug_log,
+    midi_identity,
+    s950_sysex,
+    sampler_models,
+)
 from ui.qt_helpers import (
+    align_form_label_columns,
     FullWidthTabBar,
     build_scroll_area,
     build_section_card,
     widen_popup_to_fit_items,
 )
-from ui import tooltips
+from ui import theme, tooltips
+from ui.loopback_results_dialog import LoopbackResultsDialog
+import os
 import time
 import mido
+
+_DIAGRAM_DIR = os.path.join(os.path.dirname(__file__), "help", "diagrams")
+# the diagrams are drawn at 2x (see tools/make_diagrams.py), same as the manual's screenshots
+_DIAGRAM_PIXEL_RATIO = 2.0
 
 _LOOPBACK_TEST_SIZES = [8, 32, 64, 127, 256, 512, 1024, 1536, 2048, 2560, 3072]
 
@@ -81,10 +96,11 @@ def _minimum_width_for_pages(pages, minimum=_MINIMUM_DIALOG_WIDTH):
 class MidiSettingsDialog(QDialog):
     # Two tabs, each a couple of section cards (same look/sizing rules as
     # ui.qt_helpers.build_section_card - originally Program Editor-only,
-    # moved out to be shared once this dialog needed it too): "Audio/MIDI"
-    # (MIDI Input/Output + Audio Output, the two things you set up once and
-    # rarely touch again) and "Troubleshooting" (Hardware Test + Interface
-    # Test, the two things you only reach for when something's not working).
+    # moved out to be shared once this dialog needed it too): "Settings"
+    # (MIDI Input/Output, Audio Output and Appearance - the things you set up
+    # once and rarely touch again; was called "Audio/MIDI" until Appearance
+    # joined it) and "Troubleshooting" (Hardware Test + Interface Test, the
+    # two things you only reach for when something's not working).
     # Used to be 4 flat tabs (MIDI Settings/MIDI Hardware Test/MIDI
     # Interface Test/Audio Preview, the last added alongside the Slice
     # Editor's click-to-preview feature) - collapsed at the user's own
@@ -115,9 +131,9 @@ class MidiSettingsDialog(QDialog):
         # comboboxes, which can end up considerably wider than a flat
         # constant once real, possibly long, device/port names are loaded)
         # needs to avoid a horizontal scrollbar
-        audio_midi_page = self._build_audio_midi_page()
+        settings_page = self._build_settings_page()
         troubleshooting_page = self._build_troubleshooting_page()
-        tabs.addTab(build_scroll_area(audio_midi_page), "Audio/MIDI")
+        tabs.addTab(build_scroll_area(settings_page), "Settings")
         tabs.addTab(build_scroll_area(troubleshooting_page), "Troubleshooting")
 
         buttons = QDialogButtonBox(
@@ -138,12 +154,12 @@ class MidiSettingsDialog(QDialog):
         # case (see _minimum_width_for_pages's own comment) - e.g. no
         # ports/devices found at all, nothing to size against.
         self.setMinimumWidth(
-            _minimum_width_for_pages([audio_midi_page, troubleshooting_page])
+            _minimum_width_for_pages([settings_page, troubleshooting_page])
         )
 
-    # --- Audio/MIDI tab ------------------------------------------------------
+    # --- Settings tab ----------------------------------------------------------
 
-    def _build_audio_midi_page(self):
+    def _build_settings_page(self):
         midi_form = QFormLayout()
 
         self.combo_input = QComboBox()
@@ -165,16 +181,14 @@ class MidiSettingsDialog(QDialog):
         self.spin_channel.setRange(0, 127)
         self.spin_channel.setValue(self.sampler_controller.channel)
         self.spin_channel.setToolTip(tooltips.DEVICE_ID_CHANNEL)
-        midi_form.addRow(
-            QLabel("Device ID (SysEx channel 0-127):"), self.spin_channel
-        )
+        midi_form.addRow(QLabel("Device ID (SysEx ch. 0-127):"), self.spin_channel)
 
         # sampler device type - determines which protocol family gets used for each step
         # (send, receive, list, delete, rename etc)
         self.combo_device_type = QComboBox()
-        self.combo_device_type.addItem("Akai Sampler", "akai")
-        self.combo_device_type.addItem("Generic SDS", "generic")
-        idx = self.combo_device_type.findData(self.sampler_controller.device_type)
+        for label, selection in sampler_models.CHOICES:
+            self.combo_device_type.addItem(label, selection)
+        idx = self.combo_device_type.findData(self.sampler_controller.sampler_model)
         if idx >= 0:
             self.combo_device_type.setCurrentIndex(idx)
         self.combo_device_type.setToolTip(tooltips.SAMPLER_TYPE)
@@ -190,7 +204,7 @@ class MidiSettingsDialog(QDialog):
         audio_form = QFormLayout()
 
         audio_note = QLabel(
-            "Used by the Slice Editor's click-to-preview playback. "
+            "Used by the Sample/Slice Editor's click-to-preview playback. "
             "Doesn't affect MIDI/SysEx transfers to the sampler."
         )
         audio_note.setWordWrap(True)
@@ -223,18 +237,57 @@ class MidiSettingsDialog(QDialog):
         self.combo_audio_buffer.setToolTip(tooltips.AUDIO_PREVIEW_BUFFER_SIZE)
         audio_form.addRow(QLabel("Buffer Size:"), self.combo_audio_buffer)
 
-        audio_card = build_section_card(
-            "Audio Output (Slice Editor Preview)", audio_form
-        )
+        audio_card = build_section_card("Audio Output", audio_form)
+
+        # Appearance: how the app itself looks, unrelated to MIDI or audio.
+        # "System" (the default) follows the OS light/dark setting live, as
+        # the app always has; Light/Dark pin it. Unlike every other setting
+        # here this takes effect the moment an option is PICKED (see
+        # _on_theme_chosen), not on OK - so the change is visible while the
+        # dialog is still open, and Cancel doesn't undo it.
+        appearance_form = QFormLayout()
+        self.combo_theme = QComboBox()
+        for label, value in theme.CHOICES:
+            self.combo_theme.addItem(label, value)
+        idx = self.combo_theme.findData(app_config.get_saved_theme())
+        self.combo_theme.setCurrentIndex(idx if idx >= 0 else 0)
+        self.combo_theme.setToolTip(tooltips.THEME)
+        # `activated`, not currentIndexChanged: it fires only for a choice
+        # the USER makes, never for the setCurrentIndex() above restoring the
+        # saved value (QComboBox has no editingFinished - that's QLineEdit/
+        # QSpinBox - and activated is its "the user finished choosing")
+        self.combo_theme.activated.connect(self._on_theme_chosen)
+        appearance_form.addRow(QLabel("Theme:"), self.combo_theme)
+        appearance_card = build_section_card("Appearance", appearance_form)
+
+        # one shared label-column width across all three cards, so every
+        # entry field starts at the same x (each form would otherwise size
+        # its own label column to its own widest label)
+        align_form_label_columns(midi_form, audio_form, appearance_form)
 
         page = QWidget()
         page_layout = QVBoxLayout(page)
         page_layout.addWidget(midi_card)
         page_layout.addWidget(audio_card)
+        page_layout.addWidget(appearance_card)
         page_layout.addStretch()
         return page
 
     # --- Troubleshooting tab --------------------------------------------------
+
+    @staticmethod
+    def _diagram_label(filename, description):
+        """A centred cabling picture for a test card, or None if the file is missing (the card just has no picture)."""
+        pixmap = QPixmap(os.path.join(_DIAGRAM_DIR, filename))
+        if pixmap.isNull():
+            return None
+        pixmap.setDevicePixelRatio(_DIAGRAM_PIXEL_RATIO)
+        label = QLabel()
+        label.setPixmap(pixmap)
+        label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        label.setAccessibleDescription(description)
+        label.setToolTip(description)
+        return label
 
     def _build_troubleshooting_page(self):
         hardware_test_layout = QVBoxLayout()
@@ -242,13 +295,20 @@ class MidiSettingsDialog(QDialog):
         hardware_test_note = QLabel(
             "To test your MIDI hardware setup, "
             "connect your MIDI device to both your interface's MIDI IN and OUT ports. "
-            "Select the ports on the Audio/MIDI tab, then run the test below."
+            "Select the ports on the Settings tab, then run the test below."
         )
         hardware_test_note.setWordWrap(True)
         hardware_test_note.setAlignment(
             Qt.AlignmentFlag.AlignCenter | Qt.AlignmentFlag.AlignTop
         )
         hardware_test_layout.addWidget(hardware_test_note)
+
+        sampler_diagram = self._diagram_label(
+            "midi-sampler-cable.png",
+            "Interface MIDI OUT to sampler MIDI IN, and sampler MIDI OUT to interface MIDI IN",
+        )
+        if sampler_diagram is not None:
+            hardware_test_layout.addWidget(sampler_diagram)
 
         self.id_results_label = QLabel()
         self.id_results_label.setWordWrap(True)
@@ -271,13 +331,20 @@ class MidiSettingsDialog(QDialog):
         loopback_note = QLabel(
             "To test a MIDI interface's SysEx reliability, "
             "connect a cable from its MIDI OUT port back into its own MIDI IN port. "
-            "Select the ports on the Audio/MIDI tab, then run the test below (may take 5-20 seconds to complete)."
+            "Select the ports on the Settings tab, then run the test below (may take 5-20 seconds to complete)."
         )
         loopback_note.setWordWrap(True)
         loopback_note.setAlignment(
             Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop
         )
         interface_test_layout.addWidget(loopback_note)
+
+        loopback_diagram = self._diagram_label(
+            "midi-loopback-cable.png",
+            "One MIDI cable from the interface's MIDI OUT to its own MIDI IN",
+        )
+        if loopback_diagram is not None:
+            interface_test_layout.addWidget(loopback_diagram)
 
         self.btn_loopback_test = QPushButton("Run Loopback Test")
         self.btn_loopback_test.setToolTip(tooltips.LOOPBACK_TEST_BUTTON)
@@ -371,6 +438,18 @@ class MidiSettingsDialog(QDialog):
 
         self.accept()
 
+    def _on_theme_chosen(self, index):
+        # saved and applied the moment the user picks an option - every open
+        # window restyles live (ui.theme.set_theme_preference)
+        selected_theme = self.combo_theme.itemData(index)
+        app_config.save_theme(selected_theme)
+        theme.set_theme_preference(selected_theme)
+
+    def _selected_protocol_family(self):
+        # the combo holds the full model selection (S1000 / S2000/S3000 /
+        # Generic); the hardware test only cares which protocol to speak
+        return sampler_models.protocol_family(self.combo_device_type.currentData())
+
     def _run_identity_request(self):
         input_name = self.combo_input.currentData()
         output_name = self.combo_output.currentData()
@@ -405,10 +484,14 @@ class MidiSettingsDialog(QDialog):
                     midi_id_input, midi_id_output
                 )
                 if success:
-                    device_type = self.combo_device_type.currentData()
+                    device_type = self._selected_protocol_family()
                     if device_type == "akai":
                         self.id_results_label.setText(
                             self._format_stat_result(id_response)
+                        )
+                    elif device_type == sampler_models.FAMILY_S950:
+                        self.id_results_label.setText(
+                            self._format_s950_result(id_response)
                         )
                     else:
                         self.id_results_label.setText(
@@ -447,11 +530,22 @@ class MidiSettingsDialog(QDialog):
         while input_port.poll() is not None:
             pass  # drain any stale bytes in the buffer
 
-        device_type = self.combo_device_type.currentData()
+        device_type = self._selected_protocol_family()
 
         if device_type == "akai":
             output_port.send(
                 mido.Message("sysex", data=midi_identity.build_rstat_request_message())
+            )
+        elif device_type == sampler_models.FAMILY_S950:
+            # the S900/S950 answer neither RSTAT nor a MIDI identity request;
+            # a catalog request is the cheapest message they do answer
+            output_port.send(
+                mido.Message(
+                    "sysex",
+                    data=s950_sysex.build_akai_request(
+                        s950_sysex.FUNC_RCAT, channel=self.spin_channel.value()
+                    ),
+                )
             )
         else:
             output_port.send(
@@ -473,6 +567,21 @@ class MidiSettingsDialog(QDialog):
 
         if device_type == "akai":
             received_data = midi_identity.parse_stat_response(response.data)
+        elif device_type == sampler_models.FAMILY_S950:
+            try:
+                message = s950_sysex.parse_akai(response.data)
+                if message.function != s950_sysex.FUNC_CAT:
+                    raise ValueError(f"unexpected function code {message.function}")
+                received_data = s950_sysex.parse_catalog(message.payload)
+            except ValueError as e:
+                debug_log.get_logger().warning(
+                    f"MidiSettingsDialog: unreadable S900/S950 reply "
+                    f"({len(response.data)} bytes, {e}): {bytes(response.data).hex(' ')}"
+                )
+                return (
+                    False,
+                    f"Got a reply, but it doesn't look like an S900/S950 catalog ({e})",
+                )
         else:
             received_data = midi_identity.parse_identity_response(response.data)
         return True, received_data
@@ -483,6 +592,15 @@ class MidiSettingsDialog(QDialog):
             f"OS Version: {data['version_string']}\n"
             f"Program/sample slots free: {data['num_blocks_free']} / {data['max_num_blocks']}\n"
             f"Sample memory free: {data['num_words_free']:,} / {data['max_num_samp_words']:,} words"
+        )
+
+    def _format_s950_result(self, entries):
+        programs = sum(1 for e in entries if e.kind == "P")
+        samples = sum(1 for e in entries if e.kind == "S")
+        return (
+            f"Akai S900/S950 sampler\n"
+            f"Programs in memory: {programs}\n"
+            f"Samples in memory: {samples}"
         )
 
     def _format_identity_result(self, data):
@@ -593,27 +711,11 @@ class MidiSettingsDialog(QDialog):
         )
 
     def _show_loopback_results(self, results):
-        lines = []
-        any_failed = False
-        for size, passed, detail in results:
-            status = "PASS" if passed else "FAIL"
-            if not passed:
-                any_failed = True
-            lines.append(
-                f"{size:>5} bytes: {status}" + ("" if passed else f" - {detail}")
-            )
-
-        summary = "\n".join(lines)
-        if any_failed:
-            first_failure_size = next(size for size, passed, _ in results if not passed)
-            summary += (
-                f"\n\nThis interface starts failing around {first_failure_size} bytes. "
-                f"Real MIDI SDS data packets are 127 bytes, and larger responses "
-                f"(like a sample list with many samples can be well over 1000 bytes - "
-                f"if failures start below that, this interface may struggle with "
-                f"real transfers too."
-            )
-        else:
-            summary += "\n\nAll sizes tested passed cleanly."
-
-        QMessageBox.information(self, "Loopback Test Results", summary)
+        failed = [size for size, passed, _ in results if not passed]
+        debug_log.get_logger().info(
+            f"loopback test: {len(results) - len(failed)}/{len(results)} sizes passed"
+            + (f", first failure at {failed[0]} bytes" if failed else "")
+        )
+        LoopbackResultsDialog(
+            results, self.combo_input.currentData(), self.combo_output.currentData(), self
+        ).exec()

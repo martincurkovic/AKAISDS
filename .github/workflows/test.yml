@@ -1,0 +1,30 @@
+name: Test
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+concurrency:
+  group: test-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version-file: ".python-version"
+      - uses: astral-sh/setup-uv@v6
+      - name: Install Qt runtime libraries
+        run: sudo apt-get update && sudo apt-get install -y qt6-qpa-plugins libegl1 libgl1 libfontconfig1 libnss3 libasound2t64 libpulse0 libxcb-cursor0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-randr0 libxcb-render-util0 libxcb-shape0 libxcb-shm0 libxcb-sync1 libxcomposite1 libxdamage1 libxi6 libxtst6
+      - name: Sync environment
+        run: uv sync
+      - name: Run tests
+        env:
+          AKAISDS_CI_NO_AUDIO_DEVICE: "1"
+        # -v names every test; faulthandler_timeout dumps all thread stacks if one test runs over 90 s (a hang shows where it is stuck)
+        run: uv run pytest tests/ -v -ra -o faulthandler_timeout=90

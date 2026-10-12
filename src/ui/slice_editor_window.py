@@ -151,6 +151,11 @@ class SliceEditorWindow(QDialog):
         program_names_provider=None,
         create_program_callback=None,
         cancel_callback=None,
+        extra_channels=None,
+        hide_bit_depth=False,
+        program_labels=None,
+        max_program_slices=92,
+        program_confirm_message=None,
     ):
         super().__init__(parent)
         self.setWindowTitle(f'Slice Editor - "{sample_name}"')
@@ -158,6 +163,10 @@ class SliceEditorWindow(QDialog):
 
         self._samples = samples
         self._framerate = framerate
+        # the Yamaha editor's stereo samples: the OTHER channel(s), sliced at exactly the same frames as `samples` (which stays what
+        # the markers are placed on) and handed to export_callback as `extra_slices=`. None for everything else, which then calls
+        # export_callback exactly as before.
+        self._extra_channels = [list(c) for c in extra_channels] if extra_channels else None
         # computed ONCE here, reused on every Sensitivity slider tick - see
         # transient_detection.compute_flux's own docstring on why
         self._transient_flux, self._transient_window_frames = (
@@ -180,6 +189,16 @@ class SliceEditorWindow(QDialog):
         # only when both are actually supplied
         self._program_names_provider = program_names_provider
         self._create_program_callback = create_program_callback
+        # How the create-program option reads and behaves for a sampler other than the Akai (the Yamaha: there the combo picks an EMPTY
+        # program slot, not a template, and a program has no name to choose). All optional; the defaults are the Akai wording.
+        #   program_labels: {"checkbox", "combo", "tooltip", "no_options_tooltip", "has_name"}
+        #   max_program_slices: the most slices one program can take (Akai: 92 - one keygroup per key from C1 (36) to 127; a program holds 99 keygroups but a slice past the 92nd would need a key above 127)
+        #   program_confirm_message: callable(slice_count, combo_text) -> str, replacing the Akai "cloned from ..." paragraph
+        self._program_labels = program_labels
+        labels = program_labels or {}
+        self._program_has_name = labels.get("has_name", True)
+        self._max_program_slices = max_program_slices
+        self._program_confirm_message = program_confirm_message
         # (slice_count, names) -> str, shown in the Export confirmation
         # dialog - defaults to the original "send to the sampler" wording
         # (Program Editor's own use, unchanged), but the Transfer
@@ -405,8 +424,12 @@ class SliceEditorWindow(QDialog):
             [(f"{d}-bit", d) for d in _BIT_DEPTH_OPTIONS], default=16
         )
         self.rate_combo = _build_quality_combo(_RATE_OPTIONS, default=None)
-        name_row.addWidget(QLabel("Bit depth:"))
+        bit_depth_label = QLabel("Bit depth:")
+        name_row.addWidget(bit_depth_label)
         name_row.addWidget(self.bit_depth_combo)
+        if hide_bit_depth:  # a sampler whose samples are always 16-bit (the Yamaha): nothing to choose
+            bit_depth_label.setVisible(False)
+            self.bit_depth_combo.setVisible(False)
         name_row.addWidget(QLabel("Sample rate:"))
         name_row.addWidget(self.rate_combo)
         name_row.addStretch()
@@ -464,14 +487,14 @@ class SliceEditorWindow(QDialog):
         self._template_program_separator = None
         if program_names_provider is not None and create_program_callback is not None:
             program_names = program_names_provider()
-            self.create_program_checkbox = QCheckBox("Create new program with slices")
-            self.create_program_checkbox.setToolTip(tooltips.CREATE_PROGRAM_CHECKBOX)
+            self.create_program_checkbox = QCheckBox(labels.get("checkbox", "Create new program with slices"))
+            self.create_program_checkbox.setToolTip(labels.get("tooltip", tooltips.CREATE_PROGRAM_CHECKBOX))
             # same bullet-separator style as the zoom row's own hint_label
             # above ("Click: preview slice   •   ...") - a plain "Template:"
             # butted right up against the checkbox's own text read as one
             # run-on phrase rather than two distinct controls
             self._template_program_separator = QLabel("•")
-            self._template_program_label = QLabel("Template:")
+            self._template_program_label = QLabel(labels.get("combo", "Template:"))
             self.template_program_combo = QComboBox()
             self.template_program_combo.addItems(program_names)
             # the separator/label/combo only ever APPEAR once the checkbox
@@ -502,7 +525,7 @@ class SliceEditorWindow(QDialog):
                 self._create_program_checkbox_allowed = False
                 self.create_program_checkbox.setEnabled(False)
                 self.create_program_checkbox.setToolTip(
-                    tooltips.CREATE_PROGRAM_NO_TEMPLATE
+                    labels.get("no_options_tooltip", tooltips.CREATE_PROGRAM_NO_TEMPLATE)
                 )
             export_row.addWidget(self.create_program_checkbox)
             export_row.addWidget(self._template_program_separator)
@@ -850,39 +873,48 @@ class SliceEditorWindow(QDialog):
         program_name = None
         template_index = None
         if create_program:
-            # same 99-keygroup ceiling _handle_create_keygroup guards
-            # hardware-side (matches GROUPS's own declared 1..99 range) -
-            # checked here too so a doomed export never even starts
-            # (see ProgramEditorWindow._create_program_from_slices)
-            if slice_count > 99:
-                QMessageBox.warning(
-                    self,
-                    "Export Slices",
-                    f"Can't create a program - {slice_count} keygroups "
-                    "requested, but a program can only hold 99. Uncheck "
-                    '"Also create a new program..." or reduce the number '
-                    "of slices.",
-                )
+            # each slice gets its own key from C1 up (36 + n), so the ceiling is the
+            # keyboard, not the 99 keygroups GROUPS allows (see
+            # ProgramEditorWindow._MAX_SLICES_PER_PROGRAM) - checked here too so a
+            # doomed export never even starts
+            if slice_count > self._max_program_slices:
+                if self._program_labels is None:  # the Akai wording
+                    text = (
+                        f"Can't create a program - {slice_count} keygroups "
+                        f"requested, but a slice program can only hold {self._max_program_slices} "
+                        "(one per key, from C1 up to the top of the keyboard). Uncheck "
+                        '"Also create a new program..." or reduce the number '
+                        "of slices."
+                    )
+                else:
+                    text = (
+                        f"Can't put {slice_count} slices in one program - the most is "
+                        f"{self._max_program_slices}. Uncheck the program option or reduce the number of slices."
+                    )
+                QMessageBox.warning(self, "Export Slices", text)
                 return
-            program_name = base_name.strip().upper()[:NAME_LENGTH]
             template_index = self.template_program_combo.currentIndex()
-            # same "PDATA silently overwrites a same-named program" hazard
-            # ProgramEditorWindow._confirm_duplicate_program already guards
-            # against - re-queried fresh rather than a stale snapshot, same
-            # reasoning as the sample-name collision check just above
-            if program_name in set(self._program_names_provider()):
-                QMessageBox.warning(
-                    self,
-                    "Export Slices",
-                    f'A program named "{program_name}" already exists. '
-                    "Creating a program with the same name would overwrite "
-                    "it on the sampler.\n\nPick a different base name, or "
-                    "rename/delete the existing program, then try again.",
-                )
-                return
+            if self._program_has_name:
+                program_name = base_name.strip().upper()[:NAME_LENGTH]
+                # same "PDATA silently overwrites a same-named program" hazard
+                # ProgramEditorWindow._confirm_duplicate_program already guards
+                # against - re-queried fresh rather than a stale snapshot, same
+                # reasoning as the sample-name collision check just above
+                if program_name in set(self._program_names_provider()):
+                    QMessageBox.warning(
+                        self,
+                        "Export Slices",
+                        f'A program named "{program_name}" already exists. '
+                        "Creating a program with the same name would overwrite "
+                        "it on the sampler.\n\nPick a different base name, or "
+                        "rename/delete the existing program, then try again.",
+                    )
+                    return
 
         confirm_message = self._export_confirm_message(slice_count, names)
-        if create_program:
+        if create_program and self._program_confirm_message is not None:
+            confirm_message += "\n\n" + self._program_confirm_message(slice_count, self.template_program_combo.currentText())
+        elif create_program:
             template_name = self.template_program_combo.currentText()
             confirm_message += (
                 f'\n\nAlso create a new program "{program_name}" with '
@@ -920,6 +952,12 @@ class SliceEditorWindow(QDialog):
             else f"Exporting {slice_count} slices..."
         )
         QApplication.processEvents()
+        extra = {}
+        if self._extra_channels:
+            extra["extra_slices"] = [
+                sample_slicing.slice_samples(channel, self.waveform.start(), self.waveform.end(), markers)
+                for channel in self._extra_channels
+            ]
         try:
             success, message = self._export_callback(
                 names,
@@ -933,6 +971,7 @@ class SliceEditorWindow(QDialog):
                 self._on_export_progress,
                 self._on_export_status,
                 busy_callback=self._on_export_busy,
+                **extra,
             )
             if success and create_program:
                 # runs AFTER every slice has actually landed as a resident

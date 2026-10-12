@@ -29,3 +29,51 @@ sys.path.insert(0, os.path.abspath(SRC_DIR))
 # becomes a harmless no-op (already "offscreen") rather than the thing
 # actually deciding anything.
 os.environ["QT_QPA_PLATFORM"] = "offscreen"
+
+# Send the app's debug log to a throwaway directory for the whole run. Without this the
+# suite appended thousands of lines (fake sends, fake MIDI errors) to the developer's REAL
+# ~/.akaisds/akaisds.log - the very file a user is asked to send back, and one that rotates
+# at 8 MB, so a test run could push genuine hardware evidence out of it. LOG_PATH must be
+# replaced before anything calls debug_log.get_logger() (it opens the file lazily) and before
+# core.diagnostics derives CRASH_PATH from it; conftest.py is imported before any test module.
+import shutil
+import tempfile
+from pathlib import Path
+
+from core import debug_log
+
+_TEST_LOG_DIR = Path(tempfile.mkdtemp(prefix="akaisds-test-log-"))
+debug_log.LOG_PATH = _TEST_LOG_DIR / "akaisds.log"
+
+
+# Likewise the Yamaha editor's pre-write .syx backups (controller/yamaha_session.py) - a test run must not
+# leave files in the developer's real ~/.akaisds/a4000_backups, where the genuine ones are.
+from controller import yamaha_session as _yamaha_session
+
+_yamaha_session.BACKUP_DIR = _TEST_LOG_DIR / "a4000_backups"
+
+
+# And the program-file backups made before an S1000 keygroup delete-by-rebuild.
+from core import program_editor_bridge as _program_editor_bridge
+
+_program_editor_bridge.PROGRAM_BACKUP_DIR = _TEST_LOG_DIR / "program_backups"
+# ...and the whole-block misc-data backups made before the first Global-tab block write.
+_program_editor_bridge.MDATA_BACKUP_DIR = _TEST_LOG_DIR / "mdata_backups"
+# The settle pauses around a block write (a real second or more) must not slow the suite; tests that check the spacing replace this hook.
+_program_editor_bridge._sleep = lambda seconds: None
+
+
+# The user's real ~/.akaisds/config.json must never decide a test's outcome. It once did: the Yamaha editor's one-time
+# "experimental write" warning is a modal QMessageBox unless the config says it was acknowledged, so tests passed on the
+# owner's machine and hung forever in CI (no config, nobody to click the dialog). Tests start from a fresh install's config.
+from core import app_config as _app_config
+
+_app_config.CONFIG_PATH = _TEST_LOG_DIR / "config.json"
+
+
+# The Global tab's test switch must never leak in from a developer's shell: the locked-controls tests assume nothing is unlocked.
+os.environ.pop("AKAISDS_UNLOCK_GLOBAL", None)
+
+
+def pytest_sessionfinish(session, exitstatus):
+    shutil.rmtree(_TEST_LOG_DIR, ignore_errors=True)

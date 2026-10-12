@@ -69,3 +69,37 @@ def test_resizing_the_tab_widget_after_the_fact_relayouts_the_tabs(qapp):
     qapp.processEvents()
 
     assert sum(_tab_widths(tab_widget)) == 400
+
+
+def test_hidden_tabs_dont_take_a_share_of_the_width(qapp):
+    # the Program Editor hides its Multi tab in S1000 mode - the two tabs
+    # left must still span the whole width, not two thirds of it
+    tab_widget = _tab_widget_with_full_width_bar(qapp, tab_count=3, width=300)
+    tab_widget.setTabVisible(0, False)
+    qapp.processEvents()
+
+    bar = tab_widget.tabBar()
+    visible_widths = [bar.tabRect(i).width() for i in (1, 2)]
+    assert sum(visible_widths) == 300
+    assert visible_widths == [150, 150]
+
+
+def test_hidden_tab_leftover_pixels_still_go_to_the_last_visible_tabs(qapp):
+    tab_widget = _tab_widget_with_full_width_bar(qapp, tab_count=4, width=301)
+    tab_widget.setTabVisible(1, False)
+    qapp.processEvents()
+
+    bar = tab_widget.tabBar()
+    widths = [bar.tabRect(i).width() for i in (0, 2, 3)]
+    assert sum(widths) == 301
+    assert widths == sorted(widths)  # remainder went to the later tabs
+
+
+def test_hidden_tabs_still_track_a_resize(qapp):
+    tab_widget = _tab_widget_with_full_width_bar(qapp, tab_count=3, width=300)
+    tab_widget.setTabVisible(0, False)
+    tab_widget.resize(400, 200)
+    qapp.processEvents()
+
+    bar = tab_widget.tabBar()
+    assert sum(bar.tabRect(i).width() for i in (1, 2)) == 400

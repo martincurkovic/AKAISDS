@@ -312,6 +312,7 @@ class _FakeWheelEvent:
         if ctrl:
             mods |= Qt.KeyboardModifier.ControlModifier
         self._mods = mods
+        self.ignored = False
 
     def angleDelta(self):
         return self._angle
@@ -324,6 +325,9 @@ class _FakeWheelEvent:
 
     def accept(self):
         pass
+
+    def ignore(self):
+        self.ignored = True
 
 
 def _loaded_waveform_view():
@@ -344,13 +348,23 @@ def test_wheel_horizontal_delta_always_pans_no_modifier_needed(qapp):
 
 
 def test_wheel_vertical_delta_alone_does_nothing(qapp):
-    # deliberate: there's no vertical content to scroll, and repurposing
-    # unmodified vertical wheel/scroll for pan was the source of every
-    # axis-guessing bug this section's own comment describes
+    # deliberate: repurposing unmodified vertical wheel/scroll for pan was
+    # the source of every axis-guessing bug this section's own comment
+    # describes. The event is IGNORED (not swallowed) so it bubbles up to
+    # the Samples tab's scroll area and scrolls the page instead
     view = _loaded_waveform_view()
     before = view._view_start
-    view.wheelEvent(_FakeWheelEvent(ax=0, ay=120))
+    event = _FakeWheelEvent(ax=0, ay=120)
+    view.wheelEvent(event)
     assert view._view_start == before
+    assert event.ignored is True
+
+
+def test_wheel_before_any_header_is_ignored_so_the_page_can_scroll(qapp):
+    view = WaveformView()
+    event = _FakeWheelEvent(ax=0, ay=120)
+    view.wheelEvent(event)
+    assert event.ignored is True
 
 
 def test_wheel_shift_plus_vertical_delta_pans(qapp):
@@ -1321,3 +1335,179 @@ def test_set_playhead_and_clear_playhead(qapp):
     assert view._playhead_frame == 1234
     view.clear_playhead()
     assert view._playhead_frame is None
+
+
+# --- read-only display options (the S900/S950 Samples tab) ---------------------------------------
+
+
+def _view_with_header(qapp):
+    view = WaveformView()
+    view.resize(800, 180)
+    view.set_header(1000, 100, 400, 800, 900)
+    return view
+
+
+def test_markers_can_be_grabbed_by_default(qapp):
+    view = _view_with_header(qapp)
+    assert view._markers_within_hit_radius(view._x_for("start")) == ["start"]
+
+
+def test_locked_markers_cannot_be_grabbed_or_dragged(qapp):
+    view = _view_with_header(qapp)
+    view.set_markers_locked(True)
+    for name in _MARKER_ORDER:
+        assert view._markers_within_hit_radius(view._x_for(name)) == []
+    committed = []
+    view.marker_committed.connect(lambda *a: committed.append(a))
+    from PySide6.QtCore import QPointF
+    from PySide6.QtGui import QMouseEvent
+
+    x = view._x_for("loop_end")
+    for kind, buttons in (
+        (QMouseEvent.Type.MouseButtonPress, Qt.MouseButton.LeftButton),
+        (QMouseEvent.Type.MouseMove, Qt.MouseButton.LeftButton),
+        (QMouseEvent.Type.MouseButtonRelease, Qt.MouseButton.NoButton),
+    ):
+        pos = QPointF(x + (30 if kind == QMouseEvent.Type.MouseMove else 0), 50)
+        event = QMouseEvent(kind, pos, pos, Qt.MouseButton.LeftButton, buttons, Qt.KeyboardModifier.NoModifier)
+        getattr(view, {QMouseEvent.Type.MouseButtonPress: "mousePressEvent", QMouseEvent.Type.MouseMove: "mouseMoveEvent", QMouseEvent.Type.MouseButtonRelease: "mouseReleaseEvent"}[kind])(event)
+    assert view.markers() == {"start": 100, "loop_start": 400, "loop_end": 800, "end": 900}
+    assert committed == []
+
+
+def test_unlocking_makes_markers_grabbable_again(qapp):
+    view = _view_with_header(qapp)
+    view.set_markers_locked(True)
+    view.set_markers_locked(False)
+    assert view._markers_within_hit_radius(view._x_for("start")) == ["start"]
+
+
+def test_locking_drops_a_drag_in_progress_and_the_hover_highlight(qapp):
+    view = _view_with_header(qapp)
+    view._dragging = "start"
+    view._hover_marker = "end"
+    view.set_markers_locked(True)
+    assert view._dragging is None and view._hover_marker is None
+
+
+def test_the_placeholder_text_can_be_replaced(qapp):
+    view = WaveformView()
+    assert "freeze the interface" in view._placeholder_text  # the S1000/S2000/S3000 default
+    view.set_placeholder_text("Select a sample on the left")
+    assert view._placeholder_text == "Select a sample on the left"
+    view.grab()  # paints without error in the placeholder state
+
+
+# --- stacked halves (the Yamaha Samples tab's left/right channels drawn as ONE display) ------------------------------
+
+
+def _stack_view(role, height=90):
+    from ui import theme
+
+    view = WaveformView()
+    view.set_view_height(height)
+    view.resize(300, height)
+    view.set_header(1000, 0, 100, 900, 999)  # markers near x = 0, 30, 270, 299
+    view.set_stack_position(role, height)
+    return view, theme.current_palette()
+
+
+def _color_at(view, x, y):
+    from PySide6.QtGui import QColor
+
+    return QColor(view.grab().toImage().pixel(x, y)).name()
+
+
+def test_a_stacked_top_half_has_no_border_along_the_seam(qapp):
+    from PySide6.QtGui import QColor
+
+    alone, palette = _stack_view(None)
+    top, _ = _stack_view("top")
+    bg = QColor(palette["bg_input"]).name()
+    assert _color_at(alone, 150, 89) != bg  # a stand-alone view has a border along its bottom edge
+    assert _color_at(top, 150, 89) == bg  # the seam: background, not a border
+    assert _color_at(top, 150, 0) != bg  # its outer (top) edge is still drawn
+    assert _color_at(top, 0, 45) != bg and _color_at(top, 299, 45) != bg  # and so are the sides
+
+
+def test_a_stacked_bottom_half_has_no_border_along_the_seam(qapp):
+    from PySide6.QtGui import QColor
+
+    alone, _ = _stack_view(None)
+    bottom, palette = _stack_view("bottom")
+    bg = QColor(palette["bg_input"]).name()
+    # the seam edge carries only a FAINT hairline (not the full-strength border a stand-alone view has) - once a
+    # waveform is showing; with nothing drawn yet there is no line to run through the centered hint text
+    assert _color_at(bottom, 150, 0) == bg
+    bottom.set_waveform([500, -500] * 500, 0, 100, 900, 999)
+    assert _color_at(bottom, 150, 0) != bg and _color_at(bottom, 150, 0) != _color_at(alone, 150, 0)
+    assert _color_at(bottom, 150, 1) == bg
+    assert _color_at(bottom, 150, 89) != bg
+
+
+def test_marker_handles_belong_to_the_half_that_owns_them_but_the_lines_cross_both(qapp):
+    from PySide6.QtGui import QColor
+
+    alone, palette = _stack_view(None)
+    top, _ = _stack_view("top")
+    bottom, _ = _stack_view("bottom")
+    for view in (alone, top, bottom):
+        view.set_header_hint("")  # the hint is centered on the seam, so a wider font (Linux CI) spills it onto the pixels probed below
+    bg = QColor(palette["bg_input"]).name()
+    # loop marker (frame 100 -> x ~ 30): its triangle sits at the BOTTOM of a stand-alone view...
+    assert _color_at(alone, 33, 88) != bg
+    # ...but a top half doesn't draw it (the bottom half owns it), and a bottom half does
+    assert _color_at(top, 33, 88) == bg
+    assert _color_at(bottom, 33, 88) != bg
+    # boundary marker "end" (frame 999 -> x ~ 299): a triangle at the TOP, drawn by the top half only
+    assert _color_at(alone, 295, 1) != bg and _color_at(top, 295, 1) != bg and _color_at(bottom, 295, 1) == bg
+    # the dashed LINES themselves run through both halves
+    assert any(_color_at(v, x, y) != bg for v in (top, bottom) for x in (29, 30, 31) for y in range(20, 70))
+
+
+def test_an_unknown_stack_role_is_refused_and_none_restores_a_normal_view(qapp):
+    view, _ = _stack_view("top")
+    with pytest.raises(ValueError):
+        view.set_stack_position("middle")
+    view.set_stack_position(None)
+    assert view._stack_role is None and view._stack_dash_offset_px == 0.0
+
+
+def _ink_rows(view):
+    """Rows where the view differs from itself drawn with an EMPTY hint - i.e. exactly where its hint text sits."""
+    hint = view._header_hint
+    with_hint = view.grab().toImage()
+    view.set_header_hint("")
+    without = view.grab().toImage()
+    view.set_header_hint(hint)
+    return [y for y in range(view.height()) if any(with_hint.pixel(x, y) != without.pixel(x, y) for x in range(view.width()))]
+
+
+def _pair():
+    top, _ = _stack_view("top")
+    bottom, _ = _stack_view("bottom")
+    top.set_stack_position("top", 90, bottom)
+    bottom.set_stack_position("bottom", 90, top)
+    for view in (top, bottom):
+        view.set_header_hint("Double-click to load")
+    return top, bottom
+
+
+def test_a_stacked_pair_says_its_hint_once_centered_across_the_seam(qapp):
+    top, bottom = _pair()
+    top_rows, bottom_rows = _ink_rows(top), _ink_rows(bottom)
+    assert top_rows and bottom_rows  # each half draws its share of the one line of text...
+    assert min(top_rows) > 90 - 22 and max(bottom_rows) < 22  # ...right at the seam, not centered in each half
+
+
+def test_the_hint_is_not_drawn_in_the_second_half_once_the_first_has_a_waveform(qapp):
+    top, bottom = _pair()
+    top.set_waveform([1000, -1000] * 500, 0, 100, 900, 999)
+    assert _ink_rows(bottom) == []  # nothing left over in the other half (no half-clipped glyphs)
+
+
+def test_a_stand_alone_view_centers_its_own_hint(qapp):
+    alone, _ = _stack_view(None)
+    alone.set_header_hint("Double-click to load")
+    rows = _ink_rows(alone)
+    assert rows and 45 - 12 < (min(rows) + max(rows)) / 2 < 45 + 12  # centered in its (90 px) height

@@ -1,7 +1,7 @@
 import json
 from pathlib import Path
 
-from core import debug_log
+from core import debug_log, sampler_models
 
 CONFIG_PATH = Path.home() / ".akaisds/config.json"
 
@@ -78,15 +78,79 @@ def save_channel(channel):
 
 
 def get_saved_device_type():
-    # returns the saved sampler device type (eg, akai, generic, etc)
-    # defaults to akai if nothing has been saved yet
+    # returns the saved sampler type selection - one of
+    # core/sampler_models.py's three ("akai_s2000_s3000", "akai_s1000",
+    # "generic"). a legacy plain "akai" (what this file held for the
+    # S2000/S3000 before the S1000 existed) is returned as its modern
+    # equivalent; so is anything unrecognised (hand-edited/newer config),
+    # and so is nothing having been saved yet
     config = load_config()
-    return config.get("device_type", "akai")
+    return sampler_models.normalize(
+        config.get("device_type", sampler_models.AKAI_S2000_S3000)
+    )
 
 
 def save_device_type(device_type):
     config = load_config()
     config["device_type"] = device_type
+    save_config(config)
+
+
+def get_yamaha_device_number():
+    # the Device Number set on a Yamaha A4000/A5000 (0-15) - what its SysEx is addressed to, separate from the
+    # SDS "exclusive channel" above. Manual-edit-only for now (no Settings UI): config.json's
+    # "yamaha_device_number"; anything missing or out of range reads as 0, the unit's usual setting
+    value = load_config().get("yamaha_device_number", 0)
+    return value if isinstance(value, int) and not isinstance(value, bool) and 0 <= value <= 15 else 0
+
+
+def get_yamaha_write_warning_acknowledged():
+    # the one-time "editing a Yamaha A4000/A5000 is experimental" warning, shown before the first
+    # parameter write (ui/yamaha_writer.py)
+    return bool(load_config().get("yamaha_write_warning_acknowledged", False))
+
+
+def save_yamaha_write_warning_acknowledged(acknowledged=True):
+    config = load_config()
+    config["yamaha_write_warning_acknowledged"] = bool(acknowledged)
+    save_config(config)
+
+
+def get_s1000_editor_warning_acknowledged():
+    # whether the user has already clicked through the one-time "S1000
+    # editing is experimental" warning (shown by the Dashboard before the
+    # Program Editor first opens in S1000 mode)
+    return bool(load_config().get("s1000_editor_warning_acknowledged", False))
+
+
+def save_s1000_editor_warning_acknowledged(acknowledged=True):
+    config = load_config()
+    config["s1000_editor_warning_acknowledged"] = bool(acknowledged)
+    save_config(config)
+
+
+def get_s950_transfer_warning_acknowledged():
+    # whether the user has already clicked through the one-time "S900/S950
+    # transfers are experimental" warning (shown by the Dashboard before the
+    # first Send in S900/S950 mode)
+    return bool(load_config().get("s950_transfer_warning_acknowledged", False))
+
+
+def save_s950_transfer_warning_acknowledged(acknowledged=True):
+    config = load_config()
+    config["s950_transfer_warning_acknowledged"] = bool(acknowledged)
+    save_config(config)
+
+
+def get_s950_program_write_warning_acknowledged():
+    # the one-time "writing S900/S950 programs is experimental" warning, shown
+    # before the first program write (ui/s950_program_editor.py)
+    return bool(load_config().get("s950_program_write_warning_acknowledged", False))
+
+
+def save_s950_program_write_warning_acknowledged(acknowledged=True):
+    config = load_config()
+    config["s950_program_write_warning_acknowledged"] = bool(acknowledged)
     save_config(config)
 
 
@@ -163,6 +227,29 @@ def save_skipped_update_version(version):
     save_config(config)
 
 
+# the Settings > Appearance theme choice: "system" follows the OS light/dark
+# setting (the original behaviour, and the default), "light"/"dark" pin it.
+# The valid set lives here rather than in ui/theme.py so this module stays
+# free of any ui import (ui.theme imports THESE).
+THEME_SYSTEM = "system"
+THEME_LIGHT = "light"
+THEME_DARK = "dark"
+THEME_VALUES = (THEME_SYSTEM, THEME_LIGHT, THEME_DARK)
+
+
+def get_saved_theme():
+    # anything unrecognised (a hand-edited or newer config.json) is treated
+    # as "system" rather than crashing or pinning an unknown theme
+    theme = load_config().get("theme", THEME_SYSTEM)
+    return theme if theme in THEME_VALUES else THEME_SYSTEM
+
+
+def save_theme(theme):
+    config = load_config()
+    config["theme"] = theme if theme in THEME_VALUES else THEME_SYSTEM
+    save_config(config)
+
+
 # keys with a real default value worth persisting to disk, so a hand-edited
 # or version-upgraded config.json that's missing one of them gets it filled
 # back in rather than only ever defaulting implicitly in the getter above
@@ -175,7 +262,8 @@ def save_skipped_update_version(version):
 # out would just be noise, not a real default being filled in.
 _DEFAULTS = {
     "midi_channel": 0,
-    "device_type": "akai",
+    "device_type": sampler_models.AKAI_S2000_S3000,
+    "theme": THEME_SYSTEM,
     "shared_midi_transport": _DEFAULT_SHARED_MIDI_TRANSPORT,
     "audio_buffer_samples": _DEFAULT_AUDIO_BUFFER_SAMPLES,
 }
@@ -190,7 +278,17 @@ def ensure_defaults_saved():
     # anything reads the live config - see ui/main_window.py's own call
     # site.
     config = load_config()
+    changed = False
     missing = {key: value for key, value in _DEFAULTS.items() if key not in config}
     if missing:
         config.update(missing)
+        changed = True
+    # a config.json from before the S1000 existed saved the S2000/S3000 as
+    # plain "akai" - rewrite it so someone reading the file sees the
+    # hardware it actually means (get_saved_device_type already accepts
+    # either spelling, so this is purely about the file being accurate)
+    if config.get("device_type") == sampler_models.LEGACY_AKAI:
+        config["device_type"] = sampler_models.AKAI_S2000_S3000
+        changed = True
+    if changed:
         save_config(config)

@@ -1,15 +1,24 @@
 import dataclasses
+import datetime
+import json
 import os
 import threading
 import time
 from collections import deque
+from pathlib import Path
 
-from core import akai_sysex, app_config, debug_log
+from core import akai_sysex, app_config, debug_log, sampler_models
 from core import midi_manager as midi_manager_module
 from s3k.bridge import DeviceError, S3kBridge, ThrottledOut
 from PySide6.QtCore import QThread, Signal
 import s3k.messages as m
+from s3k.messages import NAME_LENGTH
 import s3k.params as p
+from core import akai_program_file
+from core.global_settings import BLOCK_SETTINGS, GLOBAL_SETTINGS, MDATA_BLOCK_LENGTH
+from core.reply_matching import make_reply_tolerant
+from core.s1000_bridge import S1000Bridge
+import core.s1000_bridge as s1000_bridge_module
 
 # the sampler holds exactly one resident multi (no list of multis to choose
 # between) with a fixed 16 "multipart" slots
@@ -116,9 +125,24 @@ class LoggingBridge:
             return _LoggingOut(value, self._logger)
         return value
 
+    @staticmethod
+    def _describe(value):
+        # a Parameter's own repr is its whole table entry (range, notes,
+        # description - ~500 characters), printed twice per call (START and
+        # END) for every one of the dozens of get_parameter calls a single
+        # keygroup load makes: it was 99% of the log's volume, none of it
+        # telling you anything the field's name doesn't. Everything else
+        # (indexes, values, raw SysEx frames) is logged as before.
+        if isinstance(value, p.Parameter):
+            return f"{value.region}.{value.name}"
+        return repr(value)
+
     def _call(self, method_name, *args, **kwargs):
         thread_name = threading.current_thread().name
-        call_desc = f"{method_name}(args={args!r}, kwargs={kwargs!r})"
+        arguments = [self._describe(a) for a in args] + [
+            f"{key}={self._describe(value)}" for key, value in kwargs.items()
+        ]
+        call_desc = f"{method_name}({', '.join(arguments)})"
         self._logger.debug(f"[{thread_name}] START {call_desc}")
         start = time.monotonic()
         try:
@@ -150,11 +174,25 @@ for _name in LoggingBridge._WRAPPED_METHODS:
 del _name
 
 
-def connect(midi_manager=None):
+def connect(midi_manager=None, sampler_model=None):
+    # sampler_model is one of core/sampler_models.py's three selections
+    # (None = the S2000/S3000 default). Only the S1000 differs here: it
+    # doesn't implement the byte-addressable header SysEx S3kBridge's
+    # get_parameter/set_parameter use, so its connection is wrapped in
+    # core/s1000_bridge.py's block-based adapter - see that module.
+    s1000 = sampler_models.is_s1000(sampler_model)
     # lets the editor be developed away from the hardware sampler - same
     # dummy sampler s3ked itself ships for its --demo flag, duck-typing the
     # slice of S3kBridge this module's loaders/writers actually call
     logger = debug_log.get_logger()
+    if os.environ.get("AKAISDS_DEMO_SAMPLER") and s1000:
+        # an S1000 demo is a fake that speaks real S1000 SysEx on fake
+        # ports (core/demo_s1000.py), not s3ked's DemoBridge - that one
+        # answers S3000-style header reads an S1000 never would
+        from core.demo_s1000 import FakeS1000
+
+        logger.info("program_editor_bridge.connect(): demo S1000")
+        return LoggingBridge(S1000Bridge(FakeS1000().bridge()))
     if os.environ.get("AKAISDS_DEMO_SAMPLER"):
         from s3ked.demo import DemoBridge
 
@@ -185,10 +223,13 @@ def connect(midi_manager=None):
             "program_editor_bridge.connect(): shared transport "
             f"({midi_manager.output_name!r})"
         )
-        bridge = S3kBridge(
-            ThrottledOut(midi_manager.raw_output),
-            midi_manager.raw_input,
-            f"{midi_manager.output_name} (shared)",
+        bridge = make_reply_tolerant(
+            S3kBridge(
+                ThrottledOut(midi_manager.raw_output),
+                midi_manager.raw_input,
+                f"{midi_manager.output_name} (shared)",
+            ),
+            logger,
         )
     else:
         # AKAISDS_SHARED_MIDI_TRANSPORT=1 alone doesn't guarantee the
@@ -201,7 +242,10 @@ def connect(midi_manager=None):
         logger.info(
             f"program_editor_bridge.connect(): standard connection ({output_name!r})"
         )
-        bridge = S3kBridge.standard(output_name)  # type: ignore
+        bridge = make_reply_tolerant(S3kBridge.standard(output_name), logger)  # type: ignore
+    if s1000:
+        logger.info("program_editor_bridge.connect(): S1000 block adapter")
+        bridge = S1000Bridge(bridge)
     return LoggingBridge(bridge)
 
 
@@ -266,6 +310,14 @@ _KEYGROUP_DETAIL_FIELDS = [
     "VPANO4",
     "ZPLAY4",
     "CP4",
+    # keygroup mute group (0xFF = off, 0-31 = a group - see s3k.params' own notes: a zero-filled header is an ACTIVE group 0)
+    # and the per-velocity-zone sample START dependence on velocity (signed, sample points). S2000/S3000 only: an S1000 reads KGMUTE (offset 160,
+    # past its 150-byte block) as a neutral zero, and its editor hides both.
+    "KGMUTE",
+    "VSS1",
+    "VSS2",
+    "VSS3",
+    "VSS4",
 ]
 
 #: sample-header fields the Samples tab's waveform view needs. LOOPAT1 is
@@ -308,6 +360,38 @@ _SAMPLE_DETAIL_FIELDS = [
     # first loop's own dwell setting - see program_editor_window.py's
     # sample_loop_hold_knob (a Knob, ranged 0..9999 - far left is Off, far
     # right is Hold).
+]
+
+#: Extra fields read ONLY when the editor is talking to an S1000 (see
+#: BridgeWorker's `extra_*_fields`): its fixed controller routing - the
+#: S1000's equivalent of the S3000's assignable modulation matrix, whose
+#: fields the S3000 spec calls "not used" and so the S2000/S3000 editor has
+#: no controls for. Kept out of the base lists so an S2000/S3000 doesn't
+#: pay a SysEx round trip each for fields it never shows. See
+#: core/s1000_bridge.py's _S1000_RANGE_OVERRIDES for why several of them
+#: need a corrected range.
+S1000_PROGRAM_FIELDS = [
+    "K_LOUD",  # Key>Loudness
+    "P_LOUD",  # Pressure>Loudness
+    "K_PANP",  # Key>Pan position
+    "MW_PAN",  # Modwheel>Pan
+    "P_PTCH",  # Pressure>Pitch (+/-12 semitones)
+    "MWLDEP",  # Modwheel>LFO1 depth
+    "PRSDEP",  # Pressure>LFO1 depth
+    "VELDEP",  # Velocity>LFO1 depth
+    "K_LRAT",  # Key>LFO1 rate
+    "K_LDEP",  # Key>LFO1 depth
+    "K_LDEL",  # Key>LFO1 delay
+]
+S1000_KEYGROUP_FIELDS = [
+    "V_FREQ",  # Velocity>Filter frequency
+    "P_FREQ",  # Pressure>Filter frequency
+    "E_FREQ",  # Envelope 2>Filter frequency (the filter envelope's depth)
+    "V_ENV2",  # Velocity>Envelope 2 output level
+    "E_PTCH",  # Envelope 2>Pitch
+    "KV_LO",  # Velocity>Loudness offset
+    "V_ATT1", "V_REL1", "O_REL1", "K_DAR1",  # Envelope 1 (amp) response
+    "V_ATT2", "V_REL2", "O_REL2", "K_DAR2",  # Envelope 2 (filter) response
 ]
 
 _PROGRAM_LEVEL_FIELDS = [
@@ -374,6 +458,27 @@ _PROGRAM_LEVEL_FIELDS = [
 ]
 
 
+#: where a program's .p1/.p3 backup goes before anything destructive is done to it
+#: (the S1000 delete-keygroup rebuild). tests/conftest.py points it at a temp dir.
+PROGRAM_BACKUP_DIR = Path.home() / ".akaisds" / "program_backups"
+# the sampler's whole-block misc data, saved once per session before the first block write (core/global_settings.py)
+MDATA_BACKUP_DIR = Path.home() / ".akaisds" / "mdata_backups"
+
+# Spacing around a whole-block misc write. MEASURED (2026-10-10, the user's S2000): a block write sent 3 ms after the RMDATA read was ACKED ("OK") and then NEVER applied -
+# every later read of the block, even 5 s on, still held the old bytes - while the standalone check (tools/s2000_mdata_write_check.py), which has seconds before the write
+# and waits 1 s before reading back, applied it every time. Working theory: the sampler acks on receipt and applies afterwards, and a message arriving too soon cancels
+# the pending apply. So: a pause before the write, a pause before the read-back, and a few verify attempts. `_sleep` is a module hook so tests (tests/conftest.py)
+# run instantly and can watch the spacing.
+MISC_BLOCK_BEFORE_WRITE_S = 0.3
+MISC_BLOCK_AFTER_WRITE_S = 1.0
+MISC_BLOCK_VERIFY_ATTEMPTS = 3
+_sleep = time.sleep
+
+
+class _ImportSafetyError(DeviceError):
+    """A program load stopped or failed its own check (message is user-facing)."""
+
+
 class BridgeWorker(QThread):
     # S3kBridge documents itself as unsafe for concurrent calls, and a real
     # crash (Qt aborting via QThread::~QThread() when a stale loader's
@@ -396,7 +501,13 @@ class BridgeWorker(QThread):
     # fast should end up showing the fifth, not sit through four stale
     # reads first. Writes and Program Changes are never coalesced: every
     # one of those must reach the hardware.
-    _COALESCE_KINDS = {"keygroups", "detail", "multi_parts", "sample_detail"}
+    _COALESCE_KINDS = {
+        "keygroups",
+        "detail",
+        "multi_parts",
+        "sample_detail",
+        "global_settings",
+    }
 
     programs_loaded = Signal(list)
     programs_load_failed = Signal(str)
@@ -449,6 +560,21 @@ class BridgeWorker(QThread):
     write_succeeded = Signal(str, str, object)
     write_failed = Signal(str, str, str)
 
+    # Emitted whenever the reply-matching layer (core/reply_matching.py) has skipped STRAY_REPLY_WARNING_COUNT or more NEW stray frames since the last warning - so it
+    # fires again if the echo comes back later in the same session (the user asked for that). The signature of something sending the sampler's own replies back to it
+    # (measured 2026-10-10 with Ableton open: a stray OK for nearly every reply). Returned replies are executed by the sampler as WRITES, so this is a data-safety
+    # warning, not a curiosity. The int is the session's running total of skipped strays.
+    stray_replies_detected = Signal(int)
+
+    # the sampler's GLOBAL-page settings (core/global_settings.py) - not part
+    # of any program, so not a submit_write(). Loaded together: a dict of
+    # {key: value} holding every setting that read back as a value the panel
+    # can show (a missing key = that one couldn't be read).
+    global_settings_loaded = Signal(dict)
+    global_settings_load_failed = Signal(str)
+    global_setting_written = Signal(str, int)  # key, value
+    global_setting_write_failed = Signal(str, str)  # key, error
+
     # DELP/DELK/DELS - S3kBridge.delete_program/delete_keygroup/delete_sample
     # default to confirm=True, which waits for and raises on the hardware's
     # own OK/error reply (see s3k.bridge's "_destructive"), so a *_deleted
@@ -480,6 +606,18 @@ class BridgeWorker(QThread):
     program_created = Signal(int, int)  # source_index, new_index
     program_create_failed = Signal(int, str)  # source_index, error
 
+    # whole-program save/load (.p1/.p3 files, core/akai_program_file.py): the
+    # export reads every raw block of one program, the import writes a parsed
+    # file back as a NEW program with the same PDATA/KDATA sequence the
+    # duplicate flow uses
+    program_exported = Signal(int, object)  # program_index, akai_program_file.ProgramFile
+    program_export_failed = Signal(int, str)  # program_index, error
+    # an S1000 keygroup delete done by rebuilding the program: the program MOVED
+    # (the rebuilt copy is last in the list)
+    program_rebuilt = Signal(int, int, int)  # old program_index, deleted keygroup_index, new program_index
+    program_imported = Signal(int, str)  # new_index, name
+    program_import_failed = Signal(str, str)  # name, error
+
     keygroup_created = Signal(int, int)  # program_index, new_keygroup_index
     keygroup_create_failed = Signal(int, str)  # program_index, error
 
@@ -493,9 +631,30 @@ class BridgeWorker(QThread):
     # progress bar.
     busy_changed = Signal(bool)
 
-    def __init__(self, bridge):
+    def __init__(
+        self,
+        bridge,
+        *,
+        extra_program_fields=(),
+        extra_keygroup_fields=(),
+        s1000=False,
+    ):
         super().__init__()
         self._bridge = bridge
+        # True when `bridge` is (a wrapper around) an S1000Bridge - the
+        # worker can't isinstance() it, since LoggingBridge wraps it. Only
+        # used to pick the S1000-safe variant of a few destructive flows
+        # (see _delete_keygroup_s1000 and _handle_create_program).
+        self._s1000 = s1000
+        # set the first time an S1000 keygroup delete fails its own
+        # before/after verification - the UI then disables Delete Keygroup
+        # for the rest of the session (see _delete_keygroup_s1000)
+        self.s1000_keygroup_delete_blocked = False
+        # model-specific additions to what _handle_keygroups/_handle_detail
+        # read (S1000_PROGRAM_FIELDS/S1000_KEYGROUP_FIELDS for an S1000,
+        # none otherwise)
+        self._program_fields = _PROGRAM_LEVEL_FIELDS + list(extra_program_fields)
+        self._keygroup_fields = _KEYGROUP_DETAIL_FIELDS + list(extra_keygroup_fields)
         self._lock = threading.Lock()
         self._idle = threading.Condition(self._lock)
         self._queue = deque()
@@ -513,6 +672,9 @@ class BridgeWorker(QThread):
         # whenever the program list reloads, since a newly created/loaded
         # program may not carry a number distinct from the rest.
         self._programs_renumbered = False
+        # the misc-block backup is saved before the first block WRITE of a session only (see _backup_misc_block)
+        self._misc_block_backed_up = False
+        self._stray_replies_reported = 0  # the skipped_replies total at the last warning
 
     def _submit(self, job):
         with self._idle:
@@ -571,6 +733,13 @@ class BridgeWorker(QThread):
             ("write", writer_key, param_name, region, program_index, value, keygroup_index)
         )
 
+    def submit_global_settings(self):
+        self._submit(("global_settings",))
+
+    def submit_set_global_setting(self, key, value):
+        # not coalesced: every choice must reach the sampler, in order
+        self._submit(("set_global_setting", key, value))
+
     def submit_delete_program(self, program_index):
         self._submit(("delete_program", program_index))
 
@@ -580,8 +749,14 @@ class BridgeWorker(QThread):
     def submit_delete_sample(self, sample_index):
         self._submit(("delete_sample", sample_index))
 
-    def submit_create_program(self, source_index, new_name):
-        self._submit(("create_program", source_index, new_name))
+    def submit_create_program(self, source_index, new_name, first_keygroup_only=False):
+        self._submit(("create_program", source_index, new_name, first_keygroup_only))
+
+    def submit_export_program(self, program_index):
+        self._submit(("export_program", program_index))
+
+    def submit_import_program(self, program_file, new_name):
+        self._submit(("import_program", program_file, new_name))
 
     def submit_create_keygroup(self, program_index, source_keygroup_index):
         self._submit(("create_keygroup", program_index, source_keygroup_index))
@@ -696,6 +871,20 @@ class BridgeWorker(QThread):
                 "would otherwise have killed the worker thread silently",
                 exc_info=True,
             )
+        self._check_stray_replies()
+
+    STRAY_REPLY_WARNING_COUNT = 3
+
+    def _check_stray_replies(self):
+        count = getattr(self._bridge, "skipped_replies", 0)
+        if not isinstance(count, int):
+            return
+        if count - self._stray_replies_reported >= self.STRAY_REPLY_WARNING_COUNT:
+            self._stray_replies_reported = count
+            debug_log.get_logger().critical(
+                f"{count} stray replies skipped this session - something is probably sending the sampler's replies back to it (another MIDI program?)"
+            )
+            self.stray_replies_detected.emit(count)
 
     def _dispatch(self, job):
         kind = job[0]
@@ -729,7 +918,7 @@ class BridgeWorker(QThread):
             # same list+loop shape _KEYGROUP_DETAIL_FIELDS already uses below
             program_values = {
                 field: self._bridge.get_parameter(p.lookup(field, "program"), program_index)
-                for field in _PROGRAM_LEVEL_FIELDS
+                for field in self._program_fields
             }
             # read the real keygroup count off the program header rather than
             # probing until an out-of-range read fails: the real bridge signals
@@ -759,7 +948,7 @@ class BridgeWorker(QThread):
     def _handle_detail(self, program_index, keygroup_index):
         values = {}
         try:
-            for field in _KEYGROUP_DETAIL_FIELDS:
+            for field in self._keygroup_fields:
                 values[field] = self._bridge.get_parameter(
                     p.lookup(field, "keygroup"),
                     program_index,
@@ -907,6 +1096,164 @@ class BridgeWorker(QThread):
             return
         self.write_succeeded.emit(writer_key, param_name, value)
 
+    def _misc_call(self, name):
+        # DemoBridge has no misc registers, and the S1000 has no global
+        # settings of this kind (it ignores byte-addressable misc ops)
+        call = getattr(self._bridge, name, None)
+        if call is None or self._s1000:
+            raise DeviceError("not available on this connection")
+        return call
+
+    # -- the whole-block misc data (RMDATA/MDATA) ---------------------------------------------
+    # Program change channel, tune and fine tune live here, not in their byte registers (see
+    # core/global_settings.py). The sampler intermittently answers with a frame that does not
+    # decode ("extended data: expected at least a 7-byte body, got 1" - measured), so reads retry.
+
+    _MISC_BLOCK_TRIES = 3
+
+    def _read_misc_block(self):
+        self._misc_call("_misc_byte")  # the "is this a real S2000/S3000 connection" gate
+        frame = m.build_frame(
+            m.Command.RMDATA,
+            [],
+            exclusive_channel=getattr(self._bridge, "exclusive_channel", m.DEFAULT_EXCLUSIVE_CHANNEL),
+        )
+        last = None
+        for _ in range(self._MISC_BLOCK_TRIES):
+            try:
+                reply = self._bridge.send_and_receive(frame, timeout=3.0)
+                _channel, command, payload = m.parse_frame(reply)
+                if command != m.Command.MDATA:
+                    raise DeviceError(f"expected MDATA, got command {int(command):#04x}")
+                block = bytes(m.decode_nibbles(list(payload)))
+            except (ValueError, DeviceError, TimeoutError) as e:
+                last = e
+                continue
+            if len(block) != MDATA_BLOCK_LENGTH:
+                # a different firmware/layout: never edit a block we don't understand
+                raise DeviceError(f"unexpected misc block length {len(block)} (expected {MDATA_BLOCK_LENGTH})")
+            return block
+        raise last
+
+    def _write_misc_block(self, block):
+        if len(block) != MDATA_BLOCK_LENGTH:
+            raise ValueError(f"refusing to write a {len(block)}-byte misc block")
+        frame = m.build_frame(
+            m.Command.MDATA,
+            m.encode_nibbles(block),
+            exclusive_channel=getattr(self._bridge, "exclusive_channel", m.DEFAULT_EXCLUSIVE_CHANNEL),
+        )
+        self._bridge._drain()
+        self._bridge._send(frame, write=True)
+        reply = self._bridge._receive(3.0, accept=frozenset({int(m.Command.REPLY)}))
+        decoded = m.Reply.decode(reply)
+        if not decoded.ok:
+            raise DeviceError(f"the sampler refused the misc block (reply code {decoded.code})")
+
+    def _backup_misc_block(self, block):
+        # no backup, no write - the whole block is replaced, so a copy of what was there
+        # must exist first. Once per session: later writes only ever change what the editor
+        # itself wrote.
+        if self._misc_block_backed_up:
+            return
+        MDATA_BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        path = MDATA_BACKUP_DIR / f"mdata_{stamp}.json"
+        path.write_text(
+            json.dumps({"saved": stamp, "block_hex": block.hex(), "block": list(block)}, indent=1),
+            encoding="utf-8",
+        )
+        self._misc_block_backed_up = True
+        debug_log.get_logger().info(f"misc block backed up to {path}")
+
+    def _handle_global_settings(self):
+        log = debug_log.get_logger()
+        values = {}
+        first_error = None
+        try:
+            read_byte = self._misc_call("_misc_byte")
+        except Exception as e:
+            self.global_settings_load_failed.emit(str(e))
+            return
+        for key, setting in GLOBAL_SETTINGS.items():
+            if key in BLOCK_SETTINGS:
+                continue  # read from the block below - its byte register is a stale copy
+            try:
+                raw = read_byte(setting.register)
+            except Exception as e:
+                # a failed read is the connection, not this register: stop
+                # rather than wait out a timeout per remaining setting
+                log.warning(f"global setting {key}: read failed: {e}")
+                first_error = first_error or str(e)
+                break
+            try:
+                values[key] = setting.decode(raw)
+            except ValueError as e:
+                # a value the panel can't show must not hide the others
+                log.warning(f"global setting {key}: not shown: {e}")
+                first_error = first_error or str(e)
+        if first_error is None or values:
+            try:
+                block = self._read_misc_block()
+            except Exception as e:
+                log.warning(f"global settings: misc block not read: {e}")
+                first_error = first_error or str(e)
+            else:
+                for key, setting in BLOCK_SETTINGS.items():
+                    try:
+                        values[key] = setting.decode(block)
+                    except ValueError as e:
+                        log.warning(f"global setting {key}: not shown: {e}")
+        if not values:
+            self.global_settings_load_failed.emit(first_error or "nothing read")
+            return
+        self.global_settings_loaded.emit(values)
+
+    def _handle_set_global_setting(self, key, value):
+        log = debug_log.get_logger()
+        try:
+            if key in BLOCK_SETTINGS:
+                self._set_block_setting(BLOCK_SETTINGS[key], value)
+                raw_note = "misc block"
+            else:
+                setting = GLOBAL_SETTINGS[key]
+                raw = setting.encode(value)
+                write_verify = self._misc_call("_misc_write_verify")
+                # write, then believe the READ: several misc registers answer a
+                # good write with an error code (see S3kBridge._misc_write_verify)
+                write_verify(setting.register, raw, f"setting {key}")
+                raw_note = f"register {setting.register} = {raw}"
+        except Exception as e:
+            log.error(f"global setting {key}: write of {value} failed: {e}")
+            self.global_setting_write_failed.emit(key, str(e))
+            return
+        log.info(f"global setting {key}: set to {value} ({raw_note})")
+        self.global_setting_written.emit(key, value)
+
+    def _set_block_setting(self, setting, value):
+        log = debug_log.get_logger()
+        before = self._read_misc_block()  # fresh every time: the panel may have changed it
+        after = setting.encode(before, value)  # raises for a value the block can't hold
+        self._backup_misc_block(before)
+        _sleep(MISC_BLOCK_BEFORE_WRITE_S)  # see MISC_BLOCK_BEFORE_WRITE_S
+        log.info(f"misc block write for {setting.key}: {before[:12].hex(' ')} -> {after[:12].hex(' ')} (first 12 bytes)")
+        self._write_misc_block(after)
+        # believe the READ, not the ack - but give the sampler time to apply it first
+        read_back = None
+        for attempt in range(MISC_BLOCK_VERIFY_ATTEMPTS):
+            _sleep(MISC_BLOCK_AFTER_WRITE_S)
+            read_back = self._read_misc_block()
+            if read_back == after:
+                return
+            log.warning(
+                f"misc block read-back {attempt + 1}/{MISC_BLOCK_VERIFY_ATTEMPTS} for {setting.key} differs: "
+                f"{read_back[:12].hex(' ')} (wanted {after[:12].hex(' ')})"
+            )
+        differing = [i for i in range(MDATA_BLOCK_LENGTH) if read_back[i] != after[i]]
+        raise DeviceError(
+            f"setting {setting.key}: the sampler's block differs from what was written at offsets {differing}"
+        )
+
     def _handle_delete_program(self, program_index):
         try:
             self._bridge.delete_program(program_index)
@@ -920,11 +1267,264 @@ class BridgeWorker(QThread):
 
     def _handle_delete_keygroup(self, program_index, keygroup_index):
         try:
-            self._bridge.delete_keygroup(program_index, keygroup_index)
+            if self._s1000 and s1000_bridge_module.KEYGROUP_DELETE_BY_REBUILD:
+                new_index = self._delete_keygroup_s1000_rebuild(
+                    program_index, keygroup_index
+                )
+            elif self._s1000:
+                self._delete_keygroup_s1000(program_index, keygroup_index)
+            else:
+                self._bridge.delete_keygroup(program_index, keygroup_index)
         except Exception as e:
             self.keygroup_delete_failed.emit(program_index, keygroup_index, str(e))
             return
+        if self._s1000 and s1000_bridge_module.KEYGROUP_DELETE_BY_REBUILD:
+            self._programs_renumbered = False
+            self.program_rebuilt.emit(program_index, keygroup_index, new_index)
+            return
         self.keygroup_deleted.emit(program_index, keygroup_index)
+
+    #: how many block reads the post-delete check may spend on programs
+    #: OTHER than the one being edited (~0.1s each over MIDI). The target
+    #: program is always checked in full.
+    _S1000_VERIFY_READ_BUDGET = 60
+
+    @staticmethod
+    def _without_pointer(block):
+        # a program block's bytes 1-2 are FIRSTKG, a keygroup block's NXTKG:
+        # absolute addresses the sampler is free to rewrite, so content
+        # comparisons ignore them (they're compared and logged separately)
+        return bytes(block[:1]) + bytes(block[3:])
+
+    def _s1000_snapshot(self, target_index):
+        # {program_index: {"groups", "program", "keygroups", "pointers"}} for
+        # the target program (in full) and as many others as the read budget
+        # allows. Everything is read FRESH from the hardware: S1000Bridge
+        # caches blocks for 1.5s, and a PDATA write also leaves its own
+        # copy cached - neither may stand in for what the sampler holds.
+        invalidate = getattr(self._bridge, "invalidate", None)
+        if invalidate is not None:
+            invalidate()
+        count = len(self._bridge.program_list())
+        order = [target_index] + [i for i in range(count) if i != target_index]
+        budget = self._S1000_VERIFY_READ_BUDGET
+        snapshot = {}
+        for index in order:
+            if index >= count:
+                continue
+            program_block = self._bridge.get_header_bytes("program", index, 0, 192)
+            groups = self._bridge.get_parameter(p.lookup("GROUPS", "program"), index)
+            if index != target_index:
+                if budget < groups + 1:
+                    debug_log.get_logger().info(
+                        "S1000 delete check: program %d not snapshotted "
+                        "(read budget exhausted)",
+                        index,
+                    )
+                    continue
+                budget -= groups + 1
+            keygroups = [
+                self._bridge.get_header_bytes(
+                    "keygroup", index, 0, 192, selector=k
+                )
+                for k in range(groups)
+            ]
+            snapshot[index] = {
+                "groups": groups,
+                "program": self._without_pointer(program_block),
+                "keygroups": [self._without_pointer(b) for b in keygroups],
+                "pointers": [bytes(program_block[1:3])]
+                + [bytes(b[1:3]) for b in keygroups],
+            }
+        return snapshot
+
+    def _read_keygroups_to_shift_s1000(self, program_index, keygroup_index, groups):
+        # the FULL blocks (pointer bytes included) of keygroups k..N-1, read
+        # fresh before anything is written
+        return [
+            bytes(
+                self._bridge.get_header_bytes(
+                    "keygroup", program_index, 0, 192, selector=i
+                )
+            )
+            for i in range(keygroup_index, groups)
+        ]
+
+    def _shift_keygroups_down_s1000(self, program_index, keygroup_index, blocks):
+        """Overwrite keygroup k..N-2 with the content of k+1..N-1.
+
+        Why delete the LAST keygroup instead of the chosen one: a real S1000
+        (2026-10-06 log) answered DELK of keygroup 0 by moving the program's
+        FIRSTKG forward 150 bytes, and then rejected the PDATA that rewrites
+        GROUPS (every PDATA that ever worked carried an unchanged FIRSTKG).
+        Deleting the last keygroup should leave FIRSTKG alone. Each slot keeps
+        ITS OWN pointer bytes (1-2, NXTKG: an absolute address) - only the
+        content moves - so the chain's addresses never change. Ascending
+        order, from blocks read up front, so nothing is read after being
+        overwritten. Until the DELK that follows, this only duplicates content:
+        a failure part-way leaves a valid program with a repeated keygroup.
+        """
+        for offset in range(len(blocks) - 1):
+            slot = keygroup_index + offset
+            slot_block = blocks[offset]
+            donor = blocks[offset + 1]
+            new_block = slot_block[:1] + slot_block[1:3] + donor[3:]
+            if new_block == slot_block:
+                continue
+            self._send_and_check(
+                akai_sysex.build_kdata_request(program_index, slot, new_block),
+                f"moving keygroup {slot + 1} down to {slot} of program {program_index}",
+            )
+
+    def _repair_groups_after_delk(self, program_index, keygroup_index, groups):
+        logger = debug_log.get_logger()
+        groups_param = p.lookup("GROUPS", "program")
+        groups_now = self._bridge.get_parameter(groups_param, program_index)
+        logger.info(
+            "S1000 delete keygroup %d of program %d: GROUPS %d -> %d after DELK",
+            keygroup_index, program_index, groups, groups_now,
+        )
+        if groups_now == groups:
+            # the observed S1000 behaviour: DELK left the count alone
+            header = bytearray(
+                self._bridge.get_header_bytes("program", program_index, 0, 192)
+            )
+            self._patch_field(header, "GROUPS", "program", groups - 1)
+            self._send_and_check(
+                akai_sysex.build_pdata_request(program_index, bytes(header)),
+                f"updating program {program_index} groups={groups - 1}",
+            )
+        elif groups_now != groups - 1:
+            raise DeviceError(
+                f"program {program_index} reports {groups_now} keygroups after "
+                f"deleting one of {groups} - check the sampler directly"
+            )
+
+    def _delete_keygroup_s1000(self, program_index, keygroup_index):
+        """DELK on an S1000, repaired and verified.
+
+        A real S1000 (2026-10-05 log) acknowledged DELK but left the
+        program's GROUPS unchanged. The next "add keygroup" then used that
+        stale count as the new keygroup's index, walked off the end of the
+        program's chain and linked the new keygroup into ANOTHER program,
+        orphaning that program's tail. So after DELK this rewrites the
+        program with the real GROUPS, then compares a before/after snapshot:
+        the surviving keygroups must be unchanged and in order, and no other
+        program may have changed. A mismatch raises (the UI shows it), logs
+        everything, and blocks further S1000 keygroup deletes this session.
+
+        The DELK itself always targets the LAST keygroup, after the ones
+        behind the chosen one were shifted down over it
+        (_shift_keygroups_down_s1000) - deleting keygroup 0 directly broke
+        the GROUPS repair on a real S1000 (2026-10-06, see AGENTS.md).
+        """
+        logger = debug_log.get_logger()
+        if self.s1000_keygroup_delete_blocked:
+            raise DeviceError(
+                "keygroup delete is disabled for this session after an "
+                "earlier delete failed its safety check"
+            )
+        if not s1000_bridge_module.KEYGROUP_DELETE_SUPPORTED:
+            raise DeviceError("deleting a keygroup isn't supported on an S1000")
+
+        before = self._s1000_snapshot(program_index)
+        target = before[program_index]
+        groups = target["groups"]
+        if not 0 <= keygroup_index < groups:
+            raise ValueError(
+                f"keygroup {keygroup_index} is out of range (program has {groups})"
+            )
+        if groups <= 1:
+            raise ValueError(
+                "can't delete a program's only keygroup (delete the program instead)"
+            )
+
+        to_shift = self._read_keygroups_to_shift_s1000(
+            program_index, keygroup_index, groups
+        )
+        logger.info(
+            "S1000 delete keygroup %d of program %d (%d keygroups): shifting %d "
+            "down, then DELK of the last (%d). Program pointers before: %s",
+            keygroup_index, program_index, groups, len(to_shift) - 1, groups - 1,
+            target["pointers"][0].hex(),
+        )
+
+        # From here the sampler IS being changed. Any failure leaves a program
+        # that is repeated-keygroup at best and unreadable at worst (2026-10-06
+        # log: GROUPS stale, the PDATA rewriting it rejected), so it blocks
+        # further deletes exactly like a failed safety check - otherwise the
+        # tester can retry and compound the damage. No recovery is attempted:
+        # a blind KDATA against a stale GROUPS is what linked a keygroup into
+        # another program on 2026-10-05.
+        try:
+            self._shift_keygroups_down_s1000(program_index, keygroup_index, to_shift)
+            self._bridge.delete_keygroup(program_index, groups - 1)
+            self._repair_groups_after_delk(program_index, groups - 1, groups)
+        except Exception as e:
+            self.s1000_keygroup_delete_blocked = True
+            logger.error("S1000 keygroup delete FAILED part-way: %s", e)
+            raise DeviceError(
+                f"The delete was only partly applied to program {program_index} "
+                f"({e}). Keygroup deleting is now disabled; check that program "
+                "on the sampler directly - it may need to be deleted."
+            ) from e
+
+        problems = []
+        try:
+            after = self._s1000_snapshot(program_index)
+        except Exception as e:
+            problems.append(f"couldn't read the program back ({e})")
+            after = {}
+        expected = [
+            kg for i, kg in enumerate(target["keygroups"]) if i != keygroup_index
+        ]
+        mine = after.get(program_index)
+        if after:
+            if mine is None:
+                problems.append("the edited program is missing afterwards")
+            else:
+                if mine["groups"] != groups - 1:
+                    problems.append(
+                        f"program {program_index} has {mine['groups']} keygroups, "
+                        f"expected {groups - 1}"
+                    )
+                if mine["keygroups"] != expected:
+                    problems.append(
+                        f"program {program_index}'s remaining keygroups differ "
+                        "from what they were before the delete"
+                    )
+            for index, was in before.items():
+                if index == program_index or index not in after:
+                    continue
+                now = after[index]
+                if now["groups"] != was["groups"] or now["keygroups"] != was["keygroups"]:
+                    problems.append(f"program {index} changed")
+                elif now["pointers"] != was["pointers"]:
+                    # content intact but addresses moved: not a failure, but
+                    # exactly what a tester's log should show
+                    logger.info(
+                        "S1000 delete check: program %d's addresses moved "
+                        "(content intact)", index,
+                    )
+        for index, was in before.items():
+            logger.info(
+                "S1000 delete check: program %d before: pointers %s",
+                index, [x.hex() for x in was["pointers"]],
+            )
+        for index, now in after.items():
+            logger.info(
+                "S1000 delete check: program %d after: pointers %s",
+                index, [x.hex() for x in now["pointers"]],
+            )
+        if problems:
+            self.s1000_keygroup_delete_blocked = True
+            message = "; ".join(problems)
+            logger.error("S1000 keygroup delete FAILED its safety check: %s", message)
+            raise DeviceError(
+                f"The sampler's programs didn't come back as expected after "
+                f"the delete ({message}). Keygroup deleting is now disabled; "
+                "check the programs on the sampler directly."
+            )
 
     def _handle_delete_sample(self, sample_index):
         try:
@@ -993,7 +1593,36 @@ class BridgeWorker(QThread):
         if not result.ok:
             raise DeviceError(f"device rejected {what} (code {result.code})")
 
-    def _handle_create_program(self, source_index, new_name):
+    def _locate_new_program(self, names_before):
+        """Index the sampler gave a program we just created with PDATA.
+
+        A PDATA addressed one past the end does NOT necessarily append: the
+        sampler keeps its program list ordered (by PRGNUM - a clone carries
+        its template's, so it sorts right after it), and measured on a real
+        S2000 the new program landed BETWEEN two existing ones. Addressing
+        the next KDATA/PDATA at `len(list)` then hit the program that had
+        been pushed down to that slot and overwrote ITS keygroups. So re-read
+        the list and take the first position where it differs from the one
+        before the write. (Callers refuse a name that is already resident,
+        so a duplicate name can't make this ambiguous.)
+        """
+        names_after = list(self._bridge.program_list())
+        if len(names_after) != len(names_before) + 1:
+            raise DeviceError(
+                f"the sampler now lists {len(names_after)} programs, expected "
+                f"{len(names_before) + 1} - can't tell where the new program went"
+            )
+        for index, (after, before) in enumerate(zip(names_after, names_before)):
+            if after != before:
+                return index
+        return len(names_before)
+
+    def _handle_create_program(self, source_index, new_name, first_keygroup_only=False):
+        # first_keygroup_only: clone just the template's keygroup 0 instead
+        # of every keygroup. Create-program-from-slices uses this on an
+        # S1000, where it would otherwise clone N keygroups only to DELK
+        # N-1 of them - and an S1000 DELK corrupts the chain (see
+        # _delete_keygroup_s1000)
         try:
             if not hasattr(self._bridge, "send_and_receive"):
                 # defensive backstop - the UI layer already disables this
@@ -1010,25 +1639,36 @@ class BridgeWorker(QThread):
             group_count = self._bridge.get_parameter(
                 p.lookup("GROUPS", "program"), source_index
             )
-            new_index = len(self._bridge.program_list())
+            names_before = list(self._bridge.program_list())
+            # read every keygroup to clone BEFORE the first write: the
+            # insert below can shift the source program's own index
+            source_keygroups = [
+                self._bridge.get_header_bytes(
+                    "keygroup", source_index, 0, 192, selector=keygroup_index
+                )
+                for keygroup_index in range(
+                    1 if first_keygroup_only else group_count
+                )
+            ]
 
             header = bytearray(source_header)
             self._patch_field(header, "PRNAME", "program", new_name)
             self._patch_field(header, "GROUPS", "program", 1)
+            # sent as "one past the end" = append, but the sampler decides
+            # where the program really lands (see _locate_new_program) -
+            # every later KDATA/PDATA must use THAT index
             self._send_and_check(
-                akai_sysex.build_pdata_request(new_index, bytes(header)),
-                f"creating program {new_index}",
+                akai_sysex.build_pdata_request(len(names_before), bytes(header)),
+                f"creating program {len(names_before)}",
             )
+            new_index = self._locate_new_program(names_before)
 
             # keygroup 0 bootstrap - same PDATA(groups=1)-then-KDATA(0)
             # order s3000editor's own addProgram() uses for a brand new
             # program (the program has to exist before a keygroup can be
             # written under it)
-            kg0_raw = self._bridge.get_header_bytes(
-                "keygroup", source_index, 0, 192, selector=0
-            )
             self._send_and_check(
-                akai_sysex.build_kdata_request(new_index, 0, kg0_raw),
+                akai_sysex.build_kdata_request(new_index, 0, source_keygroups[0]),
                 f"creating keygroup 0 of program {new_index}",
             )
 
@@ -1037,16 +1677,10 @@ class BridgeWorker(QThread):
             # _handle_create_keygroup below (s3000editor's own "add
             # keygroup to an existing program" step pair), just reused in
             # a loop since this app clones every keygroup, not just one
-            for keygroup_index in range(1, group_count):
-                # selector must be the SOURCE program's keygroup index here
-                # - the default is 0, which would silently clone keygroup 0
-                # over and over for a multi-keygroup source
-                kg_raw = self._bridge.get_header_bytes(
-                    "keygroup", source_index, 0, 192, selector=keygroup_index
-                )
+            for keygroup_index in range(1, len(source_keygroups)):
                 self._send_and_check(
                     akai_sysex.build_kdata_request(
-                        new_index, keygroup_index, kg_raw
+                        new_index, keygroup_index, source_keygroups[keygroup_index]
                     ),
                     f"creating keygroup {keygroup_index} of program {new_index}",
                 )
@@ -1064,6 +1698,423 @@ class BridgeWorker(QThread):
         # guaranteed
         self._programs_renumbered = False
         self.program_created.emit(source_index, new_index)
+
+    def _read_program_file(self, program_index):
+        # 192 is what an S2000/S3000 block is; an S1000 adapter clips the
+        # read to the real (150-byte) block, so the same call serves both
+        program = bytes(
+            self._bridge.get_header_bytes("program", program_index, 0, 192)
+        )
+        if len(program) <= akai_program_file._GROUPS_OFFSET:
+            raise DeviceError(f"program block is only {len(program)} bytes")
+        groups = program[akai_program_file._GROUPS_OFFSET]
+        keygroups = [
+            bytes(
+                self._bridge.get_header_bytes(
+                    "keygroup", program_index, 0, 192, selector=k
+                )
+            )
+            for k in range(groups)
+        ]
+        return akai_program_file.ProgramFile(
+            block_size=akai_program_file.validate_blocks(program, keygroups),
+            program=program,
+            keygroups=keygroups,
+        )
+
+    def _handle_export_program(self, program_index):
+        try:
+            program_file = self._read_program_file(program_index)
+        except Exception as e:
+            debug_log.get_logger().error(
+                "export program %d failed: %s", program_index, e, exc_info=True
+            )
+            self.program_export_failed.emit(program_index, str(e))
+            return
+        self.program_exported.emit(program_index, program_file)
+
+    # -- S1000 Delete Keygroup by rebuilding the program ---------------------------
+    #
+    # DELK on a real S1000 only unlinks the keygroup and leaves GROUPS and the
+    # chain inconsistent, and the sampler refuses the GROUPS fix (see
+    # _delete_keygroup_s1000). So never DELK: copy the program without the
+    # keygroup through the program-file load, then swap. Every step leaves a
+    # COMPLETE program: the original is deleted only after the copy has loaded
+    # and passed the load's own checks, and the backup .p1 is written first.
+
+    @staticmethod
+    def _rebuild_temp_name(name, existing):
+        # distinct from every resident name (a clash would make the sampler delete
+        # that program) and from the original's; hyphen because AKAI_CHARSET has
+        # no underscore. Truncates the original to leave room for the suffix.
+        base = name.rstrip()[: NAME_LENGTH - 4]
+        for suffix in ("-TMP", "-TM2", "-TM3", "-TM4", "-TM5", "-TM6", "-TM7", "-TM8", "-TM9"):
+            candidate = base + suffix
+            if candidate not in existing:
+                return candidate
+        raise DeviceError("couldn't find an unused temporary program name")
+
+    def _save_program_backup(self, program_file, name):
+        PROGRAM_BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+        path = PROGRAM_BACKUP_DIR / (
+            f"{akai_program_file.safe_file_stem(name)}-{stamp}{program_file.extension}"
+        )
+        path.write_bytes(
+            akai_program_file.build_file(program_file.program, program_file.keygroups)
+        )
+        return path
+
+    def _delete_keygroup_s1000_rebuild(self, program_index, keygroup_index):
+        """Returns the rebuilt program's new index. Raises (with a user-facing message) otherwise."""
+        logger = debug_log.get_logger()
+        if self.program_import_blocked:
+            raise DeviceError(
+                "program loading is disabled for this session after an earlier "
+                "load failed its safety check - check the sampler's programs "
+                "directly, then restart the editor"
+            )
+        names = self._bridge.program_list()
+        original_name = names[program_index]
+        original = self._read_program_file(program_index)
+        groups = len(original.keygroups)
+        if not 0 <= keygroup_index < groups:
+            raise ValueError(
+                f"keygroup {keygroup_index} is out of range (program has {groups})"
+            )
+        if groups <= 1:
+            raise ValueError(
+                "can't delete a program's only keygroup (delete the program instead)"
+            )
+
+        backup = self._save_program_backup(original, original_name)  # no backup, no change
+        logger.info(
+            "S1000 delete keygroup %d of program %d %r by rebuild: backup %s",
+            keygroup_index, program_index, original_name, backup,
+        )
+        header = bytearray(original.program)
+        self._patch_field(header, "GROUPS", "program", groups - 1)
+        edited = akai_program_file.ProgramFile(
+            block_size=original.block_size,
+            program=bytes(header),
+            keygroups=[k for i, k in enumerate(original.keygroups) if i != keygroup_index],
+        )
+        temp_name = self._rebuild_temp_name(original_name, names)
+
+        # 1. the copy. Until it is verified the original is untouched.
+        try:
+            self._import_program(edited, temp_name, logger)
+        except Exception as e:
+            if isinstance(e, _ImportSafetyError):
+                self.program_import_blocked = True
+            raise DeviceError(
+                f"{e}\n\nThe original program \"{original_name}\" was NOT changed "
+                f"(a backup is in {backup}). A partly loaded copy named "
+                f'"{temp_name}" may be on the sampler - delete it if so.'
+            ) from e
+        copy_index = self._imported_index
+
+        # 2. delete the original, then check the others came through
+        stage = f'"{original_name}" was deleted but'
+        try:
+            names_now = self._bridge.program_list()
+            before = self._s1000_snapshot(copy_index)
+            self._bridge.delete_program(program_index)
+            expected = [n for i, n in enumerate(names_now) if i != program_index]
+            if self._bridge.program_list() != expected:
+                raise _ImportSafetyError(
+                    "the program list after the delete is not what was expected"
+                )
+            copy_index -= 1  # the original was before it in the list
+            after = self._s1000_snapshot(copy_index)
+            problems = []
+            for old_index, was in before.items():
+                if old_index == program_index:
+                    continue
+                now = after.get(old_index - (1 if old_index > program_index else 0))
+                if now is None:
+                    continue
+                if (
+                    now["groups"] != was["groups"]
+                    or now["program"] != was["program"]
+                    or now["keygroups"] != was["keygroups"]
+                ):
+                    problems.append(f"program {old_index} changed")
+                elif now["pointers"] != was["pointers"]:
+                    logger.info(
+                        "S1000 rebuild: program %d's addresses moved after DELP "
+                        "(content intact)", old_index,
+                    )
+            if problems:
+                raise _ImportSafetyError("; ".join(problems))
+
+            # 3. the copy takes the original's name (the original is gone, so
+            # no clash for the sampler to act on)
+            self._bridge.set_parameter(
+                p.lookup("PRNAME", "program"), copy_index, original_name
+            )
+            if self._bridge.program_list()[copy_index] != original_name:
+                raise _ImportSafetyError("the rename did not take")
+        except Exception as e:
+            self.program_import_blocked = True
+            raise DeviceError(
+                f"{stage} the check afterwards failed ({e}). The program without "
+                f'that keygroup is on the sampler as "{temp_name}"; a backup of '
+                f"the original is in {backup}. Check the sampler's programs; loading "
+                "is disabled for this session."
+            ) from e
+        logger.info(
+            "S1000 delete keygroup by rebuild done: %r is now program %d", original_name, copy_index
+        )
+        return copy_index
+
+    # -- import a program file as a NEW program --------------------------------
+    #
+    # Bytes 1-2 of a program block (FIRSTKG) and of a keygroup block (NXTKG) are
+    # ADDRESSES in the sampler's memory that the sampler assigns and links
+    # itself (the spec calls them "internal use"). A program file carries
+    # file-relative stand-ins (150, 300, ...) which on a sampler are addresses
+    # of OTHER programs' blocks - and a wrong pointer is exactly what scrambled
+    # programs on a real S1000 after DELK (see _delete_keygroup_s1000). Whether a
+    # sampler honours the pointer bytes of an incoming PDATA/KDATA is not known
+    # (measured only: an appended keygroup keeps the NXTKG it was sent). So
+    # nothing here ever sends a pointer value the sampler did not itself hand us:
+    # every block goes out with the pointer bytes that slot ALREADY holds, read
+    # back from the sampler, and the load stops - before writing any keygroup
+    # content - if the sampler's own addresses for the new program alias another
+    # program's. Everything is then re-read and compared with a before snapshot.
+
+    #: bytes the sampler is free to compute itself, so a content comparison skips
+    #: them: program KGRP1@ (1-2) and TPNUM (43); keygroup NXTKG@ (1-2) and, per
+    #: zone, LVXF/HVXF (crossfade factors) and SBADD (the calculated sample
+    #: header address) at 54-57 (+24 per zone)
+    _IMPORT_PROGRAM_INTERNAL = frozenset({1, 2, 43})
+    _IMPORT_KEYGROUP_INTERNAL = frozenset(
+        {1, 2} | {54 + 24 * z + d for z in range(4) for d in range(4)}
+    )
+
+    #: set after a load failed its safety check; further loads are refused for
+    #: the session (like s1000_keygroup_delete_blocked) so a tester can't pile
+    #: a second load on top of a damaged state
+    program_import_blocked = False
+
+    @staticmethod
+    def _address(pointer_bytes):
+        return pointer_bytes[0] | (pointer_bytes[1] << 8)
+
+    def _read_block_fresh(self, region, index, selector=0):
+        invalidate = getattr(self._bridge, "invalidate", None)
+        if invalidate is not None:
+            invalidate()
+        return bytes(
+            self._bridge.get_header_bytes(region, index, 0, 192, selector=selector)
+        )
+
+    @staticmethod
+    def _with_pointer(block, pointer_bytes):
+        out = bytearray(block)
+        out[1:3] = pointer_bytes
+        return bytes(out)
+
+    @staticmethod
+    def _differences(expected, actual, internal):
+        return [
+            i
+            for i in range(max(len(expected), len(actual)))
+            if i not in internal
+            and (i >= len(expected) or i >= len(actual) or expected[i] != actual[i])
+        ]
+
+    def _handle_import_program(self, program_file, new_name):
+        logger = debug_log.get_logger()
+        name = new_name or program_file.name
+        try:
+            self._import_program(program_file, name, logger)
+        except Exception as e:
+            logger.error("import program %r failed: %s", name, e, exc_info=True)
+            if isinstance(e, _ImportSafetyError):
+                self.program_import_blocked = True
+                message = str(e)
+            else:
+                message = (
+                    f"{e} - a partly loaded program may now be on the sampler; "
+                    "refresh and delete it if so"
+                )
+            self.program_import_failed.emit(name, message)
+            return
+        self._programs_renumbered = False
+        self.program_imported.emit(self._imported_index, name)
+
+    def _import_program(self, program_file, name, logger):
+        if self.program_import_blocked:
+            raise DeviceError(
+                "loading programs is disabled for this session after an earlier "
+                "load failed its safety check - check the sampler's programs "
+                "directly (and send the log), then restart the editor"
+            )
+        if not hasattr(self._bridge, "send_and_receive"):
+            raise RuntimeError(
+                "loading a program needs a real hardware connection "
+                "(not available in demo mode)"
+            )
+        existing = self._bridge.program_list()
+        if name in existing:
+            # PDATA deletes a resident program with the same name first
+            raise DeviceError(f'a program named "{name}" is already on the sampler')
+
+        # nothing has been written yet: if the sampler can't be read, refuse
+        before = self._s1000_snapshot(0)
+        taken = {
+            self._address(pointer)
+            for snap in before.values()
+            for pointer in snap["pointers"][: snap["groups"]]
+        }
+        keygroups = program_file.keygroups
+        block_size = program_file.block_size
+
+        def header_for(groups, first_pointer):
+            header = bytearray(program_file.program)
+            self._patch_field(header, "PRNAME", "program", name)
+            self._patch_field(header, "GROUPS", "program", groups)
+            if first_pointer is not None:
+                header[1:3] = first_pointer
+            return bytes(header)
+
+        # 1. create the program (GROUPS=1, as the measured duplicate flow does).
+        # Its pointer bytes are the file's - the one write where there is
+        # nothing of the sampler's to carry yet - so check what came of them
+        # before any keygroup data follows.
+        self._send_and_check(
+            akai_sysex.build_pdata_request(len(existing), header_for(1, None)),
+            f"creating program {len(existing)}",
+        )
+        new_index = self._locate_new_program(existing)
+        created = self._read_block_fresh("program", new_index)
+        if len(created) != block_size:
+            raise _ImportSafetyError(
+                f"the sampler's program block is {len(created)} bytes, the file's "
+                f"is {block_size} - nothing was loaded, but an empty program "
+                f'"{name}" may remain; delete it'
+            )
+        first_pointer = created[1:3]
+        logger.info(
+            "program load: new program %d FIRSTKG sent %s, sampler holds %s",
+            new_index, program_file.program[1:3].hex(), first_pointer.hex(),
+        )
+        own = {self._address(first_pointer)}
+        if self._address(first_pointer) in taken:
+            raise _ImportSafetyError(
+                f"the sampler gave the new program the first-keygroup address "
+                f"{self._address(first_pointer)}, which another program already "
+                "uses. Loading stopped BEFORE any keygroup was written. An empty "
+                f'program "{name}" may remain - do not edit it; check the other '
+                "programs and delete it."
+            )
+
+        # 2. keygroup 0 replaces the dummy the sampler made: keep ITS pointer
+        slot0 = self._read_block_fresh("keygroup", new_index, selector=0)
+        self._send_and_check(
+            akai_sysex.build_kdata_request(
+                new_index, 0, self._with_pointer(keygroups[0], slot0[1:3])
+            ),
+            f"creating keygroup 0 of program {new_index}",
+        )
+
+        # 3. each further keygroup is appended; its NXTKG is the terminator the
+        # previous slot holds (a sampler-made value, not ours), and the previous
+        # keygroup's own pointer is re-read afterwards: that is the address the
+        # sampler gave the new block - it must not collide with anything
+        for index in range(1, len(keygroups)):
+            previous = self._read_block_fresh("keygroup", new_index, selector=index - 1)
+            self._send_and_check(
+                akai_sysex.build_kdata_request(
+                    new_index, index, self._with_pointer(keygroups[index], previous[1:3])
+                ),
+                f"creating keygroup {index} of program {new_index}",
+            )
+            linked = self._read_block_fresh("keygroup", new_index, selector=index - 1)
+            address = self._address(linked[1:3])
+            logger.info(
+                "program load: keygroup %d placed at %d (previous terminator %d)",
+                index, address, self._address(previous[1:3]),
+            )
+            if address in taken or address in own:
+                raise _ImportSafetyError(
+                    f"keygroup {index + 1} was linked at address {address}, which "
+                    f"{'this program' if address in own else 'another program'} "
+                    "already uses. Loading stopped; the new program is incomplete "
+                    f'("{name}") - do not edit it; check the other programs and '
+                    "delete it."
+                )
+            own.add(address)
+            current = self._read_block_fresh("program", new_index)
+            self._send_and_check(
+                akai_sysex.build_pdata_request(
+                    new_index, header_for(index + 1, current[1:3])
+                ),
+                f"updating program {new_index} groups={index + 1}",
+            )
+
+        # 4. read everything back and compare
+        after = self._s1000_snapshot(new_index)
+        problems = []
+        mine = after.get(new_index)
+        if mine is None:
+            problems.append("the new program can't be read back")
+        else:
+            if mine["groups"] != len(keygroups):
+                problems.append(
+                    f"it has {mine['groups']} keygroups, the file has {len(keygroups)}"
+                )
+            actual_program = self._read_block_fresh("program", new_index)
+            # the name (3-14) is ours, possibly renamed at load time
+            name_bytes = frozenset(range(3, 15))
+            diffs = self._differences(
+                program_file.program,
+                actual_program,
+                self._IMPORT_PROGRAM_INTERNAL | name_bytes,
+            )
+            if diffs:
+                problems.append(f"the program header differs at bytes {diffs}")
+            for index in range(min(len(keygroups), mine["groups"])):
+                actual = self._read_block_fresh("keygroup", new_index, selector=index)
+                diffs = self._differences(
+                    keygroups[index], actual, self._IMPORT_KEYGROUP_INTERNAL
+                )
+                if diffs:
+                    problems.append(f"keygroup {index + 1} differs at bytes {diffs}")
+                logger.info(
+                    "program load: keygroup %d NXTKG %s, zone SBADD read back %s "
+                    "(file had %s)",
+                    index, actual[1:3].hex(),
+                    [actual[56 + 24 * z : 58 + 24 * z].hex() for z in range(4)],
+                    [keygroups[index][56 + 24 * z : 58 + 24 * z].hex() for z in range(4)],
+                )
+            chain = [self._address(pointer) for pointer in mine["pointers"][: mine["groups"]]]
+            if chain != sorted(set(chain)):
+                problems.append(f"its keygroup addresses are not in order: {chain}")
+            if set(chain) & taken:
+                problems.append("its keygroup addresses overlap another program's")
+        for index, was in before.items():
+            # the new program may have been slotted in BEFORE this one (the sampler keeps its list ordered), moving it down a place
+            now = after.get(index if index < new_index else index + 1)
+            if now is None:
+                continue
+            if (
+                now["groups"] != was["groups"]
+                or now["keygroups"] != was["keygroups"]
+                or now["program"] != was["program"]
+                or now["pointers"] != was["pointers"]
+            ):
+                problems.append(f"program {index} was changed by the load")
+        if problems:
+            raise _ImportSafetyError(
+                f'"{name}" was loaded but did not check out afterwards: '
+                + "; ".join(problems)
+                + ". Do not trust it or the other programs until you have "
+                "checked them on the sampler; loading is disabled for this session."
+            )
+        self._imported_index = new_index
 
     def _handle_create_keygroup(self, program_index, source_keygroup_index):
         try:

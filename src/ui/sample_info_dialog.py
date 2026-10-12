@@ -44,15 +44,19 @@ class SampleInfoDialog(QDialog):
             QLabel(f"{duration_s:.3f} s - ({size_str})"),
         )
 
-        note_name = midi_note_to_name(info["root_key"])
-        layout.addRow(
-            QLabel("Root key:"),
-            QLabel(f"{note_name} (MIDI note {info['root_key']})"),
-        )
+        # a sampler that can't report these (the S900/S950's pitch field is
+        # only partly understood) sends None - leave the rows out entirely
+        if info.get("root_key") is not None:
+            note_name = midi_note_to_name(info["root_key"])
+            layout.addRow(
+                QLabel("Root key:"),
+                QLabel(f"{note_name} (MIDI note {info['root_key']})"),
+            )
 
-        detune = info["detune"]
-        sign = "+" if detune >= 0 else ""
-        layout.addRow(QLabel("Detune:"), QLabel(f"{sign}{detune:.2f} semitones"))
+        detune = info.get("detune")
+        if detune is not None:
+            sign = "+" if detune >= 0 else ""
+            layout.addRow(QLabel("Detune:"), QLabel(f"{sign}{detune:.2f} semitones"))
 
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel

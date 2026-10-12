@@ -36,7 +36,6 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QMessageBox,
     QPushButton,
-    QScrollBar,
     QSizePolicy,
     QVBoxLayout,
     QComboBox,
@@ -44,14 +43,35 @@ from PySide6.QtWidgets import (
     QStackedWidget,
     QDoubleSpinBox,
     QButtonGroup,
+    QFileDialog,
     QSpinBox,
     QStatusBar,
     QTabWidget,
     QProgressBar,
 )
 from s3k.messages import AKAI_CHARSET, NAME_LENGTH
+from core import akai_program_file
+from ui.diagnostics_ui import add_open_log_folder_action
 from ui.knob import Knob
 from ui.note_spinbox import NoteSpinBox
+from ui.editor_layout import (
+    add_keygroup_row,
+    build_centered_row,
+    build_content_row,
+    build_knob_column,
+    build_knob_value_row,
+    build_labeled_combo_column,
+    build_labeled_knob_value_column,
+    build_list_column,
+    build_paired_row,
+    build_sample_list_row_widget,
+    build_samples_page,
+    build_waveform_scrollbar,
+    build_zone_card,
+    equalize_card_heights,
+    style_card_page_layout,
+    sync_waveform_scrollbar,
+)
 from ui.qt_helpers import FullWidthTabBar, build_scroll_area, build_section_card
 from ui.envelope_graph import ADSREnvelopeGraph, Envelope2Graph
 from ui.keygroup_range_bar import KeygroupRangeBar, keygroup_color
@@ -65,16 +85,25 @@ from ui.about_dialog import AboutDialog
 from ui.quickstart_dialog import show_quickstart_dialog
 from ui.update_helper import UpdateCheckRunner
 from ui import tooltips as tt
-from core import debug_log
+from core import debug_log, diagnostics
 from core.akai_sysex import baseline_semitones_for_bandwidth
 from core import midi_manager as midi_manager_module
 from core import program_editor_bridge
 from core import root_note_detection
+from core import s1000_bridge as s1000_bridge_module
+from core import sampler_models
 from core import sample_editing
 from core import sds_encoder
 from core.midi_notes import midi_note_to_name
-from core.program_editor_bridge import BridgeWorker, MULTI_PART_COUNT
+from core.program_editor_bridge import (
+    BridgeWorker,
+    MULTI_PART_COUNT,
+    S1000_KEYGROUP_FIELDS,
+    S1000_PROGRAM_FIELDS,
+)
+from core.global_settings import EXTERNAL_CONTROLLER_LABELS
 from core.sample_duration import sample_duration_seconds
+from ui.global_tab import GlobalSettingsTab, build_external_controller_combo
 from ui.settings_dialog import MidiSettingsDialog
 
 # shared by every list's "Delete ..." QAction (program/keygroup/sample) -
@@ -92,6 +121,9 @@ _DELETE_SHORTCUTS = [
 # note - raw note 36, which is "C1" under THIS app's own C3-at-60 octave
 # convention (core/midi_notes.py), not general MIDI's C1 (24)
 _FIRST_SLICE_NOTE = 36
+# one keygroup per slice, each on its own key from _FIRST_SLICE_NOTE up to the top of the keyboard (127) - so at most 92 slices. (A program
+# can hold 99 keygroups, but slice 93 onwards would need a key above 127, which LONOTE/HINOTE can't hold.)
+_MAX_SLICES_PER_PROGRAM = 128 - _FIRST_SLICE_NOTE
 
 # (label, tooltip) per ZPLAY value, in raw-byte order (0-4) - labels are the
 # abbreviated forms the front panel itself uses; tooltips spell out what
@@ -184,6 +216,12 @@ _PORTAMENTO_TYPE_OPTIONS = [
 # not env3 itself) - but this app has no Envelope 3 editor page yet, so
 # offering it as a source with no way to shape its ADSR would be confusing
 # rather than useful. Revisit once/if an Envelope 3 page exists.
+# Keygroup mute group (KGMUTE): the raw byte is 0xFF for OFF and 0-31 for a real group - raw 0 is a REAL group (the panel's group "1"), so a zero-filled header is an
+# active one (s3k.params' notes, measured: two keygroups at 0 over the same notes and only one sounds). The panel numbers the groups 1-32 (confirmed on the user's S2000).
+# The combo therefore maps by item DATA (label = raw + 1), never by index.
+_MUTE_GROUP_OFF = 255
+_MUTE_GROUP_COUNT = 32
+
 _MOD_SOURCE_LABELS = [
     "None",
     "Modwheel",
@@ -240,29 +278,11 @@ _MARKER_KNOB_TOOLTIPS = {
     "end": tt.SAMPLE_END_KNOB,
 }
 
-# Detect Root Note (core/root_note_detection.py) - window selection: the
-# loop region (already-identified stable, repeating audio) is strongly
-# preferred over blindly analysing the whole sample, which would both be
-# slower and biased by the attack transient right at the start. Falls
-# back to a short, attack-skipped chunk of [start, end] only when the
-# loop region itself is too small a span to say anything meaningful about
-# (loop off, or loop_start/loop_end sitting at/near the same value) - see
-# _confirm_detect_root_note.
-#
-# _MIN_LOOP_ANALYSIS_FRAMES: enough for at least 2 full periods of the
-# LOWEST note root_note_detection supports (MIDI 21 ~= 29Hz, period
-# ~1513 frames @44100) with real margin, comfortably before any
-# decimation that function does internally.
-_MIN_LOOP_ANALYSIS_FRAMES = 4096
-# skip this much of the fallback window's own start to dodge the attack
-# transient (pick noise, breath, drum-like click) - not applied to the
-# loop-region case, which is already past the attack by construction
-_ROOT_NOTE_ATTACK_SKIP_SECONDS = 0.05
-# capped short deliberately - measured ~200ms of real analysis time for a
-# window this size (pure Python, no numpy) against ~900ms for a full
-# second's worth; this is a one-click button, not a live-dragged control,
-# but should still feel closer to instant than "this can take a while"
-_ROOT_NOTE_FALLBACK_WINDOW_SECONDS = 0.3
+# Detect Root Note (core/root_note_detection.py) - the analysis window is chosen by root_note_detection.analysis_window (shared
+# with the A4000 editor); these names are kept for the tests and _detect_root_note_analysis_window below.
+_MIN_LOOP_ANALYSIS_FRAMES = root_note_detection.MIN_LOOP_ANALYSIS_FRAMES
+_ROOT_NOTE_ATTACK_SKIP_SECONDS = root_note_detection.ATTACK_SKIP_SECONDS
+_ROOT_NOTE_FALLBACK_WINDOW_SECONDS = root_note_detection.WINDOW_SECONDS
 
 # real audio for AKAISDS_DEMO_SAMPLER's fake sample-audio path (see
 # _fetch_demo_sample_audio) - the same fixture the test suite uses, not
@@ -286,6 +306,11 @@ _DEMO_TEST_AUDIO_PATH = os.path.normpath(
 # long "double-click and wait" really is) without needing hardware -
 # nothing here talks to a real connection at any bit rate.
 _DEMO_MS_PER_WORD = 1.02
+
+# how often a real receive's buffered packets are pushed into the waveform
+# (see _on_sample_chunk_received) - a repaint per SDS packet (one every
+# ~40ms on a real sampler) isn't needed for a smooth-looking fill
+_LIVE_CHUNK_FLUSH_MS = 100
 
 
 def _synthesized_demo_frame_count(sample_index):
@@ -433,6 +458,19 @@ class ProgramEditorWindow(QMainWindow):
         # (_on_samples_loaded) - a resident sample's own index can start
         # meaning something else after that.
         self._sample_waveform_cache = {}
+        # audio this window itself just SENT, by sample NAME -> (samples,
+        # framerate). The cache above is wiped by every sample-list reload
+        # (an index can mean something else afterwards), and the edit/
+        # duplicate/slice flows reload several times, so the sample that was
+        # on screen came back header-only and needed a slow SDS dump to see
+        # again - for audio we were holding the whole time.
+        # _on_sample_detail_loaded attaches it to the fresh header when the
+        # name AND frame count still match. Pruned to names in the list on
+        # every reload; see _retain_sample_audio.
+        self._retained_sample_audio = {}
+        # packets decoded during a real receive, waiting for the next
+        # _flush_live_chunks - see _on_sample_chunk_received
+        self._live_chunk_buffer = []
         # name/duration labels per row (index -> (generation, name_label,
         # duration_label)), rebuilt every _on_samples_loaded, plus a
         # generation counter bumped there too - sample_length_loaded
@@ -454,6 +492,26 @@ class ProgramEditorWindow(QMainWindow):
 
         self._main_window = main_window
         self._bridge = bridge
+        # which sampler family this window was BUILT for. The S1000 has
+        # none of the S3000's modulation matrix/LFO2/portamento/ENV3/Multi
+        # (and a different wire protocol - see core/s1000_bridge.py), and
+        # _apply_s1000_gating() below removes those widgets once, at
+        # construction - so a model change in Settings while this window
+        # is open closes it instead (see _open_settings_dialog)
+        self._sampler_model = sampler_models.normalize(
+            getattr(
+                getattr(main_window, "sampler_controller", None),
+                "sampler_model",
+                None,
+            )
+        )
+        self._is_s1000 = sampler_models.is_s1000(self._sampler_model)
+        self._program_name_on_sampler = None
+        self._stray_dialog_open = False  # see _on_stray_replies_detected
+        # (knob, value_label, field, region) for every S1000-only controller
+        # knob built by _build_s1000_controller_grid - loaded from
+        # keygroups_loaded/detail_loaded by _load_s1000_controls
+        self._s1000_controls = []
 
         # a single persistent worker thread owns every call to the bridge
         # for this window's whole lifetime, taking requests off a queue and
@@ -509,7 +567,18 @@ class ProgramEditorWindow(QMainWindow):
         # this one lives as long as the editor window itself does.
         self._sample_preview_player = SlicePreviewPlayer(self)
 
-        self._worker = BridgeWorker(self._bridge)
+        # recolor the palette-colored swatches when the theme changes (see
+        # _refresh_themed_swatches) - disconnected again in closeEvent
+        theme.notifier.changed.connect(self._refresh_themed_swatches)
+
+        self._worker = BridgeWorker(
+            self._bridge,
+            # an S1000 also reads its fixed controller routing (see
+            # program_editor_bridge.S1000_PROGRAM_FIELDS)
+            extra_program_fields=S1000_PROGRAM_FIELDS if self._is_s1000 else (),
+            extra_keygroup_fields=S1000_KEYGROUP_FIELDS if self._is_s1000 else (),
+            s1000=self._is_s1000,
+        )
         self._worker.busy_changed.connect(self._on_worker_busy_changed)
         self._worker.programs_loaded.connect(self._on_programs_loaded)
         self._worker.programs_load_failed.connect(self._on_program_load_failed)
@@ -544,6 +613,15 @@ class ProgramEditorWindow(QMainWindow):
                 f"Write failed ({param_name}): {e}"
             )
         )
+        self._worker.stray_replies_detected.connect(self._on_stray_replies_detected)
+        self._worker.global_settings_loaded.connect(self._on_global_settings_loaded)
+        self._worker.global_settings_load_failed.connect(
+            self._on_global_settings_load_failed
+        )
+        self._worker.global_setting_written.connect(self._on_global_setting_written)
+        self._worker.global_setting_write_failed.connect(
+            self._on_global_setting_write_failed
+        )
         self._worker.program_deleted.connect(self._on_program_deleted)
         self._worker.program_delete_failed.connect(
             lambda _index, e: self.status_bar.showMessage(
@@ -551,17 +629,18 @@ class ProgramEditorWindow(QMainWindow):
             )
         )
         self._worker.keygroup_deleted.connect(self._on_keygroup_deleted)
-        self._worker.keygroup_delete_failed.connect(
-            lambda _p, _k, e: self.status_bar.showMessage(
-                f"Couldn't delete keygroup: {e}"
-            )
-        )
+        self._worker.program_rebuilt.connect(self._on_program_rebuilt)
+        self._worker.keygroup_delete_failed.connect(self._on_keygroup_delete_failed)
         self._worker.program_created.connect(self._on_program_created)
         self._worker.program_create_failed.connect(
             lambda _index, e: self.status_bar.showMessage(
                 f"Couldn't duplicate program: {e}"
             )
         )
+        self._worker.program_exported.connect(self._on_program_exported)
+        self._worker.program_export_failed.connect(self._on_program_export_failed)
+        self._worker.program_imported.connect(self._on_program_imported)
+        self._worker.program_import_failed.connect(self._on_program_import_failed)
         self._worker.keygroup_created.connect(self._on_keygroup_created)
         self._worker.keygroup_create_failed.connect(
             lambda _p, e: self.status_bar.showMessage(
@@ -689,23 +768,41 @@ class ProgramEditorWindow(QMainWindow):
 
         self.keygroup_range_bar = KeygroupRangeBar()
 
-        # bold header + list, same layout shape as the dashboard's queue/hardware panels
-        programs_column = QVBoxLayout()
-        programs_column.setContentsMargins(0, 0, 0, 0)
-        programs_column.setSpacing(6)
-        programs_column.addWidget(QLabel("<b>Programs</b>"))
-        programs_column.addWidget(self.program_list)
-        programs_container = QWidget()
-        programs_container.setLayout(programs_column)
+        # Save/Load a whole program as an Akai .p1/.p3 file (samples are NOT
+        # included - zones refer to them by name). Both are also in the
+        # program list's context menu.
+        self._save_program_action = QAction("Save Program to File...", self.program_list)
+        self._save_program_action.triggered.connect(self._save_program_to_file)
+        self._save_program_action.setEnabled(False)
+        self.program_list.addAction(self._save_program_action)
+        self._load_program_action = QAction("Load Program from File...", self.program_list)
+        self._load_program_action.setToolTip(tt.LOAD_PROGRAM_DEMO_MODE)
+        self._load_program_action.triggered.connect(self._load_program_from_file)
+        self._load_program_action.setEnabled(False)
+        self.program_list.addAction(self._load_program_action)
 
-        keygroups_column = QVBoxLayout()
-        keygroups_column.setContentsMargins(0, 0, 0, 0)
-        keygroups_column.setSpacing(6)
-        keygroups_column.addWidget(QLabel("<b>Keygroups</b>"))
-        keygroups_column.addWidget(self.keygroup_range_bar)
-        keygroups_column.addWidget(self.keygroup_list)
-        keygroups_container = QWidget()
-        keygroups_container.setLayout(keygroups_column)
+        self.save_program_button = QPushButton("Save...")
+        self.save_program_button.setToolTip(tt.SAVE_PROGRAM_BUTTON)
+        self.save_program_button.clicked.connect(self._save_program_action.trigger)
+        self.save_program_button.setEnabled(False)
+        self.load_program_button = QPushButton("Load...")
+        self.load_program_button.setToolTip(tt.LOAD_PROGRAM_BUTTON)
+        self.load_program_button.clicked.connect(self._load_program_action.trigger)
+        self.load_program_button.setEnabled(False)
+        program_file_row = QHBoxLayout()
+        program_file_row.setContentsMargins(0, 0, 0, 0)
+        program_file_row.setSpacing(6)
+        program_file_row.addWidget(self.save_program_button)
+        program_file_row.addWidget(self.load_program_button)
+        program_file_widget = QWidget()
+        program_file_widget.setLayout(program_file_row)
+
+        programs_container = build_list_column(
+            "Programs", self.program_list, program_file_widget
+        )
+        keygroups_container = build_list_column(
+            "Keygroups", self.keygroup_range_bar, self.keygroup_list
+        )
 
         self.note_lo_spinbox = NoteSpinBox()
         self.note_hi_spinbox = NoteSpinBox()
@@ -717,6 +814,22 @@ class ProgramEditorWindow(QMainWindow):
         note_range_row.addWidget(QLabel("-"))
         note_range_row.addWidget(self.note_hi_spinbox)
         note_range_row.addStretch()
+
+        # keygroup mute group - a choke group (closed hi-hat cuts the open one). Item DATA is the raw byte (Off = 255); see _MUTE_GROUP_OFF
+        self.mute_group_combo = QComboBox()
+        self.mute_group_combo.addItem("Off", _MUTE_GROUP_OFF)
+        for group in range(_MUTE_GROUP_COUNT):
+            # the PANEL numbers the groups 1-32 (confirmed on the user's S2000, 2026-10-10); the raw byte is 0-31
+            self.mute_group_combo.addItem(str(group + 1), group)
+        self.mute_group_combo.setToolTip(tt.MUTE_GROUP_COMBO)
+        self.mute_group_combo.setFixedWidth(70)
+        self.mute_group_combo.currentIndexChanged.connect(self._on_mute_group_chosen)
+        mute_group_row = QHBoxLayout()
+        mute_group_label = QLabel("Mute Group")
+        mute_group_label.setFixedWidth(80)
+        mute_group_row.addWidget(mute_group_label)
+        mute_group_row.addWidget(self.mute_group_combo)
+        mute_group_row.addStretch()
 
         self.cutoff_knob = Knob()
         self.cutoff_knob.setRange(0, 99)
@@ -771,16 +884,16 @@ class ProgramEditorWindow(QMainWindow):
         self.release1_knob.setFixedSize(40, 40)
         self.release1_knob.setToolTip(tt.ENV1_RELEASE_KNOB)
 
-        attack1_col, self.attack1_value_label = self._build_knob_column(
+        attack1_col, self.attack1_value_label = build_knob_column(
             "Attack", self.attack1_knob
         )
-        decay1_col, self.decay1_value_label = self._build_knob_column(
+        decay1_col, self.decay1_value_label = build_knob_column(
             "Decay", self.decay1_knob
         )
-        sustain1_col, self.sustain1_value_label = self._build_knob_column(
+        sustain1_col, self.sustain1_value_label = build_knob_column(
             "Sustain", self.sustain1_knob
         )
-        release1_col, self.release1_value_label = self._build_knob_column(
+        release1_col, self.release1_value_label = build_knob_column(
             "Release", self.release1_knob
         )
 
@@ -844,8 +957,8 @@ class ProgramEditorWindow(QMainWindow):
             level_knob.setFixedSize(32, 32)
             level_knob.setToolTip(tt.ENV2_LEVEL_KNOB.format(stage=i))
 
-            rate_layout, rate_value_label = self._build_knob_value_row(rate_knob)
-            level_layout, level_value_label = self._build_knob_value_row(level_knob)
+            rate_layout, rate_value_label = build_knob_value_row(rate_knob)
+            level_layout, level_value_label = build_knob_value_row(level_knob)
             env2_rate_layouts.append(rate_layout)
             env2_level_layouts.append(level_layout)
 
@@ -893,23 +1006,17 @@ class ProgramEditorWindow(QMainWindow):
                 keygroup_index_getter=self.keygroup_list.currentRow,
             )
 
-        env1_graph_row = QHBoxLayout()
-        env1_graph_row.addStretch()
-        env1_graph_row.addWidget(self.env1_graph)
-        env1_graph_row.addStretch()
-        env2_graph_row = QHBoxLayout()
-        env2_graph_row.addStretch()
-        env2_graph_row.addWidget(self.env2_graph)
-        env2_graph_row.addStretch()
+        env1_graph_row = build_centered_row(self.env1_graph)
+        env2_graph_row = build_centered_row(self.env2_graph)
 
-        cutoff_column, self.cutoff_value_label = self._build_knob_column(
+        cutoff_column, self.cutoff_value_label = build_knob_column(
             "Cutoff", self.cutoff_knob
         )
-        resonance_column, self.resonance_value_label = self._build_knob_column(
+        resonance_column, self.resonance_value_label = build_knob_column(
             "Resonance", self.resonance_knob
         )
         key_filter_track_column, self.key_filter_track_value_label = (
-            self._build_knob_column("Key Filter Track", self.key_filter_track_knob)
+            build_knob_column("Key Filter Track", self.key_filter_track_knob)
         )
 
         knobs_layout = QHBoxLayout()
@@ -926,6 +1033,9 @@ class ProgramEditorWindow(QMainWindow):
         self._zone_pan = []
         self._zone_looptype = []
         self._zone_keytrack = []
+        self._zone_vss = []  # per-zone sample START dependence on velocity (VSS1-4): small bipolar knobs
+        self._zone_vss_labels = []  # their value readouts
+        self._zone_vss_rows = []  # the layouts holding them, hidden on an S1000 (_apply_s1000_gating)
 
         _ZONE_FIELDS = [
             (
@@ -1014,7 +1124,7 @@ class ProgramEditorWindow(QMainWindow):
             # usual centered/plain knob-column labels.
             combo = QComboBox()
             combo.setEnabled(False)
-            sample_column = self._build_labeled_combo_column(
+            sample_column = build_labeled_combo_column(
                 "<b>Sample</b>", combo, center=False
             )
             self._zone_combos.append(combo)
@@ -1030,10 +1140,10 @@ class ProgramEditorWindow(QMainWindow):
             pan_knob.setEnabled(True)
             pan_knob.setToolTip(tt.ZONE_PAN_KNOB)
 
-            loud_col, loud_val_label = self._build_labeled_knob_value_column(
+            loud_col, loud_val_label = build_labeled_knob_value_column(
                 "<b>Loud</b>", loud_knob, center=False
             )
-            pan_col, pan_val_label = self._build_labeled_knob_value_column(
+            pan_col, pan_val_label = build_labeled_knob_value_column(
                 "<b>Pan</b>", pan_knob, center=False
             )
 
@@ -1065,10 +1175,33 @@ class ProgramEditorWindow(QMainWindow):
             vel_row.addSpacing(12)
             vel_row.addWidget(vel_hi_label)
             vel_row.addWidget(vel_hi)
+
+            # velocity-driven sample start (VSS<n>): a signed start-point offset in sample points, as a small bipolar knob (the editor's 28px
+            # convention) right of Velocity High. -9999..9999 is coarse on a knob: Shift-drag is fine control and a click types an exact value,
+            # like every Knob. Its own layout so an S1000 (no VSS) can hide just this part of the row.
+            vss_group = QHBoxLayout()
+            vss_group.setSpacing(4)
+            vss_group.addSpacing(12)
+            vss_label = QLabel("Vel. start")
+            vss_label.setFixedWidth(60)
+            vss = Knob()
+            vss.setRange(-9999, 9999)
+            vss.setDefaultValue(0)
+            vss.setFixedSize(28, 28)
+            vss.setToolTip(tt.VELOCITY_START_KNOB)
+            vss.setEnabled(True)
+            vss_knob_row, vss_value_label = build_knob_value_row(vss)
+            vss_value_label.setFixedWidth(44)  # "-9999"
+            vss_group.addWidget(vss_label)
+            vss_group.addLayout(vss_knob_row)
+            vel_row.addLayout(vss_group)
             vel_row.addStretch()
             page_layout.addLayout(vel_row)
             self._zone_vel_lo.append(vel_lo)
             self._zone_vel_hi.append(vel_hi)
+            self._zone_vss.append(vss)
+            self._zone_vss_labels.append(vss_value_label)
+            self._zone_vss_rows.append(vss_group)
 
             # tune stays as a spinbox — precision decimal values need it
             tune_row = QHBoxLayout()
@@ -1142,6 +1275,12 @@ class ProgramEditorWindow(QMainWindow):
                 value_converter=self._semitones_to_tune_offset,
             )
             self._wire_knob_write(
+                vss,
+                f"VSS{zone_idx + 1}",
+                "keygroup",
+                keygroup_index_getter=self.keygroup_list.currentRow,
+            )
+            self._wire_knob_write(
                 loud_knob,
                 vloud,
                 "keygroup",
@@ -1168,17 +1307,7 @@ class ProgramEditorWindow(QMainWindow):
 
         self._zone_button_group.idClicked.connect(self._zone_stack.setCurrentIndex)
 
-        zone_header = QLabel("Zone")
-        zone_header.setObjectName("sectionHeader")
-        zone_section = QVBoxLayout()
-        zone_section.setContentsMargins(12, 10, 12, 12)
-        zone_section.setSpacing(10)
-        zone_section.addWidget(zone_header)
-        zone_section.addLayout(zone_selector_row)
-        zone_section.addWidget(self._zone_stack)
-        zone_card = QWidget()
-        zone_card.setObjectName("zoneCard")
-        zone_card.setLayout(zone_section)
+        zone_card = build_zone_card(zone_selector_row, self._zone_stack)
 
         # same grouping principle as the Program tab: Range on its own,
         # every filter control together, then the existing per-zone card.
@@ -1186,7 +1315,7 @@ class ProgramEditorWindow(QMainWindow):
         # independently meaningful generators (a genuine ADSR vs. ENV2's
         # 4-stage rate/level shape, see Envelope2Graph's own comment), and a
         # shared "Envelopes" title read as one thing when it's really two.
-        range_section = self._build_section_card("Range", note_range_row)
+        range_section = self._build_section_card("Range", note_range_row, mute_group_row)
         filter_section = self._build_section_card("Filter", knobs_layout)
         env1_section = self._build_section_card(
             "Envelope 1", env1_graph_row, env1_controls_row
@@ -1198,25 +1327,21 @@ class ProgramEditorWindow(QMainWindow):
         # each naturally shorter than their paired Filter/Envelope 2, which
         # reads oddly side by side once cards no longer auto-stretch to
         # fill the row (see _build_section_card's own Fixed-policy comment)
-        self._equalize_card_heights(range_section, filter_section)
-        self._equalize_card_heights(env1_section, env2_section)
+        equalize_card_heights(range_section, filter_section)
+        equalize_card_heights(env1_section, env2_section)
 
         # Range is a single short row and Filter is comparable in height -
         # side by side halves the vertical space these two cost together.
         # Same idea for the two envelope cards, which were side by side
         # already as one card's two halves - now just two cards instead.
-        range_filter_row = QHBoxLayout()
         # 1:1, not the 2-for-Filter split this briefly had - measured
         # sizeHints say Filter's own content (273px: 3 knobs) is actually
         # narrower than Range's (299px: label + two note spinboxes), so the
         # 2x weight was giving Filter more than its share and stretching it
         # wider than Range needed to be. Matches every other paired row on
         # the Program tab, which is never anything but 1:1.
-        range_filter_row.addWidget(range_section, stretch=1)
-        range_filter_row.addWidget(filter_section, stretch=1)
-        envelopes_row = QHBoxLayout()
-        envelopes_row.addWidget(env1_section, stretch=1)
-        envelopes_row.addWidget(env2_section, stretch=1)
+        range_filter_row = build_paired_row(range_section, filter_section)
+        envelopes_row = build_paired_row(env1_section, env2_section)
 
         # Modulation (Keygroup tab half) - the other side of the Program
         # tab's Modulation card: amounts for the destinations whose value
@@ -1291,7 +1416,7 @@ class ProgramEditorWindow(QMainWindow):
         # inputs - per direct user request.
         self.lfo1_to_pitch_knob = self._build_mod_amount_knob()
         lfo1_to_pitch_knob_row, self.lfo1_to_pitch_value_label = (
-            self._build_knob_value_row(self.lfo1_to_pitch_knob)
+            build_knob_value_row(self.lfo1_to_pitch_knob)
         )
         self._wire_knob_write(
             self.lfo1_to_pitch_knob,
@@ -1367,7 +1492,7 @@ class ProgramEditorWindow(QMainWindow):
         )
 
         detail_container_layout = QVBoxLayout()
-        detail_container_layout.setSpacing(12)
+        style_card_page_layout(detail_container_layout)
         detail_container_layout.addLayout(range_filter_row)
         detail_container_layout.addLayout(envelopes_row)
         detail_container_layout.addWidget(zone_card)
@@ -1416,14 +1541,14 @@ class ProgramEditorWindow(QMainWindow):
         self.pan_knob.setRange(-50, 50)
         self.pan_knob.setFixedSize(56, 56)
         self.pan_knob.setToolTip(tt.PROGRAM_PAN_KNOB)
-        pan_column, self.pan_value_label = self._build_knob_column("Pan", self.pan_knob)
+        pan_column, self.pan_value_label = build_knob_column("Pan", self.pan_knob)
 
         self.loud_knob = Knob()
         self.loud_knob.setRange(0, 99)
         self.loud_knob.setDefaultValue(80)
         self.loud_knob.setFixedSize(56, 56)
         self.loud_knob.setToolTip(tt.PROGRAM_LOUDNESS_KNOB)
-        loud_column, self.loud_value_label = self._build_knob_column(
+        loud_column, self.loud_value_label = build_knob_column(
             "Loud", self.loud_knob
         )
 
@@ -1432,7 +1557,7 @@ class ProgramEditorWindow(QMainWindow):
         self.velocity_knob.setDefaultValue(20)
         self.velocity_knob.setFixedSize(56, 56)
         self.velocity_knob.setToolTip(tt.PROGRAM_VELOCITY_KNOB)
-        velocity_column, self.velocity_value_label = self._build_knob_column(
+        velocity_column, self.velocity_value_label = build_knob_column(
             "Velocity", self.velocity_knob
         )
 
@@ -1484,17 +1609,17 @@ class ProgramEditorWindow(QMainWindow):
         self.lfo1_sync_combo = QComboBox()
         self.lfo1_sync_combo.addItems(["On", "Off"])
         self.lfo1_sync_combo.setToolTip(tt.LFO1_SYNC_COMBO)
-        lfo1_sync_column = self._build_labeled_combo_column(
+        lfo1_sync_column = build_labeled_combo_column(
             "LFO1 sync", self.lfo1_sync_combo
         )
 
-        lfo_rate_column, self.lfo_rate_value_label = self._build_knob_column(
+        lfo_rate_column, self.lfo_rate_value_label = build_knob_column(
             "LFO rate", self.lfo_rate_knob
         )
-        lfo_depth_column, self.lfo_depth_value_label = self._build_knob_column(
+        lfo_depth_column, self.lfo_depth_value_label = build_knob_column(
             "LFO depth", self.lfo_depth_knob
         )
-        lfo_delay_column, self.lfo_delay_value_label = self._build_knob_column(
+        lfo_delay_column, self.lfo_delay_value_label = build_knob_column(
             "LFO delay", self.lfo_delay_knob
         )
 
@@ -1551,17 +1676,17 @@ class ProgramEditorWindow(QMainWindow):
         self.lfo2_trig_combo = QComboBox()
         self.lfo2_trig_combo.addItems(["Off", "On"])
         self.lfo2_trig_combo.setToolTip(tt.LFO2_TRIG_COMBO)
-        lfo2_trig_column = self._build_labeled_combo_column(
+        lfo2_trig_column = build_labeled_combo_column(
             "LFO2 retrig", self.lfo2_trig_combo
         )
 
-        lfo2_rate_column, self.lfo2_rate_value_label = self._build_knob_column(
+        lfo2_rate_column, self.lfo2_rate_value_label = build_knob_column(
             "LFO2 rate", self.lfo2_rate_knob
         )
-        lfo2_depth_column, self.lfo2_depth_value_label = self._build_knob_column(
+        lfo2_depth_column, self.lfo2_depth_value_label = build_knob_column(
             "LFO2 depth", self.lfo2_depth_knob
         )
-        lfo2_delay_column, self.lfo2_delay_value_label = self._build_knob_column(
+        lfo2_delay_column, self.lfo2_delay_value_label = build_knob_column(
             "LFO2 delay", self.lfo2_delay_knob
         )
 
@@ -1659,7 +1784,7 @@ class ProgramEditorWindow(QMainWindow):
         self.bend_up_combo.addItems([f"{i} st" for i in range(25)])
         self.bend_up_combo.setMaximumWidth(70)
         self.bend_up_combo.setToolTip(tt.BEND_UP_COMBO)
-        bend_up_column = self._build_labeled_combo_column("Bend up", self.bend_up_combo)
+        bend_up_column = build_labeled_combo_column("Bend up", self.bend_up_combo)
 
         self.bend_down_combo = QComboBox()
         # s3k.params declares B_PTCHD's range as 0-12 (asymmetric with
@@ -1671,7 +1796,7 @@ class ProgramEditorWindow(QMainWindow):
         self.bend_down_combo.addItems([f"{i} st" for i in range(25)])
         self.bend_down_combo.setMaximumWidth(70)
         self.bend_down_combo.setToolTip(tt.BEND_DOWN_COMBO)
-        bend_down_column = self._build_labeled_combo_column(
+        bend_down_column = build_labeled_combo_column(
             "Bend down", self.bend_down_combo
         )
 
@@ -1701,7 +1826,7 @@ class ProgramEditorWindow(QMainWindow):
         self.portamento_rate_knob.setFixedSize(28, 28)
         self.portamento_rate_knob.setToolTip(tt.PORTAMENTO_RATE_KNOB)
         portamento_rate_column, self.portamento_rate_value_label = (
-            self._build_labeled_knob_value_column("Rate", self.portamento_rate_knob)
+            build_labeled_knob_value_column("Rate", self.portamento_rate_knob)
         )
 
         self.portamento_type_combo = QComboBox()
@@ -1734,7 +1859,7 @@ class ProgramEditorWindow(QMainWindow):
         self.mono_legato_combo = QComboBox()
         self.mono_legato_combo.addItems(["Off", "On"])
         self.mono_legato_combo.setMaximumWidth(70)
-        mono_legato_column = self._build_labeled_combo_column(
+        mono_legato_column = build_labeled_combo_column(
             "Mono Legato", self.mono_legato_combo
         )
 
@@ -1795,11 +1920,11 @@ class ProgramEditorWindow(QMainWindow):
         lfo2_row.addStretch()
         lfo2_section = self._build_section_card("LFO2", lfo2_row)
         # same reasoning as Range/Filter and Envelope 1/2 on the Keygroup
-        # tab - see _equalize_card_heights' own comment. Already equal in
+        # tab - see ui.editor_layout.equalize_card_heights' own comment. Already equal in
         # practice (LFO1/LFO2 are symmetric), but pin it explicitly rather
         # than leaving it an accident of current content - a future layout
         # tweak to just one of the two shouldn't silently throw this off.
-        self._equalize_card_heights(lfo_section, lfo2_section)
+        equalize_card_heights(lfo_section, lfo2_section)
 
         # Pitch - tuning offset and pitch-bend range, up and down
         pitch_row = QHBoxLayout()
@@ -1809,8 +1934,8 @@ class ProgramEditorWindow(QMainWindow):
         pitch_row.addStretch()
         pitch_section = self._build_section_card("Pitch", pitch_row)
         # same reasoning as Range/Filter and Envelope 1/2 on the Keygroup
-        # tab - see _equalize_card_heights' own comment
-        self._equalize_card_heights(volume_section, pitch_section)
+        # tab - see ui.editor_layout.equalize_card_heights' own comment
+        equalize_card_heights(volume_section, pitch_section)
 
         # Voice & MIDI - how the program responds to incoming MIDI and
         # allocates/steals voices
@@ -1831,8 +1956,8 @@ class ProgramEditorWindow(QMainWindow):
         portamento_row.addStretch()
         portamento_section = self._build_section_card("Portamento", portamento_row)
         # same reasoning as Range/Filter and Envelope 1/2 on the Keygroup
-        # tab - see _equalize_card_heights' own comment
-        self._equalize_card_heights(voice_section, portamento_section)
+        # tab - see ui.editor_layout.equalize_card_heights' own comment
+        equalize_card_heights(voice_section, portamento_section)
 
         # Modulation - the assignable modulation matrix (MODS*/MODV*
         # fields). Every destination's SOURCE choice is a program-wide
@@ -1991,6 +2116,22 @@ class ProgramEditorWindow(QMainWindow):
         mod_footnote_row = QHBoxLayout()
         mod_footnote_row.addWidget(mod_footnote)
 
+        # what the "External" source above actually is - a sampler-wide
+        # setting (its GLOBAL page), not stored in any program, and mirrored
+        # on the Global tab (see _on_global_setting_chosen). Enabled by
+        # _on_global_settings_loaded once the sampler has answered, so a
+        # failed read (demo mode, an unexpected value) leaves it disabled
+        # instead of offering a write it can't verify. `activated`, not
+        # currentIndexChanged: loading the value must not write it back.
+        self.external_controller_combo = build_external_controller_combo()
+        self.external_controller_combo.activated.connect(
+            self._on_mod_external_controller_chosen
+        )
+        external_controller_row = QHBoxLayout()
+        external_controller_row.addWidget(QLabel("External controller"))
+        external_controller_row.addWidget(self.external_controller_combo)
+        external_controller_row.addStretch()
+
         # 7 destination rows above (Pan, Loudness, LFO1 Rate/Depth/Delay,
         # Filter Freq., Pitch); boundaries separate the label column
         # from Slot 1, then Slot 1|2 and Slot 2|3 - never a slot's own
@@ -2001,7 +2142,7 @@ class ProgramEditorWindow(QMainWindow):
         mod_grid_row.addWidget(mod_matrix)
 
         modulation_section = self._build_section_card(
-            "Modulation", mod_grid_row, mod_footnote_row
+            "Modulation", mod_grid_row, external_controller_row, mod_footnote_row
         )
 
         # two cards per row rather than one long stacked column - halves
@@ -2025,7 +2166,7 @@ class ProgramEditorWindow(QMainWindow):
 
         program_page = QWidget()
         program_page_layout = QVBoxLayout()
-        program_page_layout.setSpacing(12)
+        style_card_page_layout(program_page_layout)
         program_page_layout.addWidget(name_section)
         program_page_layout.addLayout(program_row1)
         program_page_layout.addLayout(program_row2)
@@ -2063,10 +2204,9 @@ class ProgramEditorWindow(QMainWindow):
         self.cancel_transfer_button.clicked.connect(self._cancel_hardware_transfer)
         self.cancel_transfer_button.setVisible(False)
 
-        content_layout = QHBoxLayout()
-        content_layout.addWidget(programs_container)
-        content_layout.addWidget(keygroups_container)
-        content_layout.addWidget(self.detail_stack, stretch=1)
+        content_layout = build_content_row(
+            programs_container, keygroups_container, self.detail_stack
+        )
         programs_tab_page = QWidget()
         programs_tab_page.setLayout(content_layout)
 
@@ -2080,6 +2220,9 @@ class ProgramEditorWindow(QMainWindow):
         self.main_tabs.addTab(multis_tab_page, "Multi")
         self.main_tabs.addTab(programs_tab_page, "Programs")
         self._samples_tab_index = self.main_tabs.addTab(samples_tab_page, "Samples")
+        self.global_tab = GlobalSettingsTab()
+        self.global_tab.setting_chosen.connect(self._on_global_setting_chosen)
+        self._global_tab_index = self.main_tabs.addTab(self.global_tab, "Global")
         # Multis stays the first tab, but isn't fully working yet - open on
         # Programs instead
         self.main_tabs.setCurrentIndex(1)
@@ -2311,6 +2454,13 @@ class ProgramEditorWindow(QMainWindow):
         )
         window_menu.addAction(self._samples_tab_action)
 
+        self._global_tab_action = QAction("Global Tab", self)
+        self._global_tab_action.setShortcut("Ctrl+4")
+        self._global_tab_action.triggered.connect(
+            lambda: self.main_tabs.setCurrentIndex(self._global_tab_index)
+        )
+        window_menu.addAction(self._global_tab_action)
+
         # Qt has no MenuRole for "check for updates" (only About/Preferences/
         # Quit get auto-relocated into the native app menu on macOS - see
         # QAction.MenuRole), so this stays a plain Help menu on every
@@ -2321,6 +2471,7 @@ class ProgramEditorWindow(QMainWindow):
         quickstart_action.triggered.connect(lambda: show_quickstart_dialog(self))
         help_menu.addAction(quickstart_action)
         help_menu.addSeparator()
+        add_open_log_folder_action(help_menu, self)
 
         about_action = QAction("About AKAISDS...", self)
         about_action.setMenuRole(QAction.MenuRole.AboutRole)
@@ -2387,6 +2538,7 @@ class ProgramEditorWindow(QMainWindow):
         self._sample_preview_player.finished.connect(self.waveform_view.clear_playhead)
         self.waveform_scrollbar.valueChanged.connect(self._on_waveform_scrollbar_moved)
         self._worker.submit_program_list()
+        self._request_global_settings()
 
         # enable knobs and wire their (debounced) writes
         self.cutoff_knob.setEnabled(True)
@@ -2472,6 +2624,402 @@ class ProgramEditorWindow(QMainWindow):
             *self._env2_level_knobs,
         ):
             knob.setEnabled(True)
+
+        if self._is_s1000:
+            # after every setEnabled(True) above, which would otherwise
+            # re-enable what this disables
+            self._apply_s1000_gating(
+                hidden_widgets=[
+                    portamento_section,
+                    modulation_section,
+                    keygroup_modulation_section,
+                    self.env2_graph,
+                ],
+                hidden_layouts=[
+                    lfo2_shape_sync_column,
+                    lfo_shape_column,
+                    bend_down_column,
+                    resonance_column,
+                    env2_grid,
+                    env2_graph_row,
+                    mute_group_row,
+                    *self._zone_vss_rows,
+                ],
+                env_sections=(env1_section, env2_section),
+                bend_up_column=bend_up_column,
+                pan_lfo=(
+                    lfo2_section,
+                    (lfo2_rate_column, lfo2_depth_column, lfo2_delay_column),
+                ),
+                page_layouts=(program_page_layout, detail_container_layout),
+            )
+
+    def _apply_s1000_gating(
+        self,
+        hidden_widgets,
+        hidden_layouts,
+        env_sections,
+        bend_up_column,
+        pan_lfo,
+        page_layouts,
+    ):
+        # one-way: removes/disables everything an S1000 doesn't have
+        # (core/s1000_bridge.py reads those fields as neutral zeros and
+        # refuses to write them, so nothing here is a safety net - it just
+        # stops the UI offering controls that can't do anything)
+        for widget in hidden_widgets:
+            widget.setVisible(False)
+        for layout in hidden_layouts:
+            self._set_layout_visible(layout, False)
+
+        # the S1000 has ONE bend field, B_PTCH, 0-12 semitones (the S3000
+        # splits it into B_PTCH "increase", 0-24, and B_PTCHD "decrease"
+        # at an offset past the S1000's block) - so it's a plain range, not
+        # a direction: relabelled, and trimmed to the S1000's 12
+        while self.bend_up_combo.count() > 13:
+            self.bend_up_combo.removeItem(self.bend_up_combo.count() - 1)
+        bend_up_column.itemAt(0).widget().setText("Bend range")
+        self.bend_up_combo.setToolTip(tt.S1000_BEND_RANGE_COMBO)
+
+        # value ranges narrower on an S1000 than the S3000 defaults the
+        # widgets were built with (S1000 spec: POLYPH 1-16, and every note
+        # field 24-127 = C0-G8; the S3000's are 1-32 and 21-127) - an
+        # out-of-range write is at best clamped by the sampler
+        while self.polyph_combo.count() > 16:
+            self.polyph_combo.removeItem(self.polyph_combo.count() - 1)
+        for spinbox in (
+            self.note_lo_spinbox,
+            self.note_hi_spinbox,
+            self.sample_root_note_spinbox,
+        ):
+            spinbox.setRange(24, 127)
+
+        self._build_s1000_env2_adsr(*env_sections)
+        self._build_s1000_pan_lfo(*pan_lfo)
+        self._build_s1000_controller_cards(*page_layouts)
+
+        # no Multi on an S1000 - hide the tab and drop its Window-menu
+        # shortcut (removeAction, not setEnabled(False):
+        # _set_hardware_busy_ui re-enables every tab action)
+        self.main_tabs.setTabVisible(0, False)
+        for menu_action in self.menuBar().actions():
+            menu = menu_action.menu()
+            if menu is not None and self._multi_tab_action in menu.actions():
+                menu.removeAction(self._multi_tab_action)
+                menu.removeAction(self._global_tab_action)
+        # nor the S2000/S3000's global settings (see _request_global_settings)
+        self.main_tabs.setTabVisible(self._global_tab_index, False)
+        self.setWindowTitle("AKAISDS - Program Editor (Akai S1000, experimental)")
+
+    # -- theme-following colored swatches ----------------------------------------
+    #
+    # The little colored squares (keygroup list rows, the Samples tab's marker
+    # legend) are QLabels whose color comes from the palette, so they can't
+    # use a QSS rule the way plain text does - the color depends on which
+    # keygroup/marker they stand for. Each carries a "swatchKind" property
+    # and _refresh_swatch() works out its current color from that, so the
+    # same code colors one when it's built AND recolors every one when the
+    # theme changes (theme.notifier.changed -> _refresh_themed_swatches).
+
+    def _swatch_color(self, swatch):
+        palette = theme.current_palette()
+        kind = swatch.property("swatchKind")
+        if kind == "keygroup":
+            return keygroup_color(swatch.property("keygroupIndex")).name()
+        if kind == "marker_boundary":
+            return palette["text_disabled"]
+        # a marker_loop swatch greys out with its loop (SPTYPE with no loop)
+        return (
+            palette["keygroup_color_3"]
+            if self._loop_markers_enabled
+            else palette["text_disabled"]
+        )
+
+    def _refresh_swatch(self, swatch):
+        swatch.setStyleSheet(
+            f"background-color: {self._swatch_color(swatch)}; border-radius: 2px;"
+        )
+
+    def _refresh_themed_swatches(self):
+        for label in self.findChildren(QLabel):
+            if label.property("swatchKind"):
+                self._refresh_swatch(label)
+
+    def _build_s1000_pan_lfo(self, lfo2_section, rate_depth_delay_columns):
+        # The S1000 has a Pan LFO (PANRAT/PANDEP/PANDEL - the same three
+        # fields the S3000's "LFO2" card already edits, since that LFO is
+        # hardwired to Pan there too), but not the S3000's LFO2 shape/
+        # retrigger. So the card stays, retitled, minus those two combos
+        # (hidden by the caller) and with its knob labels shortened to
+        # match the new title.
+        lfo2_section.findChild(QLabel, "sectionHeader").setText("Pan LFO")
+        for column, label, tooltip, knob in zip(
+            rate_depth_delay_columns,
+            ("Rate", "Depth", "Delay"),
+            (tt.S1000_PAN_LFO_RATE, tt.S1000_PAN_LFO_DEPTH, tt.S1000_PAN_LFO_DELAY),
+            (self.lfo2_rate_knob, self.lfo2_depth_knob, self.lfo2_delay_knob),
+        ):
+            column.itemAt(0).widget().setText(label)
+            knob.setToolTip(tooltip)
+
+    def _build_s1000_controller_grid(self, region, column_headers, rows):
+        # One destination-by-source grid of controller-amount knobs. `rows`
+        # is [(row_label, row_tooltip, [cell, ...])] with one cell per
+        # column: either None (that source doesn't drive that destination
+        # on an S1000 - shown as a dash) or (field, minimum, maximum). Each
+        # knob is wired to write its own field and registered in
+        # self._s1000_controls so keygroups_loaded/detail_loaded can fill it
+        # (_load_s1000_controls). Program-region fields write to whichever
+        # program is selected; keygroup-region ones also follow the selected
+        # keygroup - same as every other knob on those two pages.
+        #
+        # Styled like the S2000/S3000 Modulation cards: wrapped in a
+        # _ModMatrixGrid, which paints zebra striping on alternate rows and
+        # a separator between every column behind the widgets. Unlike those
+        # (whose columns hug their content), every DATA column has stretch 1
+        # so the columns share the card's width evenly and track a window
+        # resize; the label column keeps a fixed width sized to its longest
+        # label. Returns a layout (what _build_section_card takes) holding
+        # that wrapper.
+        grid = QGridLayout()
+        grid.setHorizontalSpacing(14)
+        grid.setVerticalSpacing(10)
+        for column, header in enumerate(column_headers, start=1):
+            label = QLabel(header)
+            label.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+            grid.addWidget(label, 0, column, Qt.AlignmentFlag.AlignHCenter)
+            grid.setColumnStretch(column, 1)
+
+        getter = self.keygroup_list.currentRow if region == "keygroup" else None
+        centered = Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignHCenter
+        row_labels = []
+        for row, (row_label, row_tooltip, cells) in enumerate(rows, start=1):
+            name = QLabel(row_label)
+            if row_tooltip:
+                name.setToolTip(row_tooltip)
+            row_labels.append(name)
+            grid.addWidget(name, row, 0, Qt.AlignmentFlag.AlignVCenter)
+            for column, cell in enumerate(cells, start=1):
+                if cell is None:
+                    dash = QLabel("-")
+                    dash.setEnabled(False)
+                    grid.addWidget(dash, row, column, centered)
+                    continue
+                field, minimum, maximum = cell
+                knob = Knob()
+                knob.setRange(minimum, maximum)
+                knob.setDefaultValue(0)
+                knob.setFixedSize(28, 28)
+                knob.setToolTip(tt.S1000_CONTROLLER_TOOLTIPS[field])
+                knob.setEnabled(True)
+                cell_layout, value_label = build_knob_value_row(knob)
+                grid.addLayout(cell_layout, row, column, centered)
+                self._wire_knob_write(
+                    knob, field, region, keygroup_index_getter=getter
+                )
+                self._s1000_controls.append((knob, value_label, field, region))
+
+        # sized to the longest label in THIS grid, not a shared constant -
+        # the two keygroup grids' labels are very different lengths, and a
+        # column sized for the widest would leave a gap in the other
+        label_width = max(
+            label.fontMetrics().horizontalAdvance(label.text()) for label in row_labels
+        )
+        for label in row_labels:
+            label.setFixedWidth(label_width + 8)
+
+        count = len(column_headers)
+        matrix = _ModMatrixGrid(
+            grid, 1, len(rows), [(column, column + 1) for column in range(count)]
+        )
+        wrapper = QVBoxLayout()
+        wrapper.setContentsMargins(0, 0, 0, 0)
+        wrapper.addWidget(matrix)
+        return wrapper
+
+    def _build_s1000_controller_cards(self, program_page_layout, keygroup_page_layout):
+        # The S1000's fixed controller routing - its equivalent of the
+        # S3000's assignable modulation matrix, whose cards are hidden on an
+        # S1000. These fields sit at the same offsets on both models but the
+        # S3000 spec calls most of them "not used", so the S2000/S3000
+        # editor never had controls for them (see core/s1000_bridge.py's
+        # _S1000_RANGE_OVERRIDES for the corrected ranges). V_LOUD isn't in
+        # the grid: it already has the Velocity knob in Volume, Pan &
+        # Velocity, and a second control for one field would need keeping in
+        # sync - the footnote points there instead.
+        pm50 = lambda field: (field, -50, 50)
+        program_grid = self._build_s1000_controller_grid(
+            "program",
+            ["Velocity", "Key", "Pressure", "Modwheel"],
+            [
+                (
+                    "Loudness",
+                    tt.S1000_LOUDNESS_VELOCITY_NOTE,
+                    [None, pm50("K_LOUD"), pm50("P_LOUD"), None],
+                ),
+                ("Pan", "", [None, pm50("K_PANP"), None, pm50("MW_PAN")]),
+                ("Pitch", "", [None, None, ("P_PTCH", -12, 12), None]),
+                (
+                    "LFO1 depth",
+                    "",
+                    [
+                        ("VELDEP", 0, 99),
+                        pm50("K_LDEP"),
+                        ("PRSDEP", 0, 99),
+                        ("MWLDEP", 0, 99),
+                    ],
+                ),
+                ("LFO1 rate", "", [None, pm50("K_LRAT"), None, None]),
+                ("LFO1 delay", "", [None, pm50("K_LDEL"), None, None]),
+            ],
+        )
+        program_note = QLabel(
+            "Velocity > Loudness is the Velocity knob in Volume, Pan & Velocity. "
+            "The pitch bend range is in the Pitch card."
+        )
+        program_note.setWordWrap(True)
+        program_note.setEnabled(False)
+        note_row = QVBoxLayout()
+        note_row.addWidget(program_note)
+        program_card = self._build_section_card("Controllers", program_grid, note_row)
+        program_page_layout.insertWidget(program_page_layout.count() - 1, program_card)
+
+        keygroup_grid = self._build_s1000_controller_grid(
+            "keygroup",
+            ["Velocity", "Pressure", "Envelope 2"],
+            [
+                (
+                    "Filter frequency",
+                    "",
+                    [pm50("V_FREQ"), pm50("P_FREQ"), pm50("E_FREQ")],
+                ),
+                ("Pitch", "", [None, None, pm50("E_PTCH")]),
+                ("Loudness", "", [pm50("KV_LO"), None, None]),
+                ("Envelope 2 level", "", [pm50("V_ENV2"), None, None]),
+            ],
+        )
+        envelope_grid = self._build_s1000_controller_grid(
+            "keygroup",
+            ["Vel > Attack", "Vel > Release", "Off vel > Release", "Key > Dec/Rel"],
+            [
+                (
+                    "Envelope 1 (amp)",
+                    "",
+                    [pm50("V_ATT1"), pm50("V_REL1"), pm50("O_REL1"), pm50("K_DAR1")],
+                ),
+                (
+                    "Envelope 2 (filter)",
+                    "",
+                    [pm50("V_ATT2"), pm50("V_REL2"), pm50("O_REL2"), pm50("K_DAR2")],
+                ),
+            ],
+        )
+        for title, grid in (
+            ("Controllers", keygroup_grid),
+            ("Envelope response", envelope_grid),
+        ):
+            card = self._build_section_card(title, grid)
+            keygroup_page_layout.insertWidget(keygroup_page_layout.count() - 1, card)
+
+    def _load_s1000_controls(self, region, values):
+        # blockSignals around every setValue, same reason as every other
+        # loaded-from-hardware set in this file: valueChanged schedules a
+        # write, which would echo the just-loaded value straight back
+        for knob, value_label, field, knob_region in self._s1000_controls:
+            if knob_region != region or field not in values:
+                continue
+            knob.blockSignals(True)
+            knob.setValue(values[field])
+            knob.blockSignals(False)
+            value_label.setText(str(values[field]))
+
+    def _build_s1000_env2_adsr(self, env1_section, env2_section):
+        # The S1000's ENV2 (its filter envelope) is a plain ADSR - ATTAK2/
+        # DECAY2/SUSTN2/RELSE2 sit in the same KDATA block as ENV1's four
+        # (the S1000 spec lists both) - not the S3000's 4-stage rate/level
+        # generator the Envelope 2 card is normally built around. So on an
+        # S1000 that card's grid/graph are hidden (see the caller) and an
+        # ENV1-style ADSR graph + four knobs take their place.
+        self.env2_adsr_graph = ADSREnvelopeGraph()
+        self.env2_adsr_graph.setFixedSize(200, 90)
+
+        # (attr, label, field, default, tooltip) - the defaults are ENV2's
+        # own Akai factory-preset values, same as the 4-stage knobs it
+        # replaces (rate1=0, rate3=50, level3=99, rate4=45)
+        specs = [
+            ("attack2_knob", "Attack", "ATTAK2", 0, tt.S1000_ENV2_ATTACK_KNOB),
+            ("decay2_knob", "Decay", "DECAY2", 50, tt.S1000_ENV2_DECAY_KNOB),
+            ("sustain2_knob", "Sustain", "SUSTN2", 99, tt.S1000_ENV2_SUSTAIN_KNOB),
+            ("release2_knob", "Release", "RELSE2", 45, tt.S1000_ENV2_RELEASE_KNOB),
+        ]
+        controls_row = QHBoxLayout()
+        controls_row.setSpacing(10)
+        self._env2_adsr_knobs = []
+        self._env2_adsr_value_labels = []
+        for attr, label, field, default, tooltip in specs:
+            knob = Knob()
+            knob.setRange(0, 99)
+            knob.setDefaultValue(default)
+            knob.setFixedSize(40, 40)
+            knob.setToolTip(tooltip)
+            knob.setEnabled(True)
+            column, value_label = build_knob_column(label, knob)
+            controls_row.addLayout(column)
+            setattr(self, attr, knob)
+            self._env2_adsr_knobs.append(knob)
+            self._env2_adsr_value_labels.append(value_label)
+            knob.valueChanged.connect(self._on_env2_adsr_knob_changed)
+            self._wire_knob_write(
+                knob,
+                field,
+                "keygroup",
+                keygroup_index_getter=self.keygroup_list.currentRow,
+            )
+
+        graph_row = QHBoxLayout()
+        graph_row.addStretch()
+        graph_row.addWidget(self.env2_adsr_graph)
+        graph_row.addStretch()
+        # same row order as Envelope 1's card (graph, then knobs), slotted
+        # in ahead of the card's trailing stretch
+        card_layout = env2_section.layout()
+        card_layout.insertLayout(card_layout.count() - 1, graph_row)
+        card_layout.insertLayout(card_layout.count() - 1, controls_row)
+
+        # both cards were pinned to the old 4-stage grid's height at
+        # construction (equalize_card_heights) - unpin and re-measure now
+        # that Envelope 2 has the same shape as Envelope 1
+        # hiding widgets in a window that hasn't been shown yet doesn't
+        # invalidate the nested layouts' cached size hints, so the hidden
+        # 4-stage grid/graph rows would still be counted by sizeHint() below
+        # (measured: the card stayed 406px tall instead of ~225px)
+        env2_section.layout().invalidate()
+        env2_section.layout().activate()
+        for card in (env1_section, env2_section):
+            card.setMinimumHeight(0)
+            card.setMaximumHeight(16777215)  # QWIDGETSIZE_MAX
+        equalize_card_heights(env1_section, env2_section)
+
+    def _on_env2_adsr_knob_changed(self):
+        # same live-redraw as _on_env1_knob_changed
+        self.env2_adsr_graph.set_values(
+            self.attack2_knob.value(),
+            self.decay2_knob.value(),
+            self.sustain2_knob.value(),
+            self.release2_knob.value(),
+        )
+
+    @staticmethod
+    def _set_layout_visible(layout, visible):
+        # QLayout has no setVisible - hide/show every widget it holds,
+        # recursing into nested layouts
+        for i in range(layout.count()):
+            item = layout.itemAt(i)
+            widget = item.widget()
+            if widget is not None:
+                widget.setVisible(visible)
+            elif item.layout() is not None:
+                ProgramEditorWindow._set_layout_visible(item.layout(), visible)
 
     def _on_programs_loaded(self, programs):
         # also reached on every Refresh (see _refresh_from_hardware), not
@@ -2595,7 +3143,85 @@ class ProgramEditorWindow(QMainWindow):
         self._busy_show_timer.stop()
         self._loading_progress.setVisible(False)
 
+    # -- Global tab / external controller ---------------------------------------------------
+    #
+    # The GLOBAL-page settings (core/global_settings.py) are read together and written one at a
+    # time. External controller lives in TWO places - the Modulation card's combo and the Global
+    # tab's - kept in step both ways: whichever the user picks updates the other without firing
+    # its own write, and a failed write re-reads everything so both show what the sampler holds.
+
+    _GLOBAL_UNAVAILABLE_DEMO = "Not available in demo mode."
+
+    def _on_stray_replies_detected(self, count):
+        # something is probably sending the sampler's own replies back to it (measured with a DAW open on the same MIDI interface): the sampler executes a returned
+        # reply as a WRITE and acknowledges it with an OK. Shown EVERY time the worker reports it (the echo can come back mid-session), but never stacked: a modal dialog
+        # runs a nested event loop, so a second report arriving while one is open is dropped - the next batch of strays after it closes warns again.
+        self.status_bar.showMessage("Stray MIDI replies detected - close or re-configure other MIDI software.")
+        if self._stray_dialog_open:
+            return
+        self._stray_dialog_open = True
+        try:
+            QMessageBox.warning(
+                self,
+                "Stray MIDI replies",
+                "The sampler is getting its own replies sent back to it, probably by another "
+                "MIDI program (a DAW, a MIDI monitor).\n\n"
+                "Close or re-configure its MIDI settings before editing.",
+            )
+        finally:
+            self._stray_dialog_open = False
+
+    def _request_global_settings(self):
+        # DemoBridge has no misc registers, and an S1000 no such settings
+        # (its tab is hidden); the controls just stay disabled
+        if self._is_s1000:
+            return
+        if os.environ.get("AKAISDS_DEMO_SAMPLER"):
+            self.global_tab.set_unavailable(self._GLOBAL_UNAVAILABLE_DEMO)
+            return
+        self._worker.submit_global_settings()
+
+    def _on_global_settings_loaded(self, values):
+        self.global_tab.set_values(values)
+        if "external_controller" in values:
+            self.external_controller_combo.setCurrentIndex(values["external_controller"])
+            self.external_controller_combo.setEnabled(True)
+        else:
+            self.external_controller_combo.setEnabled(False)
+
+    def _on_global_settings_load_failed(self, error):
+        # leave everything disabled: nothing was read, so nothing may be written
+        self.external_controller_combo.setEnabled(False)
+        self.global_tab.set_unavailable(f"Couldn't read the global settings: {error}")
+        self.status_bar.showMessage(f"Couldn't read the global settings: {error}")
+
+    def _on_mod_external_controller_chosen(self, index):
+        self.global_tab.set_value("external_controller", index)
+        self._worker.submit_set_global_setting("external_controller", index)
+
+    def _on_global_setting_chosen(self, key, value):
+        # from the Global tab
+        if key == "external_controller":
+            self.external_controller_combo.setCurrentIndex(value)
+        self._worker.submit_set_global_setting(key, value)
+
+    def _on_global_setting_written(self, key, value):
+        if key == "external_controller":
+            self.status_bar.showMessage(
+                f"External controller → {EXTERNAL_CONTROLLER_LABELS[value]}"
+            )
+        else:
+            self.status_bar.showMessage(f"Global setting {key.replace('_', ' ')} → {value}")
+
+    def _on_global_setting_write_failed(self, key, error):
+        self.status_bar.showMessage(f"Couldn't set {key.replace('_', ' ')}: {error}")
+        # the controls show the choice that just failed - put back what the
+        # sampler really holds
+        self._worker.submit_global_settings()
+
     def _refresh_multi_parts(self, *, show_confirmation=False):
+        if self._is_s1000:
+            return  # no Multi on an S1000 (and no SysEx for it)
         self._multi_refresh_in_progress = show_confirmation
         self._worker.submit_multi_parts()
 
@@ -2649,6 +3275,7 @@ class ProgramEditorWindow(QMainWindow):
         # closing and reopening the window) and the Multis tab's 16 parts,
         # independent of program selection.
         self._worker.submit_program_list()
+        self._request_global_settings()
         self._refresh_multi_parts(show_confirmation=True)
 
         program_index = self.program_list.currentRow()
@@ -2691,6 +3318,7 @@ class ProgramEditorWindow(QMainWindow):
             self._multi_tab_action,
             self._programs_tab_action,
             self._samples_tab_action,
+            self._global_tab_action,
         ):
             action.setEnabled(not busy)
 
@@ -2777,6 +3405,7 @@ class ProgramEditorWindow(QMainWindow):
         logger.debug("ProgramEditorWindow._open_settings_dialog: opening MidiSettingsDialog")
         dialog = MidiSettingsDialog(midi_manager, sampler_controller, self)
         dialog.exec()
+        diagnostics.log_session_config("after Settings (editor)")
         logger.debug(
             "ProgramEditorWindow._open_settings_dialog: dialog.exec() returned, "
             "calling _reconnect_shared_bridge"
@@ -2791,6 +3420,21 @@ class ProgramEditorWindow(QMainWindow):
         # or the close()-back-to-Dashboard fallback).
         self._reconnect_shared_bridge()
         self._settings_dialog_active = False
+        if sampler_models.normalize(sampler_controller.sampler_model) != self._sampler_model:
+            # this window's controls were built for the OLD model (see
+            # _is_s1000 in __init__) - going back to the Dashboard is the
+            # one way to get a correctly-built editor for the new one
+            logger.info(
+                "ProgramEditorWindow: sampler type changed in Settings "
+                f"({self._sampler_model!r} -> {sampler_controller.sampler_model!r}) "
+                "- closing the editor"
+            )
+            dashboard = getattr(self._main_window, "dashboard_view", None)
+            if dashboard is not None:
+                dashboard.status_bar.showMessage(
+                    "Sampler type changed - reopen the Program Editor", 8000
+                )
+            self.close()
         logger.debug("ProgramEditorWindow._open_settings_dialog: finished")
 
     def _reconnect_shared_bridge(self):
@@ -2904,7 +3548,14 @@ class ProgramEditorWindow(QMainWindow):
             "program_editor_bridge.connect()"
         )
         try:
-            new_bridge = program_editor_bridge.connect(midi_manager)
+            new_bridge = program_editor_bridge.connect(
+                midi_manager,
+                getattr(
+                    getattr(self._main_window, "sampler_controller", None),
+                    "sampler_model",
+                    None,
+                ),
+            )
         except Exception:
             logger.error(
                 "ProgramEditorWindow: couldn't rebuild the bridge after "
@@ -2938,6 +3589,10 @@ class ProgramEditorWindow(QMainWindow):
         # no separate hardware round-trip the way every other program field
         # does via program_values in _on_keygroups_loaded below
         self.program_name_edit.setText(current.text())
+        # the name as it stands on the sampler, for _commit_program_name -
+        # the list item's own text is overwritten live while typing (see
+        # _on_program_name_typed), so it can't be used to tell what changed
+        self._program_name_on_sampler = current.text()
         program_index = self.program_list.currentRow()
         self._worker.submit_keygroups(program_index)
 
@@ -2950,7 +3605,7 @@ class ProgramEditorWindow(QMainWindow):
         # through _on_program_selected first
         self.keygroup_list.clear()
         for i, (lo, hi) in enumerate(keygroup_ranges):
-            self._add_keygroup_row(i, lo, hi)
+            add_keygroup_row(self.keygroup_list, i, lo, hi, self._refresh_swatch)
         self._keygroup_ranges = [list(r) for r in keygroup_ranges]
         self.keygroup_range_bar.set_ranges(self._keygroup_ranges)
         # blockSignals during every one of these loaded-from-hardware
@@ -3115,6 +3770,7 @@ class ProgramEditorWindow(QMainWindow):
         self.mono_legato_combo.blockSignals(True)
         self.mono_legato_combo.setCurrentIndex(program_values["LEGATO"])
         self.mono_legato_combo.blockSignals(False)
+        self._load_s1000_controls("program", program_values)
 
         # set by _refresh_from_hardware() and _on_keygroup_deleted() -
         # restores whatever the user was looking at before the reload (a
@@ -3164,16 +3820,28 @@ class ProgramEditorWindow(QMainWindow):
         # here rather than faking a local-only simulation that can't really
         # round-trip through anything
         demo_mode = bool(os.environ.get("AKAISDS_DEMO_SAMPLER"))
-
         has_program = self.program_list.currentRow() >= 0
         self._rename_program_action.setEnabled(has_program)
         self._duplicate_program_action.setEnabled(has_program and not demo_mode)
+        # loading needs no selection (it makes a new program) but, like
+        # duplicating, has no demo-mode equivalent; saving only reads
+        self._save_program_action.setEnabled(has_program)
+        self._load_program_action.setEnabled(not demo_mode)
+        self.save_program_button.setEnabled(has_program)
+        self.load_program_button.setEnabled(not demo_mode)
         self._delete_program_action.setEnabled(
             has_program and self.program_list.count() > 1
         )
         has_keygroup = self.keygroup_list.currentRow() >= 0
         self._duplicate_keygroup_action.setEnabled(has_keygroup and not demo_mode)
-        self._delete_keygroup_action.setEnabled(has_keygroup)
+        # enabled even when an S1000 can't do it: triggering it (menu, Delete key) explains why instead of doing nothing
+        self._delete_keygroup_action.setEnabled(
+            has_keygroup
+            and (
+                self._keygroup_delete_unavailable_message() is not None
+                or self._keygroup_delete_allowed()
+            )
+        )
 
         # unlike DELP, no "last one is silently ignored" restriction is
         # documented for DELS (see sample_deleted's own comment in
@@ -3218,6 +3886,35 @@ class ProgramEditorWindow(QMainWindow):
     def _prompt_sample_name(self, current_name):
         return self._prompt_akai_name("Rename Sample", "Sample name:", current_name)
 
+    # -- S1000: a rename must not land on another item's name -----------------
+    #
+    # The S1000 spec says a PDATA/SDATA whose name matches an existing
+    # resident program/sample DELETES that one first ("If the program name in
+    # data is the same as that of any existing program, that program will be
+    # deleted first" - and the same for samples), where an S2000/S3000 header
+    # write just changes a field. _confirm_duplicate_program/_sample already
+    # refuse a clashing name for exactly this reason; renaming goes through
+    # the same whole-block writes, so on an S1000 it needs the same guard or
+    # it could silently destroy a different program/sample. Not applied on an
+    # S2000/S3000, where a duplicate name is merely ambiguous, not destructive.
+
+    def _warn_name_in_use(self, kind, name):
+        QMessageBox.warning(
+            self,
+            f"Rename {kind}",
+            f'"{name}" is already used by another {kind.lower()} on the '
+            f"sampler.\n\nOn an Akai S1000, writing a {kind.lower()} with a name "
+            f"that's already in use deletes the existing one - so this rename "
+            f"was cancelled. Pick a different name.",
+        )
+
+    def _program_name_taken(self, program_index, name):
+        return any(
+            self.program_list.item(i).text() == name
+            for i in range(self.program_list.count())
+            if i != program_index
+        )
+
     def _confirm_rename_program(self):
         item = self.program_list.currentItem()
         if item is None:
@@ -3227,6 +3924,10 @@ class ProgramEditorWindow(QMainWindow):
         new_name = self._prompt_program_name(current_name)
         if new_name is None or new_name == current_name:
             return
+        if self._is_s1000 and self._program_name_taken(program_index, new_name):
+            self._warn_name_in_use("Program", new_name)
+            return
+        self._program_name_on_sampler = new_name
         item.setText(new_name)
         self._update_multi_program_combo_names(program_index, new_name)
         # keeps the controls page's own name field in step, same reasoning
@@ -3304,6 +4005,164 @@ class ProgramEditorWindow(QMainWindow):
         # delete
         self._worker.submit_program_list()
 
+    # -- save / load a program as an Akai .p1/.p3 file --------------------------
+
+    def _program_file_directory(self):
+        return getattr(self, "_last_program_file_dir", "") or os.path.expanduser("~")
+
+    def _save_program_to_file(self):
+        item = self.program_list.currentItem()
+        if item is None:
+            return
+        index = self.program_list.currentRow()
+        self._pending_program_export = index
+        self.status_bar.showMessage(f'Reading program "{item.text()}" from the sampler…')
+        self._worker.submit_export_program(index)
+
+    def _on_program_exported(self, program_index, program_file):
+        if getattr(self, "_pending_program_export", None) != program_index:
+            return
+        self._pending_program_export = None
+        extension = program_file.extension
+        default_path = os.path.join(
+            self._program_file_directory(),
+            akai_program_file.safe_file_stem(program_file.name) + extension,
+        )
+        path, _filter = QFileDialog.getSaveFileName(
+            self,
+            "Save Program",
+            default_path,
+            f"Akai program (*{extension});;All files (*)",
+        )
+        if not path:
+            self.status_bar.showMessage("Save cancelled")
+            return
+        try:
+            data = akai_program_file.build_file(
+                program_file.program, program_file.keygroups
+            )
+            with open(path, "wb") as handle:
+                handle.write(data)
+        except (OSError, akai_program_file.ProgramFileError) as e:
+            QMessageBox.warning(self, "Save Program", f"Couldn't save the program:\n\n{e}")
+            self.status_bar.showMessage(f"Couldn't save program: {e}")
+            return
+        self._last_program_file_dir = os.path.dirname(path)
+        self.status_bar.showMessage(
+            f'Saved "{program_file.name}" ({len(program_file.keygroups)} keygroups) '
+            f"to {os.path.basename(path)}"
+        )
+
+    def _on_program_export_failed(self, program_index, error):
+        if getattr(self, "_pending_program_export", None) != program_index:
+            return
+        self._pending_program_export = None
+        self.status_bar.showMessage(f"Couldn't read program: {error}")
+        QMessageBox.warning(self, "Save Program", f"Couldn't read the program:\n\n{error}")
+
+    def _load_program_from_file(self):
+        path, _filter = QFileDialog.getOpenFileName(
+            self,
+            "Load Program",
+            self._program_file_directory(),
+            "Akai programs (*.p1 *.p3);;All files (*)",
+        )
+        if not path:
+            return
+        self._last_program_file_dir = os.path.dirname(path)
+        try:
+            with open(path, "rb") as handle:
+                program_file = akai_program_file.parse_file(handle.read())
+        except (OSError, akai_program_file.ProgramFileError) as e:
+            QMessageBox.warning(self, "Load Program", f"Couldn't read this file:\n\n{e}")
+            return
+        expected = "s1000" if self._is_s1000 else "s2000_s3000"
+        if program_file.family == "s1000" and expected == "s2000_s3000":
+            # the S2000/S3000 reads S1000 programs from disk (its manual) but SysEx takes raw blocks, so convert here (never the other way)
+            answer = QMessageBox.question(
+                self,
+                "Load Program",
+                "This is an S1000 (.p1) program. The S2000/S3000 can use it, but this app has to convert it first: its S2000-only "
+                "parameters (modulation matrix, second filter, envelope 3, effects sends) are set to neutral values, and "
+                "S1000-only settings the S2000 has no equivalent for may be ignored, so it can sound a little different "
+                "from the original and may need tweaking.\n\nConvert it and continue?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.Yes,
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                return
+            try:
+                program_file = akai_program_file.convert_s1000_to_s3000(program_file)
+            except akai_program_file.ProgramFileError as e:
+                QMessageBox.warning(self, "Load Program", f"Couldn't convert this file:\n\n{e}")
+                return
+        if program_file.family != expected:
+            mine = "S1000" if self._is_s1000 else "S2000/S3000"
+            theirs = "S1000 (.p1)" if program_file.family == "s1000" else "S2000/S3000 (.p3)"
+            QMessageBox.warning(
+                self,
+                "Load Program",
+                f"This is an {theirs} program, but the sampler type is set to "
+                f"{mine}. The two use different block sizes, so it can't be "
+                "loaded as it is.",
+            )
+            return
+
+        existing = [
+            self.program_list.item(i).text() for i in range(self.program_list.count())
+        ]
+        name = program_file.name or "PROGRAM"
+        while name in existing:
+            # same reasoning as _confirm_duplicate_program: a name matching a
+            # resident program would delete it first (PDATA's own spec)
+            name = self._prompt_akai_name(
+                "Load Program",
+                f'A program named "{name}" is already on the sampler (loading '
+                "one with the same name would delete it).\n\nNew program name:",
+                _duplicate_default_name(name),
+            )
+            if name is None:
+                return
+
+        samples = akai_program_file.zone_sample_names(program_file)
+        missing = [n for n in samples if n not in self._sample_list]
+        text = (
+            f'Load "{name}" ({len(program_file.keygroups)} keygroups) onto the '
+            "sampler as a new program?"
+        )
+        if samples:
+            text += (
+                "\n\nSamples are not part of a program file; its zones look "
+                "them up by name."
+            )
+            if missing:
+                text += "\nNot on the sampler right now:\n  " + "\n  ".join(missing)
+            else:
+                text += "\nAll of them are on the sampler."
+        answer = QMessageBox.question(
+            self,
+            "Load Program",
+            text,
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        self.status_bar.showMessage(f'Loading program "{name}"…')
+        self._worker.submit_import_program(program_file, name)
+
+    def _on_program_imported(self, new_index, name):
+        self.status_bar.showMessage(f'Loaded program "{name}"')
+        # same select-after-reload path a duplicate uses
+        self._pending_program_selection_index = new_index
+        self._worker.submit_program_list()
+
+    def _on_program_import_failed(self, name, error):
+        self.status_bar.showMessage(f'Couldn\'t load program "{name}": {error}')
+        QMessageBox.warning(self, "Load Program", f'Couldn\'t load "{name}":\n\n{error}')
+        # whatever got through is on the sampler - show it
+        self._worker.submit_program_list()
+
     def _on_keygroup_created(self, program_index, new_keygroup_index):
         if program_index != self.program_list.currentRow():
             return
@@ -3337,9 +4196,60 @@ class ProgramEditorWindow(QMainWindow):
         self.status_bar.showMessage(f'Deleting program "{program_name}"…')
         self._worker.submit_delete_program(program_index)
 
+    @staticmethod
+    def _s1000_keygroup_delete_enabled():
+        # either way of deleting a keygroup on an S1000 (the DELK one is off
+        # for good; the rebuild one is behind its own flag)
+        return (
+            s1000_bridge_module.KEYGROUP_DELETE_SUPPORTED
+            or s1000_bridge_module.KEYGROUP_DELETE_BY_REBUILD
+        )
+
+    def _keygroup_delete_unavailable_message(self):
+        """Why Delete Keygroup can't be offered on this sampler (text for the user), or None if it can."""
+        if not self._is_s1000:
+            return None
+        if not self._s1000_keygroup_delete_enabled():
+            return (
+                "Deleting keygroups on an Akai S1000 series sampler is not reliable at this time, so the delete "
+                "feature is disabled for now.\n\n"
+                "The S1000's delete command leaves the program's keygroup count wrong and the sampler refuses the "
+                "fix, which can corrupt the program. To remove a keygroup, delete it on the sampler's front panel."
+            )
+        if self._worker.s1000_keygroup_delete_blocked or (
+            s1000_bridge_module.KEYGROUP_DELETE_BY_REBUILD
+            and self._worker.program_import_blocked
+        ):
+            return (
+                "Keygroup deleting has been switched off for this session after an earlier delete failed its safety "
+                "check. Check that program on the sampler, or restart the editor to try again."
+            )
+        return None
+
+    def _keygroup_delete_allowed(self):
+        if not self._is_s1000:
+            return True
+        # S1000: can't empty a program (the flag / session block are explained by
+        # _keygroup_delete_unavailable_message)
+        return (
+            self._s1000_keygroup_delete_enabled()
+            and not self._worker.s1000_keygroup_delete_blocked
+            and not (
+                s1000_bridge_module.KEYGROUP_DELETE_BY_REBUILD
+                and self._worker.program_import_blocked
+            )
+            and self.keygroup_list.count() > 1
+        )
+
     def _confirm_delete_keygroup(self):
         keygroup_index = self.keygroup_list.currentRow()
         if keygroup_index < 0:
+            return
+        unavailable = self._keygroup_delete_unavailable_message()
+        if unavailable is not None:
+            QMessageBox.information(self, "Delete Keygroup", unavailable)
+            return
+        if not self._keygroup_delete_allowed():
             return
         program_index = self.program_list.currentRow()
         lo, hi = self._keygroup_ranges[keygroup_index]
@@ -3348,7 +4258,10 @@ class ProgramEditorWindow(QMainWindow):
             self,
             "Delete Keygroup",
             f"Delete keygroup {keygroup_index + 1} ({range_text})?\n\n"
-            "This cannot be undone.",
+            "This cannot be undone."
+            + (
+                self._s1000_delete_confirm_note() if self._is_s1000 else ""
+            ),
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,
         )
@@ -3357,6 +4270,29 @@ class ProgramEditorWindow(QMainWindow):
         self.status_bar.showMessage(f"Deleting keygroup {keygroup_index + 1}…")
         self._worker.submit_delete_keygroup(program_index, keygroup_index)
 
+    @staticmethod
+    def _s1000_delete_confirm_note():
+        if s1000_bridge_module.KEYGROUP_DELETE_BY_REBUILD:
+            return (
+                "\n\nThe S1000 can't delete a keygroup itself, so this rebuilds "
+                "the program: a backup (.p1) is saved first, the program is "
+                "copied without this keygroup, and only when the copy checks out "
+                "is the original replaced. It takes about a minute, the program "
+                "ends up last in the list, and this is experimental."
+            )
+        return (
+            "\n\nS1000 support for this is experimental: afterwards the "
+            "editor re-reads every program to check nothing else changed."
+        )
+
+    def _on_program_rebuilt(self, old_index, keygroup_index, new_index):
+        self.status_bar.showMessage(
+            f"Keygroup {keygroup_index + 1} deleted (the program was rebuilt and is now last in the list)"
+        )
+        # select the rebuilt program once the reload lands
+        self._pending_program_selection_index = new_index
+        self._worker.submit_program_list()
+
     def _on_program_deleted(self, program_index):
         self.status_bar.showMessage("Program deleted")
         # full reload, not a targeted removal - a DELP that lands on the
@@ -3364,6 +4300,21 @@ class ProgramEditorWindow(QMainWindow):
         # _update_list_context_actions_enabled) and every other case renumbers/
         # reorders everything after it, the same as a manual Refresh
         self._worker.submit_program_list()
+
+    def _on_keygroup_delete_failed(self, program_index, keygroup_index, error):
+        self.status_bar.showMessage(f"Couldn't delete keygroup: {error}")
+        # a failed S1000 delete may have blocked further ones this session
+        # (BridgeWorker._delete_keygroup_s1000), and the programs may no
+        # longer match what's on screen - say so in full, and reload
+        # (a rebuild failure always needs the full message: it may name a
+        # leftover program and a backup file)
+        if self._is_s1000 and (
+            self._worker.s1000_keygroup_delete_blocked
+            or s1000_bridge_module.KEYGROUP_DELETE_BY_REBUILD
+        ):
+            QMessageBox.warning(self, "Delete Keygroup", error)
+            self._update_list_context_actions_enabled()
+            self._worker.submit_program_list()
 
     def _on_keygroup_deleted(self, program_index, keygroup_index):
         if program_index != self.program_list.currentRow():
@@ -3389,7 +4340,17 @@ class ProgramEditorWindow(QMainWindow):
         new_name = self._prompt_sample_name(current_name)
         if new_name is None or new_name == current_name:
             return
+        if self._is_s1000 and any(
+            other == new_name
+            for i, other in enumerate(self._sample_list)
+            if i != sample_index
+        ):
+            self._warn_name_in_use("Sample", new_name)
+            return
         self._sample_list[sample_index] = new_name
+        # the audio keeps its cache entry (by index); a retained copy under
+        # the old name must not attach to some other sample later
+        self._forget_retained_audio(current_name)
         entry = self._sample_row_labels.get(sample_index)
         if entry is not None:
             _generation, name_label, _duration_label = entry
@@ -3431,6 +4392,7 @@ class ProgramEditorWindow(QMainWindow):
 
     def _on_sample_deleted(self, sample_index):
         self.status_bar.showMessage("Sample deleted")
+        self._forget_retained_audio(self._sample_name_at_row(sample_index))
         # full reload, not a targeted removal - every sample index after
         # the deleted one shifts down by one, same reasoning as
         # _on_program_deleted (no PRGNUM-style renumbering concern here,
@@ -3574,6 +4536,15 @@ class ProgramEditorWindow(QMainWindow):
                 )
                 return
 
+            # both samples' audio is in hand and unchanged on the sampler -
+            # keep it across the reloads below (see _retain_sample_audio)
+            self._retain_sample_audio(
+                new_name, entry["samples"], entry["framerate"]
+            )
+            self._retain_sample_audio(
+                current_name, entry["samples"], entry["framerate"]
+            )
+
             # find the duplicate's index by name - nothing shifted
             # underneath it the way a replace-in-place delete does, but
             # its index still isn't known in advance, only looked up
@@ -3714,9 +4685,15 @@ class ProgramEditorWindow(QMainWindow):
             demo_mode=bool(os.environ.get("AKAISDS_DEMO_SAMPLER")),
             program_names_provider=_existing_program_names,
             create_program_callback=self._create_program_from_slices,
+            max_program_slices=_MAX_SLICES_PER_PROGRAM,
             cancel_callback=sampler_controller.cancel_transfer,
         )
+        # the export reloads the sample list (wiping the cache), so keep the
+        # source's audio across it; dropped again below if nothing was exported
+        self._retain_sample_audio(sample_name, entry["samples"], entry["framerate"])
         dialog.exec()
+        if not dialog.export_succeeded:
+            self._forget_retained_audio(sample_name)
         # slice export can add several new resident samples - refresh so
         # the Samples tab's own list/zone combos pick them up. Only when
         # something was ACTUALLY exported, though (dialog.export_succeeded) -
@@ -3862,6 +4839,13 @@ class ProgramEditorWindow(QMainWindow):
                 )
                 return False, "Export failed - sending the slices did not complete"
 
+            if bit_depth == 16 and sample_rate is None:
+                # sent as-is, so each new slice can come back with its
+                # waveform (see _retain_sample_audio); a requantised or
+                # resampled send is not the audio we hold
+                for name, slice_samples in zip(names, slices):
+                    self._retain_sample_audio(name, slice_samples, framerate)
+
             # nothing numeric to report while this reloads/retries - see
             # _set_busy's own comment above
             _set_busy(True)
@@ -3977,13 +4961,14 @@ class ProgramEditorWindow(QMainWindow):
         # "submit fast, verify once via a final reload" shape
         # _export_slices already uses for its own per-sample header fixups.
         slice_count = len(names)
-        if slice_count > 99:
+        if slice_count > _MAX_SLICES_PER_PROGRAM:
             # same ceiling SliceEditorWindow already checks client-side
             # before ever calling this - re-checked here since this method
             # has no other caller today, but shouldn't silently trust one
             return False, (
                 f"Can't create a program - {slice_count} keygroups "
-                "requested, but a program can only hold 99."
+                f"requested, but a slice program can only hold {_MAX_SLICES_PER_PROGRAM} "
+                "(one per key, from C1 up to the top of the keyboard)."
             )
 
         # _on_program_created/_on_keygroup_created (see __init__) are
@@ -4034,7 +5019,12 @@ class ProgramEditorWindow(QMainWindow):
         which, args = self._wait_for_any_signal(
             [self._worker.program_created, self._worker.program_create_failed],
             start=lambda: self._worker.submit_create_program(
-                template_program_index, program_name
+                template_program_index,
+                program_name,
+                # S1000: clone just keygroup 0, so there is nothing to
+                # delete afterwards (an S1000 DELK corrupts the chain -
+                # see BridgeWorker._delete_keygroup_s1000)
+                first_keygroup_only=self._is_s1000,
             ),
             timeout_ms=20000,
         )
@@ -4058,6 +5048,13 @@ class ProgramEditorWindow(QMainWindow):
                 "sampler directly."
             )
         template_group_count = len(args[1])
+        if self._is_s1000 and template_group_count != 1:
+            # never expected (first_keygroup_only), but the alternative is a
+            # run of keygroup deletes on an S1000 - refuse rather than risk it
+            return False, (
+                f'Program "{program_name}" was created with {template_group_count} '
+                "keygroups instead of 1 - check the sampler directly."
+            )
 
         # keygroup 0 first, into its final configured shape - LONOTE/HINOTE
         # map it to the first slice at _FIRST_SLICE_NOTE ("C1"), CP1 forces
@@ -4087,6 +5084,7 @@ class ProgramEditorWindow(QMainWindow):
         # first: deletion may shift every index above it down, so working
         # backward never moves the next target out from under this loop
         # (same reasoning as sample delete elsewhere in this file)
+        # (an S1000 clone has only keygroup 0, so this loop never runs there)
         for keygroup_index in range(template_group_count - 1, 0, -1):
             self._worker.submit_delete_keygroup(new_index, keygroup_index)
 
@@ -4268,6 +5266,20 @@ class ProgramEditorWindow(QMainWindow):
             values["RELSE2"],
             values["ENV2L4"],
         )
+        self._load_s1000_controls("keygroup", values)
+        if self._is_s1000:
+            for knob, label, field in zip(
+                self._env2_adsr_knobs,
+                self._env2_adsr_value_labels,
+                ("ATTAK2", "DECAY2", "SUSTN2", "RELSE2"),
+            ):
+                knob.blockSignals(True)
+                knob.setValue(values[field])
+                knob.blockSignals(False)
+                label.setText(str(values[field]))
+            self.env2_adsr_graph.set_values(
+                values["ATTAK2"], values["DECAY2"], values["SUSTN2"], values["RELSE2"]
+            )
         self._update_zone_panels(values)
 
     def _on_detail_load_failed(self, program_index, keygroup_index, error_message):
@@ -4358,6 +5370,10 @@ class ProgramEditorWindow(QMainWindow):
         # a check that was still running on it finishes
         self._update_runner.wait()
 
+        try:
+            theme.notifier.changed.disconnect(self._refresh_themed_swatches)
+        except (RuntimeError, TypeError):
+            pass  # already disconnected
         self._main_window.show()
         event.accept()
 
@@ -4367,43 +5383,6 @@ class ProgramEditorWindow(QMainWindow):
 
     def _check_for_updates_manual(self):
         self._update_runner.start(manual=True)
-
-    def _build_knob_column(self, label_text, knob, *, show_label=True):
-        # show_label=False skips the name label entirely - used by the
-        # Modulation matrix grid below, which shows "Amount" once as a
-        # column header instead of repeating it above every single knob
-        column = QVBoxLayout()
-        column.setSpacing(4)  # fixed gap, in pixels - never stretches
-
-        if show_label:
-            name_label = QLabel(label_text)
-            name_label.setAlignment(Qt.AlignmentFlag.AlignHCenter)
-            name_label.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
-            column.addWidget(name_label, alignment=Qt.AlignmentFlag.AlignHCenter)
-
-        value_label = QLabel("-")
-        value_label.setAlignment(Qt.AlignmentFlag.AlignHCenter)
-
-        column.addWidget(knob, alignment=Qt.AlignmentFlag.AlignHCenter)
-        column.addWidget(value_label)
-
-        knob.valueChanged.connect(lambda v: value_label.setText(str(v)))
-
-        return column, value_label
-
-    def _build_labeled_spinbox_column(self, label_text, spinbox):
-        # same "label above, centered" shape as the Tune/MIDI channel/etc
-        # columns already on the Program tab, for a plain spinbox rather
-        # than a knob or combo
-        name_label = QLabel(label_text)
-        name_label.setAlignment(Qt.AlignmentFlag.AlignHCenter)
-
-        column = QVBoxLayout()
-        column.setSpacing(4)
-        column.addWidget(name_label, alignment=Qt.AlignmentFlag.AlignHCenter)
-        column.addWidget(spinbox, alignment=Qt.AlignmentFlag.AlignHCenter)
-
-        return column
 
     # --- modulation matrix helpers -------------------------------------
     # The assignable modulation matrix (MODS*/MODV* fields - see the
@@ -4458,32 +5437,6 @@ class ProgramEditorWindow(QMainWindow):
         knob.setEnabled(True)
         return knob
 
-    def _build_knob_value_row(self, knob):
-        # knob + live numeric readout side by side, same compact row shape
-        # as the Multis tab's knobs (_build_multi_part_knob) - unlike
-        # _build_knob_column's vertical (knob, then value below) layout,
-        # this is for grids that already carry their own row/column
-        # headers (the Modulation cards' "Slot N"/"Amount" header - see
-        # _build_mod_matrix_header/_build_mod_matrix_amount_header - and
-        # ENV2's "Stage N"/"Rate"/"Level" grid below), so there's no
-        # per-knob name label to stack above the value here, just the knob
-        # and its readout beside each other. Fixed width (matching
-        # _build_multi_part_knob's own value_label) so the label's own
-        # width doesn't change as its text does ("0" vs "-50") - unfixed,
-        # a value crossing a digit-count boundary reflowed the row's total
-        # width, which visibly nudged the knob sideways since these rows
-        # sit centered in their grid cell (see _build_mod_matrix_row/
-        # _build_mod_matrix_amount_row's AlignHCenter).
-        value_label = QLabel("-")
-        value_label.setFixedWidth(28)
-        row = QHBoxLayout()
-        row.setContentsMargins(0, 0, 0, 0)
-        row.setSpacing(4)
-        row.addWidget(knob)
-        row.addWidget(value_label)
-        knob.valueChanged.connect(lambda v: value_label.setText(str(v)))
-        return row, value_label
-
     def _build_mod_slot(
         self,
         source_param,
@@ -4503,7 +5456,7 @@ class ProgramEditorWindow(QMainWindow):
         # card comments below for the full list.
         combo = self._build_mod_source_combo()
         knob = self._build_mod_amount_knob()
-        amount_column, value_label = self._build_knob_value_row(knob)
+        amount_column, value_label = build_knob_value_row(knob)
 
         self._wire_combo_write(
             combo,
@@ -4518,53 +5471,6 @@ class ProgramEditorWindow(QMainWindow):
             keygroup_index_getter=keygroup_index_getter,
         )
         return combo, amount_column, knob, value_label
-
-    def _build_labeled_combo_column(self, label_text, combo, *, center=True):
-        # same "label above, centered" shape as _build_labeled_spinbox_column,
-        # for a combo instead of a spinbox - still used outside the
-        # Modulation matrix (e.g. lfo1_sync_combo/lfo2_trig_combo), which
-        # aren't part of a grid with its own header row. center=False
-        # instead left-aligns the label flush with the combo's own
-        # (left-aligned) displayed text - for the Zone card's Sample combo
-        # (see _build_zone_page), which stretches to fill whatever width
-        # its row gives it: centering that label put it in the middle of
-        # the whole stretched width, nowhere near "BASS C1" etc.
-        name_label = QLabel(label_text)
-        column = QVBoxLayout()
-        column.setSpacing(4)
-        if center:
-            name_label.setAlignment(Qt.AlignmentFlag.AlignHCenter)
-            column.addWidget(name_label, alignment=Qt.AlignmentFlag.AlignHCenter)
-        else:
-            column.addWidget(name_label)
-        column.addWidget(combo)
-        return column
-
-    def _build_labeled_knob_value_column(self, label_text, knob, *, center=True):
-        # label above, knob+value beside each other below it - the Zone
-        # card's Loud/Pan knobs' own shape (see _build_zone_page below),
-        # sharing a row with the Sample combo (_build_labeled_combo_column)
-        # rather than the knob row those two used to have further down the
-        # page. Neither existing knob helper fit: _build_knob_column stacks
-        # the value below the knob (fine stand-alone, but taller than this
-        # row has room for next to a combo), and _build_knob_value_row has
-        # no label at all (built for grids with their own header row,
-        # which this single pair of knobs isn't part of). center=False
-        # left-aligns the label instead, flush with the knob rather than
-        # floating over its middle - same reasoning, and same "Sample"/
-        # "Loud"/"Pan" row, as _build_labeled_combo_column's own center
-        # param.
-        name_label = QLabel(label_text)
-        column = QVBoxLayout()
-        column.setSpacing(4)
-        if center:
-            name_label.setAlignment(Qt.AlignmentFlag.AlignHCenter)
-            column.addWidget(name_label, alignment=Qt.AlignmentFlag.AlignHCenter)
-        else:
-            column.addWidget(name_label)
-        knob_row, value_label = self._build_knob_value_row(knob)
-        column.addLayout(knob_row)
-        return column, value_label
 
     def _build_mod_source_only_column(self, source_param, source_region):
         # used where the matching amount field is per-keygroup (so it's
@@ -4581,7 +5487,7 @@ class ProgramEditorWindow(QMainWindow):
         # with no source dropdown, for the Keygroup tab's own Modulation
         # card (the matching source lives on the Program tab)
         knob = self._build_mod_amount_knob()
-        column, value_label = self._build_knob_value_row(knob)
+        column, value_label = build_knob_value_row(knob)
         self._wire_knob_write(
             knob,
             amount_param,
@@ -4622,7 +5528,7 @@ class ProgramEditorWindow(QMainWindow):
         # read-only row rather than ordinary page text.
         label = QLabel(text)
         label.setFixedWidth(130)
-        label.setStyleSheet(f"color: {theme.current_palette()['text_disabled']};")
+        label.setObjectName("mutedLabel")  # style.qss.template: text_disabled
         return label
 
     def _build_mod_amount_column_with_source_mirror(
@@ -4644,7 +5550,7 @@ class ProgramEditorWindow(QMainWindow):
         # horizontal scrollbar at this page's own minimum width.
         source_mirror = self._build_mod_source_mirror_combo()
         knob = self._build_mod_amount_knob()
-        knob_row, value_label = self._build_knob_value_row(knob)
+        knob_row, value_label = build_knob_value_row(knob)
         self._wire_knob_write(
             knob,
             amount_param,
@@ -4779,22 +5685,6 @@ class ProgramEditorWindow(QMainWindow):
         # directly, not through this wrapper, by ui/settings_dialog.py).
         return build_section_card(title, *row_layouts)
 
-    def _equalize_card_heights(self, *cards):
-        # pairs like Range+Filter or the two Envelope cards read oddly
-        # when one is visibly taller than its neighbor sitting right next
-        # to it - now that _build_section_card pins every card to its OWN
-        # sizeHint (see its own comment), nothing does that matching
-        # automatically the way the horizontal 1:1 stretch on their shared
-        # row already equalizes WIDTH. setFixedHeight (not just a min/max)
-        # since these cards' own vertical policy is already Fixed - this
-        # is that same fixed value, just the larger of the two rather than
-        # each one's own independently measured sizeHint. Call this after
-        # every row/widget has already been added to each card, since
-        # sizeHint() needs the real final content to measure correctly.
-        target_height = max(card.sizeHint().height() for card in cards)
-        for card in cards:
-            card.setFixedHeight(target_height)
-
     def _build_scroll_area(self, page):
         # both detail_stack pages (Program, Keygroup) are wrapped in one of
         # these rather than added directly - see
@@ -4823,7 +5713,7 @@ class ProgramEditorWindow(QMainWindow):
         # but this one lands inside a QWidget#sectionCard (${bg_panel},
         # a different shade - see _build_section_card), which showed up
         # as a visible colored box behind the knob+label - same fix as
-        # _add_keygroup_row's own row_widget below.
+        # ui.editor_layout.add_keygroup_row's own row_widget.
         widget.setObjectName("transparentContainer")
         row = QHBoxLayout(widget)
         row.setContentsMargins(0, 0, 0, 0)
@@ -4875,13 +5765,7 @@ class ProgramEditorWindow(QMainWindow):
         self._delete_sample_action.setEnabled(False)
         self.sample_list_widget.addAction(self._delete_sample_action)
 
-        samples_column = QVBoxLayout()
-        samples_column.setContentsMargins(0, 0, 0, 0)
-        samples_column.setSpacing(6)
-        samples_column.addWidget(QLabel("<b>Samples</b>"))
-        samples_column.addWidget(self.sample_list_widget)
-        samples_container = QWidget()
-        samples_container.setLayout(samples_column)
+        samples_container = build_list_column("Samples", self.sample_list_widget)
 
         self.waveform_view = WaveformView()
 
@@ -4941,27 +5825,9 @@ class ProgramEditorWindow(QMainWindow):
         zoom_row.addWidget(self.sample_edit_progress)
         zoom_row.addStretch()
 
-        self.waveform_scrollbar = QScrollBar(Qt.Orientation.Horizontal)
-        self.waveform_scrollbar.setVisible(False)
-        # a plain setVisible(False) on the scrollbar directly collapses it
-        # to zero height in the layout, so the spinbox row below jumps up
-        # to fill the gap and then jumps back down the moment zooming in
-        # makes the bar reappear - a fixed-height container reserves that
-        # space permanently regardless of whether the bar inside it is
-        # currently shown, so the spinboxes never move
-        scrollbar_container = QWidget()
-        scrollbar_container.setFixedHeight(self.waveform_scrollbar.sizeHint().height())
-        # otherwise this bare QWidget picks up the global `QWidget {
-        # background-color: ${bg} }` rule (style.qss.template) - the
-        # page's own background - rather than blending into the
-        # QWidget#sectionCard (${bg_panel}, a different shade) it
-        # actually sits in here, so the reserved space read as a visible
-        # colored bar even while the real scrollbar inside was hidden.
-        # Same fix as _build_multi_part_knob's own widget above.
-        scrollbar_container.setObjectName("transparentContainer")
-        scrollbar_container_layout = QVBoxLayout(scrollbar_container)
-        scrollbar_container_layout.setContentsMargins(0, 0, 0, 0)
-        scrollbar_container_layout.addWidget(self.waveform_scrollbar)
+        # (the fixed-height container reserves the bar's height so nothing below jumps when
+        # zooming in makes the bar appear - see ui.editor_layout.build_waveform_scrollbar)
+        scrollbar_container, self.waveform_scrollbar = build_waveform_scrollbar()
 
         # the canvas has no room for per-marker text without labels
         # overlapping once two markers are close together (start/loop_start/
@@ -4988,17 +5854,13 @@ class ProgramEditorWindow(QMainWindow):
             # - start/end share the neutral "boundary" tone, loop start/end
             # share the loop region's teal, since they're one region's two
             # edges rather than two independent things
-            palette = theme.current_palette()
-            swatch_color = (
-                palette["text_disabled"]
-                if name in ("start", "end")
-                else palette["keygroup_color_3"]
-            )
             swatch = QLabel()
             swatch.setFixedSize(10, 10)
-            swatch.setStyleSheet(
-                f"background-color: {swatch_color}; border-radius: 2px;"
+            swatch.setProperty(
+                "swatchKind",
+                "marker_boundary" if name in ("start", "end") else "marker_loop",
             )
+            self._refresh_swatch(swatch)
             # Knob, not QSpinBox - start/loop_start/loop_end/end commonly
             # sit right on top of each other at the same frame (a short or
             # non-looping sample), which a row of identical-looking number
@@ -5298,9 +6160,9 @@ class ProgramEditorWindow(QMainWindow):
 
         tune_card = self._build_section_card("Root Note & Tune", tune_meta_row)
 
+        # the right margin leaves a gap between the cards and the scrollbar below
         waveform_column = QVBoxLayout()
-        waveform_column.setContentsMargins(0, 0, 0, 0)
-        waveform_column.setSpacing(10)
+        style_card_page_layout(waveform_column)
         waveform_column.addWidget(loop_controls_card)
         waveform_column.addWidget(loop_preview_card)
         waveform_column.addWidget(tune_card)
@@ -5309,13 +6171,16 @@ class ProgramEditorWindow(QMainWindow):
         waveform_container.setLayout(waveform_column)
         self._update_marker_spinboxes(None, None, None, None)
 
-        content_layout = QHBoxLayout()
-        content_layout.setContentsMargins(14, 14, 14, 14)
-        content_layout.addWidget(samples_container)
-        content_layout.addWidget(waveform_container, stretch=1)
-        page = QWidget()
-        page.setLayout(content_layout)
-        return page
+        # the cards scroll (like the Programs tab's - see _build_scroll_area),
+        # the sample list beside them doesn't, so it stays in view while
+        # scrolling. Without this, a window shorter than the cards' combined
+        # height (a higher DPI scale/bigger fonts than the setMinimumSize
+        # above was tuned on) had the layout squeezed BELOW its own minimum -
+        # an explicit setMinimumSize overrides the layout-derived one - so the
+        # Start/End/Loop knob row drew on top of the waveform.
+        waveform_scroll = self._build_scroll_area(waveform_container)
+
+        return build_samples_page(samples_container, waveform_scroll)
 
     def _build_multis_tab(self):
         # the sampler holds exactly one resident multi - no list to choose
@@ -5453,7 +6318,10 @@ class ProgramEditorWindow(QMainWindow):
             )
 
         layout.addStretch()
-        return page
+        # same wrap as the Programs tab's pages - see _build_samples_tab's own
+        # comment on why (an explicit window setMinimumSize means a layout
+        # can be squeezed below its own minimum instead of forcing a scroll)
+        return self._build_scroll_area(page)
 
     def _on_multi_part_channel_changed(self, part_index):
         channel = self._multi_channel_combos[part_index].currentData()
@@ -5478,36 +6346,6 @@ class ProgramEditorWindow(QMainWindow):
             part_index, program_index, program_name, channel
         )
 
-    def _build_sample_list_row_widget(self, name):
-        # name on the left, duration on the right in the theme's muted
-        # "secondary info" grey (same token/pattern as
-        # _build_mod_fixed_source_label) so it reads as supplementary to
-        # the name rather than part of it. Duration starts blank - it's
-        # filled in asynchronously as sample_length_loaded results arrive,
-        # see _on_samples_loaded/_on_sample_length_loaded.
-        row_widget = QWidget()
-        row_widget.setObjectName("transparentContainer")
-        row_layout = QHBoxLayout(row_widget)
-        # matches QListWidget#sampleList::item's own "padding: 6px 8px"
-        # (style.qss.template) - a custom item widget's sizeHint() is used
-        # as-is for the row's height/width, it does NOT also pick up that
-        # padding the way a plain text item would, so skipping this margin
-        # here shrank every row and made the font look cramped/squashed
-        # against the row's own top/bottom edges
-        row_layout.setContentsMargins(8, 6, 8, 6)
-        row_layout.setSpacing(6)
-
-        name_label = QLabel(name)
-        row_layout.addWidget(name_label, stretch=1)
-
-        duration_label = QLabel("")
-        duration_label.setStyleSheet(
-            f"color: {theme.current_palette()['text_disabled']};"
-        )
-        row_layout.addWidget(duration_label)
-
-        return row_widget, name_label, duration_label
-
     def _sample_name_at_row(self, row):
         # the sample list's own QListWidgetItems carry no text of their own
         # (see _on_samples_loaded) - self._sample_list is the real source
@@ -5515,35 +6353,6 @@ class ProgramEditorWindow(QMainWindow):
         if 0 <= row < len(self._sample_list):
             return self._sample_list[row]
         return ""
-
-    def _add_keygroup_row(self, index, lo, hi):
-        # colored swatch + range text, same row-widget approach as the
-        # dashboard's queue/hardware panels - keeps each row's identity tied
-        # to its keygroup_range_bar segment (same color, same order) rather
-        # than color alone
-        item = QListWidgetItem(self.keygroup_list)
-
-        row_widget = QWidget()
-        row_widget.setObjectName("transparentContainer")
-        row_layout = QHBoxLayout(row_widget)
-        row_layout.setContentsMargins(8, 6, 8, 6)
-        row_layout.setSpacing(8)
-
-        swatch = QLabel()
-        swatch.setFixedSize(10, 10)
-        swatch.setStyleSheet(
-            f"background-color: {keygroup_color(index).name()}; border-radius: 2px;"
-        )
-        row_layout.addWidget(swatch)
-
-        label = QLabel(
-            f"Keygroup {index + 1}: {midi_note_to_name(lo)} - {midi_note_to_name(hi)}"
-        )
-        label.setObjectName("keygroupRangeLabel")
-        row_layout.addWidget(label, stretch=1)
-
-        item.setSizeHint(row_widget.sizeHint())
-        self.keygroup_list.setItemWidget(item, row_widget)
 
     def _tune_offset_to_semitones(self, raw_value):
         return round(raw_value / 2.56) / 100
@@ -5819,6 +6628,24 @@ class ProgramEditorWindow(QMainWindow):
         # show rather than differing only until the next refresh
         name = self.program_name_edit.text().rstrip()
         self.program_name_edit.setText(name)
+        if self._is_s1000:
+            original = self._program_name_on_sampler
+            if original is not None and name == original:
+                # editingFinished also fires on a plain click-away with
+                # nothing changed - on an S1000 that would rewrite the whole
+                # program block for no reason, so don't
+                return
+            if self._program_name_taken(program_index, name):
+                # restore what the live-typing handler overwrote
+                self._warn_name_in_use("Program", name)
+                if original is not None:
+                    self.program_name_edit.setText(original)
+                    item = self.program_list.currentItem()
+                    if item is not None:
+                        item.setText(original)
+                    self._update_multi_program_combo_names(program_index, original)
+                return
+            self._program_name_on_sampler = name
         item = self.program_list.currentItem()
         if item is not None:
             item.setText(name)
@@ -5864,6 +6691,11 @@ class ProgramEditorWindow(QMainWindow):
         # silently wrong rather than just stale, so drop it rather than try
         # to carry it forward by name
         self._sample_waveform_cache = {}
+        self._retained_sample_audio = {
+            name: audio
+            for name, audio in self._retained_sample_audio.items()
+            if name in samples
+        }
         self._sample_list_generation += 1
         generation = self._sample_list_generation
         self._sample_row_labels = {}
@@ -5880,7 +6712,7 @@ class ProgramEditorWindow(QMainWindow):
             item = QListWidgetItem()
             self.sample_list_widget.addItem(item)
             row_widget, name_label, duration_label = (
-                self._build_sample_list_row_widget(name)
+                build_sample_list_row_widget(name)
             )
             item.setSizeHint(row_widget.sizeHint())
             self.sample_list_widget.setItemWidget(item, row_widget)
@@ -5926,7 +6758,11 @@ class ProgramEditorWindow(QMainWindow):
                 lambda _, f=field, z=zone_idx: self._on_zone_sample_changed(f, z)
             )
 
-        if self.program_list.count() > 0:
+        # only when nothing is selected yet (the first load). Every program-list
+        # reload is followed by a sample-list reload, and an unconditional reset
+        # here sent the selection back to row 0 after a duplicate/load/rebuild had
+        # just selected the new program
+        if self.program_list.count() > 0 and self.program_list.currentRow() < 0:
             self.program_list.setCurrentRow(
                 0
             )  # this is what triggers keygroup loading for the first program
@@ -6042,10 +6878,18 @@ class ProgramEditorWindow(QMainWindow):
             "ldwell1": values["LDWELL1"],
             "sbandw": values["SBANDW"],
         }
+        has_audio = self._attach_retained_audio(sample_index, entry)
         self._sample_waveform_cache[sample_index] = entry
         if sample_index == self.sample_list_widget.currentRow():
             self._set_marker_spinbox_range(frame_count)
-            self.waveform_view.set_header(frame_count, start, loop_start, loop_end, end)
+            if has_audio:
+                self.waveform_view.set_waveform(
+                    entry["samples"], start, loop_start, loop_end, end
+                )
+            else:
+                self.waveform_view.set_header(
+                    frame_count, start, loop_start, loop_end, end
+                )
             self._update_sample_meta_controls(
                 values["SPTYPE"],
                 values["SPITCH"],
@@ -6053,7 +6897,37 @@ class ProgramEditorWindow(QMainWindow):
                 values["STUNO"],
                 values["LDWELL1"],
             )
-            self._set_sample_edit_buttons_enabled(False)
+            self._set_sample_edit_buttons_enabled(has_audio)
+
+    def _retain_sample_audio(self, name, samples, framerate):
+        # remember audio this window sent under *name*, so the sample comes
+        # back WITH its waveform after the reloads that follow a send. Only
+        # for audio that reached the sampler unchanged (16-bit, same rate) -
+        # the caller's job. A copy of the list is not needed: nothing
+        # mutates a samples list in place.
+        self._retained_sample_audio[name] = (samples, framerate)
+
+    def _forget_retained_audio(self, name):
+        self._retained_sample_audio.pop(name, None)
+
+    def _attach_retained_audio(self, sample_index, entry):
+        # put retained audio onto a header-only cache *entry* if it is
+        # certainly the same sample: same name AND the header's frame count
+        # equals the audio's length (a sample changed on the front panel
+        # since, or a stale detail reply for a shifted index, fails this and
+        # falls back to the normal click-to-load). The header stays the
+        # source of truth for markers and metadata.
+        if not 0 <= sample_index < len(self._sample_list):
+            return False
+        retained = self._retained_sample_audio.get(self._sample_list[sample_index])
+        if retained is None:
+            return False
+        samples, framerate = retained
+        if len(samples) != entry["frame_count"]:
+            return False
+        entry["samples"] = samples
+        entry["framerate"] = framerate
+        return True
 
     def _on_sample_detail_load_failed(self, sample_index, error):
         if sample_index != self.sample_list_widget.currentRow():
@@ -6264,47 +7138,9 @@ class ProgramEditorWindow(QMainWindow):
         self._flush_write("STUNO")
 
     def _detect_root_note_analysis_window(self, entry):
-        # loop region first preference - already-identified stable,
-        # repeating audio, ideal for pitch analysis and immune to the
-        # attack-transient bias the fallback below has to dodge by hand.
-        # Falls back to a short, attack-skipped chunk of [start, end] only
-        # when the loop region's own span is too small to say anything
-        # meaningful about (loop off, or loop_start/loop_end sitting
-        # at/near the same value) - see _MIN_LOOP_ANALYSIS_FRAMES's own
-        # comment for why that particular floor.
-        markers = self.waveform_view.markers_with_loop_in_range()
-        loop_start, loop_end = markers["loop_start"], markers["loop_end"]
-        if loop_end - loop_start + 1 >= _MIN_LOOP_ANALYSIS_FRAMES:
-            # capped to the SAME length budget as the fallback below - a
-            # real, measured issue: an uncapped loop region's own analysis
-            # time scales with its length (confirmed ~1.5s of real
-            # decaying-tone audio took ~1.5 SECONDS to analyse, entirely
-            # because nothing here capped it), which would make this
-            # button noticeably slow on a sustained pad with a
-            # multi-second loop. Loop content is stable/repeating by
-            # definition, so any representative chunk of it works equally
-            # well - no need to analyse the WHOLE region, just take it
-            # from the start (already past any attack, unlike the
-            # fallback, which has to skip it by hand below).
-            max_frames = round(
-                entry["framerate"] * _ROOT_NOTE_FALLBACK_WINDOW_SECONDS
-            )
-            window_end = min(loop_end, loop_start + max_frames - 1)
-            return entry["samples"][loop_start : window_end + 1]
-
-        start, end = markers["start"], markers["end"]
-        span = end - start + 1
-        skip = min(
-            round(entry["framerate"] * _ROOT_NOTE_ATTACK_SKIP_SECONDS), span // 4
+        return root_note_detection.analysis_window(
+            entry["samples"], entry["framerate"], self.waveform_view.markers_with_loop_in_range()
         )
-        window_start = start + skip
-        window_end = min(
-            end,
-            window_start
-            + round(entry["framerate"] * _ROOT_NOTE_FALLBACK_WINDOW_SECONDS)
-            - 1,
-        )
-        return entry["samples"][window_start : window_end + 1]
 
     def _confirm_detect_root_note(self):
         sample_index = self.sample_list_widget.currentRow()
@@ -6450,15 +7286,9 @@ class ProgramEditorWindow(QMainWindow):
         # non-interactive spinbox for a marker that no longer even draws on
         # the canvas would read as a UI inconsistency, so these follow the
         # same enabled state
-        palette = theme.current_palette()
-        loop_swatch_color = (
-            palette["keygroup_color_3"] if enabled else palette["text_disabled"]
-        )
         for name in ("loop_start", "loop_end"):
             swatch, _spinbox, _value_label = self._marker_spinboxes[name]
-            swatch.setStyleSheet(
-                f"background-color: {loop_swatch_color}; border-radius: 2px;"
-            )
+            self._refresh_swatch(swatch)  # reads self._loop_markers_enabled
         if old_markers is not None and sample_index >= 0:
             new_markers = self.waveform_view.markers()
             entry = self._sample_waveform_cache.get(sample_index)
@@ -6709,6 +7539,15 @@ class ProgramEditorWindow(QMainWindow):
         chunk_connection = sampler_controller.sample_chunk_received.connect(
             self._on_sample_chunk_received
         )
+        # per-packet work on the GUI thread (envelope rebuild + repaint) delays
+        # handling the NEXT packet's ACK, which a real sampler's dump
+        # handshake can be sensitive to - so packets only get buffered as
+        # they arrive and a short timer flushes them to the waveform in
+        # batches (see _on_sample_chunk_received)
+        self._live_chunk_buffer = []
+        flush_timer = QTimer(self)
+        flush_timer.timeout.connect(self._flush_live_chunks)
+        flush_timer.start(_LIVE_CHUNK_FLUSH_MS)
         try:
             which, args = self._wait_for_any_signal(
                 [
@@ -6731,6 +7570,11 @@ class ProgramEditorWindow(QMainWindow):
         finally:
             sampler_controller.receive_progress.disconnect(progress_connection)
             sampler_controller.sample_chunk_received.disconnect(chunk_connection)
+            flush_timer.stop()
+            flush_timer.deleteLater()
+            # whatever arrived since the last tick - so a receive that ends
+            # (or fails) between ticks never leaves the tail unpainted
+            self._flush_live_chunks()
             try:
                 os.remove(temp_path)
             except OSError:
@@ -6776,7 +7620,18 @@ class ProgramEditorWindow(QMainWindow):
         # _fetch_sample_audio_blocking's own comment on why this is
         # connected there. Already 16-bit-scaled by the controller, same
         # range WaveformView.paintEvent divides by everywhere else.
-        self.waveform_view.append_live_samples(chunk)
+        #
+        # Only BUFFERS here - _flush_live_chunks (on a timer) does the
+        # actual envelope rebuild/repaint. This runs on the same GUI thread
+        # that ACKs the sampler's next packet, so per-packet drawing work
+        # sat directly in the handshake's critical path.
+        self._live_chunk_buffer.extend(chunk)
+
+    def _flush_live_chunks(self):
+        if not self._live_chunk_buffer:
+            return
+        buffered, self._live_chunk_buffer = self._live_chunk_buffer, []
+        self.waveform_view.append_live_samples(buffered)
 
     def _fetch_demo_sample_audio(self, sample_index):
         # AKAISDS_DEMO_SAMPLER has no equivalent on the audio side -
@@ -7468,6 +8323,9 @@ class ProgramEditorWindow(QMainWindow):
         entry["loop_start"] = new_loop_start
         entry["loop_end"] = new_loop_end
         entry["end"] = new_end
+        # the cache is edited in place here, so a retained copy of the
+        # pre-edit audio (e.g. from the Slice Editor) would come back stale
+        self._forget_retained_audio(self._sample_name_at_row(sample_index))
         if sample_index == self.sample_list_widget.currentRow():
             self._set_marker_spinbox_range(len(new_samples))
             self.waveform_view.set_waveform(
@@ -7584,16 +8442,45 @@ class ProgramEditorWindow(QMainWindow):
                 return
 
             # replacement confirmed resident under temp_name - now safe to
-            # remove the original
+            # remove the original. NOT by the index it had before the send:
+            # a new sample takes the LOWEST FREE SLOT (measured on a real
+            # S2000, 2026-10-07), which after any earlier delete is below the
+            # original, so that index now points at the replacement - or at
+            # an unrelated sample. Look both up BY NAME in a fresh list.
+            which, args = self._wait_for_any_signal(
+                [self._worker.samples_loaded, self._worker.samples_load_failed],
+                start=self._worker.submit_sample_list,
+                timeout_ms=20000,
+            )
+            if which != 0:
+                self.status_bar.showMessage(
+                    f'{action_label} sent as "{temp_name}", but the sample list '
+                    "couldn't be refreshed to find the original - nothing was "
+                    "deleted; check the sampler and delete the original manually."
+                )
+                return
+            names_now = args[0]
+            if names_now.count(original_name) != 1 or temp_name not in names_now:
+                logger.debug(
+                    f"_perform_sample_edit_real: can't tell which sample to delete "
+                    f"in {names_now!r} (original {original_name!r}, temp {temp_name!r})"
+                )
+                self.status_bar.showMessage(
+                    f'{action_label}: "{temp_name}" or "{original_name}" is not '
+                    "listed exactly once, so nothing was deleted - check the "
+                    "sampler directly."
+                )
+                return
+            delete_index = names_now.index(original_name)
             which, args = self._wait_for_any_signal(
                 [self._worker.sample_deleted, self._worker.sample_delete_failed],
-                start=lambda: self._worker.submit_delete_sample(sample_index),
+                start=lambda: self._worker.submit_delete_sample(delete_index),
                 timeout_ms=20000,
             )
             if which != 0:
                 error = args[1] if args else "timed out waiting for a response"
                 logger.debug(
-                    f"_perform_sample_edit_real: delete of sample {sample_index} "
+                    f"_perform_sample_edit_real: delete of sample {delete_index} "
                     f"failed: {error}"
                 )
                 self.status_bar.showMessage(
@@ -7674,7 +8561,10 @@ class ProgramEditorWindow(QMainWindow):
             # to land on a clean final selection: nothing stayed selected
             # through the two reloads above for _on_samples_loaded's own
             # restore-by-name logic to restore, so this explicitly selects
-            # the (correctly renamed again) sample itself
+            # the (correctly renamed again) sample itself. The audio we just
+            # sent is kept for that selection (not before: the reloads above
+            # list the sample under its -TMP name, which would prune it).
+            self._retain_sample_audio(original_name, new_samples, framerate)
             which, args = self._wait_for_any_signal(
                 [self._worker.samples_loaded, self._worker.samples_load_failed],
                 start=self._worker.submit_sample_list,
@@ -7809,23 +8699,7 @@ class ProgramEditorWindow(QMainWindow):
         self._flush_write("LLNGTH1")
 
     def _on_waveform_view_changed(self, view_start, view_length, frame_count):
-        # keeps the pan scrollbar in step with WaveformView's own zoom/pan
-        # state, however it changed (wheel-zoom, wheel-pan, the Fit/+/-
-        # buttons, or a fresh sample loading) - blockSignals so this never
-        # bounces back through _on_waveform_scrollbar_moved
-        self.waveform_scrollbar.blockSignals(True)
-        if frame_count == 0 or view_length >= frame_count:
-            # nothing loaded, or fully zoomed out - there's nothing to
-            # scroll to, so the bar takes up space for no reason if it's
-            # merely disabled rather than hidden outright
-            self.waveform_scrollbar.setVisible(False)
-            self.waveform_scrollbar.setRange(0, 0)
-        else:
-            self.waveform_scrollbar.setVisible(True)
-            self.waveform_scrollbar.setPageStep(view_length)
-            self.waveform_scrollbar.setRange(0, frame_count - view_length)
-            self.waveform_scrollbar.setValue(view_start)
-        self.waveform_scrollbar.blockSignals(False)
+        sync_waveform_scrollbar(self.waveform_scrollbar, view_start, view_length, frame_count)
 
     def _on_waveform_scrollbar_moved(self, value):
         self.waveform_view.set_view_start(value)
@@ -8049,6 +8923,40 @@ class ProgramEditorWindow(QMainWindow):
             keytrack_combo.blockSignals(True)
             keytrack_combo.setCurrentIndex(values.get(cp, 0))
             keytrack_combo.blockSignals(False)
+
+            vss_value = values.get(f"VSS{z + 1}", 0)
+            self._zone_vss[z].blockSignals(True)
+            self._zone_vss[z].setValue(vss_value)
+            self._zone_vss_labels[z].setText(str(vss_value))
+            self._zone_vss[z].blockSignals(False)
+
+        self._show_mute_group(values.get("KGMUTE", _MUTE_GROUP_OFF))
+
+    def _show_mute_group(self, raw):
+        """Show the keygroup's mute group WITHOUT writing it. A raw byte the sampler holds that the combo has no entry for (32-254) gets its own temporary item
+        (\"Raw N\") - never silently shown as Off or as another group."""
+        combo = self.mute_group_combo
+        combo.blockSignals(True)
+        try:
+            # drop a "Raw N" item left by the previous keygroup
+            for i in range(combo.count() - 1, -1, -1):
+                if combo.itemData(i) is not None and combo.itemData(i) != _MUTE_GROUP_OFF and combo.itemData(i) >= _MUTE_GROUP_COUNT:
+                    combo.removeItem(i)
+            index = combo.findData(raw)
+            if index < 0:
+                combo.addItem(f"Raw {raw}", raw)
+                index = combo.count() - 1
+            combo.setCurrentIndex(index)
+        finally:
+            combo.blockSignals(False)
+
+    def _on_mute_group_chosen(self, index):
+        raw = self.mute_group_combo.itemData(index)
+        if raw is None:
+            return
+        self._schedule_write(
+            "KGMUTE", "keygroup", raw, keygroup_index=self.keygroup_list.currentRow()
+        )
 
 
 if __name__ == "__main__":

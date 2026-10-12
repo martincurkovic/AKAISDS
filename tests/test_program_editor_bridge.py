@@ -4,6 +4,8 @@
 # process_pending() drains it synchronously on the test thread, so its
 # signals fire as plain direct connections - fast and deterministic.
 
+import json
+
 import s3k.messages as m
 import s3k.params as p
 
@@ -61,8 +63,8 @@ def test_connect_opens_saved_output_port_when_not_demo(monkeypatch):
 # --- connect(): AKAISDS_SHARED_MIDI_TRANSPORT=1 (see core/midi_transport.py) -
 # builds the Program Editor's own S3kBridge from a MidiManager's already-open
 # raw ports instead of opening a second, independent connection - one real
-# connection instead of two. See test_scripts/midi_transport_consolidation_
-# test_plan.md - this path is not yet validated on real hardware.
+# connection instead of two. See tests/midi_transport_consolidation_
+# test_plan.md - validated on real hardware and now the default.
 
 
 class _FakeMidiManagerWithRawPorts:
@@ -766,7 +768,12 @@ def test_worker_deletes_samples_are_never_coalesced():
 
 class _CreateBridge:
     def __init__(self, program_names, program_keygroups, error=None,
-                 error_on_step=None, reply_error_on_step=None):
+                 error_on_step=None, reply_error_on_step=None, insert_at=None):
+        # insert_at: where a program created by a PDATA past the end really
+        # lands. None = appended; an int simulates the sampler's PRGNUM
+        # ordering (measured on a real S2000: a clone sorts right after its
+        # template, i.e. BETWEEN two existing programs)
+        self._insert_at = insert_at
         # program_names: list[str], index = program index
         # program_keygroups: {program_index: [(lonote, hinote), ...]} - one
         # tuple per keygroup, used to build distinguishable fake keygroup
@@ -841,6 +848,15 @@ class _CreateBridge:
                 header[groups_param.offset : groups_param.offset + groups_param.size],
             )
             self.pdata_writes.append((program_index, groups, name))
+            if program_index >= len(self._program_names):
+                at = len(self._program_names) if self._insert_at is None else self._insert_at
+                self._program_names.insert(at, name)
+                shifted = {
+                    (i + 1 if i >= at else i): kgs
+                    for i, kgs in self._program_keygroups.items()
+                }
+                shifted[at] = []
+                self._program_keygroups = shifted
         elif command == m.Command.KDATA:
             program_index = payload[0] | (payload[1] << 7)
             keygroup_index = payload[2]
@@ -854,6 +870,7 @@ class _CreateBridge:
                 hi_param, header[hi_param.offset : hi_param.offset + hi_param.size]
             )
             self.kdata_writes.append((program_index, keygroup_index, lo, hi))
+            self._program_keygroups.setdefault(program_index, []).append((lo, hi))
         else:
             raise AssertionError(f"unexpected command {command:#04x}")
         return m.Reply(code=int(m.ReplyCode.OK)).encode()
@@ -887,6 +904,53 @@ def test_worker_creates_program_with_every_source_keygroup_cloned():
         (1, 1, 61, 96),
         (1, 2, 97, 108),
     ]
+
+
+def test_worker_creates_program_at_the_index_the_sampler_gave_it():
+    # real S2000 log (2026-10-07): the clone landed BETWEEN TEST PROGRAM and
+    # SKIBIDI, so the old "new_index = len(list)" sent every KDATA/PDATA to
+    # SKIBIDI and left the new program with an unwritten keygroup
+    bridge = _CreateBridge(
+        program_names=["TEST PROGRAM", "SKIBIDI"],
+        program_keygroups={0: [(24, 60), (61, 96)], 1: [(0, 127)]},
+        insert_at=1,
+    )
+    worker = BridgeWorker(bridge)
+    created, failed = [], []
+    worker.program_created.connect(lambda *a: created.append(a))
+    worker.program_create_failed.connect(lambda *a: failed.append(a))
+
+    worker.submit_create_program(0, "CW AMEN CHOP")
+    worker.process_pending()
+
+    assert failed == []
+    assert created == [(0, 1)]
+    # the first PDATA is addressed past the end; everything after it follows
+    # the new program to index 1 and never touches SKIBIDI (now index 2)
+    assert bridge.pdata_writes == [
+        (2, 1, "CW AMEN CHOP"),
+        (1, 2, "CW AMEN CHOP"),
+    ]
+    assert bridge.kdata_writes == [(1, 0, 24, 60), (1, 1, 61, 96)]
+    assert bridge.program_list() == ["TEST PROGRAM", "CW AMEN CHOP", "SKIBIDI"]
+
+
+def test_worker_refuses_to_guess_when_the_program_list_did_not_grow():
+    bridge = _CreateBridge(
+        program_names=["BASS STAB"], program_keygroups={0: [(24, 60)]}
+    )
+    bridge.program_list = lambda: ["BASS STAB"]  # the sampler "lost" the PDATA
+    worker = BridgeWorker(bridge)
+    created, failed = [], []
+    worker.program_created.connect(lambda *a: created.append(a))
+    worker.program_create_failed.connect(lambda *a: failed.append(a))
+
+    worker.submit_create_program(0, "NEW PROG")
+    worker.process_pending()
+
+    assert created == []
+    assert len(failed) == 1 and "can't tell where" in failed[0][1]
+    assert bridge.kdata_writes == []
 
 
 def test_worker_emits_program_create_failed_on_error_mid_sequence():
@@ -1531,3 +1595,684 @@ def test_logging_bridge_wraps_get_header_bytes_and_send_and_receive():
     assert any("START send_and_receive" in m for m in logger.debug_calls)
     assert any("END send_and_receive" in m for m in logger.debug_calls)
     assert logger.error_calls == []
+
+
+# --- LoggingBridge logs a Parameter as its name, not its whole table entry ------------------------
+
+
+class _RecordingLogger:
+    def __init__(self):
+        self.lines = []
+
+    def debug(self, message, *a, **k):
+        self.lines.append(message)
+
+    def error(self, message, *a, **k):
+        self.lines.append(message)
+
+
+class _OneFieldBridge:
+    def get_parameter(self, param, index, *, keygroup=0, region=None):
+        return 7
+
+    def set_parameter(self, param, index, value, *, keygroup=0, region=None):
+        pass
+
+
+def test_logging_bridge_logs_a_parameter_as_region_dot_name():
+    logger = _RecordingLogger()
+    bridge = LoggingBridge(_OneFieldBridge(), logger=logger)
+    param = p.lookup("GROUPS", "program")
+
+    bridge.get_parameter(param, 3, keygroup=2)
+
+    start, end = logger.lines
+    assert "START get_parameter(program.GROUPS, 3, keygroup=2)" in start
+    assert "END get_parameter(program.GROUPS, 3, keygroup=2) -> 7" in end
+
+
+def test_logging_bridge_no_longer_dumps_the_whole_parameter_entry():
+    logger = _RecordingLogger()
+    bridge = LoggingBridge(_OneFieldBridge(), logger=logger)
+    bridge.get_parameter(p.lookup("GROUPS", "program"), 0)
+    bridge.set_parameter(p.lookup("PRLOUD", "program"), 0, 40)
+    text = "\n".join(logger.lines)
+    # none of the Parameter dataclass's own fields leak into the log
+    for leaked in ("Parameter(", "minimum=", "maximum=", "notes=", "desc=", "group="):
+        assert leaked not in text
+    assert all(len(line) < 120 for line in logger.lines)
+
+
+def test_logging_bridge_still_logs_plain_arguments_and_values_in_full():
+    logger = _RecordingLogger()
+    bridge = LoggingBridge(_OneFieldBridge(), logger=logger)
+    bridge.set_parameter(p.lookup("PRNAME", "program"), 5, "MY PROGRAM")
+    assert "set_parameter(program.PRNAME, 5, 'MY PROGRAM')" in logger.lines[0]
+
+
+def test_logging_bridge_failures_name_the_field_too():
+    class _Failing:
+        def get_parameter(self, param, index, **kwargs):
+            raise TimeoutError("no reply within 2.0s")
+
+    logger = _RecordingLogger()
+    bridge = LoggingBridge(_Failing(), logger=logger)
+    with pytest.raises(TimeoutError):
+        bridge.get_parameter(p.lookup("SLNGTH", "sample"), 0)
+    failed = [line for line in logger.lines if "FAILED" in line]
+    assert failed and "get_parameter(sample.SLNGTH, 0)" in failed[0]
+    assert "Parameter(" not in failed[0]
+
+
+# --- global settings (misc byte registers + the whole-block misc data, core/global_settings.py) --
+
+
+# the raw bytes the real S2000 held when the probe dumped it (2026-10-09). The program change / tune / fine tune registers (71, 64, 65) are
+# STALE copies - the app reads those three from the block, below - so they hold deliberately wrong values here.
+_RAW_GLOBALS = {
+    38: 1, 15: 12, 64: 99, 65: 99, 71: 99, 31: 60, 57: 0, 54: 100, 11: 5, 14: 1, 12: 6,
+}
+# the 48-byte block: [channel, omni, enabled, 0, 0, 0, cents+50, semitones+9, level raw 12, 0...] - program change Omni, tune 0, fine tune 0
+_BLOCK = bytes([15, 1, 1, 0, 0, 0, 50, 9, 12] + [0] * 39)
+_DECODED_GLOBALS = {
+    "external_controller": 1,
+    "output_level": 0,
+    "tune_semitones": 0,
+    "tune_cents": 0,
+    "program_change_channel": 17,
+    "play_note": 60,
+    "play_channel": 1,
+    "play_velocity": 100,
+    "scsi_disk_id": 5,
+    "scsi_sector": 1,
+    "scsi_local_id": 6,
+}
+
+
+class _MiscBridge:
+    """Duck-types S3kBridge's private misc-byte calls AND its raw frame calls, with real RMDATA/MDATA/REPLY frames."""
+
+    exclusive_channel = 0
+
+    def __init__(self, registers=None, error=None, echo=True, block=_BLOCK):
+        self.registers = dict(_RAW_GLOBALS if registers is None else registers)
+        self.error = error
+        self.echo = echo  # False: the sampler ignores a register write
+        self.block = bytes(block)
+        self.block_error = None  # an exception to raise from the next block reads
+        self.block_flaky = 0  # this many block reads fail first
+        self.block_reply_code = 0  # REPLY code for a block write
+        self.block_applies = True  # False: the sampler acks a block write but keeps the old block
+        self.reads = []
+        self.write_verify_calls = []
+        self.block_writes = []
+        self._replies = []
+
+    def _misc_byte(self, index, value=None, **kwargs):
+        self.reads.append(index)
+        if self.error:
+            raise self.error
+        return self.registers[index]
+
+    def _misc_write_verify(self, index, value, what, **kwargs):
+        self.write_verify_calls.append((index, value))
+        if self.error:
+            raise self.error
+        if self.echo:
+            self.registers[index] = value
+        if self.registers[index] != value:
+            raise program_editor_bridge.DeviceError(
+                f"{what}: asked for {value}, register reads {self.registers[index]}"
+            )
+        return value
+
+    def send_and_receive(self, frame, timeout=None):
+        _c, command, _p = m.parse_frame(frame)
+        assert command == m.Command.RMDATA
+        if self.block_error:
+            raise self.block_error
+        if self.block_flaky:
+            self.block_flaky -= 1
+            raise ValueError("extended data: expected at least a 7-byte body, got 1")
+        return m.build_frame(m.Command.MDATA, m.encode_nibbles(self.block))
+
+    def _drain(self):
+        self._replies.clear()
+
+    def _send(self, frame, write=False):
+        _c, command, payload = m.parse_frame(frame)
+        assert command == m.Command.MDATA and write
+        block = bytes(m.decode_nibbles(list(payload)))
+        self.block_writes.append(block)
+        if self.block_reply_code == 0 and self.block_applies:
+            self.block = block
+        self._replies.append(m.Reply(code=self.block_reply_code).encode())
+
+    def _receive(self, timeout=None, accept=None):
+        if not self._replies:
+            raise TimeoutError("no reply within 3.0s")
+        return self._replies.pop(0)
+
+
+def _global_signals(worker):
+    seen = {"loaded": [], "load_failed": [], "written": [], "write_failed": []}
+    worker.global_settings_loaded.connect(seen["loaded"].append)
+    worker.global_settings_load_failed.connect(seen["load_failed"].append)
+    worker.global_setting_written.connect(lambda k, v: seen["written"].append((k, v)))
+    worker.global_setting_write_failed.connect(
+        lambda k, e: seen["write_failed"].append((k, e))
+    )
+    return seen
+
+
+def test_worker_reads_every_global_setting():
+    worker = BridgeWorker(_MiscBridge())
+    seen = _global_signals(worker)
+
+    worker.submit_global_settings()
+    worker.process_pending()
+
+    assert seen["loaded"] == [_DECODED_GLOBALS]
+    assert seen["load_failed"] == []
+
+
+def test_the_block_not_the_stale_registers_decides_program_change_and_tune():
+    block = bytes([5, 0, 1, 0, 0, 0, 100, 59, 12] + [0] * 39)  # channel 6, +50 cents, +50 st
+    worker = BridgeWorker(_MiscBridge(block=block))
+    seen = _global_signals(worker)
+
+    worker.submit_global_settings()
+    worker.process_pending()
+
+    (loaded,) = seen["loaded"]
+    assert loaded["program_change_channel"] == 6
+    assert loaded["tune_cents"] == 50 and loaded["tune_semitones"] == 50
+    # the stale registers (71, 64, 65) are never even read
+    bridge = _MiscBridge(block=block)
+    worker2 = BridgeWorker(bridge)
+    worker2.submit_global_settings()
+    worker2.process_pending()
+    assert not {71, 64, 65} & set(bridge.reads)
+
+
+@pytest.mark.parametrize(
+    "block_bytes, expected",
+    [([0, 0, 1], 1), ([5, 0, 1], 6), ([0, 0, 0], 0), ([15, 1, 1], 17)],
+)
+def test_program_change_states_decode_from_the_block(block_bytes, expected):
+    block = bytes(block_bytes + [0, 0, 0, 50, 9, 12] + [0] * 39)
+    worker = BridgeWorker(_MiscBridge(block=block))
+    seen = _global_signals(worker)
+    worker.submit_global_settings()
+    worker.process_pending()
+    assert seen["loaded"][0]["program_change_channel"] == expected
+
+
+def test_worker_leaves_out_a_setting_whose_raw_value_the_panel_cannot_show():
+    # a firmware that keeps something else there: no value, not a wrong one -
+    # and the other settings still load
+    block = bytes([0, 2, 1] + [0] * 45)  # an Omni flag of 2 is no panel state
+    worker = BridgeWorker(_MiscBridge({**_RAW_GLOBALS, 38: 9, 15: 200}, block=block))
+    seen = _global_signals(worker)
+
+    worker.submit_global_settings()
+    worker.process_pending()
+
+    (loaded,) = seen["loaded"]
+    assert "external_controller" not in loaded and "output_level" not in loaded
+    assert "program_change_channel" not in loaded
+    assert loaded["scsi_disk_id"] == 5
+
+
+def test_a_block_that_cannot_be_read_leaves_only_the_block_settings_out():
+    bridge = _MiscBridge()
+    bridge.block_error = TimeoutError("no reply")
+    worker = BridgeWorker(bridge)
+    seen = _global_signals(worker)
+
+    worker.submit_global_settings()
+    worker.process_pending()
+
+    (loaded,) = seen["loaded"]
+    assert not {"program_change_channel", "tune_semitones", "tune_cents"} & set(loaded)
+    assert loaded["external_controller"] == 1
+
+
+def test_worker_stops_reading_at_the_first_failed_read():
+    # a dead connection must not cost one timeout per setting
+    bridge = _MiscBridge(error=TimeoutError("no reply"))
+    worker = BridgeWorker(bridge)
+    seen = _global_signals(worker)
+
+    worker.submit_global_settings()
+    worker.process_pending()
+
+    assert len(bridge.reads) == 1
+    assert seen["loaded"] == []
+    assert seen["load_failed"] == ["no reply"]
+
+
+def test_worker_reports_a_bridge_without_misc_registers_as_unavailable():
+    # DemoBridge has no _misc_byte
+    worker = BridgeWorker(object())
+    seen = _global_signals(worker)
+
+    worker.submit_global_settings()
+    worker.submit_set_global_setting("external_controller", 1)
+    worker.submit_set_global_setting("program_change_channel", 6)
+    worker.process_pending()
+
+    assert seen["loaded"] == [] and len(seen["load_failed"]) == 1
+    assert seen["written"] == [] and len(seen["write_failed"]) == 2
+
+
+@pytest.mark.parametrize(
+    "key, value, register, raw",
+    [
+        ("external_controller", 2, 38, 2),
+        ("output_level", -18, 15, 9),
+        ("output_level", 18, 15, 15),
+        ("play_note", 127, 31, 127),
+        ("play_channel", 16, 57, 15),
+        ("play_velocity", 127, 54, 127),
+        ("scsi_disk_id", 7, 11, 7),
+        ("scsi_sector", 0, 14, 0),
+        ("scsi_local_id", 0, 12, 0),
+    ],
+)
+def test_worker_writes_each_register_setting_to_its_register_verified(key, value, register, raw):
+    bridge = _MiscBridge()
+    worker = BridgeWorker(bridge)
+    seen = _global_signals(worker)
+
+    worker.submit_set_global_setting(key, value)
+    worker.process_pending()
+
+    assert bridge.write_verify_calls == [(register, raw)]
+    assert bridge.block_writes == []  # a register setting never touches the block
+    assert seen["written"] == [(key, value)]
+    assert seen["write_failed"] == []
+
+
+def test_worker_reports_a_write_the_sampler_did_not_take():
+    bridge = _MiscBridge(echo=False)
+    worker = BridgeWorker(bridge)
+    seen = _global_signals(worker)
+
+    worker.submit_set_global_setting("external_controller", 2)
+    worker.process_pending()
+
+    assert seen["written"] == []
+    assert [k for k, _e in seen["write_failed"]] == ["external_controller"]
+
+
+@pytest.mark.parametrize(
+    "key, value",
+    [
+        ("external_controller", 3),
+        ("output_level", 5),  # not a 6 dB step
+        ("output_level", 24),
+        ("tune_semitones", 51),
+        ("tune_cents", -51),
+        ("program_change_channel", 18),
+        ("program_change_channel", -1),
+        ("play_note", 20),
+        ("play_channel", 0),
+        ("play_velocity", 128),
+        ("scsi_disk_id", 8),
+        ("scsi_sector", 2),
+        ("scsi_local_id", -1),
+        ("no_such_setting", 0),
+    ],
+)
+def test_worker_never_sends_an_out_of_range_global_setting(key, value):
+    bridge = _MiscBridge()
+    worker = BridgeWorker(bridge)
+    seen = _global_signals(worker)
+
+    worker.submit_set_global_setting(key, value)
+    worker.process_pending()
+
+    assert bridge.write_verify_calls == [] and bridge.block_writes == []
+    assert len(seen["write_failed"]) == 1
+
+
+def test_global_settings_are_never_touched_on_an_s1000():
+    bridge = _MiscBridge()
+    worker = BridgeWorker(bridge, s1000=True)
+    seen = _global_signals(worker)
+
+    worker.submit_global_settings()
+    worker.submit_set_global_setting("external_controller", 1)
+    worker.submit_set_global_setting("program_change_channel", 6)
+    worker.process_pending()
+
+    assert bridge.reads == [] and bridge.write_verify_calls == [] and bridge.block_writes == []
+    assert len(seen["load_failed"]) == 1 and len(seen["write_failed"]) == 2
+
+
+def test_queued_global_reads_coalesce_but_writes_do_not():
+    worker = BridgeWorker(_MiscBridge())
+    seen = _global_signals(worker)
+
+    worker.submit_global_settings()
+    worker.submit_global_settings()
+    worker.submit_set_global_setting("external_controller", 1)
+    worker.submit_set_global_setting("external_controller", 2)
+    worker.process_pending()
+
+    assert len(seen["loaded"]) == 1
+    assert seen["written"] == [("external_controller", 1), ("external_controller", 2)]
+
+
+# --- the whole-block write (program change channel, tune, fine tune) ----------
+
+
+def _block_write(bridge, key, value):
+    worker = BridgeWorker(bridge)
+    seen = _global_signals(worker)
+    worker.submit_set_global_setting(key, value)
+    worker.process_pending()
+    return worker, seen
+
+
+def test_a_program_change_channel_write_changes_only_the_channel_byte():
+    # measured on the real S2000: channel 1 -> 6 changed offset 0 and nothing else
+    bridge = _MiscBridge(block=bytes([0, 0, 1, 0, 0, 0, 50, 9, 12] + [0] * 39))
+    original = bridge.block
+
+    _worker, seen = _block_write(bridge, "program_change_channel", 6)
+
+    assert len(bridge.block_writes) == 1
+    written = bridge.block_writes[0]
+    assert [i for i in range(48) if written[i] != original[i]] == [0]
+    assert written[0] == 5
+    assert seen["written"] == [("program_change_channel", 6)]
+    assert bridge.write_verify_calls == []  # never through the stale byte register
+
+
+@pytest.mark.parametrize(
+    "value, start, expected_first_three",
+    [
+        (0, [5, 0, 1], [5, 0, 0]),  # Off keeps the channel byte
+        (17, [5, 0, 1], [5, 1, 1]),  # Omni keeps it too
+        (3, [15, 1, 1], [2, 0, 1]),  # a channel from Omni clears the Omni flag
+        (3, [5, 0, 0], [2, 0, 1]),  # ...and from Off re-enables
+    ],
+)
+def test_program_change_off_omni_and_channels_encode_the_three_bytes(value, start, expected_first_three):
+    bridge = _MiscBridge(block=bytes(start + [0, 0, 0, 50, 9, 12] + [0] * 39))
+    _worker, seen = _block_write(bridge, "program_change_channel", value)
+    assert list(bridge.block_writes[0][:3]) == expected_first_three
+    assert bridge.block_writes[0][3:] == bytes([0, 0, 0, 50, 9, 12] + [0] * 39)
+    assert seen["write_failed"] == []
+
+
+@pytest.mark.parametrize("key, value, offset, raw", [("tune_semitones", 12, 7, 21), ("tune_semitones", -50, 7, 215), ("tune_cents", 50, 6, 100), ("tune_cents", -50, 6, 0)])
+def test_tune_and_fine_tune_write_their_block_offsets(key, value, offset, raw):
+    bridge = _MiscBridge()
+    original = bridge.block
+    _worker, seen = _block_write(bridge, key, value)
+    written = bridge.block_writes[0]
+    assert written[offset] == raw
+    assert [i for i in range(48) if written[i] != original[i]] == [offset]
+    assert seen["written"] == [(key, value)]
+
+
+def test_the_block_is_backed_up_once_before_the_first_write(tmp_path, monkeypatch):
+    monkeypatch.setattr(program_editor_bridge, "MDATA_BACKUP_DIR", tmp_path)
+    bridge = _MiscBridge()
+    original = bridge.block
+    worker = BridgeWorker(bridge)
+    worker.submit_set_global_setting("program_change_channel", 6)
+    worker.submit_set_global_setting("program_change_channel", 7)
+    worker.process_pending()
+
+    files = list(tmp_path.glob("mdata_*.json"))
+    assert len(files) == 1  # once per session, not per write
+    saved = json.loads(files[0].read_text())
+    assert bytes.fromhex(saved["block_hex"]) == original  # what was there BEFORE the first write
+    assert len(bridge.block_writes) == 2
+
+
+def test_no_backup_means_no_block_write(tmp_path, monkeypatch):
+    # the directory can't be created (a file is in the way): the block must not be written
+    blocker = tmp_path / "not_a_dir"
+    blocker.write_text("x")
+    monkeypatch.setattr(program_editor_bridge, "MDATA_BACKUP_DIR", blocker / "sub")
+    bridge = _MiscBridge()
+    _worker, seen = _block_write(bridge, "program_change_channel", 6)
+    assert bridge.block_writes == []
+    assert len(seen["write_failed"]) == 1 and seen["written"] == []
+
+
+def test_a_refused_block_write_is_reported():
+    bridge = _MiscBridge()
+    bridge.block_reply_code = 1
+    _worker, seen = _block_write(bridge, "program_change_channel", 6)
+    assert seen["written"] == []
+    assert "refused" in seen["write_failed"][0][1]
+
+
+def test_an_acked_block_write_the_sampler_did_not_keep_is_reported():
+    # believe the READ, not the ack
+    bridge = _MiscBridge()
+    bridge.block_applies = False
+    _worker, seen = _block_write(bridge, "program_change_channel", 6)
+    assert seen["written"] == []
+    assert "differs" in seen["write_failed"][0][1]
+
+
+def test_a_block_of_the_wrong_length_is_never_edited():
+    bridge = _MiscBridge(block=bytes(47))
+    _worker, seen = _block_write(bridge, "program_change_channel", 6)
+    assert bridge.block_writes == []
+    assert "length" in seen["write_failed"][0][1]
+
+
+def test_block_reads_retry_the_undecodable_frame():
+    # measured: the sampler intermittently answers with a frame s3k cannot decode
+    bridge = _MiscBridge()
+    bridge.block_flaky = 2
+    worker = BridgeWorker(bridge)
+    seen = _global_signals(worker)
+    worker.submit_global_settings()
+    worker.process_pending()
+    assert seen["loaded"][0]["program_change_channel"] == 17
+
+
+def test_a_block_that_keeps_failing_to_read_fails_the_write_without_writing():
+    bridge = _MiscBridge()
+    bridge.block_flaky = 99
+    _worker, seen = _block_write(bridge, "program_change_channel", 6)
+    assert bridge.block_writes == []
+    assert len(seen["write_failed"]) == 1
+
+
+# --- spacing around a block write (measured 2026-10-10: acked, then never applied when the read-back came 2 ms later) ---
+
+
+class _SlowApplyBridge(_MiscBridge):
+    """Models the working theory for the real S2000: a block write is acked at once but only APPLIED after APPLY_S of quiet - any message
+    that arrives sooner (the verifying read, say) cancels it. `clock` is virtual: the patched `_sleep` advances it."""
+
+    APPLY_S = 0.5
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.clock = 0.0
+        self.pending = None  # (block, time written)
+        self.events = []  # ("read" | "write" | ("sleep", seconds)) in order
+
+    def _settle(self):
+        if self.pending is not None:
+            block, written_at = self.pending
+            self.pending = None
+            if self.clock - written_at >= self.APPLY_S:
+                self.block = block  # quiet long enough: applied
+            # else: cancelled by this message
+
+    def send_and_receive(self, frame, timeout=None):
+        self._settle()
+        self.events.append("read")
+        return super().send_and_receive(frame, timeout)
+
+    def _send(self, frame, write=False):
+        self._settle()
+        self.events.append("write")
+        _c, _command, payload = m.parse_frame(frame)
+        self.block_writes.append(bytes(m.decode_nibbles(list(payload))))
+        self.pending = (self.block_writes[-1], self.clock)
+        self._replies.append(m.Reply(code=0).encode())
+
+
+@pytest.fixture
+def real_spacing(monkeypatch):
+    """Run the block-write spacing for real against a virtual clock (conftest makes `_sleep` a no-op for every other test)."""
+    holder = {}
+
+    def fake_sleep(seconds):
+        bridge = holder["bridge"]
+        bridge.events.append(("sleep", seconds))
+        bridge.clock += seconds
+
+    monkeypatch.setattr(program_editor_bridge, "_sleep", fake_sleep)
+    return holder
+
+
+def test_the_block_write_survives_a_sampler_that_applies_after_a_pause(real_spacing):
+    bridge = _SlowApplyBridge(block=bytes([0, 0, 1, 0, 0, 0, 50, 9, 12] + [0] * 39))
+    real_spacing["bridge"] = bridge
+
+    _worker, seen = _block_write(bridge, "program_change_channel", 6)
+
+    assert seen["write_failed"] == []
+    assert seen["written"] == [("program_change_channel", 6)]
+    assert bridge.block[0] == 5  # really applied
+
+
+def test_the_same_sampler_loses_the_write_without_the_pauses(real_spacing, monkeypatch):
+    # proves the fake models the failure the user saw: a write followed at once by a read is acked and never applied
+    monkeypatch.setattr(program_editor_bridge, "MISC_BLOCK_BEFORE_WRITE_S", 0)
+    monkeypatch.setattr(program_editor_bridge, "MISC_BLOCK_AFTER_WRITE_S", 0)
+    bridge = _SlowApplyBridge(block=bytes([0, 0, 1, 0, 0, 0, 50, 9, 12] + [0] * 39))
+    real_spacing["bridge"] = bridge
+
+    _worker, seen = _block_write(bridge, "program_change_channel", 6)
+
+    assert seen["written"] == []
+    assert "differs" in seen["write_failed"][0][1]
+    assert bridge.block[0] == 0
+
+
+def test_the_block_write_is_paced_around_the_write(real_spacing):
+    bridge = _SlowApplyBridge()
+    real_spacing["bridge"] = bridge
+
+    _block_write(bridge, "tune_semitones", 12)
+
+    # fresh read, pause, the write, pause, then the verifying read - never a message right next to the write
+    assert bridge.events[:5] == [
+        "read",
+        ("sleep", program_editor_bridge.MISC_BLOCK_BEFORE_WRITE_S),
+        "write",
+        ("sleep", program_editor_bridge.MISC_BLOCK_AFTER_WRITE_S),
+        "read",
+    ]
+    assert program_editor_bridge.MISC_BLOCK_BEFORE_WRITE_S >= 0.3
+    assert program_editor_bridge.MISC_BLOCK_AFTER_WRITE_S >= 1.0
+
+
+def test_a_slow_apply_is_verified_over_several_attempts(monkeypatch):
+    # a sampler that shows the new block only from the SECOND read-back on: the verify retries before giving up
+    class _LateApply(_MiscBridge):
+        def __init__(self, **kwargs):
+            super().__init__(**kwargs)
+            self.pending_block = None
+            self.reads_since_write = 0
+
+        def _send(self, frame, write=False):
+            _c, _command, payload = m.parse_frame(frame)
+            self.pending_block = bytes(m.decode_nibbles(list(payload)))
+            self.block_writes.append(self.pending_block)
+            self.reads_since_write = 0
+            self._replies.append(m.Reply(code=0).encode())
+
+        def send_and_receive(self, frame, timeout=None):
+            if self.pending_block is not None:
+                self.reads_since_write += 1
+                if self.reads_since_write >= 2:
+                    self.block, self.pending_block = self.pending_block, None
+            return super().send_and_receive(frame, timeout)
+
+    bridge = _LateApply()
+    _worker, seen = _block_write(bridge, "program_change_channel", 6)
+    assert seen["written"] == [("program_change_channel", 6)]
+    assert bridge.block[0] == 5
+
+    # with a single attempt the same sampler would have been reported as failed
+    monkeypatch.setattr(program_editor_bridge, "MISC_BLOCK_VERIFY_ATTEMPTS", 1)
+    _worker, seen = _block_write(_LateApply(), "program_change_channel", 6)
+    assert seen["written"] == [] and "differs" in seen["write_failed"][0][1]
+
+
+# --- stray replies: the warning the editor shows (something is echoing the sampler's replies back to it) ----
+
+
+class _StrayBridge:
+    def __init__(self):
+        self.skipped_replies = 0
+
+    def program_list(self):
+        self.skipped_replies += 2  # each read skips two strays
+        return ["A"]
+
+
+def test_the_worker_warns_again_whenever_new_strays_pile_up():
+    bridge = _StrayBridge()  # each read skips two strays
+    worker = BridgeWorker(bridge)
+    warned = []
+    worker.stray_replies_detected.connect(warned.append)
+
+    def read():
+        worker.submit_program_list()
+        worker.process_pending()
+
+    read()
+    assert warned == []  # 2 strays: below the threshold of 3
+    read()
+    assert warned == [4]  # 4 >= 3: the first warning
+    read()
+    assert warned == [4]  # only 2 NEW strays since the warning
+    read()
+    assert warned == [4, 8]  # 4 new strays: it warns AGAIN, in the same session
+    read()
+    read()
+    assert warned == [4, 8, 12]
+
+
+def test_an_echo_that_stops_does_not_keep_warning():
+    bridge = _StrayBridge()
+    worker = BridgeWorker(bridge)
+    warned = []
+    worker.stray_replies_detected.connect(warned.append)
+    worker.submit_program_list()
+    worker.submit_program_list()
+    worker.process_pending()
+    assert warned == [4]
+
+    bridge.program_list = lambda: ["A"]  # the user fixed the setup: no more strays
+    for _ in range(5):
+        worker.submit_program_list()
+        worker.process_pending()
+    assert warned == [4]
+
+
+def test_no_warning_without_a_reply_matching_counter():
+    # demo/fake bridges have no skipped_replies
+    worker = BridgeWorker(_ListBridge(items=["A"]))
+    warned = []
+    worker.stray_replies_detected.connect(warned.append)
+    worker.submit_program_list()
+    worker.process_pending()
+    assert warned == []

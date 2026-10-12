@@ -449,6 +449,7 @@ def test_check_packet_timeout_switches_to_open_loop_when_generation_matches(cont
     controller._send_queue = [b"pkt0", b"pkt1"]
     controller._send_index = 0
     controller._packet_send_generation = 5
+    controller._send_packet_retries = controller._send_unproven_max_retries  # retry budget spent
     calls = []
     controller._send_current_packet = lambda: calls.append(controller._send_index)
 
@@ -457,6 +458,254 @@ def test_check_packet_timeout_switches_to_open_loop_when_generation_matches(cont
     assert controller._no_response_detected is True
     assert controller._send_index == 1
     assert calls == [1]
+
+
+def test_timeout_before_any_ack_falls_back_to_open_loop_without_resending_the_header(controller):
+    # a duplicate same-name header may leave the sample silent on a real S2000
+    controller._send_queue = [b"pkt0", b"pkt1"]
+    controller._send_index = 0
+    controller._packet_send_generation = 5
+    calls = []
+    controller._send_current_packet = lambda: calls.append(controller._send_index)
+
+    controller._check_packet_timeout(5)
+
+    assert controller._no_response_detected is True
+    assert controller._send_index == 1
+    assert calls == [1]
+    assert controller._send_stats["retries"] == 0
+
+
+def test_midstream_loss_finishes_this_sample_then_cancels_the_rest_of_the_queue(controller):
+    controller._send_midstream_loss_at = "36/143"
+    controller._batch_loss_note = "36/143"
+    controller._current_file_path = "a.wav"
+    controller._file_queue = [("b.wav",), ("c.wav",)]
+    controller._stereo_queue = [("x",)]
+    next_file = []
+    controller._send_next_queued_file = lambda: next_file.append(1)
+    status, finished, sent = [], [], []
+    controller.status_changed.connect(status.append)
+    controller.transfer_finished.connect(finished.append)
+    controller.file_transferred.connect(sent.append)
+
+    controller._finish_unit(True)
+
+    assert next_file == []
+    assert controller._file_queue == [] and controller._stereo_queue == []
+    assert sent == ["a.wav"]
+    assert finished == [True]
+    assert any("2 remaining queued files not sent" in m and "right channel" in m for m in status)
+
+
+def test_lost_ack_after_handshaking_resends_same_packet_up_to_max_retries(controller):
+    controller._send_queue = [b"pkt0", b"pkt1", b"pkt2"]
+    controller._send_index = 1
+    controller._send_stats["acks"] = 1  # sampler has proven it handshakes
+    controller._packet_send_generation = 5
+    calls = []
+    controller._send_current_packet = lambda: calls.append(controller._send_index)
+
+    for n in range(controller._send_packet_max_retries):
+        controller._check_packet_timeout(5)
+        assert controller._send_packet_retries == n + 1
+
+    assert calls == [1] * controller._send_packet_max_retries
+    assert controller._send_index == 1  # never skipped
+    assert controller._no_response_detected is False
+
+
+def test_retries_exhausted_after_handshaking_finishes_open_loop_and_flags_it(controller):
+    controller._send_queue = [b"pkt0", b"pkt1", b"pkt2"]
+    controller._send_index = 2
+    controller._send_stats["acks"] = 2
+    controller._send_packet_retries = controller._send_packet_max_retries
+    controller._packet_send_generation = 5
+    calls = []
+    controller._send_current_packet = lambda: calls.append(controller._send_index)
+    status = []
+    controller.status_changed.connect(status.append)
+
+    controller._check_packet_timeout(5)
+
+    assert controller._no_response_detected is True
+    assert controller._send_midstream_loss_at == "2/3"
+    assert controller._batch_loss_note == "2/3"
+    assert controller._send_index == 3
+    assert calls == [3]
+    assert any("replies stopped at packet 2" in m for m in status)
+
+
+def test_midstream_open_loop_uses_the_slower_pace(controller, controller_module, monkeypatch):
+    delays = []
+    monkeypatch.setattr(
+        controller_module.QTimer, "singleShot", staticmethod(lambda ms, fn: delays.append(ms))
+    )
+    controller._send_queue = [b"\xf0\x00\xf7", b"\xf0\x01\xf7", b"\xf0\x02\xf7"]
+    controller._send_index = 0
+    controller._no_response_detected = True
+    controller._send_midstream_loss_at = "1/3"
+
+    controller._send_current_packet()
+    assert delays == [controller._send_midstream_delay_ms]
+
+    # plain zero-ACK fallback keeps the original pacing
+    delays.clear()
+    controller._send_midstream_loss_at = None
+    controller._send_current_packet()
+    assert delays == [controller._open_loop_delay_ms]
+
+
+def test_open_loop_keeps_the_original_pace(controller, controller_module, monkeypatch):
+    delays = []
+    monkeypatch.setattr(
+        controller_module.QTimer, "singleShot", staticmethod(lambda ms, fn: delays.append(ms))
+    )
+    controller._send_queue = [b"\xf0\x00\xf7", b"\xf0\x01\xf7"]
+    controller._send_index = 0
+    controller._no_response_detected = True
+
+    controller._send_current_packet()
+
+    assert delays == [controller._open_loop_delay_ms]
+
+
+def test_late_replies_after_giving_up_do_not_advance_the_send(controller):
+    controller._send_queue = [b"hdr", b"d0", b"d1", b"d2"]
+    controller._send_index = 2
+    controller._no_response_detected = True
+    calls = []
+    controller._send_current_packet = lambda: calls.append(controller._send_index)
+
+    controller._on_handshake_message("ack", [0x7E, 0, 0x7F, 1])
+    controller._on_handshake_message("nak", [0x7E, 0, 0x7E, 1])
+    controller._on_handshake_message("wait", [0x7E, 0, 0x7C, 1])
+
+    assert controller._send_index == 2
+    assert calls == []
+    assert controller._send_stats["late_acks"] == 1
+
+
+def test_batch_status_names_where_replies_stopped(controller):
+    controller._batch_loss_note = "28/143"
+    status = []
+    controller.status_changed.connect(status.append)
+    controller._finish_unit(True)
+    assert any("replies stopped at packet 28/143" in m for m in status)
+
+
+def test_ack_resets_retries_and_timeout_grows_once_handshaking(controller):
+    controller._send_queue = [b"pkt0", b"pkt1", b"pkt2"]
+    controller._send_index = 0
+    controller._send_packet_retries = 2
+    controller._send_current_packet = lambda: None
+    assert controller._current_packet_timeout_ms() == controller._handshake_timeout_ms
+
+    controller._on_handshake_message("ack", [0x7E, 0, 0x7F, 0])
+
+    assert controller._send_packet_retries == 0
+    assert controller._current_packet_timeout_ms() >= controller._send_proven_timeout_ms
+
+
+def test_only_the_first_acks_are_logged_per_packet(controller):
+    import logging
+    from core import debug_log
+
+    lines = []
+
+    class H(logging.Handler):
+        def emit(self, record):
+            lines.append(record.getMessage())
+
+    handler = H()
+    debug_log.get_logger().addHandler(handler)
+    try:
+        controller._send_queue = [b"hdr"] + [b"d"] * 6
+        controller._send_index = 0
+        controller._send_current_packet = lambda: None
+        for n in range(6):
+            controller._on_handshake_message("ack", [0x7E, 0, 0x7F, (n - 1) & 0x7F if n else 0x55])
+    finally:
+        debug_log.get_logger().removeHandler(handler)
+
+    assert len([l for l in lines if "ACK pp=" in l]) == 2  # header + first data packet
+
+
+def test_status_messages_are_logged_once_each(controller):
+    import logging
+    from core import debug_log
+
+    lines = []
+
+    class H(logging.Handler):
+        def emit(self, record):
+            lines.append(record.getMessage())
+
+    handler = H()
+    debug_log.get_logger().addHandler(handler)
+    try:
+        for msg in ("Sending...", "Sending...", "Transfer complete"):
+            controller.status_changed.emit(msg)
+    finally:
+        debug_log.get_logger().removeHandler(handler)
+
+    assert [l for l in lines if l.startswith("status:")] == [
+        "status: Sending...",
+        "status: Transfer complete",
+    ]
+
+
+def test_ack_for_a_different_packet_is_ignored(controller):
+    # the original ACK arriving after we already re-sent and advanced
+    controller._send_queue = [b"hdr", b"d0", b"d1", b"d2"]
+    controller._send_index = 2  # expecting ACK for data packet 1
+    calls = []
+    controller._send_current_packet = lambda: calls.append(controller._send_index)
+
+    controller._on_handshake_message("ack", [0x7E, 0, 0x7F, 0])  # stale: packet 0
+
+    assert controller._send_index == 2
+    assert calls == []
+    assert controller._send_stats["stray_acks"] == 1
+
+    controller._on_handshake_message("ack", [0x7E, 0, 0x7F, 1])
+    assert controller._send_index == 3
+
+
+def test_header_ack_is_accepted_whatever_its_packet_number(controller):
+    controller._send_queue = [b"hdr", b"d0"]
+    controller._send_index = 0
+    controller._send_current_packet = lambda: None
+
+    controller._on_handshake_message("ack", [0x7E, 0, 0x7F, 0x55])
+
+    assert controller._send_index == 1
+
+
+def test_wait_rearms_timeout_so_it_is_not_treated_as_silence(controller):
+    controller._send_queue = [b"pkt0", b"pkt1"]
+    controller._send_index = 0
+    controller._packet_send_generation = 5
+    controller._send_current_packet = lambda: None
+    armed = []
+    controller._arm_packet_timeout = lambda ms: armed.append(ms)
+
+    controller._on_handshake_message("wait", [0x7E, 0, 0x7C, 0])
+
+    assert armed == [controller._send_wait_cap_ms]
+
+
+def test_wait_cap_expiry_aborts(controller):
+    controller._send_queue = [b"pkt0", b"pkt1"]
+    controller._send_index = 0
+    controller._send_wait_started = 1.0
+    controller._packet_send_generation = 5
+    finished = []
+    controller.transfer_finished.connect(finished.append)
+
+    controller._check_packet_timeout(5)
+
+    assert finished == [False]
 
 
 def test_check_packet_timeout_ignored_when_generation_is_stale(controller):
@@ -1068,6 +1317,273 @@ def test_duplicate_data_packet_is_acked_but_not_appended_twice(controller):
     assert controller.midi_manager.sent[-1][2] == sds_encoder.ACK
 
 
+def _start_fake_akai_receive(controller, expected_packets=5):
+    controller._receiving = True
+    controller._receive_channel = 0
+    controller._receive_sample_number = 1
+    controller._receive_header_info = {
+        "bit_depth": 16,
+        "sample_length": 500,
+        "sample_number": 1,
+        "sample_rate": 44100,
+        "name": "TEST",
+    }
+    controller._receive_expected_packets = expected_packets
+    controller._receive_packets = []
+    controller._reset_receive_diagnostics()
+
+
+def test_cancel_from_sampler_during_receive_fails_fast(controller, caplog):
+    import logging
+    from core import sds_encoder
+
+    statuses = _statuses(controller)
+    finished = []
+    controller.receive_finished.connect(finished.append)
+    _start_fake_akai_receive(controller)
+    with caplog.at_level(logging.WARNING, logger="akaisds"):
+        controller.on_sysex_received([0x7E, 0x00, sds_encoder.CANCEL, 0x02])
+    assert controller._receiving is False
+    assert finished == [False]
+    assert any("cancelled the transfer" in s for s in statuses)
+    assert any("sent CANCEL during receive" in r.message for r in caplog.records)
+
+
+def test_stray_ack_nak_wait_during_receive_are_logged_not_acted_on(controller, caplog):
+    import logging
+    from core import sds_encoder
+
+    _start_fake_akai_receive(controller)
+    sent_before = len(controller.midi_manager.sent)
+    with caplog.at_level(logging.WARNING, logger="akaisds"):
+        for sub_id in (sds_encoder.ACK, sds_encoder.NAK, sds_encoder.WAIT):
+            controller.on_sysex_received([0x7E, 0x00, sub_id, 0x01])
+    assert controller._receiving is True
+    assert len(controller.midi_manager.sent) == sent_before
+    assert controller._receive_stray_handshakes == 3
+    for name in ("ACK", "NAK", "WAIT"):
+        assert any(f"unexpected {name} from the sampler" in r.message for r in caplog.records)
+
+
+def test_stray_handshake_logging_is_capped(controller, caplog):
+    import logging
+    from core import sds_encoder
+
+    _start_fake_akai_receive(controller)
+    with caplog.at_level(logging.WARNING, logger="akaisds"):
+        for _ in range(50):
+            controller.on_sysex_received([0x7E, 0x00, sds_encoder.ACK, 0x01])
+    logged = [r for r in caplog.records if "unexpected ACK" in r.message]
+    assert len(logged) == controller._RECEIVE_LOG_MAX_STRAY_HANDSHAKES
+    assert controller._receive_stray_handshakes == 50
+
+
+def test_handshake_during_a_send_still_reaches_the_send_logic(controller):
+    from core import sds_encoder
+
+    controller._receiving = True  # stale flag must not steal a send's ACKs
+    controller._send_queue = [b"a", b"b"]
+    controller._send_index = 0
+    sent = []
+    controller._send_current_packet = lambda: sent.append(controller._send_index)
+    controller.on_sysex_received([0x7E, 0x00, sds_encoder.ACK, 0x00])
+    assert controller._send_index == 1
+    assert sent == [1]
+
+
+def test_stall_error_log_includes_receive_diagnostics(controller, caplog):
+    import logging
+
+    _start_fake_akai_receive(controller)
+    controller._receive_packet_retries = controller._receive_packet_max_retries
+    controller._arm_reply_timeout("next data packet", 3000)
+    with caplog.at_level(logging.ERROR, logger="akaisds"):
+        controller._on_reply_timeout(controller._reply_generation)
+    assert any(
+        "no data packet received yet" in r.message
+        and "unexpected handshake message(s)" in r.message
+        for r in caplog.records
+    )
+
+
+def test_data_packet_timing_is_logged_for_the_first_packets(controller, caplog):
+    import logging
+    from core import sds_encoder
+
+    _start_fake_akai_receive(controller)
+    packet = sds_encoder.build_data_packets([1, 2, 3], channel=0, bit_depth=16)[0]
+    with caplog.at_level(logging.DEBUG, logger="akaisds"):
+        controller.on_sysex_received(list(packet[1:-1]))
+    assert any("receive data packet #1" in r.message for r in caplog.records)
+    assert controller._receive_last_packet_at is not None
+
+
+def _start_akai_receive_of(controller, samples, tmp_path):
+    # drives the real RSDATA -> SDATA -> RSPACK exchange, returns the packets
+    # the sampler would send and the save path
+    from core import akai_sysex, sds_encoder
+
+    save_path = str(tmp_path / "resumed.wav")
+    controller.receive_samples([(3, save_path)], channel=0)
+    sdata_msg = akai_sysex.build_sdata_message(
+        name="AKAI SAMP",
+        sample_length=len(samples),
+        sample_rate=44100,
+        sample_number=3,
+        channel=0,
+    )
+    controller.on_sysex_received(list(sdata_msg[1:-1]))
+    return save_path, sds_encoder.build_data_packets(samples, channel=0, bit_depth=16)
+
+
+def _rspack_fields(message):
+    # [0x47, cc, 0x0C, 0x48, ss, ss, o*4, n*4, ii, ff]
+    def _value(b):
+        return b[0] | (b[1] << 7) | (b[2] << 14) | (b[3] << 21)
+
+    return _value(message[6:10]), _value(message[10:14])
+
+
+def _timeout(controller, times=1):
+    for _ in range(times):
+        controller._on_reply_timeout(controller._reply_generation)
+
+
+def test_akai_stall_resumes_with_a_new_rspack_from_the_received_offset(
+    controller, tmp_path
+):
+    from core import sds_encoder
+
+    samples = list(range(1, 121))  # 3 packets of 40 words
+    save_path, packets = _start_akai_receive_of(controller, samples, tmp_path)
+    for packet in packets[:2]:
+        controller.on_sysex_received(list(packet[1:-1]))
+
+    # three ACK/NAK nudges first, exactly as before
+    sent_before = len(controller.midi_manager.sent)
+    _timeout(controller, 3)
+    assert len(controller.midi_manager.sent) == sent_before + 3
+    assert controller._receive_resume_attempts == 0
+
+    # the fourth stall resumes: CANCEL, then a new RSPACK from word 80
+    _timeout(controller)
+    assert controller._receiving is True
+    assert controller._receive_resume_attempts == 1
+    cancel, rspack = controller.midi_manager.sent[-2:]
+    assert list(cancel[2:3]) == [sds_encoder.CANCEL]
+    assert rspack[2] == 0x0C
+    assert _rspack_fields(rspack) == (80, 40)
+
+    # the resumed stream restarts at packet 0 - its words finish the sample
+    resumed = sds_encoder.build_data_packets(samples[80:], channel=0, bit_depth=16)
+    finished = []
+    controller.receive_finished.connect(finished.append)
+    controller.on_sysex_received(list(resumed[0][1:-1]))
+
+    assert finished == [True]
+    read_back, _ = sds_encoder.read_wav_samples(save_path)
+    assert list(read_back) == samples
+
+
+def test_resume_skips_the_nudges_after_the_first_resume(controller, tmp_path):
+    samples = list(range(1, 241))
+    _, packets = _start_akai_receive_of(controller, samples, tmp_path)
+    controller.on_sysex_received(list(packets[0][1:-1]))
+    _timeout(controller, 3)  # nudges
+    _timeout(controller)  # resume 1
+    sent = len(controller.midi_manager.sent)
+    _timeout(controller)  # next stall: straight to resume 2, no ACK/NAK nudge
+    assert controller._receive_resume_attempts == 2
+    assert controller.midi_manager.sent[sent][2] == 0x7D  # CANCEL
+
+
+def test_stalled_receive_gives_up_after_the_resume_cap_and_cancels(
+    controller, tmp_path
+):
+    from core import sds_encoder
+
+    statuses = _statuses(controller)
+    finished = []
+    controller.receive_finished.connect(finished.append)
+    samples = list(range(1, 241))
+    _, packets = _start_akai_receive_of(controller, samples, tmp_path)
+    controller.on_sysex_received(list(packets[0][1:-1]))
+    _timeout(controller, 3 + controller._receive_max_resumes)
+    assert controller._receiving is True
+    sent_before = len(controller.midi_manager.sent)
+    _timeout(controller)  # cap reached
+    assert controller._receiving is False
+    assert finished == [False]
+    assert any("No reply from the sampler" in s for s in statuses)
+    assert list(controller.midi_manager.sent[sent_before][2:3]) == [sds_encoder.CANCEL]
+
+
+def test_generic_receive_stall_is_not_resumed_but_still_cancels(controller):
+    # only the Akai RSPACK path has an offset to resume from
+    from core import sds_encoder
+
+    finished = []
+    controller.receive_finished.connect(finished.append)
+    controller._receiving = True
+    controller._receive_channel = 0
+    controller._receive_header_info = {
+        "bit_depth": 16,
+        "sample_length": 500,
+        "sample_number": 1,
+        "sample_rate": 44100,
+    }
+    controller._receive_expected_packets = 5
+    controller._receive_packets = [b"x"] * 2
+    controller._receive_packet_retries = controller._receive_packet_max_retries
+    controller._arm_reply_timeout("next data packet", 3000)
+    controller._on_reply_timeout(controller._reply_generation)
+    assert controller._receive_resume_attempts == 0
+    assert controller._receiving is False
+    assert finished == [False]
+    assert controller.midi_manager.sent[-1][2] == sds_encoder.CANCEL
+
+
+def test_dump_header_answering_a_resume_does_not_wipe_received_packets(
+    controller, tmp_path
+):
+    from core import sds_encoder
+
+    samples = list(range(1, 121))
+    _, packets = _start_akai_receive_of(controller, samples, tmp_path)
+    for packet in packets[:2]:
+        controller.on_sysex_received(list(packet[1:-1]))
+    _timeout(controller, 4)  # nudges, then the resume
+    assert controller._receive_resuming is True
+
+    header = sds_encoder.build_dump_header(
+        samples[80:], 44100, sample_number=3, channel=0, bit_depth=16
+    )
+    controller.on_sysex_received(list(header[1:-1]))
+    assert len(controller._receive_packets) == 2
+    assert list(controller.midi_manager.sent[-1][2:]) == [sds_encoder.ACK, 0]
+
+
+def test_resume_does_not_fire_if_the_receive_ended_during_the_delay(
+    controller, controller_module, monkeypatch, tmp_path
+):
+    samples = list(range(1, 241))
+    _, packets = _start_akai_receive_of(controller, samples, tmp_path)
+    controller.on_sysex_received(list(packets[0][1:-1]))
+    _timeout(controller, 3)
+
+    # hold the delayed RSPACK instead of firing it immediately
+    delayed = []
+    monkeypatch.setattr(
+        controller_module.QTimer, "singleShot", staticmethod(lambda _ms, fn: delayed.append(fn))
+    )
+    _timeout(controller)  # resume: CANCEL goes out now, RSPACK is delayed
+    assert len(delayed) == 1
+    controller.cancel_transfer()  # the user cancels during the delay
+    sent_before = len(controller.midi_manager.sent)
+    delayed[0]()
+    assert len(controller.midi_manager.sent) == sent_before  # no stray RSPACK
+
+
 def test_sample_info_timeout_clears_the_busy_flag(controller):
     controller.request_sample_info(0)
     assert controller.is_transfer_busy() is True
@@ -1084,9 +1600,211 @@ def test_cancel_disarms_the_watchdog(controller):
     assert not any("No reply" in s for s in statuses)
 
 
-def test_unexpected_sysex_is_logged(controller, caplog):
+def test_unexpected_sysex_is_logged_but_never_shown_in_the_status_bar(controller, caplog):
     import logging
 
-    with caplog.at_level(logging.WARNING, logger="akaisds"):
+    statuses = _statuses(controller)
+    with caplog.at_level(logging.DEBUG, logger="akaisds"):
+        controller._on_sysex_received_impl(bytes([0x47, 0, 0x55, 1, 2]))  # an Akai message nobody asked for (e.g. the editor's reply, a panel edit)
+    assert any("unrecognised Akai message (function 85)" in r.message for r in caplog.records)
+    assert not any("unrecognised" in s.lower() or "unexpected" in s.lower() for s in statuses)
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        bytes([0x47, 0, 0x0B, 0x48, 1, 2, 3]),  # an SDATA nobody asked for
+        bytes([0x47, 0, 0x01, 0x48, 1, 2, 3]),  # a STAT nobody asked for
+        bytes([0x47, 0, 0x16, 0x48, 7]),  # a REPLY with an odd result byte
+        bytes([0x47, 0, 0x55, 1, 2]),  # an unknown Akai function
+        bytes([0x43, 0x10, 0x20]),  # not Akai at all
+    ],
+)
+def test_no_unexpected_message_reaches_the_status_bar(controller, message):
+    statuses = _statuses(controller)
+    controller._on_sysex_received_impl(message)
+    assert statuses == []
+
+
+def test_unexpected_sysex_lines_are_debug_and_capped(controller, caplog, monkeypatch):
+    import logging
+
+    from controller import sampler_controller as sc
+    from core import sysex_trace
+
+    clock = [0.0]
+    monkeypatch.setattr(sc, "_UNEXPECTED_LOG_BUDGET", sysex_trace.LineBudget(max_lines=5, window_s=10, clock=lambda: clock[0]))
+    with caplog.at_level(logging.DEBUG, logger="akaisds"):
+        for _ in range(12):
+            controller._on_sysex_received_impl(bytes([0x47, 0, 0x55, 1, 2]))
+        clock[0] += 11
         controller._on_sysex_received_impl(bytes([0x47, 0, 0x55, 1, 2]))
-    assert any("unrecognised Akai message" in r.message for r in caplog.records)
+    lines = [r for r in caplog.records if "SamplerController" in r.message]
+    received = [r for r in lines if "received unrecognised Akai message" in r.message]
+    assert len(received) == 5 + 1  # 5 in the first window, then logging resumes in the next
+    assert all(r.levelno == logging.DEBUG for r in received)  # no longer warnings
+    assert any("7 more unexpected SysEx message(s) not logged in the last 10 s" in r.message for r in lines)
+
+
+def test_a_real_transfer_anomaly_is_still_a_warning(controller, caplog):
+    import logging
+
+    with caplog.at_level(logging.DEBUG, logger="akaisds"):
+        controller._log_unexpected_sysex("data packet before any header", bytes([1, 2, 3]))
+    assert [r.levelno for r in caplog.records if "data packet before any header" in r.message] == [logging.WARNING]
+
+
+# --- Sampler Type: S1000 vs S2000/S3000 vs Generic ------------------------------
+
+
+def test_set_device_type_s1000_keeps_the_akai_protocol_family(controller):
+    # transfers only care about the protocol family - an S1000's SDS/RSTAT/
+    # list traffic is the same as an S2000/S3000's - while the full model
+    # stays available for the Program Editor
+    controller.set_device_type("akai_s1000")
+    assert controller.device_type == "akai"
+    assert controller.sampler_model == "akai_s1000"
+
+
+def test_set_device_type_s2000_s3000_is_the_akai_family(controller):
+    controller.set_device_type("akai_s1000")
+    controller.set_device_type("akai_s2000_s3000")
+    assert controller.device_type == "akai"
+    assert controller.sampler_model == "akai_s2000_s3000"
+
+
+def test_set_device_type_accepts_the_legacy_akai_key(controller):
+    # a config.json from before the S1000 existed
+    controller.set_device_type("akai")
+    assert controller.device_type == "akai"
+    assert controller.sampler_model == "akai_s2000_s3000"
+
+
+def test_set_device_type_generic_is_its_own_family(controller):
+    controller.set_device_type("generic")
+    assert controller.device_type == "generic"
+    assert controller.sampler_model == "generic"
+
+
+# --- Sampler Type: Akai S900/S950 (its own protocol family, no transfers yet) ---
+
+
+def test_set_device_type_s900_s950_is_its_own_family(controller):
+    controller.set_device_type("akai_s900_s950")
+    assert controller.device_type == "s950"
+    assert controller.sampler_model == "akai_s900_s950"
+
+
+class _StubS950Engine:
+    # stands in for controller/s950_transfers.S950Transfers - which needs real
+    # Qt timers, so it's tested on its own (test_s950_transfers.py); this file
+    # runs under a fake QtCore and only checks the controller's DELEGATION
+    def __init__(self):
+        self.calls = []
+        self.busy = False
+        self.cancel_result = False
+
+    def refresh_catalog(self, silent=False):
+        self.calls.append(("refresh_catalog", silent))
+
+    def send_file_queue(self, entries):
+        self.calls.append(("send_file_queue", entries))
+        return True
+
+    def receive_samples(self, requests):
+        self.calls.append(("receive_samples", requests))
+
+    def rename_sample(self, slot, name):
+        self.calls.append(("rename_sample", slot, name))
+
+    def request_sample_info(self, slot):
+        self.calls.append(("request_sample_info", slot))
+
+    def handle_sysex(self, data):
+        self.calls.append(("handle_sysex", bytes(data)))
+
+    def cancel(self):
+        self.calls.append(("cancel",))
+        return self.cancel_result
+
+
+@pytest.fixture
+def s950_controller(controller):
+    controller.set_device_type("akai_s900_s950")
+    controller._s950_engine = _StubS950Engine()
+    statuses = []
+    controller.status_changed.connect(statuses.append)
+    controller.statuses = statuses
+    return controller
+
+
+def test_s950_entry_points_delegate_to_the_engine(s950_controller):
+    c = s950_controller
+    c.refresh_sample_list(silent=True)
+    assert c.send_file_queue([{"filepath": "a.wav"}], starting_sample_number=5) is True
+    c.receive_samples([(1, "x.wav")])
+    c.rename_sample(4, "NEW")
+    c.request_sample_info(4)
+    assert c._s950_engine.calls == [
+        ("refresh_catalog", True),
+        ("send_file_queue", [{"filepath": "a.wav"}]),
+        ("receive_samples", [(1, "x.wav")]),
+        ("rename_sample", 4, "NEW"),
+        ("request_sample_info", 4),
+    ]
+    # none of it went through the Akai/generic paths
+    assert c.midi_manager.sent == []
+
+
+def test_s950_sysex_goes_to_the_engine_not_the_akai_parser(s950_controller):
+    c = s950_controller
+    updates = []
+    c.sample_list_updated.connect(updates.append)
+    # function 0x05 is SLIST to the S1000 family
+    c.on_sysex_received([0x47, 0x00, 0x05, 0x40, 0x00, 0x00, 0x00])
+    assert updates == []
+    assert c._s950_engine.calls == [("handle_sysex", bytes([0x47, 0, 5, 0x40, 0, 0, 0]))]
+
+
+def test_s950_refuses_what_it_has_no_protocol_for(s950_controller, tmp_path):
+    # delete has no S900/S950 opcode, and the legacy per-file / by-number
+    # entry points are Akai-family and generic-SDS only: none may put bytes
+    # on the wire for an S900/S950
+    c = s950_controller
+    wav = str(tmp_path / "x.wav")
+    c.delete_sample(1)
+    c.send_sample_file(wav)
+    c.send_stereo_sample_file(wav, 0, 1)
+    c.send_sample_file_generic(wav)
+    c.send_sample_file_generic_and_rename(wav, "NEW")
+    c.receive_sample_generic(1, wav)
+    assert c.midi_manager.sent == []
+    assert not c._receiving and not c._file_queue and not c._receive_queue
+    assert len(c.statuses) == 6
+    assert all("S900/S950" in s for s in c.statuses)
+    assert c._s950_engine.calls == []
+
+
+def test_cancel_and_busy_include_the_s950_engine(s950_controller):
+    c = s950_controller
+    assert c.is_transfer_busy() is False
+    c._s950_engine.busy = True
+    assert c.is_transfer_busy() is True
+    c._s950_engine.cancel_result = True
+    c.cancel_transfer()
+    assert c._s950_engine.calls == [("cancel",)]
+
+
+def test_the_s950_engine_is_not_built_for_other_sampler_types(controller):
+    controller.refresh_sample_list()
+    controller.set_device_type("generic")
+    controller.cancel_transfer()
+    assert controller.is_transfer_busy() is False
+    assert controller._s950_engine is None
+
+
+def test_leaving_the_s950_family_restores_normal_behaviour(s950_controller):
+    c = s950_controller
+    c.set_device_type("akai_s2000_s3000")
+    c.refresh_sample_list()
+    assert len(c.midi_manager.sent) == 1  # an RSTAT again

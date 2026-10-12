@@ -1,0 +1,156 @@
+name: Publish Packages
+
+# DRAFT - see PACKAGING.md before enabling this for real.
+#
+# Runs when a GitHub Release is PUBLISHED (not when it's created as a draft),
+# so nothing here fires while you're still editing release notes. You can also
+# run it manually from the Actions tab against any already-published release -
+# useful for the very first run, since v1.1.1 predates this workflow.
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to package, e.g. v1.1.1 (blank = latest published release)"
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  # Figures out which release we're packaging and downloads its assets once,
+  # so the homebrew and aur jobs below don't each have to re-derive this.
+  checksums:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.resolve.outputs.tag }}
+      version: ${{ steps.resolve.outputs.version }}
+      sha_macos_arm: ${{ steps.hash.outputs.sha_macos_arm }}
+      sha_macos_intel: ${{ steps.hash.outputs.sha_macos_intel }}
+      sha_linux_zip: ${{ steps.hash.outputs.sha_linux_zip }}
+    steps:
+      - name: Resolve which release to package
+        id: resolve
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TAG="${{ inputs.tag }}"
+          if [ -z "$TAG" ]; then
+            TAG="${{ github.event.release.tag_name }}"
+          fi
+          if [ -z "$TAG" ]; then
+            TAG=$(gh api "repos/${{ github.repository }}/releases/latest" --jq .tag_name)
+          fi
+          echo "Packaging $TAG"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Download release assets
+        run: |
+          set -euo pipefail
+          BASE="https://github.com/${{ github.repository }}/releases/download/${{ steps.resolve.outputs.tag }}"
+          curl -sL -f -o macos-arm.dmg   "$BASE/AKAISDS-macos-arm.dmg"
+          curl -sL -f -o macos-intel.dmg "$BASE/AKAISDS-macos-intel.dmg"
+          curl -sL -f -o linux.zip       "$BASE/AKAISDS-linux.zip"
+
+      - name: Compute checksums
+        id: hash
+        run: |
+          echo "sha_macos_arm=$(sha256sum macos-arm.dmg | cut -d' ' -f1)"     >> "$GITHUB_OUTPUT"
+          echo "sha_macos_intel=$(sha256sum macos-intel.dmg | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+          echo "sha_linux_zip=$(sha256sum linux.zip | cut -d' ' -f1)"         >> "$GITHUB_OUTPUT"
+
+  # Pushes an updated Cask straight to your own tap repo (martincurkovic/homebrew-akaisds).
+  # Requires a fine-grained PAT with write access to ONLY that repo, saved as
+  # the TAP_REPO_TOKEN secret.
+  homebrew:
+    needs: checksums
+    runs-on: ubuntu-latest
+    steps:
+      - name: Push updated cask to homebrew-akaisds tap
+        env:
+          TAP_REPO_TOKEN: ${{ secrets.TAP_REPO_TOKEN }}
+          VERSION: ${{ needs.checksums.outputs.version }}
+          SHA_ARM: ${{ needs.checksums.outputs.sha_macos_arm }}
+          SHA_INTEL: ${{ needs.checksums.outputs.sha_macos_intel }}
+        run: |
+          set -euo pipefail
+          git clone "https://x-access-token:${TAP_REPO_TOKEN}@github.com/martincurkovic/homebrew-akaisds.git" tap
+          cat > tap/Casks/akaisds.rb <<CASK
+          cask "akaisds" do
+            arch arm: "arm", intel: "intel"
+
+            version "${VERSION}"
+            sha256 arm:   "${SHA_ARM}",
+                   intel: "${SHA_INTEL}"
+
+            url "https://github.com/martincurkovic/AKAISDS/releases/download/v#{version}/AKAISDS-macos-#{arch}.dmg"
+            name "AKAISDS"
+            desc "MIDI Sample Dump Standard transfer tool for Akai and generic SDS-compatible samplers"
+            homepage "https://github.com/martincurkovic/AKAISDS"
+
+            livecheck do
+              url :url
+              strategy :github_latest
+            end
+
+            app "AKAISDS.app"
+
+            caveats <<~EOS
+              AKAISDS is not code-signed or notarized by Apple. macOS Gatekeeper will
+              block it on first launch. To open it:
+                1. Try to launch AKAISDS from Applications (it will be blocked)
+                2. Open System Settings > Privacy & Security
+                3. Scroll down and click "Open Anyway" next to the AKAISDS message
+                4. Confirm with your password or Touch ID
+            EOS
+          end
+          CASK
+          cd tap
+          git config user.name "akaisds-release-bot"
+          git config user.email "actions@users.noreply.github.com"
+          git add Casks/akaisds.rb
+          if git diff --cached --quiet; then
+            echo "No changes to publish"
+            exit 0
+          fi
+          git commit -m "akaisds ${VERSION}"
+          git push
+
+  # Bumps the akaisds-bin PKGBUILD and pushes it to the AUR. Requires an SSH
+  # keypair registered on your AUR account: the private key goes in the
+  # AUR_SSH_PRIVATE_KEY secret. AUR_COMMIT_EMAIL should be the email your AUR
+  # account uses.
+  aur:
+    needs: checksums
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Render PKGBUILD for this version
+        env:
+          VERSION: ${{ needs.checksums.outputs.version }}
+          SHA_LINUX: ${{ needs.checksums.outputs.sha_linux_zip }}
+        run: |
+          set -euo pipefail
+          sed \
+            -e "s/^pkgver=.*/pkgver=${VERSION}/" \
+            -e "s/^sha256sums=.*/sha256sums=('${SHA_LINUX}' 'SKIP' 'SKIP')/" \
+            packaging/aur/PKGBUILD > PKGBUILD
+          cp packaging/aur/akaisds.desktop .
+          cp packaging/aur/icon_512x512.png .
+
+      - name: Publish to AUR
+        uses: KSXGitHub/github-actions-deploy-aur@v4
+        with:
+          pkgname: akaisds-bin
+          pkgbuild: ./PKGBUILD
+          assets: |
+            akaisds.desktop
+            icon_512x512.png
+          commit_username: martincurkovic
+          commit_email: ${{ secrets.AUR_COMMIT_EMAIL }}
+          ssh_private_key: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+          commit_message: "akaisds-bin ${{ needs.checksums.outputs.version }}"

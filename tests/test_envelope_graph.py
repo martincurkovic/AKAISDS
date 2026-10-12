@@ -140,3 +140,45 @@ def test_env2_a_zero_rate_stage_still_shows_its_level_at_the_same_x():
     stage2_x = points[2][0]
     assert stage2_x == pytest.approx(stage1_x)
     assert points[1][1] != points[2][1]
+
+
+# --- the Yamaha envelopes ------------------------------------------------------------------------------------------
+
+
+def test_yamaha_rates_become_times_and_levels_rescale():
+    from ui.envelope_graph import yamaha_adsr_values
+
+    assert yamaha_adsr_values(127, 127, 127, 127) == (0, 0, 99, 0)  # the factory default: instant stages, full sustain
+    assert yamaha_adsr_values(0, 0, 0, 0) == (99, 99, 0, 99)  # the slowest possible
+    a, d, s, r = yamaha_adsr_values(64, 100, 64, 10)
+    assert a > d  # a LOWER rate is a LONGER stage
+    assert 0 <= a <= 99 and abs(s - 64 * 99 / 127) < 1e-9
+
+
+def test_yamaha_values_out_of_range_are_clamped_not_extrapolated():
+    from ui.envelope_graph import yamaha_adsr_values
+
+    assert yamaha_adsr_values(500, -5, 900, 127) == (0, 99, 99, 0)
+
+
+def test_the_level_envelope_is_bipolar_and_each_stage_has_its_own_width_budget():
+    from ui.envelope_graph import _level_envelope_points
+
+    pts = _level_envelope_points(0, 127, 0, -127, 100, 100, 100, 200, 100)
+    assert pts[0][1] == 50  # init 0 sits on the centre line
+    assert pts[1][1] < 50 < pts[4][1]  # +127 above it, -127 below
+    # changing the DECAY rate moves only the later points, never the attack's x
+    a = _level_envelope_points(0, 127, 0, -127, 100, 20, 100, 200, 100)
+    b = _level_envelope_points(0, 127, 0, -127, 100, 120, 100, 200, 100)
+    assert a[1][0] == b[1][0] and a[2][0] > b[2][0]
+    # the fastest rate (127) is an instant stage
+    instant = _level_envelope_points(10, 90, 40, -20, 127, 127, 127, 200, 100)
+    assert instant[1][0] == 0 and instant[2][0] == 0 and instant[4][0] == instant[3][0]
+
+
+def test_the_level_envelope_stays_inside_its_box():
+    from ui.envelope_graph import _level_envelope_points
+
+    for levels in ((127, 127, 127, 127), (-127, -127, -127, -127), (999, -999, 0, 5)):
+        for x, y in _level_envelope_points(*levels, 0, 0, 0, 200, 100):
+            assert 0 <= y <= 100 and 0 <= x <= 200

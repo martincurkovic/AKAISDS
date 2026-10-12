@@ -12,6 +12,8 @@ import s3k.messages as s3k_messages
 import s3k.params as s3k_params
 from PySide6.QtCore import Qt, QObject, QTimer, Signal
 from PySide6.QtWidgets import QApplication, QLabel, QWidget
+from ui import tooltips as tt
+from ui.global_tab import DISABLED_SETTINGS
 from ui.loop_preview_view import HALF_WINDOW_FRAMES
 from ui.program_editor_window import ProgramEditorWindow, _LOOP_TYPE_OPTIONS
 from core.program_editor_bridge import MULTI_PART_COUNT
@@ -342,6 +344,312 @@ def editor(qapp):
     editor._worker.wait()
 
 
+class _FakeBridgeWithMisc(FakeBridge):
+    # the S3kBridge private misc-byte surface AND the raw RMDATA/MDATA frames the Global tab uses - registers as the real
+    # S2000 held them (tests/test_program_editor_bridge.py). Program change / tune / fine tune live in the 48-byte block (the
+    # registers 71/64/65 are deliberately stale/wrong here: the app must not trust them).
+    exclusive_channel = 0
+
+    def __init__(self):
+        super().__init__()
+        self.registers = {
+            38: 1, 15: 12, 64: 99, 65: 99, 71: 99, 31: 60, 57: 0, 54: 100, 11: 5, 14: 1, 12: 6,
+        }
+        self.block = bytes([15, 1, 1, 0, 0, 0, 50, 9, 12] + [0] * 39)  # Omni, tune 0, fine tune 0
+        self.write_verify_calls = []
+        self.block_writes = []
+        self.fail_writes = False
+        self._replies = []
+
+    def _misc_byte(self, index, value=None, **kwargs):
+        return self.registers[index]
+
+    def _misc_write_verify(self, index, value, what, **kwargs):
+        self.write_verify_calls.append((index, value))
+        if self.fail_writes:
+            raise RuntimeError("no reply")
+        self.registers[index] = value
+        return value
+
+    def send_and_receive(self, frame, timeout=None):
+        return s3k_messages.build_frame(
+            s3k_messages.Command.MDATA, s3k_messages.encode_nibbles(self.block)
+        )
+
+    def _drain(self):
+        self._replies.clear()
+
+    def _send(self, frame, write=False):
+        _c, _command, payload = s3k_messages.parse_frame(frame)
+        if self.fail_writes:
+            self._replies.append(s3k_messages.Reply(code=1).encode())
+            return
+        self.block = bytes(s3k_messages.decode_nibbles(list(payload)))
+        self.block_writes.append(self.block)
+        self._replies.append(s3k_messages.Reply(code=0).encode())
+
+    def _receive(self, timeout=None, accept=None):
+        return self._replies.pop(0)
+
+
+@pytest.fixture
+def misc_editor(qapp, monkeypatch):
+    monkeypatch.delenv("AKAISDS_DEMO_SAMPLER", raising=False)
+    bridge = _FakeBridgeWithMisc()
+    editor = ProgramEditorWindow(QWidget(), bridge=bridge)
+    _wait_for_program_load(editor, qapp)
+    editor._worker.wait_until_idle()
+    _pump_until(qapp, lambda: editor.external_controller_combo.isEnabled())
+    yield editor, bridge
+    editor._worker.stop()
+    editor._worker.wait()
+
+
+def _settle(editor, qapp):
+    editor._worker.wait_until_idle()
+    for _ in range(5):
+        qapp.processEvents()
+
+
+def test_external_controller_combos_show_what_the_sampler_holds(misc_editor):
+    editor, _bridge = misc_editor
+    tab_combo = editor.global_tab.external_controller_combo
+    assert editor.external_controller_combo.currentText() == "Footpedal"
+    assert tab_combo.currentText() == "Footpedal"
+    assert [
+        editor.external_controller_combo.itemText(i)
+        for i in range(editor.external_controller_combo.count())
+    ] == ["Breath", "Footpedal", "Volume"]
+
+
+def test_loading_the_global_settings_writes_nothing(misc_editor, qapp):
+    editor, bridge = misc_editor
+    _settle(editor, qapp)
+    assert bridge.write_verify_calls == []
+
+
+def test_global_tab_shows_every_setting(misc_editor):
+    editor, _bridge = misc_editor
+    w = editor.global_tab._widgets
+    assert w["tune_semitones"].value() == 0 and w["tune_cents"].value() == 0
+    assert w["output_level"].currentText() == "0 dB"
+    assert w["program_change_channel"].currentText() == "Omni"
+    assert w["play_note"].value() == 60
+    assert w["play_channel"].currentText() == "1" and w["play_velocity"].value() == 100
+    assert w["scsi_disk_id"].currentText() == "5" and w["scsi_local_id"].currentText() == "6"
+    # a knob's readout beside it is filled too (loading silences the knob's own signal)
+    assert editor.global_tab._knob_labels["tune_semitones"].text() == "0"
+    assert w["scsi_sector"].currentText() == "1 KB"
+    # tune / fine tune show their values but are locked (the sampler never applies a written tune)
+    assert all(widget.isEnabled() for key, widget in w.items() if key not in DISABLED_SETTINGS)
+
+
+def test_program_change_channel_is_written_through_the_block_not_the_stale_register(
+    misc_editor, qapp
+):
+    editor, bridge = misc_editor
+    combo = editor.global_tab._widgets["program_change_channel"]
+
+    combo.setCurrentIndex(combo.findData(6))
+    combo.activated.emit(combo.currentIndex())
+    _settle(editor, qapp)
+
+    assert bridge.write_verify_calls == []  # never the byte register (71 ignores writes)
+    assert len(bridge.block_writes) == 1
+    # Omni [15,1,1] -> channel 6: channel byte 5, Omni cleared, still enabled
+    assert list(bridge.block_writes[0][:3]) == [5, 0, 1]
+    assert bridge.block_writes[0][3:] == bytes([0, 0, 0, 50, 9, 12] + [0] * 39)
+    assert "program change channel" in editor.status_bar.currentMessage()
+
+
+def test_tune_and_fine_tune_show_the_block_values_but_stay_locked(misc_editor, qapp):
+    editor, bridge = misc_editor
+    tab = editor.global_tab
+    bridge.block = bytes([15, 1, 1, 0, 0, 0, 100, 59, 12] + [0] * 39)  # +50 cents, +50 st
+
+    editor._refresh_from_hardware()
+    editor._worker.wait_until_idle()
+    _pump_until(qapp, lambda: tab._widgets["tune_semitones"].value() == 50)
+
+    assert tab._widgets["tune_cents"].value() == 50
+    for key in ("tune_semitones", "tune_cents"):
+        assert not tab._widgets[key].isEnabled()  # shown, never offered
+    assert bridge.block_writes == [] and bridge.write_verify_calls == []
+
+
+def test_a_failed_block_write_restores_what_the_sampler_holds(misc_editor, qapp):
+    editor, bridge = misc_editor
+    bridge.fail_writes = True
+    combo = editor.global_tab._widgets["program_change_channel"]
+
+    combo.setCurrentIndex(combo.findData(3))
+    combo.activated.emit(combo.currentIndex())
+    editor._worker.wait_until_idle()
+    _pump_until(qapp, lambda: combo.currentText() == "Omni")
+
+    assert bridge.block_writes == []
+
+
+def test_refresh_rereads_the_block_settings(misc_editor, qapp):
+    editor, bridge = misc_editor
+    bridge.block = bytes([5, 0, 1, 0, 0, 0, 100, 59, 12] + [0] * 39)  # ch 6, +50 cents, +50 st
+
+    editor._refresh_from_hardware()
+    editor._worker.wait_until_idle()
+    tab = editor.global_tab
+    _pump_until(qapp, lambda: tab._widgets["program_change_channel"].currentText() == "6")
+
+    assert tab._widgets["tune_semitones"].value() == 50
+    assert tab._widgets["tune_cents"].value() == 50
+    assert all(w.isEnabled() for k, w in tab._widgets.items() if k not in DISABLED_SETTINGS)
+    assert bridge.write_verify_calls == [] and bridge.block_writes == []
+
+
+def test_stray_replies_show_a_brief_warning(misc_editor, monkeypatch):
+    editor, _bridge = misc_editor
+    from PySide6.QtWidgets import QMessageBox
+
+    shown = []
+    monkeypatch.setattr(QMessageBox, "warning", lambda parent, title, text, *a, **k: shown.append((title, text)))
+    editor._on_stray_replies_detected(5)
+
+    assert len(shown) == 1
+    title, text = shown[0]
+    assert title == "Stray MIDI replies"
+    assert "another MIDI program" in text
+    assert "Close or re-configure its MIDI settings before editing." in text
+    assert editor.status_bar.currentMessage() == "Stray MIDI replies detected - close or re-configure other MIDI software."
+
+
+def test_the_stray_replies_warning_comes_back_every_time(misc_editor, monkeypatch):
+    editor, _bridge = misc_editor
+    from PySide6.QtWidgets import QMessageBox
+
+    shown = []
+    monkeypatch.setattr(QMessageBox, "warning", lambda parent, title, text, *a, **k: shown.append(title))
+    for count in (5, 11, 20):
+        editor._on_stray_replies_detected(count)
+    assert shown == ["Stray MIDI replies"] * 3  # each report, after the previous dialog was closed
+
+
+def test_a_report_arriving_while_the_dialog_is_open_does_not_stack_a_second_one(misc_editor, monkeypatch):
+    editor, _bridge = misc_editor
+    from PySide6.QtWidgets import QMessageBox
+
+    shown = []
+
+    def modal_dialog(parent, title, text, *a, **k):
+        shown.append(title)
+        editor._on_stray_replies_detected(99)  # a second report while the modal dialog's event loop is running
+
+    monkeypatch.setattr(QMessageBox, "warning", modal_dialog)
+    editor._on_stray_replies_detected(5)
+    assert shown == ["Stray MIDI replies"]
+    # ...and once it is closed the next report shows again
+    editor._on_stray_replies_detected(12)
+    assert shown == ["Stray MIDI replies"] * 2
+    assert editor._stray_dialog_open is False
+
+
+def test_global_tab_is_the_fourth_tab_with_a_shortcut(misc_editor):
+    editor, _bridge = misc_editor
+    assert editor.main_tabs.tabText(editor._global_tab_index) == "Global"
+    assert editor._global_tab_index == 3
+    assert editor._global_tab_action.shortcut().toString() == "Ctrl+4"
+    editor._global_tab_action.trigger()
+    assert editor.main_tabs.currentIndex() == editor._global_tab_index
+
+
+def test_choosing_an_external_controller_in_the_modulation_card_writes_and_mirrors(
+    misc_editor, qapp
+):
+    editor, bridge = misc_editor
+
+    editor.external_controller_combo.setCurrentIndex(2)
+    editor.external_controller_combo.activated.emit(2)
+    _settle(editor, qapp)
+
+    assert bridge.write_verify_calls == [(38, 2)]
+    assert editor.global_tab.external_controller_combo.currentText() == "Volume"
+    assert editor.status_bar.currentMessage() == "External controller → Volume"
+
+
+def test_choosing_an_external_controller_on_the_global_tab_writes_and_mirrors(
+    misc_editor, qapp
+):
+    editor, bridge = misc_editor
+    tab_combo = editor.global_tab.external_controller_combo
+
+    tab_combo.setCurrentIndex(0)
+    tab_combo.activated.emit(0)
+    _settle(editor, qapp)
+
+    assert bridge.write_verify_calls == [(38, 0)]
+    assert editor.external_controller_combo.currentText() == "Breath"
+
+
+def test_a_failed_global_write_restores_both_external_controller_combos(
+    misc_editor, qapp
+):
+    editor, bridge = misc_editor
+    bridge.fail_writes = True
+
+    editor.external_controller_combo.setCurrentIndex(0)
+    editor.external_controller_combo.activated.emit(0)
+    editor._worker.wait_until_idle()
+    _pump_until(
+        qapp, lambda: editor.external_controller_combo.currentText() == "Footpedal"
+    )
+
+    assert editor.global_tab.external_controller_combo.currentText() == "Footpedal"
+    assert bridge.registers[38] == 1
+
+
+def test_a_global_tab_edit_writes_its_register(misc_editor, qapp):
+    editor, bridge = misc_editor
+
+    editor.global_tab._widgets["play_velocity"].setValue(20)
+    editor.global_tab.flush("play_velocity")
+    _settle(editor, qapp)
+
+    assert bridge.write_verify_calls == [(54, 20)]
+    assert "play velocity" in editor.status_bar.currentMessage()
+
+
+def test_refresh_rereads_the_global_settings(misc_editor, qapp):
+    editor, bridge = misc_editor
+    bridge.registers[38] = 2
+    bridge.block = bytes([4, 0, 1, 0, 0, 0, 50, 9, 12] + [0] * 39)  # program change channel 5
+
+    editor._refresh_from_hardware()
+    editor._worker.wait_until_idle()
+    _pump_until(qapp, lambda: editor.external_controller_combo.currentText() == "Volume")
+
+    assert editor.global_tab.external_controller_combo.currentText() == "Volume"
+    assert editor.global_tab._widgets["program_change_channel"].currentText() == "5"
+
+
+def test_global_controls_stay_disabled_when_the_read_fails(editor):
+    # FakeBridge has no misc registers: nothing read, so nothing may be written
+    editor._worker.wait_until_idle()
+    assert not editor.external_controller_combo.isEnabled()
+    assert editor.external_controller_combo.currentIndex() == -1
+    assert not any(w.isEnabled() for w in editor.global_tab._widgets.values())
+    assert not editor.global_tab._unavailable_label.isHidden()
+
+
+def test_global_tab_says_so_in_demo_mode(qapp, monkeypatch):
+    monkeypatch.setenv("AKAISDS_DEMO_SAMPLER", "1")
+    editor = ProgramEditorWindow(QWidget(), bridge=FakeBridge())
+    try:
+        _wait_for_program_load(editor, qapp)
+        assert not any(w.isEnabled() for w in editor.global_tab._widgets.values())
+        assert editor.global_tab._unavailable_label.text() == "Not available in demo mode."
+    finally:
+        editor._worker.stop()
+        editor._worker.wait()
+
+
 class _FakeLeftClick:
     # Knob.mouseDoubleClickEvent only calls .button() - same minimal
     # duck-typed fake tests/test_knob.py's own _FakeMouseEvent uses
@@ -380,6 +688,9 @@ class FakeSamplerController(QObject):
         self.sent_entries = []
         self.next_result = True  # what the next send's transfer_finished reports
         self.busy = False
+        #: where a sent sample lands in the list (None = the end). A real S2000 gives a new sample the LOWEST FREE slot, which after an
+        #: earlier delete is below samples that were there first (measured 2026-10-07)
+        self.insert_new_at = None
 
     def is_transfer_busy(self):
         return self.busy
@@ -415,11 +726,14 @@ class FakeSamplerController(QObject):
             )
             last_filepath = entry["filepath"]
             if result:
-                new_index = len(self._bridge._samples)
-                self._bridge._samples.append(entry["name"])
+                new_index = len(self._bridge._samples) if self.insert_new_at is None else self.insert_new_at
+                self._bridge._samples.insert(new_index, entry["name"])
+                self._bridge.sample_headers = {
+                    (i + 1 if i >= new_index else i): h for i, h in self._bridge.sample_headers.items()
+                }
                 self._bridge.sample_headers[new_index] = {
                     "SSTART": 0, "SMPEND": 0, "LOOPAT1": 0, "LLNGTH1": 0,
-                    "SLNGTH": 0, "SSRATE": 44100, "SBANDW": 1, "SPTYPE": 0,
+                    "SLNGTH": len(sent_samples), "SSRATE": 44100, "SBANDW": 1, "SPTYPE": 0,
                     "SPITCH": 60, "SHLTO": 0, "STUNO": 0, "LDWELL1": 0,
                 }
         # deferred, not synchronous - _perform_sample_edit_real connects
@@ -1171,6 +1485,138 @@ def test_zone_panels_load_loop_type_keytrack_and_tune_from_hardware(editor, qapp
         assert tune_spinbox.value() == pytest.approx(0.12)
 
 
+def _select_keygroup_1(editor, qapp):
+    editor.keygroup_list.setCurrentRow(1)
+    editor._worker.wait_until_idle()
+    _pump_until(qapp, lambda: editor.cutoff_knob.value() == 72)
+    editor._bridge.set_parameter_calls.clear()
+
+
+def test_the_mute_group_combo_maps_off_to_255_and_groups_to_0_31(editor):
+    combo = editor.mute_group_combo
+    assert combo.count() == 33
+    assert (combo.itemText(0), combo.itemData(0)) == ("Off", 255)
+    assert [combo.itemData(i) for i in range(1, 33)] == list(range(32))
+    # the PANEL numbers the groups 1-32 (confirmed on the real S2000); the raw byte is 0-31
+    assert [combo.itemText(i) for i in range(1, 33)] == [str(n) for n in range(1, 33)]
+    assert combo.toolTip() == tt.MUTE_GROUP_COMBO
+
+
+def test_mute_group_and_velocity_start_load_from_the_keygroup(editor, qapp):
+    editor.keygroup_list.setCurrentRow(1)
+    editor._worker.wait_until_idle()
+    _pump_until(qapp, lambda: editor.cutoff_knob.value() == 72)
+    # FakeBridge's generic value is 30 for any field it has no branch for
+    assert editor.mute_group_combo.currentData() == 30
+    assert [spin.value() for spin in editor._zone_vss] == [30, 30, 30, 30]
+
+
+def test_showing_a_keygroup_never_writes_the_mute_group_or_velocity_start(editor):
+    bridge = editor._bridge
+    before = len(bridge.set_parameter_calls)
+    editor._update_zone_panels({"KGMUTE": 255, "VSS1": -50, "VSS2": 0, "VSS3": 9999, "VSS4": -9999})
+    editor._flush_write("KGMUTE")
+    editor._worker.wait_until_idle()
+    assert editor.mute_group_combo.currentData() == 255 and editor.mute_group_combo.currentText() == "Off"
+    assert [spin.value() for spin in editor._zone_vss] == [-50, 0, 9999, -9999]
+    assert len(bridge.set_parameter_calls) == before
+
+
+def test_choosing_off_writes_255_and_a_group_writes_its_raw_number(editor, qapp):
+    bridge = editor._bridge
+    _select_keygroup_1(editor, qapp)
+    editor.mute_group_combo.setCurrentIndex(0)  # Off
+    editor._flush_write("KGMUTE")
+    editor._worker.wait_until_idle()
+    _pump_until(qapp, lambda: bridge.set_parameter_calls and bridge.set_parameter_calls[-1][0] == "KGMUTE")
+    assert bridge.set_parameter_calls[-1] == ("KGMUTE", 0, 255, 1)
+
+    # panel group 8 is raw 7
+    editor.mute_group_combo.setCurrentIndex(editor.mute_group_combo.findText("8"))
+    editor._flush_write("KGMUTE")
+    editor._worker.wait_until_idle()
+    _pump_until(qapp, lambda: bridge.set_parameter_calls[-1] == ("KGMUTE", 0, 7, 1))
+
+
+def test_raw_zero_is_panel_group_1_a_real_group_not_off(editor, qapp):
+    # s3k.params' measured note: raw 0 is an ACTIVE group (the panel's group 1), only 255 is off
+    bridge = editor._bridge
+    _select_keygroup_1(editor, qapp)
+    editor.mute_group_combo.setCurrentIndex(editor.mute_group_combo.findData(0))
+    editor._flush_write("KGMUTE")
+    editor._worker.wait_until_idle()
+    _pump_until(qapp, lambda: bridge.set_parameter_calls and bridge.set_parameter_calls[-1][0] == "KGMUTE")
+    assert bridge.set_parameter_calls[-1] == ("KGMUTE", 0, 0, 1)
+    assert editor.mute_group_combo.currentText() == "1"
+
+
+def test_a_raw_mute_group_the_combo_has_no_entry_for_is_shown_not_hidden(editor):
+    bridge = editor._bridge
+    before = len(bridge.set_parameter_calls)
+    editor._show_mute_group(100)
+    assert editor.mute_group_combo.currentText() == "Raw 100" and editor.mute_group_combo.currentData() == 100
+    editor._show_mute_group(3)
+    assert editor.mute_group_combo.currentText() == "4"  # raw 3 = the panel's group 4
+    assert editor.mute_group_combo.count() == 33  # the temporary "Raw 100" item is gone
+    editor._show_mute_group(255)
+    assert editor.mute_group_combo.currentText() == "Off"
+    assert len(bridge.set_parameter_calls) == before
+
+
+def test_editing_a_zone_velocity_start_writes_vss_for_that_zone(editor, qapp):
+    bridge = editor._bridge
+    _select_keygroup_1(editor, qapp)
+    editor._zone_vss[2].setValue(-1234)
+    editor._flush_write("VSS3")
+    editor._worker.wait_until_idle()
+    _pump_until(qapp, lambda: bridge.set_parameter_calls and bridge.set_parameter_calls[-1][0] == "VSS3")
+    assert bridge.set_parameter_calls[-1] == ("VSS3", 0, -1234, 1)
+
+    editor._zone_vss[0].setValue(9999)
+    editor._flush_write("VSS1")
+    editor._worker.wait_until_idle()
+    _pump_until(qapp, lambda: bridge.set_parameter_calls[-1] == ("VSS1", 0, 9999, 1))
+
+
+def test_velocity_start_is_a_28px_bipolar_knob_with_the_documented_range(editor):
+    from ui.knob import Knob
+
+    for knob in editor._zone_vss:
+        assert isinstance(knob, Knob)
+        assert (knob.width(), knob.height()) == (28, 28)
+        assert (knob.minimum(), knob.maximum()) == (-9999, 9999)
+        assert knob._bipolar and knob.defaultValue() == 0 and knob.isEnabled()
+        assert knob.toolTip() == tt.VELOCITY_START_KNOB
+
+
+def test_velocity_start_sits_right_of_velocity_high_in_the_same_row(editor):
+    for z, knob in enumerate(editor._zone_vss):
+        page_layout = editor._zone_vel_hi[z].parentWidget().layout()
+        # find the velocity row: the page layout's child layout that holds the Velocity High spinbox
+        vel_row = next(
+            item.layout()
+            for item in (page_layout.itemAt(i) for i in range(page_layout.count()))
+            if item.layout() is not None
+            and any(item.layout().itemAt(j).widget() is editor._zone_vel_hi[z] for j in range(item.layout().count()))
+        )
+        items = [vel_row.itemAt(i) for i in range(vel_row.count())]
+        hi_at = next(i for i, item in enumerate(items) if item.widget() is editor._zone_vel_hi[z])
+        vss_at = next(i for i, item in enumerate(items) if item.layout() is editor._zone_vss_rows[z])
+        lo_at = next(i for i, item in enumerate(items) if item.widget() is editor._zone_vel_lo[z])
+        assert lo_at < hi_at < vss_at  # Velocity Low, Velocity High, then Vel. start
+        # and the knob really is inside that group (not a separate row)
+        group = editor._zone_vss_rows[z]
+        assert any(group.itemAt(i).layout() is not None for i in range(group.count()))
+
+
+def test_the_velocity_start_readout_follows_the_knob_and_a_load(editor):
+    editor._update_zone_panels({"VSS1": -1234, "VSS2": 0, "VSS3": 9999, "VSS4": -9999})
+    assert [lbl.text() for lbl in editor._zone_vss_labels] == ["-1234", "0", "9999", "-9999"]
+    assert editor._zone_vss_labels[0].width() >= 40  # room for "-9999"
+    editor._zone_vss[1].setValue(55)  # a user edit updates its own readout
+    assert editor._zone_vss_labels[1].text() == "55"
+
+
 def test_loop_type_combo_has_a_tooltip_per_option(editor):
     loop_combo = editor._zone_looptype[0]
     assert loop_combo.count() == len(_LOOP_TYPE_OPTIONS)
@@ -1584,6 +2030,144 @@ def test_load_sample_waveform_progressively_fills_the_envelope_in_demo_mode(
     assert len(calls) >= 6
     assert sum(calls) == len(editor._sample_waveform_cache[0]["samples"])
     assert editor.waveform_view.has_waveform() is True
+
+
+class _FakeReceivingController(QObject):
+    # just the surface _fetch_sample_audio_blocking touches. receive_samples
+    # delivers its packets from the event loop (QTimer.singleShot), the way a
+    # real MIDI callback would - a synchronous emit inside start() would fire
+    # before _wait_for_any_signal's loop.exec() and be lost
+    receive_progress = Signal(int, int)
+    sample_chunk_received = Signal(list)
+    sample_received = Signal(str)
+    receive_finished = Signal(bool)
+
+    def __init__(self, chunks, packet_gap_ms=0):
+        super().__init__()
+        self._chunks = chunks
+        self._gap_ms = packet_gap_ms
+
+    def receive_samples(self, requests):
+        import wave
+
+        _, path = requests[0]
+
+        def _deliver(i):
+            if i < len(self._chunks):
+                self.sample_chunk_received.emit(self._chunks[i])
+                QTimer.singleShot(self._gap_ms, lambda: _deliver(i + 1))
+                return
+            with wave.open(path, "wb") as wav:
+                wav.setnchannels(1)
+                wav.setsampwidth(2)
+                wav.setframerate(44100)
+                wav.writeframes(b"\x00\x00" * sum(len(c) for c in self._chunks))
+            self.sample_received.emit(path)
+
+        QTimer.singleShot(0, lambda: _deliver(0))
+
+
+def test_real_receive_buffers_packets_instead_of_redrawing_per_packet(
+    editor, qapp, monkeypatch
+):
+    # every packet's drawing work used to sit on the GUI thread that ACKs the
+    # sampler's NEXT packet - see _on_sample_chunk_received
+    chunks = [[i] * 40 for i in range(30)]
+    controller = _FakeReceivingController(chunks)
+
+    calls = []
+    real_append = editor.waveform_view.append_live_samples
+
+    def _recording_append(chunk):
+        calls.append(list(chunk))
+        real_append(chunk)
+
+    monkeypatch.setattr(editor.waveform_view, "append_live_samples", _recording_append)
+
+    samples, framerate = editor._fetch_sample_audio_blocking(controller, 0)
+
+    assert samples is not None and framerate == 44100
+    assert len(calls) < len(chunks)
+    # nothing lost or reordered by the batching
+    assert [s for c in calls for s in c] == [s for c in chunks for s in c]
+
+
+def test_real_receive_flushes_buffered_packets_while_still_in_flight(
+    editor, qapp, monkeypatch
+):
+    # a long receive must still visibly fill in (not wait for the end)
+    import ui.program_editor_window as pew
+
+    monkeypatch.setattr(pew, "_LIVE_CHUNK_FLUSH_MS", 10)
+    chunks = [[i] * 40 for i in range(12)]
+    controller = _FakeReceivingController(chunks, packet_gap_ms=15)
+
+    calls = []
+    real_append = editor.waveform_view.append_live_samples
+    monkeypatch.setattr(
+        editor.waveform_view,
+        "append_live_samples",
+        lambda chunk: (calls.append(list(chunk)), real_append(chunk)),
+    )
+
+    editor._fetch_sample_audio_blocking(controller, 0)
+
+    assert len(calls) >= 3  # ticks mid-transfer, not only the final flush
+    assert [s for c in calls for s in c] == [s for c in chunks for s in c]
+
+
+def test_failed_receive_still_flushes_whatever_arrived(editor, qapp, monkeypatch):
+    chunks = [[7] * 40, [8] * 40]
+    controller = _FakeReceivingController(chunks)
+    calls = []
+    monkeypatch.setattr(
+        editor.waveform_view, "append_live_samples", lambda c: calls.append(list(c))
+    )
+
+    def _fail(requests):
+        QTimer.singleShot(0, lambda: controller.sample_chunk_received.emit(chunks[0]))
+        QTimer.singleShot(0, lambda: controller.receive_finished.emit(False))
+
+    controller.receive_samples = _fail
+    samples, _ = editor._fetch_sample_audio_blocking(controller, 0)
+
+    assert samples is None
+    assert [s for c in calls for s in c] == chunks[0]
+    assert editor._live_chunk_buffer == []
+
+
+def test_samples_and_multi_tabs_scroll_instead_of_squeezing_when_short(editor, qapp):
+    # an explicit window setMinimumSize overrides the layout's own minimum, so
+    # a window shorter than the Samples cards' combined height used to
+    # squeeze them until the Start/End knob row drew over the waveform
+    from PySide6.QtWidgets import QScrollArea
+
+    samples_page = editor.main_tabs.widget(editor._samples_tab_index)
+    multi_page = editor.main_tabs.widget(0)
+    assert isinstance(multi_page, QScrollArea)
+
+    # the sample list stays put; only the cards beside it scroll
+    scroll = samples_page.findChild(QScrollArea)
+    assert scroll is not None
+    assert not scroll.isAncestorOf(editor.sample_list_widget)
+    assert scroll.isAncestorOf(editor.waveform_view)
+    assert scroll.isAncestorOf(editor.sample_tune_spinbox)
+
+    editor.setMinimumSize(1250, 400)
+    editor.main_tabs.setCurrentIndex(editor._samples_tab_index)
+    editor.resize(1300, 450)
+    editor.show()
+    try:
+        _pump_until(qapp, lambda: scroll.verticalScrollBar().maximum() > 0)
+        # cards keep their natural height: the legend row's knobs sit below
+        # the waveform rather than on top of it
+        view = editor.waveform_view
+        _, knob, _ = editor._marker_spinboxes["start"]
+        view_bottom = view.mapTo(editor, view.rect().bottomLeft()).y()
+        knob_top = knob.mapTo(editor, knob.rect().topLeft()).y()
+        assert knob_top >= view_bottom
+    finally:
+        editor.hide()
 
 
 def test_akaisds_demo_instant_skips_the_pacing_loop_entirely(editor, qapp, monkeypatch):
@@ -3323,6 +3907,41 @@ def test_reverse_sample_real_mode_happy_path_sends_deletes_and_renames(
     assert editor._sample_name_at_row(editor.sample_list_widget.currentRow()) == "SQUARE"
 
 
+def test_reverse_sample_real_mode_deletes_the_original_by_name_when_the_replacement_lands_below_it(
+    editor, qapp, monkeypatch
+):
+    # real S2000 (2026-10-07): after one edit left a free slot, the NEXT edit's replacement took that lower slot, so the original's
+    # pre-send list index pointed at the replacement (the edit silently did nothing) - or, with the hole further down, at an
+    # unrelated sample. The original must be found BY NAME in a fresh list before anything is deleted.
+    import ui.program_editor_window as pew
+
+    monkeypatch.delenv("AKAISDS_DEMO_SAMPLER", raising=False)
+    monkeypatch.setattr(
+        pew.QMessageBox, "question", lambda *a, **k: pew.QMessageBox.StandardButton.Yes
+    )
+    bridge = editor._bridge
+    fake_sampler = FakeSamplerController(bridge)
+    fake_sampler.insert_new_at = 0  # the replacement lands at the very top, pushing everything down
+    editor._main_window.sampler_controller = fake_sampler
+    names_before = list(bridge.sample_list())
+    victim = names_before[1]  # what the OLD code would have deleted: the original's stale index
+
+    original_samples = list(range(100))
+    _select_sample_with_full_audio(  # sample 2 == the original being edited
+        editor, qapp, 2, original_samples,
+        {"start": 10, "loop_start": 30, "loop_end": 60, "end": 90},
+    )
+    edited = names_before[2]
+
+    editor._confirm_reverse_sample()
+
+    after = bridge.sample_list()
+    assert after.count(edited) == 1 and f"{edited}-TMP" not in after
+    assert victim in after  # nothing else was deleted
+    assert sorted(after) == sorted(names_before)  # same samples, same count
+    assert "complete" in editor.status_bar.currentMessage().lower()
+
+
 def test_reverse_sample_real_mode_send_failure_leaves_original_untouched(
     editor, qapp, monkeypatch
 ):
@@ -3425,6 +4044,140 @@ def test_duplicate_sample_real_mode_happy_path_sends_and_copies_metadata(
         editor._sample_name_at_row(editor.sample_list_widget.currentRow())
         == "SQUARE COPY"
     )
+
+
+def _wait_for_audio(editor, qapp):
+    editor._worker.wait_until_idle()
+    _pump_until(qapp, lambda: editor.waveform_view.has_waveform())
+
+
+def test_reverse_sample_real_mode_keeps_the_sent_waveform_on_screen(
+    editor, qapp, monkeypatch
+):
+    # the sample list reloads several times during a replace-in-place edit,
+    # each wiping the index-keyed cache; the edited sample used to come back
+    # header-only and need a slow SDS dump to see again
+    import ui.program_editor_window as pew
+
+    monkeypatch.delenv("AKAISDS_DEMO_SAMPLER", raising=False)
+    monkeypatch.setattr(
+        pew.QMessageBox, "question", lambda *a, **k: pew.QMessageBox.StandardButton.Yes
+    )
+    editor._main_window.sampler_controller = FakeSamplerController(editor._bridge)
+    original = list(range(100))
+    _select_sample_with_full_audio(
+        editor, qapp, 0, original,
+        {"start": 10, "loop_start": 30, "loop_end": 60, "end": 90},
+    )
+
+    editor._confirm_reverse_sample()
+    _wait_for_audio(editor, qapp)
+
+    row = editor.sample_list_widget.currentRow()
+    assert editor._sample_name_at_row(row) == "SQUARE"
+    assert editor._sample_waveform_cache[row]["samples"] == list(reversed(original))
+    assert editor.reverse_sample_button.isEnabled()
+
+
+def test_retained_audio_is_not_attached_when_the_frame_count_differs(editor, qapp):
+    # e.g. the sample was changed on the front panel since: fall back to the
+    # normal header-only state rather than show the wrong waveform
+    editor._retain_sample_audio("SQUARE", list(range(7)), 44100)
+    editor.sample_list_widget.setCurrentRow(0)
+    editor._worker.wait_until_idle()
+    _pump_until(qapp, lambda: editor.waveform_view.has_header())
+
+    assert editor._sample_waveform_cache[0]["samples"] is None
+    assert not editor.waveform_view.has_waveform()
+
+
+def test_retained_audio_is_dropped_when_the_sample_is_renamed(editor, qapp, monkeypatch):
+    editor._retain_sample_audio("SQUARE", list(range(100)), 44100)
+    editor.sample_list_widget.setCurrentRow(0)
+    monkeypatch.setattr(editor, "_prompt_sample_name", lambda *a, **k: "OTHER")
+
+    editor._confirm_rename_sample()
+
+    assert "SQUARE" not in editor._retained_sample_audio
+
+
+def test_duplicate_sample_real_mode_keeps_both_waveforms(editor, qapp, monkeypatch):
+    monkeypatch.delenv("AKAISDS_DEMO_SAMPLER", raising=False)
+    monkeypatch.setattr(editor, "_prompt_akai_name", lambda *a, **k: "SQUARE COPY")
+    bridge = editor._bridge
+    editor._main_window.sampler_controller = FakeSamplerController(bridge)
+    original = list(range(100))
+    _select_sample_with_full_audio(
+        editor, qapp, 0, original,
+        {"start": 10, "loop_start": 30, "loop_end": 60, "end": 90},
+    )
+    bridge.sample_headers[0]["SLNGTH"] = len(original)  # the fixture's header says 10000
+
+    editor._confirm_duplicate_sample()
+    _wait_for_audio(editor, qapp)
+
+    copy_row = bridge.sample_list().index("SQUARE COPY")
+    assert editor.sample_list_widget.currentRow() == copy_row
+    assert editor._sample_waveform_cache[copy_row]["samples"] == original
+    # and the source, selected later, has its audio too
+    editor.sample_list_widget.setCurrentRow(bridge.sample_list().index("SQUARE"))
+    _wait_for_audio(editor, qapp)
+    assert editor.waveform_view.frame_count() == len(original)
+
+
+def test_slice_export_keeps_the_source_and_the_new_slices_loaded(
+    editor, qapp, monkeypatch
+):
+    monkeypatch.delenv("AKAISDS_DEMO_SAMPLER", raising=False)
+    bridge = editor._bridge
+    editor._main_window.sampler_controller = FakeSamplerController(bridge)
+    source = list(range(200))
+    slices = [source[:100], source[100:]]
+    names = ["BREAK-1", "BREAK-2"]
+    _select_sample_with_full_audio(
+        editor, qapp, 0, source,
+        {"start": 0, "loop_start": 0, "loop_end": 0, "end": 199, "stuno": 0, "shlto": 0},
+    )
+    bridge.sample_headers[0]["SLNGTH"] = len(source)  # the fixture's header says 10000
+
+    class _ExportingDialog:
+        export_succeeded = False
+
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def exec(self):
+            ok, _ = editor._export_slices(
+                names, slices, 44100, 16, None, 60, 0, 0, lambda *a: None, lambda *a: None
+            )
+            type(self).export_succeeded = ok
+
+    monkeypatch.setattr("ui.program_editor_window.SliceEditorWindow", _ExportingDialog)
+
+    editor._open_slice_editor()
+    _wait_for_audio(editor, qapp)
+
+    assert editor._sample_name_at_row(editor.sample_list_widget.currentRow()) == "SQUARE"
+    assert editor.waveform_view.frame_count() == len(source)
+    for name, expected in zip(names, slices):
+        editor.sample_list_widget.setCurrentRow(bridge.sample_list().index(name))
+        _wait_for_audio(editor, qapp)
+        assert editor.waveform_view.frame_count() == len(expected)
+
+
+def test_slice_export_at_a_different_bit_depth_does_not_retain_the_slices(
+    editor, qapp, monkeypatch
+):
+    # not the audio we hold once the sampler requantises it
+    monkeypatch.delenv("AKAISDS_DEMO_SAMPLER", raising=False)
+    editor._main_window.sampler_controller = FakeSamplerController(editor._bridge)
+
+    editor._export_slices(
+        ["BREAK-1"], [list(range(50))], 44100, 12, None, 60, 0, 0,
+        lambda *a: None, lambda *a: None,
+    )
+
+    assert "BREAK-1" not in editor._retained_sample_audio
 
 
 def test_duplicate_sample_refuses_a_name_already_in_use(editor, qapp, monkeypatch):
@@ -4313,15 +5066,15 @@ def test_create_program_from_slices_single_slice_maps_only_c1(editor, qapp):
     assert keygroup_writes[(0, "SNAME1")] == "TRIM"
 
 
-def test_create_program_from_slices_refuses_more_than_99_keygroups(editor):
+def test_create_program_from_slices_refuses_more_than_92_keygroups(editor):
     bridge = editor._bridge
     programs_before = list(bridge.program_list())
     success, message = editor._create_program_from_slices(
-        [f"S-{i}" for i in range(100)], 0, "TOO BIG",
+        [f"S-{i}" for i in range(93)], 0, "TOO BIG",
         lambda *a: None, lambda *a: None,
     )
     assert success is False
-    assert "99" in message
+    assert "92" in message
     assert bridge.program_list() == programs_before  # never even started
 
 
@@ -4425,3 +5178,31 @@ def test_export_slices_uses_the_retrying_reload_not_a_single_attempt(
     assert success is True
     assert calls["n"] >= 2
 
+
+
+def _assert_card_page_layout(layout):
+    from ui.editor_layout import CARD_PAGE_MARGINS, CARD_SPACING
+
+    assert layout.spacing() == CARD_SPACING
+    m = layout.contentsMargins()
+    assert (m.left(), m.top(), m.right(), m.bottom()) == CARD_PAGE_MARGINS
+
+
+def test_every_page_of_cards_uses_the_shared_spacing_and_margins(editor):
+    # the S1000/S2000/S3000 editor and the S900/S950 one share the gap between section cards
+    # (ui.editor_layout.CARD_SPACING) and the page margins (no left margin, so the gap to the
+    # list beside the cards is the spacing alone - it was 15px with Fusion's default margin).
+    # The paired rows inherit the spacing from the page layout.
+    for index in (0, 1):  # Programs tab: program page, keygroup page
+        _assert_card_page_layout(editor.detail_stack.widget(index).widget().layout())
+    # Samples tab: the cards column beside the sample list
+    samples_page = editor.main_tabs.widget(editor._samples_tab_index)
+    scroll_area = samples_page.layout().itemAt(1).widget()
+    _assert_card_page_layout(scroll_area.widget().layout())
+
+
+def test_the_s3000_editors_signed_knobs_draw_their_arc_from_zero_and_the_unsigned_ones_do_not(editor):
+    # every Knob whose range spans zero grows its arc from the centre (a centred pan shows no arc); the rest are unchanged
+    assert editor.pan_knob.minimum() == -50 and abs(editor.pan_knob._origin_fraction() - 0.5) < 1e-9
+    assert abs(editor.key_filter_track_knob._origin_fraction() - 0.5) < 1e-9  # -24..+24
+    assert editor.attack1_knob.minimum() == 0 and editor.attack1_knob._origin_fraction() == 0.0

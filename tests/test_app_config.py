@@ -31,15 +31,84 @@ def test_save_and_get_channel_round_trip(monkeypatch, tmp_path):
     assert app_config.get_saved_channel() == 5
 
 
-def test_get_saved_device_type_defaults_to_akai(monkeypatch, tmp_path):
+def test_get_saved_device_type_defaults_to_s2000_s3000(monkeypatch, tmp_path):
     _use_temp_config(monkeypatch, tmp_path)
-    assert app_config.get_saved_device_type() == "akai"
+    assert app_config.get_saved_device_type() == "akai_s2000_s3000"
 
 
 def test_save_and_get_device_type_round_trip(monkeypatch, tmp_path):
     _use_temp_config(monkeypatch, tmp_path)
     app_config.save_device_type("generic")
     assert app_config.get_saved_device_type() == "generic"
+
+
+def test_s1000_device_type_round_trips(monkeypatch, tmp_path):
+    _use_temp_config(monkeypatch, tmp_path)
+    app_config.save_device_type("akai_s1000")
+    assert app_config.get_saved_device_type() == "akai_s1000"
+
+
+def test_s900_s950_device_type_round_trips(monkeypatch, tmp_path):
+    _use_temp_config(monkeypatch, tmp_path)
+    app_config.save_device_type("akai_s900_s950")
+    assert app_config.get_saved_device_type() == "akai_s900_s950"
+
+
+def test_unrecognised_saved_device_type_falls_back_to_s2000_s3000(
+    monkeypatch, tmp_path
+):
+    # a hand-edited config.json, or one written by a newer version
+    _use_temp_config(monkeypatch, tmp_path)
+    app_config.save_device_type("some-future-model")
+    assert app_config.get_saved_device_type() == "akai_s2000_s3000"
+
+
+def test_legacy_akai_device_type_reads_as_s2000_s3000(monkeypatch, tmp_path):
+    # what config.json held for the S2000/S3000 before the S1000 existed
+    _use_temp_config(monkeypatch, tmp_path)
+    app_config.save_device_type("akai")
+    assert app_config.get_saved_device_type() == "akai_s2000_s3000"
+
+
+def test_ensure_defaults_saved_rewrites_legacy_akai_in_the_file(monkeypatch, tmp_path):
+    # the point of the migration: someone reading config.json by hand should
+    # see the hardware it means, not the ambiguous legacy "akai"
+    _use_temp_config(monkeypatch, tmp_path)
+    app_config.save_device_type("akai")
+    app_config.save_channel(7)
+    assert app_config.load_config()["device_type"] == "akai"
+
+    app_config.ensure_defaults_saved()
+
+    config = app_config.load_config()
+    assert config["device_type"] == "akai_s2000_s3000"
+    assert config["midi_channel"] == 7  # nothing else disturbed
+
+
+def test_ensure_defaults_saved_leaves_other_device_types_alone(monkeypatch, tmp_path):
+    for value in ("akai_s1000", "generic", "akai_s2000_s3000"):
+        _use_temp_config(monkeypatch, tmp_path)
+        app_config.save_device_type(value)
+        app_config.ensure_defaults_saved()
+        assert app_config.load_config()["device_type"] == value
+
+
+def test_ensure_defaults_saved_does_not_touch_an_unrecognised_device_type(
+    monkeypatch, tmp_path
+):
+    # only the known legacy spelling is migrated - a value from a newer
+    # version must survive an older one starting up
+    _use_temp_config(monkeypatch, tmp_path)
+    app_config.save_device_type("some-future-model")
+    app_config.ensure_defaults_saved()
+    assert app_config.load_config()["device_type"] == "some-future-model"
+
+
+def test_s1000_editor_warning_defaults_to_unacknowledged(monkeypatch, tmp_path):
+    _use_temp_config(monkeypatch, tmp_path)
+    assert app_config.get_s1000_editor_warning_acknowledged() is False
+    app_config.save_s1000_editor_warning_acknowledged()
+    assert app_config.get_s1000_editor_warning_acknowledged() is True
 
 
 def test_get_last_update_check_defaults_to_zero(monkeypatch, tmp_path):
@@ -122,7 +191,7 @@ def test_ensure_defaults_saved_writes_defaults_on_fresh_config(monkeypatch, tmp_
     config = app_config.load_config()
     assert config["shared_midi_transport"] is True
     assert config["midi_channel"] == 0
-    assert config["device_type"] == "akai"
+    assert config["device_type"] == "akai_s2000_s3000"
     assert config["audio_buffer_samples"] == 1024
 
 
@@ -143,7 +212,7 @@ def test_ensure_defaults_saved_adds_missing_keys_without_touching_rest(
 
     config = app_config.load_config()
     assert config["shared_midi_transport"] is True
-    assert config["device_type"] == "akai"
+    assert config["device_type"] == "akai_s2000_s3000"
     assert config["audio_buffer_samples"] == 1024
     assert config["midi_input_port"] == "My Input"
     assert config["midi_output_port"] == "My Output"
@@ -188,3 +257,57 @@ def test_settings_saved_independently_dont_clobber_each_other(monkeypatch, tmp_p
     assert app_config.get_saved_ports() == ("In", "Out")
     assert app_config.get_saved_channel() == 3
     assert app_config.get_saved_device_type() == "generic"
+
+
+# --- theme (Settings > Appearance) ---------------------------------------------------------
+
+
+def test_get_saved_theme_defaults_to_system(monkeypatch, tmp_path):
+    _use_temp_config(monkeypatch, tmp_path)
+    assert app_config.get_saved_theme() == "system"
+
+
+def test_save_and_get_theme_round_trip(monkeypatch, tmp_path):
+    _use_temp_config(monkeypatch, tmp_path)
+    for value in ("light", "dark", "system"):
+        app_config.save_theme(value)
+        assert app_config.get_saved_theme() == value
+
+
+def test_unrecognised_saved_theme_falls_back_to_system(monkeypatch, tmp_path):
+    # a hand-edited config.json, or one written by a newer version
+    _use_temp_config(monkeypatch, tmp_path)
+    config = app_config.load_config()
+    config["theme"] = "solarized"
+    app_config.save_config(config)
+    assert app_config.get_saved_theme() == "system"
+
+
+def test_saving_an_unrecognised_theme_stores_system(monkeypatch, tmp_path):
+    _use_temp_config(monkeypatch, tmp_path)
+    app_config.save_theme("solarized")
+    assert app_config.load_config()["theme"] == "system"
+
+
+def test_ensure_defaults_saved_creates_the_theme_entry(monkeypatch, tmp_path):
+    _use_temp_config(monkeypatch, tmp_path)
+    assert "theme" not in app_config.load_config()
+    app_config.ensure_defaults_saved()
+    assert app_config.load_config()["theme"] == "system"
+
+
+def test_ensure_defaults_saved_keeps_a_saved_theme(monkeypatch, tmp_path):
+    _use_temp_config(monkeypatch, tmp_path)
+    app_config.save_theme("dark")
+    app_config.ensure_defaults_saved()
+    assert app_config.load_config()["theme"] == "dark"
+
+
+def test_yamaha_device_number_defaults_to_zero_and_rejects_nonsense(monkeypatch, tmp_path):
+    import json
+
+    _use_temp_config(monkeypatch, tmp_path)
+    assert app_config.get_yamaha_device_number() == 0
+    for value, expected in [(5, 5), (15, 15), (16, 0), (-1, 0), ("3", 0), (True, 0), (None, 0)]:
+        (tmp_path / "test_config.json").write_text(json.dumps({"yamaha_device_number": value}))
+        assert app_config.get_yamaha_device_number() == expected, value

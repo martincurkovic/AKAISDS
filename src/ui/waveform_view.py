@@ -2,7 +2,7 @@ import sys
 
 from PySide6.QtWidgets import QApplication, QWidget, QSizePolicy
 from PySide6.QtGui import QCursor, QPainter, QPen, QColor, QPolygonF
-from PySide6.QtCore import Qt, QEvent, QRectF, QPointF, QTimer, Signal
+from PySide6.QtCore import Qt, QEvent, QRect, QRectF, QPointF, QTimer, Signal
 
 from core import debug_log
 from ui import theme
@@ -325,6 +325,17 @@ class WaveformView(QWidget):
         # waveform's loop-region tint, and excludes loop_start/loop_end from
         # hit-testing so they can't be dragged, when False.
         self._loop_enabled = True
+        # read-only display (the Akai S900/S950 Samples tab): markers still draw, but can't
+        # be grabbed, hovered or dragged - see set_markers_locked
+        self._markers_locked = False
+        self._placeholder_text = _PLACEHOLDER_TEXT
+        # part of a stacked pair drawn as ONE display (the Yamaha Samples tab's left/right channels): "top",
+        # "bottom" or None - see set_stack_position
+        self._stack_role = None
+        self._stack_dash_offset_px = 0.0
+        self._stack_partner = None
+        # what the header-only state says (markers known, no audio yet) - see set_header_hint
+        self._header_hint = _PLACEHOLDER_TEXT
         # click-to-preview visual feedback (set_playhead/clear_playhead) -
         # None whenever nothing is currently sounding
         self._playhead_frame = None
@@ -437,6 +448,96 @@ class WaveformView(QWidget):
         self._loading = loading
         self.update()
 
+    def set_view_height(self, height):
+        # a stereo sample shows two of these stacked at half height each (the Yamaha Samples tab)
+        self.setFixedHeight(height)
+
+    def set_header_hint(self, text):
+        # the centered text shown while the markers are known but no audio is: the default (S3000 editor) promises a slow,
+        # interface-freezing load, which isn't true of every caller
+        self._header_hint = text
+        self.update()
+
+    def set_stack_position(self, role, other_height=0, partner=None):
+        """Draw this view as the "top" or "bottom" half of a stacked pair (None = a stand-alone view). The pair then reads
+        as one display: no border across the seam, marker lines running on through it (their dashes continue from the
+        other view's height), and each marker's handle only on the half that owns it - boundary markers' triangles at
+        the very top, loop markers' at the very bottom - plus a faint hairline along the seam and one centered hint."""
+        if role not in (None, "top", "bottom"):
+            raise ValueError(f"unknown stack role {role!r}")
+        self._stack_role = role
+        self._stack_dash_offset_px = float(other_height) if role == "bottom" else 0.0
+        # the other half: a centered hint is drawn once ACROSS the pair, and only while neither half has a waveform
+        self._stack_partner = partner if role else None
+        self.update()
+
+    def _draw_hint(self, painter, text):
+        """Centered text - for a stacked pair, laid out over the whole pair and clipped to this half, so the two halves
+        together show it ONCE, centered on the seam. Nothing is drawn while the partner already shows a waveform."""
+        if self._stack_role is not None and self._stack_partner is not None and self._stack_partner._envelope:
+            return
+        rect = self.rect()
+        if self._stack_role == "top":
+            rect = QRect(0, 0, rect.width(), rect.height() * 2)
+        elif self._stack_role == "bottom":
+            rect = QRect(0, -rect.height(), rect.width(), rect.height() * 2)
+        painter.drawText(rect, Qt.AlignmentFlag.AlignCenter | Qt.TextFlag.TextWordWrap, text)
+
+    def _repaint_partner(self):
+        if self._stack_partner is not None:
+            self._stack_partner.update()  # its hint depends on whether this half has a waveform
+
+    def view_state(self):
+        """(zoom, view_start) - what `set_view_state` of a linked view needs to show the same stretch of the wave."""
+        return self._zoom, self._view_start
+
+    def set_view_state(self, zoom, view_start):
+        # copies another view's zoom/pan (see the Yamaha Samples tab, which keeps a left and a right view in step);
+        # emits view_changed like any other zoom/pan, so a listener must guard against echoing it back
+        if self._frame_count == 0:
+            return
+        self._zoom = max(_MIN_ZOOM, min(self._max_zoom(), zoom))
+        self._view_start = view_start
+        self._clamp_view_start()
+        self._rebuild_envelope()
+        self.update()
+        self._emit_view_changed()
+
+    def set_placeholder_text(self, text):
+        # the centered text shown while nothing at all is known about a sample - the default
+        # (S1000/S2000/S3000) promises a slow, interface-freezing load, which isn't true of
+        # every caller
+        self._placeholder_text = text
+        self.update()
+
+    def _active_marker_names(self):
+        """The markers drawn solid: the one hovered or dragged here, and - for a stacked stereo pair, which is ONE display - the one
+        hovered or dragged in the other half too, so the marker lights up across both channels."""
+        names = {self._hover_marker, self._dragging}
+        partner = self._stack_partner
+        if self._stack_role is not None and partner is not None:
+            names |= {partner._hover_marker, partner._dragging}
+        names.discard(None)
+        return names
+
+    def _repaint_pair(self):
+        """Repaint this view and, for a stacked pair, its other half (hover/drag highlights span both)."""
+        self.update()
+        if self._stack_role is not None and self._stack_partner is not None:
+            self._stack_partner.update()
+
+    def set_markers_locked(self, locked):
+        # markers stay visible but can't be grabbed/dragged (and so never emit
+        # marker_committed) - for a view of a sample whose markers aren't editable.
+        # Zoom, pan and double-click-to-load are unaffected.
+        self._markers_locked = bool(locked)
+        if locked:
+            self._dragging = None
+            self._hover_marker = None
+            self._press_cycle_candidates = []
+            self._press_cycle_index = 0
+        self._repaint_pair()
+
     def set_loop_enabled(self, enabled):
         if self._loop_enabled == enabled:
             return
@@ -498,6 +599,7 @@ class WaveformView(QWidget):
         self._zoom = _MIN_ZOOM
         self._view_start = 0
         self.update()
+        self._repaint_partner()
         self._emit_view_changed()
 
     def set_header(self, frame_count, start, loop_start, loop_end, end):
@@ -522,6 +624,7 @@ class WaveformView(QWidget):
         self._zoom = _MIN_ZOOM
         self._view_start = 0
         self.update()
+        self._repaint_partner()
         self._emit_markers_changed()
         self._emit_view_changed()
 
@@ -556,6 +659,7 @@ class WaveformView(QWidget):
             self._view_start = 0
         self._rebuild_envelope()
         self.update()
+        self._repaint_partner()
         self._emit_markers_changed()
         self._emit_view_changed()
 
@@ -575,6 +679,7 @@ class WaveformView(QWidget):
         self._samples = []
         self._rebuild_envelope()
         self.update()
+        self._repaint_partner()
 
     def append_live_samples(self, chunk):
         """Extends the in-progress waveform with newly-arrived sample
@@ -594,6 +699,7 @@ class WaveformView(QWidget):
         self._samples.extend(chunk)
         self._rebuild_envelope()
         self.update()
+        self._repaint_partner()
 
     def set_marker(self, name, frame):
         """Move one marker directly (not via a mouse drag) - what the
@@ -612,6 +718,17 @@ class WaveformView(QWidget):
         self.update()
         self._emit_markers_changed()
         return self._markers[name]
+
+    def apply_markers(self, start, loop_start, loop_end, end):
+        """Show all four markers exactly where given - no pushing, no clamping to each other (the caller already holds a valid set).
+        For a view that MIRRORS another one's markers (the Yamaha Samples tab's right channel). Emits markers_changed like set_marker."""
+        if self._frame_count == 0:
+            return
+        last = self._frame_count - 1
+        clamp = lambda v: max(0, min(last, v))  # noqa: E731
+        self._markers = {"start": clamp(start), "loop_start": clamp(loop_start), "loop_end": clamp(loop_end), "end": clamp(end)}
+        self.update()
+        self._emit_markers_changed()
 
     def _push_marker(self, name, frame):
         """push_marker (the module-level function), but loop_start/
@@ -860,6 +977,13 @@ class WaveformView(QWidget):
         palette = theme.current_palette()
 
         rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        # a stacked half pushes the edge it shares with its partner outside the widget, so no border (or rounded corner)
+        # shows at the seam
+        reach = _BORDER_RADIUS * 2 + 2
+        if self._stack_role == "top":
+            rect.setBottom(rect.bottom() + reach)
+        elif self._stack_role == "bottom":
+            rect.setTop(rect.top() - reach)
         painter.fillRect(rect, QColor(palette["bg_input"]))
         painter.setPen(QColor(palette["border"]))
         painter.drawRoundedRect(rect, _BORDER_RADIUS, _BORDER_RADIUS)
@@ -868,11 +992,7 @@ class WaveformView(QWidget):
             # nothing known at all yet (no header, no audio) - the big
             # centered placeholder
             painter.setPen(QColor(palette["text_disabled"]))
-            painter.drawText(
-                self.rect(),
-                Qt.AlignmentFlag.AlignCenter | Qt.TextFlag.TextWordWrap,
-                _LOADING_TEXT if self._loading else _PLACEHOLDER_TEXT,
-            )
+            self._draw_hint(painter, _LOADING_TEXT if self._loading else self._placeholder_text)
             return
 
         self._draw_zero_crossing_line(painter, palette)
@@ -938,6 +1058,7 @@ class WaveformView(QWidget):
         # so even fully stacked, the loop marker's own colour and handle
         # remain visible at the bottom instead of disappearing behind
         # "end"'s handle at the top.
+        active_markers = self._active_marker_names()
         for name in ("start", "end", "loop_start", "loop_end"):
             # no loop on the current sample's SPTYPE - see set_loop_enabled
             # - the loop markers don't just grey out, they don't draw at
@@ -957,14 +1078,18 @@ class WaveformView(QWidget):
             # moving the mouse again doesn't flash back to the dim/dashed
             # look for one frame (mouseReleaseEvent sets _hover_marker to
             # match for exactly this reason)
-            is_active = name == self._hover_marker or name == self._dragging
+            is_active = name in active_markers
             color = brighten_for_hover(colors[name], palette) if is_active else colors[name]
             handle_size = _HANDLE_SIZE * 1.5 if is_active else _HANDLE_SIZE
             pen = QPen(color)
             pen.setWidthF(2.0 if is_active else 1.5)
             pen.setStyle(Qt.PenStyle.SolidLine if is_active else Qt.PenStyle.DashLine)
+            if self._stack_dash_offset_px and not is_active:
+                pen.setDashOffset(self._stack_dash_offset_px / pen.widthF())  # carry on from the half above
             painter.setPen(pen)
             painter.drawLine(QPointF(x, 0), QPointF(x, self.height()))
+            if (self._stack_role == "top" and is_loop) or (self._stack_role == "bottom" and not is_loop):
+                continue  # the other half draws this marker's handle
             painter.setBrush(color)
             painter.setPen(Qt.PenStyle.NoPen)
             handle_y = self.height() if is_loop else 0
@@ -992,11 +1117,18 @@ class WaveformView(QWidget):
             # triangle handles), so a centered single line doesn't run
             # into them
             painter.setPen(QColor(palette["text_disabled"]))
-            painter.drawText(
-                self.rect(),
-                Qt.AlignmentFlag.AlignCenter,
-                _LOADING_TEXT if self._loading else _PLACEHOLDER_TEXT,
-            )
+            self._draw_hint(painter, _LOADING_TEXT if self._loading else self._header_hint)
+
+        if self._stack_role == "bottom" and (
+            self._envelope or (self._stack_partner is not None and self._stack_partner._envelope)
+        ):
+            # a faint hairline where the left channel ends and the right begins (not through the centered hint text)
+            line = QColor(palette["border"])
+            line.setAlpha(150)
+            pen = QPen(line)
+            pen.setWidthF(1.0)
+            painter.setPen(pen)
+            painter.drawLine(QPointF(0, 0.5), QPointF(self.width(), 0.5))
 
         self._draw_playhead(painter, palette, view_start, view_length)
 
@@ -1026,6 +1158,8 @@ class WaveformView(QWidget):
         # to win ties - otherwise, once several markers land on the same
         # frame (a push cascade can do this - see push_marker), only the
         # frontmost one could ever be grabbed again.
+        if self._markers_locked:
+            return []
         view_start = self._view_start
         view_length = self._view_length()
         candidates = []
@@ -1132,6 +1266,7 @@ class WaveformView(QWidget):
             if self._dragging is not None:
                 self._drag_anchor_x = x
                 self._drag_value = float(self._markers[self._dragging])
+                self._repaint_pair()
         except Exception:
             debug_log.get_logger().error(
                 "WaveformView.mousePressEvent: unexpected error", exc_info=True
@@ -1150,7 +1285,7 @@ class WaveformView(QWidget):
                 hovered = candidates[0] if candidates else None
                 if hovered != self._hover_marker:
                     self._hover_marker = hovered
-                    self.update()
+                    self._repaint_pair()
                 return
             fine = bool(event.modifiers() & Qt.KeyboardModifier.ShiftModifier)
 
@@ -1277,7 +1412,7 @@ class WaveformView(QWidget):
             # next mouseMoveEvent to notice, which would otherwise leave the
             # marker looking neither dragged nor hovered for one repaint
             self._hover_marker = which
-            self.update()
+            self._repaint_pair()
             m = self._markers
             self.marker_committed.emit(
                 which, m["start"], m["loop_start"], m["loop_end"], m["end"]
@@ -1300,7 +1435,7 @@ class WaveformView(QWidget):
         # only place that can
         if self._hover_marker is not None:
             self._hover_marker = None
-            self.update()
+            self._repaint_pair()
         super().leaveEvent(event)
 
     def hideEvent(self, event):
@@ -1321,7 +1456,11 @@ class WaveformView(QWidget):
     def wheelEvent(self, event):
         # frame_count, not samples - zoom/pan are useful in header-only
         # mode too (more precise dragging), same as set_zoom/set_view_start
+        # every early return below that doesn't act on the event ignores it,
+        # so a plain vertical scroll over the waveform reaches the Samples
+        # tab's scroll area instead of being swallowed here
         if self._frame_count == 0:
+            event.ignore()
             return
         angle = event.angleDelta()
 
@@ -1371,6 +1510,7 @@ class WaveformView(QWidget):
         elif event.modifiers() & Qt.KeyboardModifier.ShiftModifier and angle.y() != 0:
             delta = angle.y()
         else:
+            event.ignore()
             return
 
         # a fixed fraction of the current view per notch, so panning stays

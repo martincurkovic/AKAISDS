@@ -1,7 +1,11 @@
 # AKAISDS
 
-![Build](https://github.com/martincurkovic/AKAISDS/actions/workflows/build.yml/badge.svg)
-[![Python 3.12+](https://img.shields.io/badge/python-3.12%2B-blue)](pyproject.toml)
+[![Build](https://github.com/martincurkovic/AKAISDS/actions/workflows/build.yml/badge.svg)](https://github.com/martincurkovic/AKAISDS/actions/workflows/build.yml)
+[![Python 3.12+](https://img.shields.io/badge/python-3.12%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
+[![Qt 6.11](https://img.shields.io/badge/Qt-6.11-41CD52?logo=qt&logoColor=white)](https://doc.qt.io/qtforpython-6/)
+[![uv](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/uv/main/assets/badge/v0.json)](https://github.com/astral-sh/uv)
+[![Platforms: macOS, Windows, Linux](https://img.shields.io/badge/platforms-macOS%20%7C%20Windows%20%7C%20Linux-lightgrey)](#download--installation)
+[![License: GPLv3](https://img.shields.io/badge/license-GPLv3-blue)](LICENSE)
 
 A simple way to send and receive audio samples (WAV, AIFF, FLAC) to an Akai S1000/S2000/S3000 series sampler over MIDI using the sample dump standard (MIDI SDS). Also supports generic MIDI SDS transmission for non-Akai samplers.
 
@@ -10,7 +14,9 @@ A simple way to send and receive audio samples (WAV, AIFF, FLAC) to an Akai S100
 ## Features
 
 - Akai-native sample browsing & management (list, rename, delete) as well as universal generic SDS support for non-Akai hardware
-- Program, Keygroup and Sample editor for Akai S2000/S3000 series samplers
+- Program, Keygroup and Sample editor for Akai S1000 and S2000/S3000 series samplers
+- Experimental Yamaha A4000/A5000 editor support
+- Experimental Akai S900/S950 support: sample send/receive plus a program editor. It uses a different protocol from the other Akai models, was written without access to the hardware and has not been tested on a real unit yet, so back up your sampler first and please report what you find
 - ReCycle style sample slicing
   - Transient detection
   - Audio preview
@@ -19,12 +25,13 @@ A simple way to send and receive audio samples (WAV, AIFF, FLAC) to an Akai S100
 - Drag-and-drop support for adding samples
 - Audio preview for samples
 - Batch transmission queue for sending and receiving samples
+- Light, dark, or follow-the-system theme (Settings > Appearance), switching live
 - Sampler memory status bar to display how much RAM is free (Akai sampler specific only)
-- Open-loop fallback for one-way MIDI cable setups, including timeout detection if a cable is unplugged mid-transfer
+- Open-loop sending for one-way MIDI cable setups (no MIDI input selected)
 - Built in MIDI diagnostic tests
   - MIDI interface test to check if your interface can support MIDI SysEx traffic
   - Hardware connection test to check if your MIDI sampler is connected correctly
-- Native builds for macOS (Apple Silicon & Intel), Linux and Windows (note that Windows support has not been thoroughly tested yet)
+- Native builds for macOS 15+ (Apple Silicon & Intel), Linux and Windows
 
 ## Quick Start & Screenshots
 
@@ -47,6 +54,8 @@ Download the latest release from the Releases tab on GitHub.
 #### macOS Instructions
 
 Unzip the download and drag AKAISDS to your applications folder. See the disclaimer section below for instructions about how to bypass Gatekeeper security.
+
+macOS 15+ support only for now. There are plans to backport AKAISDS to earlier macOS versions, but that work hasn't been started yet. 
 
 #### Windows Instructions
 
@@ -78,13 +87,17 @@ To bypass Windows SmartScreen & Defender you will need to do the following:
 
 Generic SDS mode has been implemented and tested via simulation but only has limited verification on real hardware. Bugs will likely be present, so if you encounter one please log an issue on GitHub and be as descriptive as possible :) See [CONTRIBUTING.md](CONTRIBUTING.md#reporting-bugs) for what's helpful to include.
 
-Note that some USB MIDI interfaces do not support MIDI SysEx messages. Please check your MIDI hardware supports SysEx transmission. AKAISDS contains a MIDI SysEx loopback test to assess MIDI interface compatibility. Otherwise please check the table below for a list of tested hardware. If you've tested your interface, please feel free to contribute and add your findings to the table below.
+Note that some USB MIDI interfaces do not support MIDI SysEx messages. Please check your MIDI hardware supports SysEx transmission. AKAISDS contains a MIDI SysEx loopback test to assess MIDI interface compatibility. Otherwise please check the table below for a list of tested hardware. If you've tested your interface, please share your findings: the loopback test's results window has a **Share on GitHub** button that opens an issue with everything filled in (or add a row to the table below with a Pull Request).
 
 |Interface|macOS|Linux|Windows|Notes|
 |---|---|---|---|---|
 |   iCON MIDIPORT V1.01  |❌ |  ⚠️ |  ⚠️ |  Max SysEx 256 bytes |
 |  MIDIPLUS MIDI 2x2 |  ⚠️ |  ⚠️ |  ⚠️ |  Max SysEx 256 bytes |
 |   PreSonus Studio 26  |  ✅ |  ✅ |  ⚠️ (max 512 bytes) | Requires driver on Windows  |
+
+## Reporting Problems
+
+If something goes wrong, open **Help > Open Log Folder** (in the S900/S950 and Yamaha editors: **Hardware > Open Log Folder**) and attach `akaisds.log` to your bug report, along with which sampler and MIDI interface you're using. Send it straight after the problem happens - it rotates at 8 MB. If the app crashed outright, `crash.log` in the same folder is useful too.
 
 ## Building From Source
 
@@ -94,11 +107,13 @@ Want to build AKAISDS yourself or help contribute to the project? See [BUILDING.
 
 Licensed under [GPLv3](LICENSE) - see [LICENSE](LICENSE) for details
 
-Written in Python using PySide6 (Qt), mido, python-rtmidi, soundfile, s3ked and Nuitka.
+Written in Python using PySide6 (Qt), mido, python-rtmidi, soundfile, miniaudio, s3ked and Nuitka.
 
 This project would not have been possible without the amazing work of Frank Neumann who transcribed the entire Akai SysEx implementation by hand from printed documentation. [That documentation can be found here](https://lakai.sourceforge.net/documentation.shtml.html)
 
 Additionally the program and keygroup editor is built on top of the [s3ked](https://github.com/lentferj/s3ked) project by _Jan Lentfer._
+
+The Akai S900/S950 support is partly ported from [s950tools](https://github.com/diemonster/s950tools) by _Brandon Ivers_ (MIT licensed). See [THIRD_PARTY_NOTICES](src/ui/help/THIRD_PARTY_NOTICES.md) for the licence text and exactly which files are derived.
 
 _I stand on the shoulders of giants._
 

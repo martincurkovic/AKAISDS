@@ -6,6 +6,7 @@ import time
 from PySide6.QtGui import QAction, QKeySequence
 from ui.dashboard import TransferDashboard
 from ui.about_dialog import AboutDialog
+from ui.diagnostics_ui import add_open_log_folder_action
 from ui.quickstart_dialog import show_quickstart_dialog
 from ui.update_helper import UpdateCheckRunner
 from core.midi_manager import MidiManager
@@ -165,6 +166,7 @@ class ApplicationWindow(QMainWindow):
         quickstart_action.triggered.connect(lambda: show_quickstart_dialog(self))
         help_menu.addAction(quickstart_action)
         help_menu.addSeparator()
+        add_open_log_folder_action(help_menu, self)
 
         about_action = QAction("About AKAISDS...", self)
         about_action.setMenuRole(QAction.MenuRole.AboutRole)

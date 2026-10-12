@@ -18,7 +18,7 @@ from pathlib import Path
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QCoreApplication, QEvent, Qt
 from PySide6.QtWidgets import QApplication, QLineEdit
 
 from core import dropped_files, sample_slicing, sds_encoder
@@ -48,7 +48,16 @@ def _isolated_dropped_files_base_dir(tmp_path, monkeypatch):
 def dashboard(qapp):
     midi_manager = MidiManager()
     sampler_controller = SamplerController(midi_manager)
-    return TransferDashboard(sampler_controller, midi_manager)
+    dash = TransferDashboard(sampler_controller, midi_manager)
+    yield dash
+    # QListWidget.clear() (any test that repopulates the hardware list)
+    # schedules its row widgets for deferred deletion. Left pending, that
+    # delete fires later - inside some OTHER test's nested event loop
+    # (test_program_editor_window's _wait_for_any_signal) - after this
+    # dashboard has been garbage-collected, and segfaults in
+    # QWidget::destroy (confirmed from a macOS crash report). Flush them now,
+    # while everything is still alive.
+    QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete.value)
 
 
 # --- Open Editor button: only enabled with both ports set AND Akai --------
@@ -115,7 +124,7 @@ def test_open_editor_tooltip_explains_whats_missing(dashboard):
     dashboard.midi_manager.output_name = "Fake Out"
     dashboard.sampler_controller.device_type = "generic"
     dashboard._update_open_editor_enabled()
-    assert "Akai Sampler" in dashboard.btn_open_editor.toolTip()
+    assert "Akai S2000/S3000" in dashboard.btn_open_editor.toolTip()
 
     dashboard.sampler_controller.device_type = "akai"
     dashboard._update_open_editor_enabled()
@@ -578,3 +587,428 @@ def test_open_slice_editor_wires_both_channels_through_to_export(
         channels, _rate = sds_encoder.read_wav_channels(new_path)
         assert channels[0] == [1000] * 2205
         assert channels[1] == [-1000] * 2205
+
+
+# --- Program Editor + the Akai S1000 ----------------------------------------------
+
+
+def _stub_editor_opening(monkeypatch, dashboard):
+    # records connect() calls and swaps ProgramEditorWindow for a stub, so
+    # open_program_editor() can be driven without a real bridge/window
+    from ui import dashboard as dashboard_module
+
+    connects = []
+    monkeypatch.setattr(
+        dashboard_module.program_editor_bridge,
+        "connect",
+        lambda midi_manager, sampler_model=None: connects.append(sampler_model)
+        or object(),
+    )
+
+    class _StubEditor:
+        def __init__(self, main_window, bridge):
+            pass
+
+        def show(self):
+            pass
+
+    monkeypatch.setattr(dashboard_module, "ProgramEditorWindow", _StubEditor)
+    return connects
+
+
+def _isolate_s1000_warning(monkeypatch, acknowledged):
+    from ui import dashboard as dashboard_module
+
+    state = {"acknowledged": acknowledged}
+    monkeypatch.setattr(
+        dashboard_module.app_config,
+        "get_s1000_editor_warning_acknowledged",
+        lambda: state["acknowledged"],
+    )
+    monkeypatch.setattr(
+        dashboard_module.app_config,
+        "save_s1000_editor_warning_acknowledged",
+        lambda acknowledged=True: state.update(acknowledged=acknowledged),
+    )
+    return state
+
+
+def _stub_warning(monkeypatch, answer):
+    from PySide6.QtWidgets import QMessageBox
+    from ui import dashboard as dashboard_module
+
+    shown = []
+
+    def fake_warning(parent, title, text, *args):
+        shown.append(title)
+        return answer
+
+    monkeypatch.setattr(dashboard_module.QMessageBox, "warning", fake_warning)
+    return shown
+
+
+def test_s1000_editor_asks_before_first_open_and_remembers_ok(
+    dashboard, monkeypatch
+):
+    from PySide6.QtWidgets import QMessageBox
+
+    connects = _stub_editor_opening(monkeypatch, dashboard)
+    state = _isolate_s1000_warning(monkeypatch, acknowledged=False)
+    shown = _stub_warning(monkeypatch, QMessageBox.StandardButton.Ok)
+    dashboard.sampler_controller.set_device_type("akai_s1000")
+
+    dashboard.open_program_editor()
+
+    assert shown == ["Akai S1000 - experimental"]
+    assert state["acknowledged"] is True
+    assert connects == ["akai_s1000"]
+
+
+def test_s1000_editor_cancelling_the_warning_does_not_connect(
+    dashboard, monkeypatch
+):
+    from PySide6.QtWidgets import QMessageBox
+
+    connects = _stub_editor_opening(monkeypatch, dashboard)
+    state = _isolate_s1000_warning(monkeypatch, acknowledged=False)
+    _stub_warning(monkeypatch, QMessageBox.StandardButton.Cancel)
+    dashboard.sampler_controller.set_device_type("akai_s1000")
+
+    dashboard.open_program_editor()
+
+    assert connects == []
+    assert state["acknowledged"] is False
+
+
+def test_s1000_editor_does_not_ask_again_once_acknowledged(dashboard, monkeypatch):
+    from PySide6.QtWidgets import QMessageBox
+
+    connects = _stub_editor_opening(monkeypatch, dashboard)
+    _isolate_s1000_warning(monkeypatch, acknowledged=True)
+    shown = _stub_warning(monkeypatch, QMessageBox.StandardButton.Cancel)
+    dashboard.sampler_controller.set_device_type("akai_s1000")
+
+    dashboard.open_program_editor()
+
+    assert shown == []
+    assert connects == ["akai_s1000"]
+
+
+def test_s2000_s3000_editor_never_shows_the_s1000_warning(dashboard, monkeypatch):
+    from PySide6.QtWidgets import QMessageBox
+
+    connects = _stub_editor_opening(monkeypatch, dashboard)
+    _isolate_s1000_warning(monkeypatch, acknowledged=False)
+    shown = _stub_warning(monkeypatch, QMessageBox.StandardButton.Cancel)
+
+    dashboard.open_program_editor()
+
+    assert shown == []
+    assert connects == ["akai_s2000_s3000"]
+
+
+def test_open_editor_is_enabled_for_the_s1000_too(dashboard):
+    dashboard.midi_manager.input_name = "Fake In"
+    dashboard.midi_manager.output_name = "Fake Out"
+    dashboard.sampler_controller.set_device_type("akai_s1000")
+    dashboard._update_open_editor_enabled()
+    assert dashboard.btn_open_editor.isEnabled() is True
+
+
+# --- Akai S900/S950 ------------------------------------------------------------
+
+
+@pytest.fixture
+def s950_dashboard(dashboard):
+    dashboard.midi_manager.input_name = "Fake In"
+    dashboard.midi_manager.output_name = "Fake Out"
+    dashboard.sampler_controller.set_device_type("akai_s900_s950")
+    dashboard._update_device_type_ui()
+    dashboard._update_open_editor_enabled()
+    return dashboard
+
+
+def test_s950_with_an_input_enables_browsing_but_has_no_memory_bar(s950_dashboard):
+    d = s950_dashboard
+    assert d.list_hardware.isEnabled()
+    assert d.btn_refresh.isEnabled()
+    assert d.btn_delete_selected.isEnabled() is False
+    assert d.memory_avail_prog_bar.isHidden()  # no RSTAT equivalent
+
+
+def test_s950_without_an_input_cant_refresh_receive_or_send(dashboard):
+    dashboard.midi_manager.input_name = None
+    dashboard.sampler_controller.set_device_type("akai_s900_s950")
+    dashboard.list_local.addItem("kick.wav")
+    dashboard._update_device_type_ui()
+    assert dashboard.btn_refresh.isEnabled() is False
+    assert dashboard.btn_receive.isEnabled() is False
+    assert dashboard.btn_send.isEnabled() is False
+    assert "MIDI input" in dashboard.btn_send.toolTip()
+    assert "MIDI input" in dashboard.empty_hardware_label.text()
+
+
+def test_s950_send_is_enabled_with_files_and_an_input(s950_dashboard):
+    d = s950_dashboard
+    d.list_local.addItem("kick.wav")
+    d._update_queue_buttons_state()
+    assert d.btn_send.isEnabled() is True
+    assert d.btn_send.toolTip() == ""
+
+
+def test_s950_enables_the_editor_with_an_experimental_tooltip(s950_dashboard):
+    assert s950_dashboard.btn_open_editor.isEnabled() is True
+    assert "experimental" in s950_dashboard.btn_open_editor.toolTip()
+
+
+def test_s950_editor_needs_both_ports(s950_dashboard):
+    s950_dashboard.midi_manager.input_name = None
+    s950_dashboard._update_open_editor_enabled()
+    assert s950_dashboard.btn_open_editor.isEnabled() is False
+    assert "Settings" in s950_dashboard.btn_open_editor.toolTip()
+
+
+def test_s950_opens_its_editor_on_the_shared_controller_not_a_bridge(
+    s950_dashboard, monkeypatch
+):
+    from ui import dashboard as dashboard_module
+
+    opened = []
+
+    class _StubEditor2:
+        def __init__(self, main_window, controller):
+            opened.append((main_window, controller))
+
+        def show(self):
+            pass
+
+    monkeypatch.setattr(dashboard_module, "S950ProgramEditorWindow", _StubEditor2)
+    monkeypatch.setattr(
+        dashboard_module.program_editor_bridge,
+        "connect",
+        lambda *a, **k: pytest.fail("the S900/S950 has no S3kBridge"),
+    )
+    s950_dashboard.open_program_editor()
+    assert len(opened) == 1
+    assert opened[0][1] is s950_dashboard.sampler_controller
+
+
+def test_s950_slot_list_uses_the_real_slot_numbers_and_cant_delete(s950_dashboard):
+    from PySide6.QtWidgets import QPushButton
+
+    d = s950_dashboard
+    # sparse: slots 3 and 40, not 0 and 1
+    d.sampler_controller.sample_slots_updated.emit([(3, "KICK"), (40, "SNARE")])
+    assert d.list_hardware.count() == 2
+    numbers = [
+        d.list_hardware.item(i).data(Qt.ItemDataRole.UserRole) for i in range(2)
+    ]
+    assert numbers == [3, 40]
+    for i in range(2):
+        buttons = {
+            b.text(): b
+            for b in d.list_hardware.itemWidget(d.list_hardware.item(i)).findChildren(
+                QPushButton
+            )
+        }
+        assert buttons["Delete"].isEnabled() is False
+        assert "front panel" in buttons["Delete"].toolTip()
+        assert buttons["Edit"].isEnabled() is True
+
+
+def test_s950_delete_selected_stays_disabled_with_a_row_checked(s950_dashboard):
+    from PySide6.QtWidgets import QCheckBox
+
+    d = s950_dashboard
+    d.sampler_controller.sample_slots_updated.emit([(3, "KICK")])
+    d.list_hardware.itemWidget(d.list_hardware.item(0)).findChild(QCheckBox).setChecked(True)
+    assert d.btn_delete_selected.isEnabled() is False
+
+
+def test_akai_list_is_dropped_when_switching_to_s950_but_not_when_settings_just_closes(
+    dashboard,
+):
+    dashboard.midi_manager.input_name = "Fake In"
+    dashboard.sampler_controller.sample_list_updated.emit(["A", "B"])
+    assert dashboard.list_hardware.count() == 2
+    dashboard._update_device_type_ui()  # Settings closed, nothing changed
+    assert dashboard.list_hardware.count() == 2
+    dashboard.sampler_controller.set_device_type("akai_s900_s950")
+    dashboard._update_device_type_ui()
+    assert dashboard.list_hardware.count() == 0
+
+
+def test_leaving_s950_keeps_send_available_without_a_queue_change(s950_dashboard):
+    d = s950_dashboard
+    d.midi_manager.input_name = None
+    d.list_local.addItem("kick.wav")
+    d._update_device_type_ui()
+    assert d.btn_send.isEnabled() is False
+    d.sampler_controller.set_device_type("akai_s2000_s3000")
+    d._update_device_type_ui()
+    # an Akai sampler can be sent to open loop, so Send comes back
+    assert d.btn_send.isEnabled() is True
+    assert d.btn_send.toolTip() == ""
+
+
+def test_s950_editor_refuses_without_a_midi_input_and_never_touches_a_bridge(
+    s950_dashboard, monkeypatch
+):
+    from core import program_editor_bridge
+    from ui import dashboard as dashboard_module
+
+    def _must_not_connect(*_a, **_k):
+        raise AssertionError("connected a bridge for an S900/S950")
+
+    monkeypatch.setattr(program_editor_bridge, "connect", _must_not_connect)
+    monkeypatch.setattr(
+        dashboard_module,
+        "S950ProgramEditorWindow",
+        lambda *a, **k: pytest.fail("opened an editor with no MIDI input"),
+    )
+    s950_dashboard.midi_manager.input_name = None  # the unit answers on the input
+    s950_dashboard.open_program_editor()
+    assert "MIDI input" in s950_dashboard.status_bar.currentMessage()
+
+
+def test_s950_experimental_warning_is_shown_once_then_remembered(
+    s950_dashboard, monkeypatch
+):
+    from PySide6.QtWidgets import QMessageBox
+
+    from core import app_config
+
+    state = {"acknowledged": False, "asked": 0}
+    monkeypatch.setattr(
+        app_config,
+        "get_s950_transfer_warning_acknowledged",
+        lambda: state["acknowledged"],
+    )
+    monkeypatch.setattr(
+        app_config,
+        "save_s950_transfer_warning_acknowledged",
+        lambda value=True: state.update(acknowledged=value),
+    )
+
+    def _warning(*_a, **_k):
+        state["asked"] += 1
+        return QMessageBox.StandardButton.Ok
+
+    monkeypatch.setattr(QMessageBox, "warning", _warning)
+    assert s950_dashboard._confirm_s950_experimental() is True
+    assert s950_dashboard._confirm_s950_experimental() is True
+    assert state == {"acknowledged": True, "asked": 1}
+
+
+def test_s950_experimental_warning_cancel_blocks_the_send(s950_dashboard, monkeypatch):
+    from PySide6.QtWidgets import QMessageBox
+
+    from core import app_config
+
+    saved = []
+    monkeypatch.setattr(app_config, "get_s950_transfer_warning_acknowledged", lambda: False)
+    monkeypatch.setattr(
+        app_config, "save_s950_transfer_warning_acknowledged", lambda v=True: saved.append(v)
+    )
+    monkeypatch.setattr(
+        QMessageBox, "warning", lambda *a, **k: QMessageBox.StandardButton.Cancel
+    )
+    assert s950_dashboard._confirm_s950_experimental() is False
+    assert saved == []
+
+
+def test_other_sampler_types_never_see_the_s950_warning(dashboard, monkeypatch):
+    from PySide6.QtWidgets import QMessageBox
+
+    monkeypatch.setattr(
+        QMessageBox, "warning", lambda *a, **k: pytest.fail("warned a non-S950 user")
+    )
+    assert dashboard._confirm_s950_experimental() is True
+
+
+# --- Yamaha A4000/A5000: SDS transfers (the generic family) + its own editor -------------------------
+
+
+@pytest.fixture
+def yamaha_dashboard(dashboard, monkeypatch):
+    dashboard.midi_manager.input_name = "Fake In"
+    dashboard.midi_manager.output_name = "Fake Out"
+    dashboard.sampler_controller.set_device_type("yamaha_a4000")
+    dashboard._update_device_type_ui()
+    dashboard._update_open_editor_enabled()
+    return dashboard
+
+
+def test_yamaha_is_the_generic_family_underneath_but_the_editor_and_the_sample_list_are_enabled(yamaha_dashboard):
+    d = yamaha_dashboard
+    assert d.sampler_controller.device_type == "generic"  # the protocol FAMILY (sends/receives/lists branch on is_yamaha first)
+    assert d.btn_open_editor.isEnabled() is True
+    assert "Yamaha" in d.btn_open_editor.toolTip() and "experimental" in d.btn_open_editor.toolTip()
+    # listing, receiving and sending use the unit's own protocol, so the hardware list is live (unlike Generic SDS); the unit
+    # can't report its free memory, so there is no memory bar
+    assert d.list_hardware.isEnabled() and d.btn_refresh.isEnabled()
+    assert d.btn_delete_selected.isEnabled() is False and d.memory_avail_prog_bar.isHidden()
+
+
+def test_yamaha_without_a_midi_input_cant_refresh_or_receive(dashboard):
+    dashboard.midi_manager.input_name = None
+    dashboard.sampler_controller.set_device_type("yamaha_a4000")
+    dashboard._update_device_type_ui()
+    assert dashboard.btn_refresh.isEnabled() is False and dashboard.btn_receive.isEnabled() is False
+    assert "MIDI input" in dashboard.empty_hardware_label.text()
+
+
+def test_generic_sds_still_cant_browse(dashboard):
+    dashboard.midi_manager.input_name = "Fake In"
+    dashboard.sampler_controller.set_device_type("generic")
+    dashboard._update_device_type_ui()
+    assert dashboard.btn_refresh.isEnabled() is False and dashboard.list_hardware.isEnabled() is False
+    assert "Generic SDS" in dashboard.empty_hardware_label.text()
+
+
+def test_yamaha_editor_needs_both_ports(yamaha_dashboard):
+    yamaha_dashboard.midi_manager.input_name = None
+    yamaha_dashboard._update_open_editor_enabled()
+    assert yamaha_dashboard.btn_open_editor.isEnabled() is False
+    assert "Settings" in yamaha_dashboard.btn_open_editor.toolTip()
+
+
+def test_generic_sds_still_has_no_editor(dashboard):
+    dashboard.midi_manager.input_name = "Fake In"
+    dashboard.midi_manager.output_name = "Fake Out"
+    dashboard.sampler_controller.set_device_type("generic")
+    dashboard._update_open_editor_enabled()
+    assert dashboard.btn_open_editor.isEnabled() is False
+
+
+def test_yamaha_opens_its_editor_on_the_shared_controller_not_a_bridge(yamaha_dashboard, monkeypatch):
+    from ui import dashboard as dashboard_module
+
+    opened = []
+
+    class _StubEditor:
+        def __init__(self, main_window, controller):
+            opened.append((main_window, controller))
+
+        def show(self):
+            pass
+
+    monkeypatch.setattr(dashboard_module, "YamahaProgramEditorWindow", _StubEditor)
+    monkeypatch.setattr(
+        dashboard_module.program_editor_bridge,
+        "connect",
+        lambda *a, **k: pytest.fail("the Yamaha editor has no S3kBridge"),
+    )
+    yamaha_dashboard.open_program_editor()
+    assert len(opened) == 1 and opened[0][1] is yamaha_dashboard.sampler_controller
+
+
+def test_yamaha_editor_refuses_without_a_midi_input(yamaha_dashboard, monkeypatch):
+    from ui import dashboard as dashboard_module
+
+    monkeypatch.setattr(
+        dashboard_module, "YamahaProgramEditorWindow", lambda *a, **k: pytest.fail("opened with no MIDI input")
+    )
+    yamaha_dashboard.midi_manager.input_name = None  # every answer comes back on the input
+    yamaha_dashboard.open_program_editor()
+    assert "MIDI input" in yamaha_dashboard.status_bar.currentMessage()

@@ -517,3 +517,17 @@ def test_demo_bridge_sample_loop_type_and_root_note_round_trip(editor, qapp):
     )
 
     assert editor._failures.events == []
+
+
+# --- KGMUTE / VSS1-4 against the real s3k.params through the real DemoBridge (declared ranges, signed decode) ---
+
+
+def test_mute_group_and_velocity_start_round_trip_through_the_real_parameter_table():
+    bridge = DemoBridge()
+    for value in (255, 0, 7, 31):
+        bridge.set_parameter(p.lookup("KGMUTE", "keygroup"), 0, value, keygroup=0)
+        assert bridge.get_parameter(p.lookup("KGMUTE", "keygroup"), 0, keygroup=0) == value
+    for zone in (1, 2, 3, 4):
+        for value in (-9999, -1, 0, 1, 9999):
+            bridge.set_parameter(p.lookup(f"VSS{zone}", "keygroup"), 0, value, keygroup=0)
+            assert bridge.get_parameter(p.lookup(f"VSS{zone}", "keygroup"), 0, keygroup=0) == value

@@ -3,7 +3,7 @@ import os
 import mido
 
 from core import app_config, debug_log
-from core import midi_transport
+from core import midi_transport, sysex_trace
 from PySide6.QtCore import QObject, Signal
 
 
@@ -61,6 +61,8 @@ class MidiManager(QObject):
         # program_editor_bridge.connect() builds its own S3kBridge from
         self.raw_input = None
         self.raw_output = None
+        # a bounded DEBUG trace of every SysEx in and out (core/sysex_trace.py) - the wire timeline for the Dashboard and the S950/Yamaha editors
+        self._trace = sysex_trace.SysexTrace(debug_log.get_logger())
 
     @staticmethod
     def list_inputs():
@@ -129,6 +131,7 @@ class MidiManager(QObject):
 
     def _on_message(self, message):
         if message.type == "sysex":
+            self._trace.inbound(message.data)
             self.sysex_received.emit(bytes(message.data))
 
     def _on_raw_message(self, raw_message):
@@ -146,9 +149,11 @@ class MidiManager(QObject):
             if raw_message[-1] == midi_transport.EOX
             else raw_message[1:]
         )
+        self._trace.inbound(payload)
         self.sysex_received.emit(bytes(payload))
 
     def send_sysex(self, data_bytes):
+        self._trace.out(data_bytes)
         if shared_transport_enabled():
             if self.raw_output is None:
                 raise RuntimeError("No MIDI output port is open")

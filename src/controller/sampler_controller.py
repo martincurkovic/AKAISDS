@@ -1,11 +1,32 @@
 from PySide6.QtCore import QObject, Signal, QTimer
-from core import akai_sysex, sds_encoder, midi_identity, debug_log
+from core import akai_sysex, sds_encoder, midi_identity, debug_log, sampler_models, sysex_trace
 import os
 import time
 
 
+# the cap on the DEBUG lines for "normal on a shared port" unexpected SysEx (see SamplerController._log_unexpected_sysex(quiet=True)): 50 per 10 s, then one summary line
+_UNEXPECTED_LOG_BUDGET = sysex_trace.LineBudget(max_lines=50)
+
+
 class SamplerController(QObject):
     sample_list_updated = Signal(list)
+    # S900/S950 only: [(slot, name)] - its slots are sparse, so the list-index
+    # == sample number assumption sample_list_updated carries doesn't hold
+    sample_slots_updated = Signal(list)
+    # S900/S950 only: the catalog's programs as [(slot, name)] (emitted with
+    # every catalog read, alongside sample_slots_updated), and one program read
+    # by request_program(): (slot, core.s950_program.Program) - or (slot, None)
+    # if the read failed, so a waiting window never hangs on a lost reply
+    program_slots_updated = Signal(list)
+    s950_program_received = Signal(int, object)
+    # S900/S950 only: one sample's parameters read by request_sample_params():
+    # (slot, core.s950_sysex.SampleParams) - or (slot, None) if the read failed
+    s950_sample_params_received = Signal(int, object)
+    # write_program()'s outcome: (slot, verified, Program the sampler holds now | None,
+    # message). verified means the read-back matched what was sent; False with a Program
+    # means "written, but the sampler shows something different" (the Program is what it
+    # reports); False with None means nothing usable came back / nothing was written.
+    s950_program_written = Signal(int, bool, object, str)
     status_changed = Signal(str)
     transfer_progress = Signal(int, int)  # (packets sent so far, total packets)
     unit_progress = Signal(float)
@@ -31,17 +52,49 @@ class SamplerController(QObject):
         super().__init__()
         self.midi_manager = midi_manager
         self.midi_manager.sysex_received.connect(self.on_sysex_received)
+        # the status text is what the user sees and quotes in a bug report
+        self._last_logged_status = None
+        self.status_changed.connect(self._log_status)
         self._refresh_is_silent = False
 
         # global SysEx device ID/channel (0-127) - NOT THE SAME AS MIDI CHANNELS (1-16)!!!
         # defaults to 0, otherwise it can be set manually for a daisy-chained setup
         self.channel = 0
+        # device_type is the PROTOCOL FAMILY ("akai"/"generic"/"s950") every
+        # transfer path below branches on; sampler_model is the full Settings choice
+        # (core/sampler_models.py) - only the Program Editor cares about the
+        # S1000 vs S2000/S3000 split, which transfers don't
         self.device_type = "akai"
+        self.sampler_model = sampler_models.AKAI_S2000_S3000
+        self._s950_engine = None  # built on first use - see _s950
+        self._yamaha_transfers_engine = None  # the Dashboard's Yamaha list/receive - see _yamaha_transfers
+        self._yamaha_engine = None  # built on first use - see _yamaha
 
         self._open_loop_delay_ms = 40  # pacing for open loop sending
+        # replies stopped MID-send after the sampler had been handshaking: finish the sample
+        # open loop but slower - a handshaking S2000 sometimes needs far more than 40ms per
+        # packet (measured ACKs of ~270ms), which closed loop absorbs and open loop can't
+        self._send_midstream_delay_ms = 100
+        self._send_midstream_loss_at = None  # "N/M" of the packet the replies stopped at
+        self._batch_loss_note = None  # same, remembered for the batch's final status
+        self._batch_cancelled_files = 0  # queued files dropped after a mid-send loss
+        self._batch_cancelled_right_channel = False
         self._handshake_timeout_ms = 500  # how long to wait for a reponse before switching to open-loop transmission
         self._no_response_detected = False
         self._packet_send_generation = 0
+        # a lost packet / lost ACK gets re-sent a few times before anything else happens
+        # (SDS: a receiver that already has packet N just ACKs it again). Until the
+        # sampler has ACKed once we can't tell "slow/lossy" from "open loop only", so
+        # that stays quick; once it is proven to handshake the wait is longer and running
+        # out of retries aborts the send instead of silently going open loop
+        self._send_packet_retries = 0
+        self._send_packet_max_retries = 3
+        self._send_unproven_max_retries = 0  # no ACK for the header: fall back at once, don't re-send it
+        self._send_proven_timeout_ms = 2000
+        self._send_wait_cap_ms = 30000  # a sampler holding WAIT longer than this is dead
+        self._send_slowest_ack_ms = 0.0
+        self._send_packet_sent_at = 0.0
+        self._send_wait_started = None  # monotonic time of the first WAIT for this packet
 
         # watchdog for request/reply exchanges (RSTAT, RSLIST) - without it a dead
         # input path leaves the app waiting forever with nothing in the log
@@ -59,6 +112,22 @@ class SamplerController(QObject):
         self._receive_packet_retries = 0
         self._receive_last_packet_num = None
         self._receive_checksum_errors = 0
+        # receive diagnostics (see _reset_receive_diagnostics) - the receive
+        # path used to log nothing between the header and the final
+        # error, so a stall at packet N left no clue what the sampler did
+        self._receive_started_at = 0.0
+        # when the user last cancelled a receive: packets the sampler already had on the wire still arrive after
+        # our CANCEL, and must not be reported as "unrecognised SysEx" over the "Transfer cancelled" status
+        self._receive_cancelled_at = None
+        self._receive_last_packet_at = None
+        self._receive_stray_handshakes = 0
+        # last resort after the ACK/NAK nudges fail (see _resume_stalled_receive):
+        # re-request the rest of the sample with a fresh RSPACK
+        self._receive_max_resumes = 3
+        self._receive_resume_delay_ms = 250  # gap between our CANCEL and the new RSPACK
+        self._receive_resume_attempts = 0
+        self._receive_resuming = False  # a resume RSPACK is out, no packet back yet
+        self._receive_is_akai = False  # RSPACK path (resumable), not generic SDS
 
         # per-unit send diagnostics, logged once when the unit ends (never per packet,
         # so a big sample can't flood the debug log)
@@ -125,11 +194,92 @@ class SamplerController(QObject):
     def set_channel(self, channel):
         self.channel = channel & 0x7F
 
-    def set_device_type(self, device_type):
-        self.device_type = device_type
+    def set_device_type(self, selection):
+        # takes any of core/sampler_models.py's three selections, not just
+        # a protocol family
+        self.sampler_model = sampler_models.normalize(selection)
+        self.device_type = sampler_models.protocol_family(self.sampler_model)
+
+    @property
+    def _s950(self):
+        # the S900/S950's transfers (controller/s950_transfers.py), built the
+        # first time they're needed rather than for every user
+        if self._s950_engine is None:
+            from controller.s950_transfers import S950Transfers
+
+            self._s950_engine = S950Transfers(self)
+        return self._s950_engine
+
+    def _is_s950(self):
+        return self.device_type == sampler_models.FAMILY_S950
+
+    @property
+    def _yamaha(self):
+        # the Yamaha A4000/A5000 editor's conversation engine (controller/yamaha_session.py), built the first
+        # time it's needed. Sample TRANSFERS for that model are ordinary SDS (device_type "generic"); only the
+        # editor's own Yamaha SysEx goes through here
+        if self._yamaha_engine is None:
+            from controller.yamaha_session import YamahaSession
+
+            self._yamaha_engine = YamahaSession(self)
+        return self._yamaha_engine
+
+    @property
+    def _yamaha_transfers(self):
+        # listing and receiving samples for the Yamaha A4000/A5000 (controller/yamaha_transfers.py), built the first
+        # time they're needed. SENDING samples to it is still plain SDS (device_type "generic")
+        if self._yamaha_transfers_engine is None:
+            from controller.yamaha_transfers import YamahaTransfers
+
+            self._yamaha_transfers_engine = YamahaTransfers(self)
+        return self._yamaha_transfers_engine
+
+    def yamaha_loaded_names(self):
+        """The sample names the last Yamaha send really landed under (a clash with an existing name adds a number)."""
+        engine = self._yamaha_transfers_engine
+        return list(engine.loaded_names) if engine is not None else []
+
+    def yamaha_midi_loaded_names(self):
+        """Every sample name this app has loaded onto the Yamaha over MIDI since it started (not just the last send). Linking such a
+        sample to a program has left a real A4000 unresponsive - see ui/yamaha_program_editor.py's _assign_sample."""
+        engine = self._yamaha_transfers_engine
+        return set(engine.midi_loaded_names) if engine is not None else set()
+
+    def is_yamaha_model(self):
+        return sampler_models.is_yamaha(self.sampler_model)
+
+    def yamaha_session(self):
+        """The Yamaha session the editor talks through - only for the Yamaha Sampler Type."""
+        if not self.is_yamaha_model():
+            raise RuntimeError("the Yamaha session is only available for the Yamaha Sampler Type")
+        return self._yamaha
+
+    def is_yamaha_idle(self):
+        return self._yamaha_engine is None or self._yamaha_engine.idle
+
+    def _s950_not_supported(self, what):
+        # The S900/S950 speak neither protocol the Akai-family and generic-SDS
+        # paths below were written for. Entry points with a real S950 version
+        # delegate to controller/s950_transfers.py before reaching this; the
+        # ones that remain (delete - there's no such opcode - and the legacy
+        # per-file senders) refuse, so choosing that Sampler Type can never
+        # put bytes on the wire that an S900/S950 would misread.
+        if not self._is_s950():
+            return False
+        debug_log.get_logger().info(
+            f"SamplerController: refused {what} - not available for the S900/S950"
+        )
+        self.status_changed.emit(f"{what} isn't available for the Akai S900/S950")
+        return True
 
     def refresh_sample_list(self, silent=False):
+        if self.is_yamaha_model():
+            self._yamaha_transfers.refresh_list(silent)
+            return
         if self.device_type == "generic":
+            return
+        if self._is_s950():
+            self._s950.refresh_catalog(silent)
             return
         self._refresh_is_silent = silent
         self._awaiting_memory_status = True
@@ -145,7 +295,47 @@ class SamplerController(QObject):
         if not silent:
             self.status_changed.emit("Requesting available memory...")
 
+    def request_sample_params(self, slot):
+        # S900/S950 only: read one sample's SPRM (length, rate, replay mode, loop, ...)
+        if not self._is_s950():
+            return
+        self._s950.request_sample_params(slot)
+
+    def is_s950_idle(self):
+        # True when nothing at all is on the S900/S950's wire (a catalog read
+        # counts, unlike is_transfer_busy) - what the program viewer waits for
+        return self._s950_engine is None or self._s950_engine.idle
+
+    def request_program(self, slot):
+        # S900/S950 only (the Akai family's programs go through the Program
+        # Editor's own bridge): read one whole program + keygroups
+        if not self._is_s950():
+            return
+        self._s950.request_program(slot)
+
+    def write_program(self, slot, baseline, edited):
+        # S900/S950 only: write the fields of `edited` that differ from `baseline`
+        # (the program as loaded) onto the program in `slot` - see
+        # S950Transfers.write_program
+        if not self._is_s950():
+            return
+        self._s950.write_program(slot, baseline, edited)
+
+    def _yamaha_not_supported(self, what):
+        # the Yamaha has no known delete/rename opcode, and the Akai commands below would be misread by it
+        if not self.is_yamaha_model():
+            return False
+        debug_log.get_logger().info(f"SamplerController: refused {what} - not available for the Yamaha A4000/A5000")
+        self.status_changed.emit(f"{what} isn't available for the Yamaha A4000/A5000 - use its front panel")
+        return True
+
     def delete_sample(self, sample_number, channel=None):
+        if self._yamaha_not_supported("Deleting samples"):
+            return
+        if self._s950_not_supported(
+            "Deleting samples (the S900/S950 can't do it over MIDI - use its front panel)"
+        ):
+            return
         if channel is None:
             channel = self.channel
         # delete the selected sample (DELS command in akai documentation)
@@ -155,6 +345,11 @@ class SamplerController(QObject):
         QTimer.singleShot(300, self.refresh_sample_list)
 
     def rename_sample(self, sample_number, new_name, channel=None):
+        if self._yamaha_not_supported("Renaming samples"):
+            return
+        if self._is_s950():
+            self._s950.rename_sample(sample_number, new_name)
+            return
         if channel is None:
             channel = self.channel
         # rename existing sample WITHOUT touching its audio data
@@ -168,6 +363,11 @@ class SamplerController(QObject):
         QTimer.singleShot(300, self.refresh_sample_list)
 
     def request_sample_info(self, sample_number, channel=None):
+        if self.is_yamaha_model():
+            return
+        if self._is_s950():
+            self._s950.request_sample_info(sample_number)
+            return
         if channel is None:
             channel = self.channel
         # fetch sample's header info (name, sample_rate, length, root_key, detune)
@@ -224,6 +424,154 @@ class SamplerController(QObject):
         self._reply_generation += 1  # invalidates the pending timer
         self._reply_wait_label = None
 
+    # how many packets get their own log line at the start of a receive, and
+    # then how often after that - enough to see the S1000's real packet
+    # timing without flooding the rotating log on a big sample
+    _RECEIVE_LOG_FIRST_PACKETS = 8
+    _RECEIVE_LOG_EVERY_NTH_PACKET = 50
+    _RECEIVE_LOG_MAX_STRAY_HANDSHAKES = 5
+    # how long after a user cancel a late SDS header/data packet is silently dropped instead of reported
+    _RECEIVE_CANCEL_GRACE_S = 3.0
+
+    def _reset_receive_diagnostics(self):
+        self._receive_started_at = time.monotonic()
+        self._receive_last_packet_at = None
+        self._receive_stray_handshakes = 0
+        self._receive_resume_attempts = 0
+        self._receive_resuming = False
+        self._receive_is_akai = False
+
+    def _receive_diagnostics_summary(self):
+        # one line for every stall/failure log: how long since the sampler
+        # last said anything useful, and whether it said anything we ignored
+        now = time.monotonic()
+        if self._receive_last_packet_at is None:
+            since = "no data packet received yet"
+        else:
+            since = f"last data packet {(now - self._receive_last_packet_at) * 1000:.0f}ms ago"
+        return (
+            f"{since}, {(now - self._receive_started_at) * 1000:.0f}ms into the receive, "
+            f"{self._receive_stray_handshakes} unexpected handshake message(s) from the sampler"
+        )
+
+    def _log_receive_packet(self, packet_num, payload_len):
+        # per-packet timing, sampled (see _RECEIVE_LOG_FIRST_PACKETS); always
+        # called after the packet was ACKed, never before
+        now = time.monotonic()
+        gap_ms = (
+            (now - self._receive_started_at) * 1000
+            if self._receive_last_packet_at is None
+            else (now - self._receive_last_packet_at) * 1000
+        )
+        self._receive_last_packet_at = now
+        count = len(self._receive_packets)
+        if (
+            count <= self._RECEIVE_LOG_FIRST_PACKETS
+            or count % self._RECEIVE_LOG_EVERY_NTH_PACKET == 0
+        ):
+            debug_log.get_logger().debug(
+                f"SamplerController: receive data packet #{count} (number {packet_num}, "
+                f"{payload_len} payload bytes) {gap_ms:.0f}ms after the "
+                f"{'RSPACK' if count == 1 else 'previous packet'}, ACK sent"
+            )
+
+    def _on_receive_handshake_message(self, kind, data_bytes):
+        # ACK/NAK/WAIT/CANCEL arriving WHILE we are the receiver. A dump
+        # sender (the sampler) isn't supposed to send any of these, so each
+        # one is worth knowing about - they used to be dropped without a
+        # trace (_on_handshake_message ignores everything outside a send)
+        self._receive_stray_handshakes += 1
+        raw = bytes(data_bytes).hex(" ")
+        if kind == "cancel":
+            debug_log.get_logger().error(
+                f"SamplerController: sampler sent CANCEL during receive ({raw}) - "
+                f"{self._receive_diagnostics_summary()}"
+            )
+            info = self._receive_header_info
+            expected = self._receive_expected_packets if info else "?"
+            self._recover_from_error(
+                f"The sampler cancelled the transfer after "
+                f"{len(self._receive_packets)}/{expected} packets"
+            )
+            return
+        if self._receive_stray_handshakes <= self._RECEIVE_LOG_MAX_STRAY_HANDSHAKES:
+            debug_log.get_logger().warning(
+                f"SamplerController: unexpected {kind.upper()} from the sampler during "
+                f"receive ({raw}) at {len(self._receive_packets)} packet(s) - ignored "
+                f"({self._receive_diagnostics_summary()})"
+            )
+
+    def _send_receive_cancel(self, reason):
+        # tell the sampler to abandon whatever dump it may still think it is
+        # in - a stalled receive only reset OUR state before, which could
+        # leave a real sampler wedged mid-dump for the next attempt. Never
+        # raises: this runs on failure paths that must still finish cleaning up
+        last = self._receive_last_packet_num
+        packet_num = 0 if last is None else (last + 1) & 0x7F
+        debug_log.get_logger().warning(
+            f"SamplerController: sending CANCEL to the sampler ({reason})"
+        )
+        try:
+            self.midi_manager.send_sysex(
+                [0x7E, self._receive_channel & 0x7F, sds_encoder.CANCEL, packet_num]
+            )
+        except Exception:
+            debug_log.get_logger().error(
+                "SamplerController: couldn't send CANCEL", exc_info=True
+            )
+
+    def _resume_stalled_receive(self):
+        # the sampler went quiet and neither re-ACKing nor NAKing woke it.
+        # RSPACK takes an offset, so start a fresh packet stream from
+        # wherever we got to instead of failing the whole sample. A CANCEL
+        # first clears whatever dump the sampler thinks is still running.
+        # Packet numbering restarts at 0 in the new stream, and
+        # _receive_resuming tells _on_receive_header not to wipe the
+        # packets already received if the sampler opens it with a header.
+        info = self._receive_header_info
+        bytes_per_word = (info["bit_depth"] + 6) // 7
+        words_per_packet = sds_encoder.DATA_BYTES_PER_PACKET // bytes_per_word
+        words_received = len(self._receive_packets) * words_per_packet
+        remaining = info["sample_length"] - words_received
+        self._receive_resume_attempts += 1
+        debug_log.get_logger().warning(
+            f"SamplerController: resuming receive (attempt {self._receive_resume_attempts}/"
+            f"{self._receive_max_resumes}) from word {words_received}, {remaining} words "
+            f"left - {self._receive_diagnostics_summary()}"
+        )
+        self.status_changed.emit(
+            f"Sampler stopped sending - asking it to resume from word {words_received}..."
+        )
+        self._send_receive_cancel("before resuming with a new RSPACK")
+        self._receive_last_packet_num = None
+        self._receive_packet_retries = 0
+        self._receive_resuming = True
+        self._arm_reply_timeout(
+            "next data packet",
+            self._receive_packet_retry_ms + self._receive_resume_delay_ms,
+        )
+        generation = self._reply_generation
+        sample_number = self._receive_sample_number
+        channel = self._receive_channel
+
+        def _send_rspack():
+            if not self._receiving or generation != self._reply_generation:
+                return  # the receive ended or moved on during the delay
+            request = akai_sysex.build_rspack_request(
+                sample_number,
+                offset=words_received,
+                num_samples=remaining,
+                interval=1,
+                function=0,
+                channel=channel,
+            )
+            debug_log.get_logger().info(
+                f"SamplerController: resume RSPACK {bytes(request).hex(' ')}"
+            )
+            self.midi_manager.send_sysex(request)
+
+        QTimer.singleShot(self._receive_resume_delay_ms, _send_rspack)
+
     def _nudge_stalled_receive(self):
         # alternate between re-ACKing the last packet (our ACK may have been lost)
         # and NAKing the one we expect next (the packet itself may have been lost) -
@@ -239,7 +587,7 @@ class SamplerController(QObject):
             f"SamplerController: receive stalled at {len(self._receive_packets)}/"
             f"{self._receive_expected_packets} - retry {self._receive_packet_retries}/"
             f"{self._receive_packet_max_retries} ({'ACK' if kind == sds_encoder.ACK else 'NAK'} "
-            f"packet {packet_num})"
+            f"packet {packet_num}) - {self._receive_diagnostics_summary()}"
         )
         self.midi_manager.send_sysex(
             [0x7E, self._receive_channel & 0x7F, kind, packet_num]
@@ -276,17 +624,31 @@ class SamplerController(QObject):
         elif (
             label == "next data packet"
             and self._receiving
+            and self._receive_resume_attempts == 0
             and self._receive_packet_retries < self._receive_packet_max_retries
         ):
             self._nudge_stalled_receive()
+        elif (
+            label == "next data packet"
+            and self._receiving
+            and self._receive_is_akai
+            and self._receive_header_info is not None
+            and self._receive_resume_attempts < self._receive_max_resumes
+        ):
+            # nudges are only tried before the first resume - after one, a
+            # further stall goes straight to the next resume
+            self._resume_stalled_receive()
         elif self._receiving or self._receive_queue:
             info = self._receive_header_info
             expected = self._receive_expected_packets if info else "?"
             debug_log.get_logger().error(
                 f"SamplerController: receive stalled waiting for {label} - sample "
                 f"{self._receive_sample_number}, packets {len(self._receive_packets)}/{expected}, "
-                f"checksum errors={self._receive_checksum_errors}"
+                f"checksum errors={self._receive_checksum_errors} - "
+                f"{self._receive_diagnostics_summary()}"
             )
+            if self._receiving:
+                self._send_receive_cancel("receive failed")
             self._recover_from_error(message)
         elif self._awaiting_sample_info:
             self._awaiting_sample_info = False
@@ -345,6 +707,27 @@ class SamplerController(QObject):
 
     def _on_sysex_received_impl(self, data_bytes):
         if not data_bytes:
+            return
+
+        if self._is_s950():
+            # S900/S950 traffic (also F0 47 ..., but device byte 0x40 and
+            # other function codes) must not reach the Akai-family parser
+            # below, which would misread it
+            self._s950.handle_sysex(data_bytes)
+            return
+
+        if (
+            data_bytes[0] == 0x7E
+            and self.is_yamaha_model()
+            and self._yamaha_engine is not None
+            and self._yamaha_engine.handle_identity(data_bytes)
+        ):
+            return  # the answer to the editor's identity request (an SDS 0x7E message is never one: its third byte differs)
+
+        if data_bytes[0] == 0x43 and self.is_yamaha_model():
+            # Yamaha editor traffic (parameter replies, bulk dumps): not SDS, and the generic path below would
+            # log it as "unrecognised". Sample transfers (0x7E) still take the normal path.
+            self._yamaha.handle_sysex(data_bytes)
             return
 
         if data_bytes[0] == 0x47:
@@ -416,10 +799,7 @@ class SamplerController(QObject):
                 elif self._receiving and self._receive_header_info is None:
                     self._on_receive_sdata_header(data_bytes)
                 else:
-                    self._log_unexpected_sysex("unexpected SDATA", data_bytes)
-                    self.status_changed.emit(
-                        f"Received unexpected SDATA message: {bytes(data_bytes).hex(' ')}"
-                    )
+                    self._log_unexpected_sysex("unexpected SDATA", data_bytes, quiet=True)
 
             elif function_code == 0x01:
                 # STAT reponse to RSTAT
@@ -430,10 +810,7 @@ class SamplerController(QObject):
                     self.memory_status_updated.emit(info)
                     self._send_rslist_request()
                 else:
-                    self._log_unexpected_sysex("unexpected STAT", data_bytes)
-                    self.status_changed.emit(
-                        f"Received unexpected STAT message {bytes(data_bytes).hex(' ')}"
-                    )
+                    self._log_unexpected_sysex("unexpected STAT", data_bytes, quiet=True)
 
             elif function_code == 0x16:
                 # S1000 command reply: F0, 47, cc, 16, 48, mm, F7 - mm: 0=ok, 1=error
@@ -446,17 +823,10 @@ class SamplerController(QObject):
                         "Sampler confirmed: ERROR creating/replacing sample"
                     )
                 else:
-                    self._log_unexpected_sysex("REPLY with unexpected byte", data_bytes)
-                    self.status_changed.emit(
-                        f"Received REPLY with unexpected byte: {bytes(data_bytes).hex(' ')}"
-                    )
+                    self._log_unexpected_sysex("REPLY with unexpected byte", data_bytes, quiet=True)
             else:
                 self._log_unexpected_sysex(
-                    f"unrecognised Akai message (function {function_code})", data_bytes
-                )
-                self.status_changed.emit(
-                    f"Received unrecognised Akai message (function {function_code}): "
-                    f"{bytes(data_bytes).hex(' ')}"
+                    f"unrecognised Akai message (function {function_code})", data_bytes, quiet=True
                 )
             return
 
@@ -469,31 +839,67 @@ class SamplerController(QObject):
             if self._receiving and sub_id == 0x02:
                 self._on_receive_data_packet(data_bytes)
                 return
+            if self._receiving and not self._send_queue:
+                handshake = sds_encoder.classify_response(data_bytes)
+                if handshake is not None:
+                    self._on_receive_handshake_message(handshake, data_bytes)
+                    return
+            if (
+                not self._receiving
+                and sub_id in (0x01, 0x02)
+                and self._receive_cancelled_at is not None
+                and time.monotonic() - self._receive_cancelled_at < self._RECEIVE_CANCEL_GRACE_S
+            ):
+                debug_log.get_logger().info(
+                    f"SamplerController: ignored an SDS {'header' if sub_id == 0x01 else 'data packet'} that was "
+                    "already on the wire when the receive was cancelled"
+                )
+                return
 
         handshake = sds_encoder.classify_response(data_bytes)
         if handshake is not None:
-            self._on_handshake_message(handshake)
+            self._on_handshake_message(handshake, data_bytes)
             return
 
-        # anything else - log it for now rather than crash so i can figure out wtf is going on
-        self._log_unexpected_sysex("unrecognised SysEx", data_bytes)
-        self.status_changed.emit(
-            f"Received unrecognised SysEx: {bytes(data_bytes).hex(' ')}"
-        )
+        # anything else: logged, never shown - the status bar is for the user's own operations
+        self._log_unexpected_sysex("unrecognised SysEx", data_bytes, quiet=True)
 
     @staticmethod
-    def _log_unexpected_sysex(what, data_bytes):
-        # rare by nature, so safe to log; capped so a huge stray dump can't bloat the log
+    def _log_unexpected_sysex(what, data_bytes, quiet=False):
+        """Log a SysEx the controller did not expect. `quiet=True` is for messages that are NORMAL on a shared MIDI port - the Program Editor's replies, a front-panel edit
+        announcing itself, another program's traffic - so they are DEBUG and capped (a loaded editor produces hundreds a second); they are never shown in the status bar.
+        Without it (a data packet before any header, an S1000 error REPLY) it is a WARNING: something went wrong in a transfer."""
         raw = bytes(data_bytes)
         shown = raw[:64].hex(" ") + (f" ... ({len(raw)} bytes)" if len(raw) > 64 else "")
-        debug_log.get_logger().warning(f"SamplerController: received {what}: {shown}")
+        log = debug_log.get_logger()
+        if not quiet:
+            log.warning(f"SamplerController: received {what}: {shown}")
+            return
+        allowed = _UNEXPECTED_LOG_BUDGET.allow()
+        dropped = _UNEXPECTED_LOG_BUDGET.take_suppressed()
+        if dropped:
+            log.debug(f"SamplerController: {dropped} more unexpected SysEx message(s) not logged in the last {sysex_trace.WINDOW_S:.0f} s (log volume cap)")
+        if allowed:
+            log.debug(f"SamplerController: received {what}: {shown}")
+
+    def _log_status(self, message):
+        if message != self._last_logged_status:  # a repeating status isn't news
+            self._last_logged_status = message
+            debug_log.get_logger().info(f"status: {message}")
 
     @staticmethod
     def _new_send_stats():
-        return {"acks": 0, "naks": 0, "waits": 0, "late_acks": 0}
+        return {
+            "acks": 0, "naks": 0, "waits": 0, "late_acks": 0,
+            "retries": 0, "timeouts": 0, "stray_acks": 0,
+        }
 
     def _log_send_start(self, kind, name, sample_number, bit_depth):
         self._send_stats = self._new_send_stats()
+        self._send_packet_retries = 0
+        self._send_slowest_ack_ms = 0.0
+        self._send_wait_started = None
+        self._send_midstream_loss_at = None
         debug_log.get_logger().info(
             f"SamplerController: send start ({kind}) name={name!r} slot={sample_number} "
             f"bits={bit_depth} packets={len(self._send_queue)} channel={self._active_channel} "
@@ -511,22 +917,68 @@ class SamplerController(QObject):
         ) / self._current_file_total_legs
         self.unit_progress.emit(min(unit_fraction, 1.0))
 
-    def _on_handshake_message(self, kind):
+    @staticmethod
+    def _expected_ack_number(send_index):
+        # index 0 is the header; data packet n (0-based) is queue index n + 1
+        return (send_index - 1) & 0x7F
+
+    def _on_handshake_message(self, kind, data_bytes=None):
         if not self._send_queue:
             return
+        if self._no_response_detected and kind != "cancel":
+            # we've given up on replies and are pacing packets ourselves. A reply
+            # trickling in now must NOT advance the index - that would skip packets
+            # and start a second packet chain alongside the paced one
+            self._send_stats["late_acks" if kind == "ack" else "late_other"] = (
+                self._send_stats.get("late_acks" if kind == "ack" else "late_other", 0) + 1
+            )
+            return
         if kind == "ack":
-            if self._no_response_detected:
-                # already gave up on handshaking and moved on - this reply is late
-                self._send_stats["late_acks"] += 1
+            acked = data_bytes[3] if data_bytes is not None and len(data_bytes) > 3 else None
+            log = debug_log.get_logger()
+            if acked is not None and self._send_index <= 1:
+                # only the header's and the first data packet's numbers (one line per
+                # packet would swamp the log) - the header's numbering is the open question
+                log.debug(
+                    f"SamplerController: ACK pp={acked} for queue index "
+                    f"{self._send_index}/{len(self._send_queue)}"
+                )
+            if (
+                acked is not None
+                and self._send_index >= 1  # the header's ACK numbering isn't pinned down
+                and acked != self._expected_ack_number(self._send_index)
+            ):
+                # e.g. the original ACK arriving after we already re-sent and advanced -
+                # taking it as "this packet accepted" would skip a packet
+                self._send_stats["stray_acks"] += 1
+                log.warning(
+                    f"SamplerController: ignoring ACK for packet {acked}, expected "
+                    f"{self._expected_ack_number(self._send_index)} (queue index "
+                    f"{self._send_index}/{len(self._send_queue)})"
+                )
+                return
+            latency_ms = (time.monotonic() - self._send_packet_sent_at) * 1000
+            self._send_slowest_ack_ms = max(self._send_slowest_ack_ms, latency_ms)
+            if latency_ms > 1000:
+                log.warning(
+                    f"SamplerController: slow ACK ({latency_ms:.0f}ms) for queue index "
+                    f"{self._send_index}/{len(self._send_queue)}"
+                )
             self._send_stats["acks"] += 1
+            self._send_packet_retries = 0
+            self._send_wait_started = None
             # previous packet accepted - move on to next packet
             self._send_index += 1
             self._emit_progress(self._send_index, len(self._send_queue))
             self._send_current_packet()
         elif kind == "wait":
-            # Sampler still processing - do nothing and stfu
+            # Sampler still busy - it will ACK/NAK when ready, so what we're waiting
+            # for is no longer "silence". Restart the timer with the WAIT cap instead.
             self._send_stats["waits"] += 1
+            if self._send_wait_started is None:
+                self._send_wait_started = time.monotonic()
             self.status_changed.emit("Sampler asked us to wait...")
+            self._arm_packet_timeout(self._send_wait_cap_ms)
         elif kind == "nak":
             # checksum failed on sampler's end - resend the same packet, DONT advance the index
             self._send_stats["naks"] += 1
@@ -559,6 +1011,8 @@ class SamplerController(QObject):
         effective_bits=16,
         target_sample_rate=None,
     ):
+        if self._s950_not_supported("Sending samples this way"):
+            return
         if channel is None:
             channel = self.channel
         samples, framerate = sds_encoder.read_wav_samples(filepath)
@@ -578,6 +1032,8 @@ class SamplerController(QObject):
         effective_bits=16,
         target_sample_rate=None,
     ):
+        if self._s950_not_supported("Sending samples this way"):
+            return
         if channel is None:
             channel = self.channel
         channels, framerate = sds_encoder.read_wav_channels(filepath)
@@ -615,6 +1071,8 @@ class SamplerController(QObject):
     def send_sample_file_generic(
         self, filepath, sample_number=0, channel=None, bit_depth=16
     ):
+        if self._s950_not_supported("Sending samples this way"):
+            return
         if channel is None:
             channel = self.channel
         # send sample using generic usiversal midi sds protocol (NOT THE AKAI ONE)
@@ -636,6 +1094,8 @@ class SamplerController(QObject):
     def send_sample_file_generic_and_rename(
         self, filepath, new_name, channel=None, bit_depth=16
     ):
+        if self._s950_not_supported("Sending samples this way"):
+            return
         if channel is None:
             channel = self.channel
         # send via generic sds then rename it correctly using the diff sample slist logic
@@ -779,6 +1239,11 @@ class SamplerController(QObject):
     # ---------------------------------------------------------
 
     def send_file_queue(self, file_entries, channel=None, starting_sample_number=None):
+        if self._is_s950():
+            return self._s950.send_file_queue(file_entries)
+        if self.is_yamaha_model():
+            # the unit's own bulk load (wave + sample dumps) - not Sample Dump Standard; see controller/yamaha_transfers.py
+            return self._yamaha_transfers.send_file_queue(file_entries)
         if channel is None:
             channel = self.channel
         # send batch of local wav files, one after another without overwriting anything already on the hardware
@@ -801,6 +1266,9 @@ class SamplerController(QObject):
         # that number entirely (the Akai always reallocates for generic
         # SDS) and get renamed correctly afterward instead.
         if not file_entries:
+            return False
+        if self._yamaha_transfers_engine is not None and self._yamaha_transfers_engine.busy:
+            self.status_changed.emit("A transfer is already in progress - please wait for it to finish")
             return False
         if (
             self._send_queue
@@ -826,6 +1294,7 @@ class SamplerController(QObject):
         self._file_queue_total = len(file_entries)
         self._file_queue_skipped = 0
         self._file_queue_channel = channel
+        self._batch_loss_note = None
         self._batch_names_before = None
         self._batch_units_sent = 0
         self._batch_unacknowledged = False
@@ -957,6 +1426,8 @@ class SamplerController(QObject):
     # -----------------------------------------------------------------------------
 
     def receive_sample_generic(self, sample_number, save_path, channel=None):
+        if self._s950_not_supported("Receiving samples by number"):
+            return
         # receive ONE sample from a generic SDS device
         # the user must specify a sample number manually for generic SDS, no way to obtain a file list in generic SDS
         # requests a sample dump from the device as per SDS protocol
@@ -984,6 +1455,7 @@ class SamplerController(QObject):
         self._receive_packets = []
 
         self._receive_checksum_errors = 0
+        self._reset_receive_diagnostics()
         debug_log.get_logger().info(
             f"SamplerController: receive start (generic SDS) slot={sample_number} channel={channel}"
         )
@@ -993,6 +1465,13 @@ class SamplerController(QObject):
         self.status_changed.emit(f"Requesting sample {sample_number} (generic SDS)...")
 
     def receive_samples(self, sample_requests, channel=None):
+        if self._is_s950():
+            self._s950.receive_samples(sample_requests)
+            return
+        if self.is_yamaha_model():
+            # the unit's native wave dumps (both channels of a stereo sample) instead of Sample Dump Standard
+            self._yamaha_transfers.receive_samples(sample_requests)
+            return
         if channel is None:
             channel = self.channel
         # download batch of samples from hardware, one after another, saving each as wav file
@@ -1033,6 +1512,7 @@ class SamplerController(QObject):
         self._receive_packets = []
 
         self._receive_checksum_errors = 0
+        self._reset_receive_diagnostics()
         debug_log.get_logger().info(
             f"SamplerController: receive start (Akai) slot={sample_number} "
             f"channel={self._receive_channel} ({current_index}/{self._receive_queue_total}) "
@@ -1054,6 +1534,7 @@ class SamplerController(QObject):
         self._receive_packets = []
         self._receive_packet_retries = 0
         self._receive_last_packet_num = None
+        self._receive_is_akai = True  # the RSPACK path below - resumable
 
         bytes_per_word = (info["bit_depth"] + 6) // 7
         words_per_packet = sds_encoder.DATA_BYTES_PER_PACKET // bytes_per_word
@@ -1074,11 +1555,29 @@ class SamplerController(QObject):
             function=0,
             channel=self._receive_channel,
         )
+        debug_log.get_logger().info(
+            f"SamplerController: sample header '{info['name']}': {info['sample_length']} "
+            f"samples at {info['sample_rate']}Hz, {self._receive_expected_packets} packets "
+            f"expected - sending RSPACK {bytes(request).hex(' ')}"
+        )
         self.midi_manager.send_sysex(request)
         self._arm_reply_timeout("audio data (RSPACK)", self._receive_timeout_ms)
 
     def _on_receive_header(self, data_bytes):
         self._disarm_reply_timeout()
+        if self._receive_resuming and self._receive_packets:
+            # the sampler opened our resume RSPACK with a standard dump
+            # header: just accept it - the packets already received stay
+            debug_log.get_logger().info(
+                "SamplerController: sampler sent a dump header for the resumed "
+                f"stream ({bytes(data_bytes).hex(' ')}) - ACKing, keeping "
+                f"{len(self._receive_packets)} packet(s)"
+            )
+            self.midi_manager.send_sysex(
+                [0x7E, self._receive_channel & 0x7F, sds_encoder.ACK, 0]
+            )
+            self._arm_reply_timeout("next data packet", self._receive_timeout_ms)
+            return
         info = sds_encoder.parse_dump_header(data_bytes)
         self._receive_header_info = info
         self._receive_packets = []
@@ -1131,18 +1630,29 @@ class SamplerController(QObject):
 
         if packet_num == self._receive_last_packet_num and self._receive_packets:
             # duplicate (a resend after a retry nudge) - ACK again, don't append twice
+            debug_log.get_logger().warning(
+                f"SamplerController: duplicate data packet {packet_num} received - "
+                f"re-ACKed, not appended"
+            )
             self.midi_manager.send_sysex(
                 [0x7E, self._receive_channel & 0x7F, sds_encoder.ACK, packet_num]
             )
             self._arm_reply_timeout("next data packet", self._receive_timeout_ms)
             return
 
+        if self._receive_resuming:
+            self._receive_resuming = False
+            debug_log.get_logger().info(
+                f"SamplerController: resume worked - packet {packet_num} arrived, "
+                f"continuing from {len(self._receive_packets)} packet(s)"
+            )
         self._receive_packets.append(bytes(payload))
         self._receive_last_packet_num = packet_num
         self._receive_packet_retries = 0
         self.midi_manager.send_sysex(
             [0x7E, self._receive_channel & 0x7F, sds_encoder.ACK, packet_num]
         )
+        self._log_receive_packet(packet_num, len(payload))
 
         info = self._receive_header_info
         bytes_per_word = (info["bit_depth"] + 6) // 7
@@ -1226,6 +1736,10 @@ class SamplerController(QObject):
     def cancel_transfer(self):
         # abort whatever is currently happening and communicate the cancel to the hardware
         # should be safe to call at any time i think
+        if self._s950_engine is not None and self._s950_engine.cancel():
+            return
+        if self._yamaha_transfers_engine is not None and self._yamaha_transfers_engine.cancel():
+            return
         in_progrss = (
             bool(self._send_queue)
             or bool(self._stereo_queue)
@@ -1270,6 +1784,8 @@ class SamplerController(QObject):
         self._awaiting_sample_info = False
 
         was_receiving = self._receiving or bool(self._receive_queue)
+        if self._receiving:
+            self._receive_cancelled_at = time.monotonic()
         self._receiving = False
         self._receive_queue = []
         self._receive_header_info = None
@@ -1291,6 +1807,18 @@ class SamplerController(QObject):
         # public version of _is_open_loop() - safe for UI layer to call directly
         return self._is_open_loop()
 
+    def is_sds_transfer_busy(self):
+        # a Sample Dump Standard / Akai transfer owns the wire - what the Yamaha session waits out before its own
+        # requests (its own wave downloads are NOT counted here: they go through that same session)
+        return bool(
+            self._send_queue
+            or self._stereo_queue
+            or self._file_queue
+            or self._receiving
+            or self._receive_queue
+            or self._awaiting_sample_info
+        )
+
     def is_transfer_busy(self):
         # public check for "would receive_samples()/receive_sample_generic()/
         # send_file_queue() etc. just reject this right now" - same condition
@@ -1300,12 +1828,9 @@ class SamplerController(QObject):
         # first rather than fire a request that's guaranteed to be silently
         # ignored with only a status_changed string to notice by
         return bool(
-            self._send_queue
-            or self._stereo_queue
-            or self._file_queue
-            or self._receiving
-            or self._receive_queue
-            or self._awaiting_sample_info
+            self.is_sds_transfer_busy()
+            or (self._s950_engine is not None and self._s950_engine.busy)
+            or (self._yamaha_transfers_engine is not None and self._yamaha_transfers_engine.busy)
         )
 
     def _send_current_packet(self):
@@ -1326,16 +1851,28 @@ class SamplerController(QObject):
             # OR given up waiting for hardware to send a handshake after a fixed timeout
             self._send_index += 1
             self._emit_progress(self._send_index, len(self._send_queue))
-            QTimer.singleShot(self._open_loop_delay_ms, self._send_current_packet)
+            if self._send_midstream_loss_at is not None and not self._is_open_loop():
+                delay_ms = self._send_midstream_delay_ms
+            else:
+                delay_ms = self._open_loop_delay_ms
+            QTimer.singleShot(delay_ms, self._send_current_packet)
         else:
             # normal ACK driven path but with safety net:
             # if nothing reponds within documented threshold, fall back to open loop comms
-            self._packet_send_generation += 1
-            expected_generation = self._packet_send_generation
-            QTimer.singleShot(
-                self._handshake_timeout_ms,
-                lambda: self._check_packet_timeout(expected_generation),
-            )
+            self._send_packet_sent_at = time.monotonic()
+            self._arm_packet_timeout(self._current_packet_timeout_ms())
+
+    def _current_packet_timeout_ms(self):
+        if self._send_stats["acks"] == 0:
+            return self._handshake_timeout_ms  # sampler not proven to handshake yet
+        return max(self._send_proven_timeout_ms, 4 * self._send_slowest_ack_ms)
+
+    def _arm_packet_timeout(self, timeout_ms):
+        self._packet_send_generation += 1
+        expected_generation = self._packet_send_generation
+        QTimer.singleShot(
+            int(timeout_ms), lambda: self._check_packet_timeout(expected_generation)
+        )
 
     def _check_packet_timeout(self, expected_generation):
         if not self._send_queue:
@@ -1343,18 +1880,82 @@ class SamplerController(QObject):
         if self._packet_send_generation != expected_generation:
             return  # a real reponse has already arrived and move things on - stale timeout, ignore
 
-        # no reponse arrived in time - per spec, assume packet got thru and move past it
+        stats = self._send_stats
+        stats["timeouts"] += 1
+        total = len(self._send_queue)
+        log = debug_log.get_logger()
+
+        if self._send_wait_started is not None:
+            waited = time.monotonic() - self._send_wait_started
+            log.warning(
+                f"SamplerController: sampler held WAIT for {waited:.1f}s at packet "
+                f"{self._send_index}/{total} - aborting"
+            )
+            self._abort_stalled_send(f"Sampler stopped responding at packet {self._send_index}/{total}")
+            return
+
+        proven = stats["acks"] > 0
+        max_retries = self._send_packet_max_retries if proven else self._send_unproven_max_retries
+        if self._send_packet_retries < max_retries:
+            self._send_packet_retries += 1
+            stats["retries"] += 1
+            elapsed_ms = (time.monotonic() - self._send_packet_sent_at) * 1000
+            log.warning(
+                f"SamplerController: no handshake for packet {self._send_index}/{total} after "
+                f"{elapsed_ms:.0f}ms - re-sending (retry {self._send_packet_retries}/{max_retries}, "
+                f"acks so far: {stats['acks']})"
+            )
+            self.status_changed.emit(
+                f"No reply - re-sending packet {self._send_index} "
+                f"(retry {self._send_packet_retries}/{max_retries})"
+            )
+            self._send_current_packet()
+            return
+
+        if proven:
+            # the sampler HAS been handshaking and then went quiet. Our output demonstrably
+            # works (we've re-sent this packet repeatedly), so the likeliest cause is a
+            # dropped reply path - finish the sample open loop, slower, and flag it
+            # unverified rather than leaving a partial sample on the sampler
+            where = f"{self._send_index}/{total}"
+            log.warning(
+                f"SamplerController: replies stopped at packet {where} after "
+                f"{self._send_packet_retries} retries (acks so far: {stats['acks']}) - "
+                f"sending the remaining packets open loop at {self._send_midstream_delay_ms}ms"
+            )
+            self.status_changed.emit(
+                f"Sampler replies stopped at packet {self._send_index} - "
+                f"sending the rest without confirmation..."
+            )
+            self._send_midstream_loss_at = where
+            self._batch_loss_note = self._batch_loss_note or where
+            self._no_response_detected = True
+            self._send_index += 1
+            self._emit_progress(self._send_index, total)
+            self._send_current_packet()
+            return
+
+        # never saw a single ACK - per spec, assume packet got thru and move past it
         # ie, switch to open loop comms
         self.status_changed.emit("No reponse from the sampler - assuming open loop...")
-        debug_log.get_logger().warning(
+        log.warning(
             f"SamplerController: no handshake within {self._handshake_timeout_ms}ms at "
-            f"packet {self._send_index}/{len(self._send_queue)} - falling back to open loop "
-            f"(acks so far: {self._send_stats['acks']})"
+            f"packet {self._send_index}/{total} - falling back to open loop "
+            f"(acks so far: {stats['acks']}, retries: {self._send_packet_retries})"
         )
         self._no_response_detected = True
         self._send_index += 1
-        self._emit_progress(self._send_index, len(self._send_queue))
+        self._emit_progress(self._send_index, total)
         self._send_current_packet()
+
+    def _abort_stalled_send(self, message):
+        self.status_changed.emit(message)
+        # tell the sampler to drop the transfer (best effort - the link may be dead)
+        self.midi_manager.send_sysex(
+            [0x7E, self._active_channel & 0x7F, sds_encoder.CANCEL,
+             self._send_index & 0x7F]
+        )
+        self._abort_transfer(completed=False)
 
     def _abort_transfer(self, completed):
         stats = self._send_stats
@@ -1362,6 +1963,8 @@ class SamplerController(QObject):
             f"SamplerController: send {'finished' if completed else 'ABORTED'} at packet "
             f"{self._send_index}/{len(self._send_queue)} - acks={stats['acks']} "
             f"naks={stats['naks']} waits={stats['waits']} late_acks={stats['late_acks']} "
+            f"retries={stats['retries']} timeouts={stats['timeouts']} "
+            f"stray_acks={stats['stray_acks']} midstream_loss={self._send_midstream_loss_at} slowest_ack_ms={self._send_slowest_ack_ms:.0f} "
             f"open_loop_fallback={self._no_response_detected}"
         )
         if completed:
@@ -1381,6 +1984,15 @@ class SamplerController(QObject):
     def _finish_unit(self, completed):
         # called once single send unit is finished - generic sds or akai sdata
         # decided whether to continue to a stereo right channel, next queued file or declare everything done
+
+        if completed and self._send_midstream_loss_at is not None:
+            # the sampler stopped replying mid-send. This sample was finished open loop, but
+            # carrying on blind through the rest of the queue would stack up unverified
+            # (possibly silent) samples, so stop here
+            self._batch_cancelled_files = len(self._file_queue)
+            self._batch_cancelled_right_channel = bool(self._stereo_queue)
+            self._stereo_queue = []
+            self._file_queue = []
 
         if completed and self._stereo_queue:
             name, samples, framerate, channel, bit_depth, sample_number = (
@@ -1411,11 +2023,20 @@ class SamplerController(QObject):
         self._file_queue = []
         self._rename_after_send = None
         if completed:
-            unverified = (
-                " - the sampler never acknowledged any packets, so this is unverified"
-                if self._batch_unacknowledged
-                else ""
-            )
+            if self._batch_loss_note is not None:
+                unverified = (
+                    f" - the sampler's replies stopped at packet {self._batch_loss_note}, so the "
+                    f"rest was sent without confirmation. Check the sample(s)"
+                )
+                if self._batch_cancelled_right_channel:
+                    unverified += ". The right channel was not sent"
+                if self._batch_cancelled_files:
+                    n = self._batch_cancelled_files
+                    unverified += f". {n} remaining queued file{'s' if n != 1 else ''} not sent"
+            elif self._batch_unacknowledged:
+                unverified = " - the sampler never acknowledged any packets, so this is unverified"
+            else:
+                unverified = ""
             if self._file_queue_skipped:
                 self.status_changed.emit(
                     f"Transfer complete ({self._file_queue_skipped} file"
@@ -1432,6 +2053,9 @@ class SamplerController(QObject):
         self._batch_names_before = None
         self._batch_units_sent = 0
         self._batch_unacknowledged = False
+        self._batch_loss_note = None
+        self._batch_cancelled_files = 0
+        self._batch_cancelled_right_channel = False
         self.transfer_finished.emit(completed)
 
     def _start_send(self, name, samples, framerate, sample_number, channel):

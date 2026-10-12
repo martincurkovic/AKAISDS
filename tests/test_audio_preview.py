@@ -47,6 +47,24 @@ _requires_audio_device = pytest.mark.skipif(
 )
 
 
+@pytest.fixture(autouse=True)
+def _no_player_left_running():
+    """A failed assert skips a test's own player.stop(); a device still running at interpreter exit crashes the whole process on macOS
+    (the audio thread dies inside a callback into Python - crash report 2026-10-07). Stop whatever a test leaves behind."""
+    yield
+    audio_preview._stop_all_players()
+
+
+def _wait_until(condition, timeout=2.0):
+    """Poll instead of sleeping a fixed time: how long an output device takes to start varies a lot between machines and devices."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if condition():
+            return True
+        time.sleep(0.01)
+    return condition()
+
+
 def _use_temp_config(monkeypatch, tmp_path):
     monkeypatch.setattr(app_config, "CONFIG_PATH", tmp_path / "test_config.json")
 
@@ -246,12 +264,10 @@ def test_update_loop_points_moves_the_live_playhead_into_the_new_region(qapp):
     player = audio_preview.SlicePreviewPlayer()
     samples = _tone(10000)
     player.play_loop(samples, 0, 1000, 1100, len(samples) - 1, 44100, dwell_ms=None)
-    time.sleep(0.1)
-    assert 1000 <= player._current_frame <= 1101
+    assert _wait_until(lambda: 1000 <= player._current_frame <= 1101)
 
     player.update_loop_points(5000, 5100)
-    time.sleep(0.1)
-    assert 5000 <= player._current_frame <= 5101
+    assert _wait_until(lambda: 5000 <= player._current_frame <= 5101)
     player.stop()
 
 

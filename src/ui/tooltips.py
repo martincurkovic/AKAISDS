@@ -32,7 +32,46 @@ OPEN_EDITOR_NEEDS_MIDI_PORTS = (
     "Select both a MIDI Input and MIDI Output in Settings first"
 )
 OPEN_EDITOR_NEEDS_AKAI_DEVICE_TYPE = (
-    'Set Sampler Type to "Akai Sampler" in Settings first'
+    'Set Sampler Type to Akai S1000, Akai S2000/S3000, Akai S900/S950 or Yamaha A4000/A5000 in Settings first'
+)
+OPEN_EDITOR_YAMAHA = (
+    "Opens the Yamaha A4000/A5000 program editor (experimental - edits go straight to the sampler's memory)"
+)
+# Yamaha A4000/A5000 (see controller/yamaha_session.py): every answer comes back on the MIDI input
+YAMAHA_NEEDS_MIDI_INPUT = (
+    "The Yamaha A4000/A5000 answers on your MIDI input, so the editor needs\n"
+    "one - select it in Settings."
+)
+# ...and so does listing/receiving samples (controller/yamaha_transfers.py); it has no known delete opcode
+YAMAHA_LIST_NEEDS_MIDI_INPUT = (
+    "The Yamaha A4000/A5000 answers on your MIDI input, so browsing and\n"
+    "receiving samples needs one - select it in Settings."
+)
+YAMAHA_SEND_NEEDS_MIDI_INPUT = (
+    "Sending to the Yamaha A4000/A5000 needs a MIDI input too - the sampler never\n"
+    "answers a load, so each sample is checked by asking it afterwards. Select one in Settings."
+)
+YAMAHA_CANT_DELETE = (
+    "Deleting samples over MIDI isn't supported for the Yamaha A4000/A5000 -\n"
+    "use its front panel (COMMAND > DELETE)."
+)
+YAMAHA_NO_SAMPLE_INFO = (
+    "Sample details and renaming aren't available here for the Yamaha A4000/A5000 -\n"
+    "use the Program Editor's Samples tab."
+)
+OPEN_EDITOR_S950 = (
+    "Opens the Akai S900/S950 program editor (experimental - writes are untested on hardware)"
+)
+# Akai S900/S950 (see controller/s950_transfers.py): it answers on the MIDI
+# input, so sending/receiving/browsing all need one; and it has no delete
+# opcode at all
+S950_NEEDS_MIDI_INPUT = (
+    "The Akai S900/S950 answers on your MIDI input, so sending, receiving\n"
+    "and browsing samples needs one - select it in Settings."
+)
+S950_CANT_DELETE = (
+    "The Akai S900/S950 can't delete samples over MIDI -\n"
+    "use its front panel."
 )
 # shown on both btn_open_editor and btn_settings (and mirrored onto their
 # menu actions - see TransferDashboard._sync_menu_actions) while a transfer
@@ -54,11 +93,23 @@ DEVICE_ID_CHANNEL = (
 )
 
 SAMPLER_TYPE = (
-    "Akai Sampler unlocks browsing/renaming/deleting samples on\n"
-    "the hardware (Akai-specific extension to the SDS standard).\n"
+    "Akai S1000 and Akai S2000/S3000 unlock browsing/renaming/\n"
+    "deleting samples on the hardware (Akai-specific extension to\n"
+    "the SDS standard). Pick the one that matches your sampler:\n"
+    "the Program Editor speaks a different protocol to each.\n"
+    "Akai S900/S950 use a different protocol again: sending, receiving\n"
+    "and renaming work (experimental), but deleting and the Program\n"
+    "Editor aren't available.\n"
     "Generic SDS uses only the universal standard - sending and\n"
     "receiving still work, but by sample number only, with no way\n"
     "to browse, rename or delete what's on the device."
+)
+
+THEME = (
+    "System follows your computer's light/dark setting and switches\n"
+    "live when it changes. Light and Dark keep the app on that look\n"
+    "regardless of your system setting. Takes effect as soon as you\n"
+    "pick one."
 )
 
 AUDIO_PREVIEW_BUFFER_SIZE = (
@@ -209,6 +260,17 @@ PORTAMENTO_TYPE_TIME = (
 DUPLICATE_PROGRAM_DEMO_MODE = (
     "Not available in demo mode - the fake sampler has no way to create new programs"
 )
+LOAD_PROGRAM_DEMO_MODE = (
+    "Not available in demo mode - the fake sampler has no way to create new programs"
+)
+SAVE_PROGRAM_BUTTON = (
+    "Save the selected program to an Akai program file (.p1 for an S1000, .p3 for "
+    "an S2000/S3000). Samples are not included."
+)
+LOAD_PROGRAM_BUTTON = (
+    "Load an Akai program file (.p1/.p3) onto the sampler as a new program. "
+    "Its samples must be loaded separately - zones refer to them by name."
+)
 DUPLICATE_KEYGROUP_DEMO_MODE = (
     "Not available in demo mode - the fake sampler has no way to create new keygroups"
 )
@@ -279,6 +341,11 @@ DETECT_ROOT_NOTE_BUTTON = (
     "Estimate this sample's fundamental pitch from its "
     "loop region (if one is set). Otherwise analyses a short chunk of "
     "the sample."
+)
+
+YAMAHA_DETECT_PITCH_BUTTON = (
+    "Estimate this sample's fundamental pitch from its loop region (if one is set), otherwise from a short chunk of the "
+    "sample, and offer to set Original key and Fine tune to match. Needs the waveform loaded (double-click it)."
 )
 
 # --- Filter section (Program/Keygroup tabs) - new ---------------------------
@@ -368,6 +435,39 @@ MOD_MATRIX_AMOUNT_KNOB = (
     "assigned source."
 )
 
+# --- Keygroup tab: mute group and velocity-driven sample start ---------------------------------
+MUTE_GROUP_COMBO = (
+    "Keygroups in the same mute group cut each other off - a closed hi-hat "
+    "choking an open one. Off lets this keygroup ring freely."
+)
+VELOCITY_START_KNOB = (
+    "Moves this zone's sample start point with note-on velocity, in sample "
+    "points (-9999 to +9999). 0 = the start never moves. Shift-drag for fine "
+    "control; click, then type a number."
+)
+
+# --- Global tab (core/global_settings.py) - settings of the whole sampler ----------------
+EXTERNAL_CONTROLLER_COMBO = (
+    "Which controller the \"External\" modulation source follows. This is a "
+    "setting of the whole sampler (its Global page), not of this program."
+)
+GLOBAL_TOOLTIPS = {
+    "tune_semitones": "Tunes the whole sampler, in semitones.",
+    "tune_cents": "Fine tuning of the whole sampler, in cents.",
+    "output_level": "Master output level of the sampler.",
+    "external_controller": EXTERNAL_CONTROLLER_COMBO,
+    "program_change_channel": (
+        "The MIDI channel the sampler accepts Program Change messages on. "
+        "Off ignores them; Omni accepts every channel."
+    ),
+    "play_note": "The note the sampler's front-panel Play button plays.",
+    "play_channel": "The MIDI channel the Play button plays on.",
+    "play_velocity": "The velocity the Play button plays with.",
+    "scsi_disk_id": "The SCSI ID of the disk the sampler loads from and saves to.",
+    "scsi_sector": "The sector size the sampler uses on its SCSI disk.",
+    "scsi_local_id": "The SCSI ID the sampler itself answers to.",
+}
+
 # --- Multis tab: per-part level/pan knobs - new -----------------------------
 # shared across every knob built via _build_multi_part_knob for the 16
 # parts' own Level/Pan controls
@@ -420,3 +520,67 @@ LOOP_END_KNOB = (
     "and Loop End for as long as a note is held."
 )
 SAMPLE_END_KNOB = "Where sample playback ends. Audio after this point is ignored."
+
+# Envelope 2 on an Akai S1000 is a plain ADSR filter envelope (see
+# ProgramEditorWindow._build_s1000_env2_adsr), not the S3000's 4-stage one
+S1000_ENV2_ATTACK_KNOB = "Envelope 2 (filter) attack time - how long the filter takes to open after a key is pressed."
+S1000_ENV2_DECAY_KNOB = "Envelope 2 (filter) decay time - how long the filter takes to fall from its attack peak down to the sustain level."
+S1000_ENV2_SUSTAIN_KNOB = "Envelope 2 (filter) sustain level - where the filter stays for as long as the key is held, after attack and decay finish."
+S1000_ENV2_RELEASE_KNOB = "Envelope 2 (filter) release time - how long the filter takes to close after the key is released."
+
+# the S1000's single pitch-bend field (see ProgramEditorWindow._apply_s1000_gating)
+S1000_BEND_RANGE_COMBO = (
+    "How many semitones the pitch bend wheel moves the pitch at full\n"
+    "deflection. The S1000 has one bend range (0-12 semitones), unlike\n"
+    "the S2000/S3000's separate up and down ranges."
+)
+
+# Akai S1000 controller-routing knobs (ProgramEditorWindow's S1000-only
+# "Controllers"/"Envelope response" cards) - keyed by the SysEx field each
+# one writes. All +/-50 unless noted: a negative amount inverts the effect.
+S1000_CONTROLLER_TOOLTIPS = {
+    # program
+    "K_LOUD": "How much the note's position on the keyboard changes its loudness (Key > Loudness). Negative values get quieter as notes go up.",
+    "P_LOUD": "How much channel pressure (aftertouch) changes loudness (Pressure > Loudness).",
+    "K_PANP": "How much the note's position on the keyboard moves its pan position (Key > Pan).",
+    "MW_PAN": "How much the modulation wheel moves the pan position (Modwheel > Pan).",
+    "P_PTCH": "How many semitones channel pressure (aftertouch) bends the pitch at full pressure (-12 to +12).",
+    "MWLDEP": "How much the modulation wheel adds to the LFO1 depth (0-99).",
+    "PRSDEP": "How much channel pressure (aftertouch) adds to the LFO1 depth (0-99).",
+    "VELDEP": "How much note-on velocity adds to the LFO1 depth (0-99).",
+    "K_LRAT": "How much the note's position on the keyboard changes the LFO1 rate.",
+    "K_LDEP": "How much the note's position on the keyboard changes the LFO1 depth.",
+    "K_LDEL": "How much the note's position on the keyboard changes the LFO1 delay.",
+    # keygroup
+    "V_FREQ": "How much note-on velocity moves the filter frequency (Velocity > Filter).",
+    "P_FREQ": "How much channel pressure (aftertouch) moves the filter frequency (Pressure > Filter).",
+    "E_FREQ": "How far Envelope 2 moves the filter frequency - the filter envelope's depth. 0 means Envelope 2 has no audible effect on the filter.",
+    "V_ENV2": "How much note-on velocity scales Envelope 2's output (Velocity > Envelope 2 level).",
+    "E_PTCH": "How far Envelope 2 moves the pitch (Envelope 2 > Pitch).",
+    "KV_LO": "A per-keygroup offset added to the program's Velocity > Loudness amount.",
+    "V_ATT1": "How much note-on velocity changes Envelope 1's (amp) attack time.",
+    "V_REL1": "How much note-on velocity changes Envelope 1's (amp) release time.",
+    "O_REL1": "How much note-off (release) velocity changes Envelope 1's (amp) release time.",
+    "K_DAR1": "How much the note's position on the keyboard changes Envelope 1's (amp) decay and release times.",
+    "V_ATT2": "How much note-on velocity changes Envelope 2's (filter) attack time.",
+    "V_REL2": "How much note-on velocity changes Envelope 2's (filter) release time.",
+    "O_REL2": "How much note-off (release) velocity changes Envelope 2's (filter) release time.",
+    "K_DAR2": "How much the note's position on the keyboard changes Envelope 2's (filter) decay and release times.",
+}
+S1000_LOUDNESS_VELOCITY_NOTE = "Velocity > Loudness is the Velocity knob in Volume, Pan & Velocity above."
+S1000_PAN_LFO_RATE = "Speed of the Pan LFO - the S1000's automatic left/right panning."
+S1000_PAN_LFO_DEPTH = "How far the Pan LFO swings the sound left and right."
+S1000_PAN_LFO_DELAY = "How long after a note starts before the Pan LFO fades in."
+
+
+# --- Yamaha A4000/A5000 Samples tab: edits make a NEW sample (the unit can't delete or overwrite one over MIDI) -----------------------------
+_YAMAHA_COPY_NOTE = " Makes a new sample - the original is not changed. Needs the audio loaded (double-click the waveform)."
+YAMAHA_TRIM_SAMPLE_BUTTON = "Trim the sample down to the Start/End markers." + _YAMAHA_COPY_NOTE
+YAMAHA_REVERSE_SAMPLE_BUTTON = "Reverse the sample so it plays backwards." + _YAMAHA_COPY_NOTE
+YAMAHA_FADE_SAMPLE_BUTTON = "Fade in up to the Start marker and out from the End marker." + _YAMAHA_COPY_NOTE
+YAMAHA_NORMALISE_SAMPLE_BUTTON = "Gain the sample up so its loudest point hits maximum amplitude (one gain for both channels of a stereo sample)." + _YAMAHA_COPY_NOTE
+YAMAHA_FILTER_SAMPLE_BUTTON = "Apply a highpass and/or lowpass filter (with a preview)." + _YAMAHA_COPY_NOTE
+YAMAHA_SLICE_EDITOR_BUTTON = (
+    "Chop the sample into slices and send each one to the sampler as a new sample (ReCycle-style). "
+    "Needs the audio loaded (double-click the waveform)."
+)

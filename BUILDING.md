@@ -25,4 +25,4 @@
 
 ## Running Tests
 
-There's a pytest suite in the `tests` directory - see [TESTING.md](TESTING.md) for what it covers. Remember to sync the environment first with `uv sync`, then run it with `uv run pytest tests/ -v`
+There's a pytest suite in the `tests` directory (about 3-4 minutes) - see [TESTING.md](TESTING.md). Sync the environment first with `uv sync`, then run `uv run pytest tests/ -q`.

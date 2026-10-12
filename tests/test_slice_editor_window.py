@@ -443,7 +443,7 @@ def test_export_refuses_a_program_name_collision(qapp, monkeypatch):
     assert create_calls == []
 
 
-def test_export_more_than_99_slices_with_create_program_is_refused(qapp, monkeypatch):
+def test_export_more_than_92_slices_with_create_program_is_refused(qapp, monkeypatch):
     export_calls = []
     create_calls = []
     window = _build_window(
@@ -454,15 +454,34 @@ def test_export_more_than_99_slices_with_create_program_is_refused(qapp, monkeyp
     )
     window.create_program_checkbox.setChecked(True)
     markers = sew.sample_slicing.equal_slice_markers(
-        window.waveform.start(), window.waveform.end(), 100
+        window.waveform.start(), window.waveform.end(), 93
     )
     window.waveform.set_markers(markers)
-    monkeypatch.setattr(sew.QMessageBox, "warning", lambda *a, **k: None)
+    warnings = []
+    monkeypatch.setattr(sew.QMessageBox, "warning", lambda *a, **k: warnings.append(a[2]))
 
     window._confirm_export()
 
     assert export_calls == []
     assert create_calls == []
+    # 93 would put slice 93 on key 129: the ceiling is the keyboard (36..127 = 92 slices), not the 99 keygroups a program can hold
+    assert "92" in warnings[0]
+
+
+def test_exactly_92_slices_with_create_program_are_accepted(qapp, monkeypatch):
+    export_calls = []
+    window = _build_window(
+        samples=list(range(-200, 30000)), export_calls=export_calls, program_names=["Bass stab"],
+    )
+    window.create_program_checkbox.setChecked(True)
+    window.waveform.set_markers(
+        sew.sample_slicing.equal_slice_markers(window.waveform.start(), window.waveform.end(), 92)
+    )
+    monkeypatch.setattr(sew.QMessageBox, "warning", lambda *a, **k: None)
+    monkeypatch.setattr(sew.QMessageBox, "question", lambda *a, **k: sew.QMessageBox.StandardButton.Yes)
+    monkeypatch.setattr(sew.QMessageBox, "information", lambda *a, **k: None)  # (shown, modal, after a successful export)
+    window._confirm_export()
+    assert len(export_calls) == 1
 
 
 def test_export_program_creation_failure_marks_the_whole_export_failed(
