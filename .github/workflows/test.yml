@@ -12,6 +12,7 @@ concurrency:
 jobs:
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -25,4 +26,5 @@ jobs:
       - name: Run tests
         env:
           AKAISDS_CI_NO_AUDIO_DEVICE: "1"
-        run: uv run pytest tests/ -q
+        # -v names every test; faulthandler_timeout dumps all thread stacks if one test runs over 90 s (a hang shows where it is stuck)
+        run: uv run pytest tests/ -v -ra -o faulthandler_timeout=90
