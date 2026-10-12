@@ -369,10 +369,14 @@ macOS arm64); upstream marks no exports, so on MSVC the tool writes a `.def` fro
   120 BPM). Muted slices are kept (mute is ReCycle editing state).
 - Three entry points, all over the same decode: **Dashboard** (drop or Open an `.rx2`): `TransferDashboard._import_rx2` queues one row per slice,
   `<STEM>-01..` (stereo stays stereo). **Program Editor File > "Import RX2 Loop..." (Ctrl+Shift+I)**: opens the Slice Editor on the slices laid end to end
-  (`Rx2Loop.mono_buffer`, stereo averaged to mono) with the cut points as `initial_markers`, so Export and "Create new program" are the
-  Slice Editor's own paths. `_run_slice_editor` is shared with the resident-sample flow; `resident_source=False` skips the audio retention.
+  (`Rx2Loop.channel_buffers`) with the cut points as `initial_markers`, so Export and "Create new program" are the Slice Editor's own paths.
+  `_run_slice_editor` is shared with the resident-sample flow; `resident_source=False` skips the audio retention. **A stereo loop stays stereo:** each slice is
+  sent as TWO mono samples, `<name>-L` / `<name>-R` (`_STEREO_SUFFIXES`; the dialog's `channel_suffixes` shortens the slice names to 10 chars and checks the
+  suffixed ones for clashes), and the program (`_create_program_from_slices(stereo=True)`) puts left in zone 1 and right in zone 2 of each keygroup: `SNAME1/2`,
+  `CP1/2`=1, `LOVEL/HIVEL` 0..127 on both, `VPANO1`=-50 / `VPANO2`=+50 (zone pan offset), zones 3-4 empty. **Unverified on hardware** (S2000 or S1000): whether
+  +-50 pans a zone hard left/right, and the two-zone keygroup writes; the single-zone builder it extends is proven.
   **Yamaha editor File > "Import RX2 Loop..." (Ctrl+Shift+I)**: `YamahaSampleEditor.import_rx2` -> `_run_slicer` (shared with the resident-sample Slice Editor); a stereo loop STAYS stereo
-  (`Rx2Loop.channel_buffers`, the dialog slices the right channel at the same frames), root key 60, the unit's defaults for the rest, "fill a program" is the existing empty-program assignment.
+  (the dialog slices the right channel at the same frames), root key 60, the unit's defaults for the rest, "fill a program" is the existing empty-program assignment.
   The S950 editor has no entry point (read-only Samples tab, no Slice Editor); the Dashboard route still queues slices for it.
 - **Updating VelociLoops:** `uv run python tools/update_velociloops.py` (`--ref`, `--dry-run`): fetches all four files before writing any, records the sha in `third_party/velociloops/VERSION` and the two docs that quote it, rebuilds and runs `tests/test_rx2.py`. Run by hand, review the diff; never from a build (the library parses untrusted files).
 - Only `.rx2` is accepted; the library also reads `.rex`/`.rcy` (not wired up). Float -> int16 is a plain Python loop (no numpy at runtime).
@@ -527,3 +531,11 @@ See `TESTING.md`. `tests/conftest.py` points the debug log, backups and the `_sl
 `QT_QPA_PLATFORM=offscreen` unconditionally (the per-file `setdefault` is a no-op if the desktop exports the variable - that once made
 "offscreen" tests run on a real Wayland session), and clears `AKAISDS_UNLOCK_GLOBAL`. One audio-preview test
 (`test_update_loop_points_with_degenerate_bounds_is_ignored`) is timing-sensitive and has flaked once; re-run it alone before suspecting a change.
+
+## Slice Editor: stereo display (2026-10-12)
+
+`SliceWaveformView.set_waveform(..., right=)` draws a second channel in its own lane under the first (L/R labels, one divider); markers, labels and the playhead span both
+(a slice boundary is one frame index). `SliceEditorWindow(extra_channels=[right])` turns it on for exactly one extra channel and ANALYSES the mono MIX (`_analysis`): the Sensitivity
+detector, click-to-preview and zero-crossing snaps all read it, so a hit loud on one side only still counts (this changed the Yamaha editor's stereo slicing too, which read the left
+channel only). The Dashboard's Slice Editor passes the right channel as well and now takes it from `extra_slices` rather than re-cutting it; it also passes `channel_suffixes`, which fixes
+a latent clash: the send path builds `-L`/`-R` names by cutting the BASE to 10 chars, so 11-12 character slice names (e.g. `120STEREO-01`, `-02`...) all collapsed to one `120STEREO--L`/`--R` pair.
