@@ -183,6 +183,8 @@ _LOOP_HOLD_HOLD_VALUE = 9999
 _PREVIEW_ROOT_NOTE = 60
 # root note given to slices from an .rx2 (no sampler header to copy one from) - what the Dashboard's Slice Editor uses too
 _RX2_ROOT_NOTE = 60
+# a stereo slice goes out as two mono samples: <slice name>-L (zone 1, panned left) and <slice name>-R (zone 2, panned right)
+_STEREO_SUFFIXES = ("-L", "-R")
 
 
 def _format_loop_hold(value):
@@ -4682,6 +4684,7 @@ class ProgramEditorWindow(QMainWindow):
         shlto,
         initial_markers=None,
         resident_source=True,
+        extra_channels=None,
     ):
         # The Slice Editor over *samples*. resident_source is True when they
         # are a sample already on the sampler (retained across the export's
@@ -4721,10 +4724,17 @@ class ProgramEditorWindow(QMainWindow):
             self._export_slices,
             demo_mode=bool(os.environ.get("AKAISDS_DEMO_SAMPLER")),
             program_names_provider=_existing_program_names,
-            create_program_callback=self._create_program_from_slices,
+            create_program_callback=(
+                functools.partial(self._create_program_from_slices, stereo=True)
+                if extra_channels
+                else self._create_program_from_slices
+            ),
             max_program_slices=_MAX_SLICES_PER_PROGRAM,
             cancel_callback=sampler_controller.cancel_transfer,
             initial_markers=initial_markers,
+            # a stereo loop: both channels shown, each slice sent as a -L/-R pair
+            extra_channels=extra_channels,
+            channel_suffixes=_STEREO_SUFFIXES if extra_channels else None,
         )
         # the export reloads the sample list (wiping the cache), so keep the
         # source's audio across it; dropped again below if nothing was exported
@@ -4768,18 +4778,19 @@ class ProgramEditorWindow(QMainWindow):
             debug_log.get_logger().error(f"ProgramEditor: couldn't import {path!r}", exc_info=True)
             self.status_bar.showMessage(str(e))
             return
-        samples, markers = loop.mono_buffer()
+        channels, markers = loop.channel_buffers()
         if loop.channels == 2:
-            self.status_bar.showMessage("Stereo loop mixed to mono - the sampler's slices are mono")
+            self.status_bar.showMessage("Stereo loop: each slice is sent as a -L/-R pair, panned left and right in the program")
         self._run_slice_editor(
             rx2.slice_base_name(path),
-            samples,
+            channels[0],
             loop.sample_rate,
             _RX2_ROOT_NOTE,
             0,
             0,
             initial_markers=markers,
             resident_source=False,
+            extra_channels=channels[1:] or None,
         )
 
     def _reload_sample_list_with_retries(self, attempts=3, retry_delay_seconds=0.3):
@@ -4826,6 +4837,7 @@ class ProgramEditorWindow(QMainWindow):
         progress_callback,
         status_callback,
         busy_callback=None,
+        extra_slices=None,
     ):
         # the actual hardware-talking half of the Slice Editor (see
         # ui/slice_editor_window.py's own class docstring for the split) -
@@ -4860,9 +4872,19 @@ class ProgramEditorWindow(QMainWindow):
 
         logger = debug_log.get_logger()
         temp_paths = []
+        # what actually goes to the sampler, [(resident name, samples)]: one sample per slice, or - for a stereo loop
+        # (extra_slices = the right channel's slices) - a -L and a -R sample per slice, since resident samples are mono
+        if extra_slices:
+            items = []
+            for slice_index, slice_name in enumerate(names):
+                items.append((slice_name + _STEREO_SUFFIXES[0], slices[slice_index]))
+                items.append((slice_name + _STEREO_SUFFIXES[1], extra_slices[0][slice_index]))
+        else:
+            items = list(zip(names, slices))
+        resident_names = [n for n, _ in items]
         try:
             file_entries = []
-            for name, slice_samples in zip(names, slices):
+            for name, slice_samples in items:
                 fd, temp_path = tempfile.mkstemp(
                     suffix=".wav", prefix="akaisds_slice_"
                 )
@@ -4918,7 +4940,7 @@ class ProgramEditorWindow(QMainWindow):
                 # sent as-is, so each new slice can come back with its
                 # waveform (see _retain_sample_audio); a requantised or
                 # resampled send is not the audio we hold
-                for name, slice_samples in zip(names, slices):
+                for name, slice_samples in items:
                     self._retain_sample_audio(name, slice_samples, framerate)
 
             # nothing numeric to report while this reloads/retries - see
@@ -4929,21 +4951,21 @@ class ProgramEditorWindow(QMainWindow):
             finally:
                 _set_busy(False)
             if which != 0:
-                sent = f'"{names[0]}"' if len(names) == 1 else f"{len(names)} slices"
+                sent = f'"{resident_names[0]}"' if len(resident_names) == 1 else f"{len(names)} slices"
                 return False, (
                     f"{sent} sent, but the sample list couldn't be "
                     "refreshed to set the header fields - refresh manually "
                     "and check the sampler directly."
                 )
             samples_after_send = args[0]
-            landed = [n for n in names if n in samples_after_send]
-            missing = [n for n in names if n not in samples_after_send]
+            landed = [n for n in resident_names if n in samples_after_send]
+            missing = [n for n in resident_names if n not in samples_after_send]
 
-            for index, name in enumerate(names):
+            for name, item_samples in items:
                 if name not in samples_after_send:
                     continue
                 new_index = samples_after_send.index(name)
-                slice_frame_count = len(slices[index])
+                slice_frame_count = len(item_samples)
                 # SPTYPE forced to one-shot (3, matching
                 # _SAMPLE_PLAYBACK_TYPE_OPTIONS' own raw-byte-order) - a
                 # chopped slice isn't meant to loop, regardless of what
@@ -4977,12 +4999,17 @@ class ProgramEditorWindow(QMainWindow):
 
             if missing:
                 return False, (
-                    f"Sent {len(landed)}/{len(names)} slice(s); missing from the "
+                    f"Sent {len(landed)}/{len(resident_names)} sample(s); missing from the "
                     f"reloaded list: {', '.join(missing)} - check the sampler "
                     "directly."
                 )
-            if len(names) == 1:
+            if len(names) == 1 and not extra_slices:
                 return True, f'Export complete: "{names[0]}" sent'
+            if extra_slices:
+                return True, (
+                    f"Export complete: {len(names)} stereo slices sent as {len(resident_names)} samples, "
+                    f"{resident_names[0]}..{resident_names[-1]}"
+                )
             return True, f"Export complete: {len(names)} slices sent as {names[0]}..{names[-1]}"
         except Exception:
             # same reasoning as _perform_duplicate_sample_real/
@@ -5011,7 +5038,10 @@ class ProgramEditorWindow(QMainWindow):
         progress_callback,
         status_callback,
         busy_callback=None,
+        stereo=False,
     ):
+        # stereo: every slice was sent as a -L/-R pair, so each keygroup plays the left sample in zone 1 (panned hard left) and
+        # the right one in zone 2 (hard right), both over the whole velocity range - see _create_program_from_slices_locked
         # the "ReCycle-style export" half of the Slice Editor's
         # create-program checkbox (see ui/slice_editor_window.py) - called
         # AFTER _export_slices has already landed every slice as a
@@ -5069,7 +5099,7 @@ class ProgramEditorWindow(QMainWindow):
             return self._create_program_from_slices_locked(
                 names, template_program_index, program_name,
                 progress_callback, status_callback, slice_count,
-                busy_callback=busy_callback,
+                busy_callback=busy_callback, stereo=stereo,
             )
         finally:
             self._worker.program_created.connect(self._on_program_created)
@@ -5084,6 +5114,7 @@ class ProgramEditorWindow(QMainWindow):
         status_callback,
         slice_count,
         busy_callback=None,
+        stereo=False,
     ):
         def _set_busy(busy):
             if busy_callback is not None:
@@ -5140,16 +5171,39 @@ class ProgramEditorWindow(QMainWindow):
         # plays from a velocity zone this feature isn't using. Every
         # keygroup created further down clones THIS keygroup, so
         # CP1/ZPLAY1/the cleared zones only need writing once, here.
-        for param_name, value in (
-            ("SNAME1", names[0]),
-            ("SNAME2", ""),
-            ("SNAME3", ""),
-            ("SNAME4", ""),
-            ("CP1", 1),
-            ("ZPLAY1", 0),
-            ("LONOTE", _FIRST_SLICE_NOTE),
-            ("HINOTE", _FIRST_SLICE_NOTE),
-        ):
+        if stereo:
+            # left in zone 1, right in zone 2, each panned hard to its side (VPANO is the zone's pan OFFSET, -50..+50) over the
+            # whole velocity range, so one key plays the pair together. Zones 3-4 stay empty.
+            first_keygroup = (
+                ("SNAME1", names[0] + _STEREO_SUFFIXES[0]),
+                ("SNAME2", names[0] + _STEREO_SUFFIXES[1]),
+                ("SNAME3", ""),
+                ("SNAME4", ""),
+                ("CP1", 1),
+                ("CP2", 1),
+                ("ZPLAY1", 0),
+                ("ZPLAY2", 0),
+                ("LOVEL1", 0),
+                ("HIVEL1", 127),
+                ("LOVEL2", 0),
+                ("HIVEL2", 127),
+                ("VPANO1", -50),
+                ("VPANO2", 50),
+                ("LONOTE", _FIRST_SLICE_NOTE),
+                ("HINOTE", _FIRST_SLICE_NOTE),
+            )
+        else:
+            first_keygroup = (
+                ("SNAME1", names[0]),
+                ("SNAME2", ""),
+                ("SNAME3", ""),
+                ("SNAME4", ""),
+                ("CP1", 1),
+                ("ZPLAY1", 0),
+                ("LONOTE", _FIRST_SLICE_NOTE),
+                ("HINOTE", _FIRST_SLICE_NOTE),
+            )
+        for param_name, value in first_keygroup:
             self._write_knob_value(
                 param_name, "keygroup", value, keygroup_index=0, index=new_index
             )
@@ -5172,8 +5226,16 @@ class ProgramEditorWindow(QMainWindow):
         # order (see this method's own docstring-style comment above)
         for slice_index in range(1, slice_count):
             self._worker.submit_create_keygroup(new_index, 0)
+            slice_zones = (
+                (
+                    ("SNAME1", names[slice_index] + _STEREO_SUFFIXES[0]),
+                    ("SNAME2", names[slice_index] + _STEREO_SUFFIXES[1]),
+                )
+                if stereo
+                else (("SNAME1", names[slice_index]),)
+            )
             for param_name, value in (
-                ("SNAME1", names[slice_index]),
+                *slice_zones,
                 ("LONOTE", _FIRST_SLICE_NOTE + slice_index),
                 ("HINOTE", _FIRST_SLICE_NOTE + slice_index),
             ):

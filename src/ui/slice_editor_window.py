@@ -50,7 +50,7 @@ _EQUAL_SLICE_DEFAULT = 8
 _TRANSIENT_SENSITIVITY_DEFAULT = 0
 
 
-def slice_export_names(base_name, count):
+def slice_export_names(base_name, count, name_length=NAME_LENGTH):
     """The exact resident-sample names an export of *count* slices will use:
     <base>-01, <base>-02, ... - zero-padded to a FIXED width (derived once
     from *count*, not per-name) so every name in the same batch truncates
@@ -65,14 +65,19 @@ def slice_export_names(base_name, count):
     own class docstring on doubling as a trimmer) rather than "slice 1 of
     1", so it skips the numeric suffix entirely and just returns the
     base name itself, truncated/uppercased the same way.
+
+    *name_length* is shorter than NAME_LENGTH when each slice is sent as a
+    -L/-R pair (see SliceEditorWindow's channel_suffixes): the channel suffix
+    is appended to these names, so it needs room that truncating the base
+    here, not the finished name, can give.
     """
     if count == 1:
-        return [base_name.strip().upper()[:NAME_LENGTH]]
+        return [base_name.strip().upper()[:name_length]]
     width = len(str(count))
     suffixes = [f"-{i:0{width}d}" for i in range(1, count + 1)]
     max_suffix_len = max(len(s) for s in suffixes)
-    truncated_base = base_name.strip().upper()[: NAME_LENGTH - max_suffix_len]
-    return [(truncated_base + suffix)[:NAME_LENGTH] for suffix in suffixes]
+    truncated_base = base_name.strip().upper()[: name_length - max_suffix_len]
+    return [(truncated_base + suffix)[:name_length] for suffix in suffixes]
 
 
 def _akai_name_edit(default_text):
@@ -157,6 +162,7 @@ class SliceEditorWindow(QDialog):
         max_program_slices=92,
         program_confirm_message=None,
         initial_markers=None,
+        channel_suffixes=None,
     ):
         super().__init__(parent)
         self.setWindowTitle(f'Slice Editor - "{sample_name}"')
@@ -168,10 +174,20 @@ class SliceEditorWindow(QDialog):
         # the markers are placed on) and handed to export_callback as `extra_slices=`. None for everything else, which then calls
         # export_callback exactly as before.
         self._extra_channels = [list(c) for c in extra_channels] if extra_channels else None
+        # a stereo pair is shown as two lanes (the waveform takes exactly one extra channel) and ANALYSED as its mono mix - the
+        # onset detector, preview and zero-crossing snaps all read this, so a hit that is loud on one side only still counts
+        stereo_pair = self._extra_channels[0] if self._extra_channels and len(self._extra_channels) == 1 else None
+        self._analysis = (
+            [(l + r) // 2 for l, r in zip(samples, stereo_pair)] if stereo_pair is not None else samples
+        )
+        # ("-L", "-R") when each slice goes out as TWO resident samples (the Akai editor, whose samples are mono): the names
+        # leave room for the suffix, and the clash check covers the suffixed names too. None = one sample per slice
+        self._channel_suffixes = tuple(channel_suffixes) if channel_suffixes else None
+        self._name_length = NAME_LENGTH - max((len(x) for x in self._channel_suffixes), default=0) if self._channel_suffixes else NAME_LENGTH
         # computed ONCE here, reused on every Sensitivity slider tick - see
         # transient_detection.compute_flux's own docstring on why
         self._transient_flux, self._transient_window_frames = (
-            transient_detection.compute_flux(samples, framerate)
+            transient_detection.compute_flux(self._analysis, framerate)
         )
         self._spitch = spitch
         self._stuno = stuno
@@ -228,7 +244,7 @@ class SliceEditorWindow(QDialog):
         self._preview_player = SlicePreviewPlayer(self)
 
         self.waveform = SliceWaveformView()
-        self.waveform.set_waveform(samples, 0, len(samples) - 1)
+        self.waveform.set_waveform(samples, 0, len(samples) - 1, right=stereo_pair)
         if initial_markers:
             # e.g. an .rx2's own cut points; set before the signals below are
             # connected so opening with them doesn't count as an edit
@@ -751,7 +767,7 @@ class SliceEditorWindow(QDialog):
 
     def _preview_slice(self, slice_start, slice_end):
         self._preview_player.play(
-            self._samples, slice_start, slice_end, self._framerate
+            self._analysis, slice_start, slice_end, self._framerate
         )
 
     # --- Equal Slices ------------------------------------------------------
@@ -773,7 +789,7 @@ class SliceEditorWindow(QDialog):
             self.waveform.start(), self.waveform.end(), count
         )
         snapped = [
-            sample_slicing.find_nearest_zero_crossing(self._samples, m) for m in markers
+            sample_slicing.find_nearest_zero_crossing(self._analysis, m) for m in markers
         ]
         self.waveform.set_markers(snapped)
 
@@ -792,7 +808,7 @@ class SliceEditorWindow(QDialog):
             self._transient_flux,
             self._transient_window_frames,
             value,
-            len(self._samples),
+            len(self._analysis),
         )
         # markers_from_flux works over the WHOLE buffer, not [start, end] -
         # it has no idea where the trim handles currently sit (same reason
@@ -805,7 +821,7 @@ class SliceEditorWindow(QDialog):
         start, end = self.waveform.start(), self.waveform.end()
         markers = [m for m in candidates if start < m < end]
         snapped = [
-            sample_slicing.find_nearest_zero_crossing(self._samples, m) for m in markers
+            sample_slicing.find_nearest_zero_crossing(self._analysis, m) for m in markers
         ]
         self.waveform.set_markers(snapped)
 
@@ -827,6 +843,17 @@ class SliceEditorWindow(QDialog):
             "freeze the interface."
         )
 
+    @staticmethod
+    def _stereo_confirm_message(slice_count, names, suffixes):
+        pair = f'"{names[0]}{suffixes[0]}" / "{names[0]}{suffixes[-1]}"'
+        what = (
+            f"as a stereo pair of samples ({pair})"
+            if slice_count == 1
+            else f"{slice_count} stereo slices as {slice_count * len(suffixes)} samples ({pair} .. "
+            f'"{names[-1]}{suffixes[0]}" / "{names[-1]}{suffixes[-1]}")'
+        )
+        return f"Send {what} to the sampler? This can take a while and will freeze the interface."
+
     def _confirm_export(self):
         # slice_count == 1 (no interior markers at all) is a valid, if
         # degenerate, export - the whole [start, end] region as a single
@@ -846,7 +873,7 @@ class SliceEditorWindow(QDialog):
             )
             return
 
-        names = slice_export_names(base_name, slice_count)
+        names = slice_export_names(base_name, slice_count, self._name_length)
         if len(set(names)) != len(names):
             # only reachable with a base name short enough that truncation
             # can't be the cause - i.e. never, in practice (NAME_LENGTH=12
@@ -859,7 +886,9 @@ class SliceEditorWindow(QDialog):
             )
             return
         existing = set(self._existing_names_provider())
-        collisions = [n for n in names if n in existing]
+        # what will really be resident: the slice names, or each with a channel suffix
+        resident = [n + suffix for n in names for suffix in (self._channel_suffixes or ("",))]
+        collisions = [n for n in resident if n in existing]
         if collisions:
             QMessageBox.warning(
                 self,
@@ -917,6 +946,8 @@ class SliceEditorWindow(QDialog):
                     return
 
         confirm_message = self._export_confirm_message(slice_count, names)
+        if self._channel_suffixes and self._export_confirm_message == self._default_export_confirm_message:
+            confirm_message = self._stereo_confirm_message(slice_count, names, self._channel_suffixes)
         if create_program and self._program_confirm_message is not None:
             confirm_message += "\n\n" + self._program_confirm_message(slice_count, self.template_program_combo.currentText())
         elif create_program:

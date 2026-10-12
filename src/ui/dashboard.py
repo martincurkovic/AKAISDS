@@ -36,11 +36,14 @@ from ui.s950_program_editor import S950ProgramEditorWindow
 from ui.yamaha_program_editor import YamahaProgramEditorWindow
 from ui.sample_settings_dialog import SampleSettingsDialog
 from ui.sample_info_dialog import SampleInfoDialog
+from s3k.messages import NAME_LENGTH
 from ui.slice_editor_window import SliceEditorWindow, slice_export_names
 from ui.ascii_logo import LOGO
 from ui import tooltips
 
 SETTINGS_ROLE = Qt.ItemDataRole.UserRole + 1
+# the longest slice name that still takes a "-L"/"-R" within the sampler's 12 characters
+_MAX_STEREO_BASE = NAME_LENGTH - 2
 
 
 class TransferDashboard(QWidget):
@@ -504,8 +507,12 @@ class TransferDashboard(QWidget):
             return False
 
         # same shared numbering the Slice Editor uses (zero-padded to the batch's width)
-        names = slice_export_names(rx2.slice_base_name(path), len(loop.slices))
         stereo = loop.channels == 2
+        # a stereo slice is sent as <name>-L / <name>-R, and the send path cuts the BASE down to fit "-L" into 12 characters - which
+        # would eat the slice number of a 12-character name and give every slice the same pair of names. So leave room for it here.
+        names = slice_export_names(
+            rx2.slice_base_name(path), len(loop.slices), _MAX_STEREO_BASE if stereo else NAME_LENGTH
+        )
         new_items = []
         temp_paths = []
         try:
@@ -897,6 +904,7 @@ class TransferDashboard(QWidget):
             progress_callback,
             status_callback,
             busy_callback=None,
+            extra_slices=None,
         ):
             # spitch/stuno/shlto are Akai program-header concepts
             # (SliceEditorWindow's shared export_callback contract always
@@ -907,20 +915,9 @@ class TransferDashboard(QWidget):
             # verify) is accepted for the same "shared contract" reason but
             # never called - this export never leaves the local queue, so
             # there's no hardware round-trip to mark indeterminate.
-            right_slices = None
-            if right_channel is not None:
-                # the exact same start/end/markers that produced `slices`
-                # (the left channel's own sliced buffers) just above, read
-                # live off the still-open dialog - see sample_slicing.
-                # slice_samples's own contract; this can't disagree with
-                # `slices` since nothing else runs between SliceEditorWindow
-                # computing one and calling this callback with the other
-                right_slices = sample_slicing.slice_samples(
-                    right_channel,
-                    dialog.waveform.start(),
-                    dialog.waveform.end(),
-                    dialog.waveform.slice_markers(),
-                )
+            # the right channel's slices, cut by the dialog at exactly the frames that
+            # produced `slices` (it is shown both channels - see extra_channels below)
+            right_slices = extra_slices[0] if extra_slices else None
             return self._export_slices_to_queue(
                 item,
                 names,
@@ -944,6 +941,9 @@ class TransferDashboard(QWidget):
             _existing_names,
             _export,
             demo_mode=False,
+            # a stereo file shows both channels; its slices are sent as -L/-R pairs, so the names leave room for the suffix
+            extra_channels=[right_channel] if right_channel is not None else None,
+            channel_suffixes=("-L", "-R") if right_channel is not None else None,
             export_confirm_message=lambda slice_count, names: (
                 f'Replace "{sample_name}" in the queue with {slice_count} '
                 f'slice{"s" if slice_count != 1 else ""} '
