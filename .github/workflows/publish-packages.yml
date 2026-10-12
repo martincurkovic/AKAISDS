@@ -1,0 +1,145 @@
+name: Publish Packages
+
+# Runs when a GitHub Release is PUBLISHED (not when it is created as a draft, and
+# not for pre-releases), so nothing here fires while you are still editing notes.
+# You can also run it by hand from the Actions tab against any published release.
+# See dev_docs/packaging/PACKAGING.md.
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to package, e.g. v1.2.1 (blank = latest published release)"
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  # Works out which release we are packaging and hashes its assets once, so the
+  # homebrew and aur jobs don't each re-derive this.
+  checksums:
+    # A hand run always goes ahead; a release event skips pre-releases (rc builds).
+    if: github.event_name == 'workflow_dispatch' || !github.event.release.prerelease
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.resolve.outputs.tag }}
+      version: ${{ steps.resolve.outputs.version }}
+      sha_macos_arm: ${{ steps.hash.outputs.sha_macos_arm }}
+      sha_macos_intel: ${{ steps.hash.outputs.sha_macos_intel }}
+      sha_linux_zip: ${{ steps.hash.outputs.sha_linux_zip }}
+    steps:
+      - name: Resolve which release to package
+        id: resolve
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUT_TAG: ${{ inputs.tag }}
+          EVENT_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          set -euo pipefail
+          TAG="${INPUT_TAG:-$EVENT_TAG}"
+          if [ -z "$TAG" ]; then
+            TAG=$(gh api "repos/${{ github.repository }}/releases/latest" --jq .tag_name)
+          fi
+          echo "Packaging $TAG"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Download release assets
+        run: |
+          set -euo pipefail
+          BASE="https://github.com/${{ github.repository }}/releases/download/${{ steps.resolve.outputs.tag }}"
+          curl -sL -f -o macos-arm.dmg   "$BASE/AKAISDS-macos-arm.dmg"
+          curl -sL -f -o macos-intel.dmg "$BASE/AKAISDS-macos-intel.dmg"
+          curl -sL -f -o linux.zip       "$BASE/AKAISDS-linux.zip"
+
+      - name: Compute checksums
+        id: hash
+        run: |
+          echo "sha_macos_arm=$(sha256sum macos-arm.dmg | cut -d' ' -f1)"     >> "$GITHUB_OUTPUT"
+          echo "sha_macos_intel=$(sha256sum macos-intel.dmg | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+          echo "sha_linux_zip=$(sha256sum linux.zip | cut -d' ' -f1)"         >> "$GITHUB_OUTPUT"
+
+  # Bumps ONLY the version and the two sha256 lines in the tap's existing
+  # Casks/akaisds.rb (the cask itself, caveats included, lives in the tap repo).
+  # Needs a fine-grained PAT with Contents read/write on ONLY martincurkovic/homebrew-akaisds,
+  # saved as the TAP_REPO_TOKEN secret.
+  homebrew:
+    needs: checksums
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: martincurkovic/homebrew-akaisds
+          token: ${{ secrets.TAP_REPO_TOKEN }}
+
+      - name: Bump the cask
+        env:
+          VERSION: ${{ needs.checksums.outputs.version }}
+          SHA_ARM: ${{ needs.checksums.outputs.sha_macos_arm }}
+          SHA_INTEL: ${{ needs.checksums.outputs.sha_macos_intel }}
+        run: |
+          set -euo pipefail
+          CASK=Casks/akaisds.rb
+          sed -i \
+            -e "s|^\(  version \)\".*\"|\1\"${VERSION}\"|" \
+            -e "s|^\(  sha256 arm: *\)\"[0-9a-f]*\"|\1\"${SHA_ARM}\"|" \
+            -e "s|^\( *intel: *\)\"[0-9a-f]*\"|\1\"${SHA_INTEL}\"|" \
+            "$CASK"
+          # Fail loudly if the cask layout changed and a substitution missed.
+          grep -q "^  version \"${VERSION}\"" "$CASK"
+          grep -q "\"${SHA_ARM}\"" "$CASK"
+          grep -q "\"${SHA_INTEL}\"" "$CASK"
+          git diff "$CASK"
+
+      - name: Commit and push
+        env:
+          VERSION: ${{ needs.checksums.outputs.version }}
+        run: |
+          set -euo pipefail
+          git config user.name "akaisds-release-bot"
+          git config user.email "actions@users.noreply.github.com"
+          git add Casks/akaisds.rb
+          if git diff --cached --quiet; then
+            echo "No changes to publish"
+            exit 0
+          fi
+          git commit -m "akaisds ${VERSION}"
+          git push
+
+  # Bumps the akaisds-bin PKGBUILD and pushes it to the AUR. OFF until you set the
+  # repo variable PUBLISH_AUR=true (Settings > Secrets and variables > Actions >
+  # Variables) and add the AUR_SSH_PRIVATE_KEY and AUR_COMMIT_EMAIL secrets.
+  aur:
+    if: ${{ vars.PUBLISH_AUR == 'true' }}
+    needs: checksums
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Render PKGBUILD for this version
+        env:
+          VERSION: ${{ needs.checksums.outputs.version }}
+          SHA_LINUX: ${{ needs.checksums.outputs.sha_linux_zip }}
+        run: |
+          set -euo pipefail
+          sed \
+            -e "s/^pkgver=.*/pkgver=${VERSION}/" \
+            -e "s/^sha256sums=.*/sha256sums=('${SHA_LINUX}' 'SKIP' 'SKIP')/" \
+            dev_docs/packaging/aur/PKGBUILD > PKGBUILD
+          cp dev_docs/packaging/aur/akaisds.desktop .
+          cp dev_docs/packaging/aur/icon_512x512.png .
+
+      - name: Publish to AUR
+        uses: KSXGitHub/github-actions-deploy-aur@v4
+        with:
+          pkgname: akaisds-bin
+          pkgbuild: ./PKGBUILD
+          assets: |
+            akaisds.desktop
+            icon_512x512.png
+          commit_username: martincurkovic
+          commit_email: ${{ secrets.AUR_COMMIT_EMAIL }}
+          ssh_private_key: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+          commit_message: "akaisds-bin ${{ needs.checksums.outputs.version }}"
