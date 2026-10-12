@@ -18,7 +18,7 @@ A simple way to send and receive audio samples (WAV, AIFF, FLAC) to an Akai S100
 - Experimental Yamaha A4000/A5000 editor support
 - Experimental Akai S900/S950 support: sample send/receive plus a program editor. It uses a different protocol from the other Akai models, was written without access to the hardware and has not been tested on a real unit yet, so back up your sampler first and please report what you find
 - ReCycle style sample slicing
-  - Transient detection
+  - Transient detection: a fast simple detector, or SuperFlux (high quality) for drum loops
   - Audio preview
   - Generate new Program with slices
 - Import ReCycle `.rx2` loops: each slice becomes a sample, optionally with a program built from them
