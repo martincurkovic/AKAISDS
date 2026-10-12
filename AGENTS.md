@@ -14,6 +14,7 @@ corrections, and say what was MEASURED on real hardware versus guessed. Human do
 | sample sending, Slice Editor, sample edits | "Sample send hardening", "Sample edit actions", "Slice Editor" |
 | logs, bug reports | "Debug logging" |
 | tests | `TESTING.md` |
+| releases, Homebrew tap, AUR | `dev_docs/packaging/PACKAGING.md` (workflow: `.github/workflows/publish-packages.yml`) |
 
 ## House rules
 
