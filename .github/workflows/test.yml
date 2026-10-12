@@ -24,6 +24,8 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y qt6-qpa-plugins libegl1 libgl1 libfontconfig1 libnss3 libasound2t64 libpulse0 libxcb-cursor0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-randr0 libxcb-render-util0 libxcb-shape0 libxcb-shm0 libxcb-sync1 libxcomposite1 libxdamage1 libxi6 libxtst6
       - name: Sync environment
         run: uv sync
+      - name: Build the REX2 reader
+        run: uv run python tools/build_velociloops.py
       - name: Run tests
         env:
           AKAISDS_CI_NO_AUDIO_DEVICE: "1"
