@@ -40,3 +40,30 @@ s950tools' own field layouts were in turn cross-checked against
 [dxzl/akai-s950](https://github.com/dxzl/akai-s950), which has no licence. No
 code or prose from that repository is used here - only byte offsets, which are
 facts about the hardware.
+
+## VelociLoops
+
+Reading ReCycle `.rx2` files uses [VelociLoops](https://github.com/kunitoki/VelociLoops) by kunitoki, vendored unmodified
+in `third_party/velociloops/` (commit `f77609e`) and compiled by `tools/build_velociloops.py`. It is released into the
+public domain under the Unlicense:
+
+```
+This is free and unencumbered software released into the public domain.
+
+Anyone is free to copy, modify, publish, use, compile, sell, or
+distribute this software, either in source code form or as a compiled
+binary, for any purpose, commercial or non-commercial, and by any
+means.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+IN NO EVENT SHALL THE AUTHORS BE LIABLE FOR ANY CLAIM, DAMAGES OR
+OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE,
+ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR
+OTHER DEALINGS IN THE SOFTWARE.
+
+For more information, please refer to <https://unlicense.org>
+```
+
+It includes `fft8g.h`, a general-purpose FFT routine (Ooura's package), which carries no licence text of its own.

@@ -156,6 +156,7 @@ class SliceEditorWindow(QDialog):
         program_labels=None,
         max_program_slices=92,
         program_confirm_message=None,
+        initial_markers=None,
     ):
         super().__init__(parent)
         self.setWindowTitle(f'Slice Editor - "{sample_name}"')
@@ -228,6 +229,10 @@ class SliceEditorWindow(QDialog):
 
         self.waveform = SliceWaveformView()
         self.waveform.set_waveform(samples, 0, len(samples) - 1)
+        if initial_markers:
+            # e.g. an .rx2's own cut points; set before the signals below are
+            # connected so opening with them doesn't count as an edit
+            self.waveform.set_markers(initial_markers)
         self.waveform.markers_changed.connect(self._update_info_label)
         self.waveform.markers_changed.connect(self._mark_dirty)
         self.waveform.view_changed.connect(self._on_view_changed)

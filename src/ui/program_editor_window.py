@@ -90,6 +90,7 @@ from core.akai_sysex import baseline_semitones_for_bandwidth
 from core import midi_manager as midi_manager_module
 from core import program_editor_bridge
 from core import root_note_detection
+from core import rx2
 from core import s1000_bridge as s1000_bridge_module
 from core import sampler_models
 from core import sample_editing
@@ -180,6 +181,8 @@ _LOOP_HOLD_HOLD_VALUE = 9999
 # approximation of the hardware's FACTORY DEFAULT, not a live read of
 # whatever a given unit is actually configured to right now.
 _PREVIEW_ROOT_NOTE = 60
+# root note given to slices from an .rx2 (no sampler header to copy one from) - what the Dashboard's Slice Editor uses too
+_RX2_ROOT_NOTE = 60
 
 
 def _format_loop_hold(value):
@@ -2248,6 +2251,16 @@ class ProgramEditorWindow(QMainWindow):
         # self._refresh_action (not a local) - _set_hardware_busy_ui toggles
         # it (and refresh_button) off for the duration of any blocking
         # hardware operation on this window, see that method's own comment
+        # not a button on the Samples tab: unlike every control there it acts on
+        # no selected sample - it opens a file. Disabled with the rest of the
+        # window by _set_hardware_busy_ui.
+        self._import_rx2_action = QAction("Import RX2 Loop...", self)
+        self._import_rx2_action.setShortcut("Ctrl+Shift+I")
+        self._import_rx2_action.setToolTip(tt.IMPORT_RX2_ACTION)
+        self._import_rx2_action.triggered.connect(self._import_rx2)
+        file_menu = self.menuBar().addMenu("&File")
+        file_menu.addAction(self._import_rx2_action)
+
         self._refresh_action = QAction("Refresh from Hardware", self)
         self._refresh_action.setShortcut("Ctrl+R")  # shows as ⌘R on macOS
         self._refresh_action.triggered.connect(self._refresh_from_hardware)
@@ -3314,6 +3327,7 @@ class ProgramEditorWindow(QMainWindow):
         self.cancel_transfer_button.setVisible(busy)
         self.refresh_button.setEnabled(not busy)
         self._refresh_action.setEnabled(not busy)
+        self._import_rx2_action.setEnabled(not busy)
         for action in (
             self._multi_tab_action,
             self._programs_tab_action,
@@ -4649,7 +4663,30 @@ class ProgramEditorWindow(QMainWindow):
         if entry is None or entry["samples"] is None:
             return
         sample_name = self._sample_name_at_row(sample_index)
+        self._run_slice_editor(
+            sample_name,
+            entry["samples"],
+            entry["framerate"],
+            entry["spitch"],
+            entry["stuno"],
+            entry["shlto"],
+        )
 
+    def _run_slice_editor(
+        self,
+        sample_name,
+        samples,
+        framerate,
+        spitch,
+        stuno,
+        shlto,
+        initial_markers=None,
+        resident_source=True,
+    ):
+        # The Slice Editor over *samples*. resident_source is True when they
+        # are a sample already on the sampler (retained across the export's
+        # reloads); False for audio from a file (Import RX2), whose name must
+        # not be tied to a resident sample of the same name.
         sampler_controller = getattr(self._main_window, "sampler_controller", None)
         if sampler_controller is None:
             self.status_bar.showMessage(
@@ -4675,11 +4712,11 @@ class ProgramEditorWindow(QMainWindow):
         dialog = SliceEditorWindow(
             self,
             sample_name,
-            entry["samples"],
-            entry["framerate"],
-            entry["spitch"],
-            entry["stuno"],
-            entry["shlto"],
+            samples,
+            framerate,
+            spitch,
+            stuno,
+            shlto,
             _existing_names,
             self._export_slices,
             demo_mode=bool(os.environ.get("AKAISDS_DEMO_SAMPLER")),
@@ -4687,12 +4724,14 @@ class ProgramEditorWindow(QMainWindow):
             create_program_callback=self._create_program_from_slices,
             max_program_slices=_MAX_SLICES_PER_PROGRAM,
             cancel_callback=sampler_controller.cancel_transfer,
+            initial_markers=initial_markers,
         )
         # the export reloads the sample list (wiping the cache), so keep the
         # source's audio across it; dropped again below if nothing was exported
-        self._retain_sample_audio(sample_name, entry["samples"], entry["framerate"])
+        if resident_source:
+            self._retain_sample_audio(sample_name, samples, framerate)
         dialog.exec()
-        if not dialog.export_succeeded:
+        if resident_source and not dialog.export_succeeded:
             self._forget_retained_audio(sample_name)
         # slice export can add several new resident samples - refresh so
         # the Samples tab's own list/zone combos pick them up. Only when
@@ -4706,6 +4745,42 @@ class ProgramEditorWindow(QMainWindow):
         # Editor," reported directly.
         if dialog.export_succeeded:
             self._worker.submit_sample_list()
+
+    def _import_rx2(self):
+        # A ReCycle .rx2 into the Slice Editor, its cut points already placed
+        # as markers: export sends each slice as a one-shot sample and can
+        # build a program from them - the Slice Editor's own paths, nothing
+        # RX2-specific on the wire. Needs no sample selected.
+        sampler_controller = getattr(self._main_window, "sampler_controller", None)
+        if sampler_controller is not None and sampler_controller.is_transfer_busy():
+            self.status_bar.showMessage(
+                "Can't import - a transfer is already in progress on the Transfer Dashboard"
+            )
+            return
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Import RX2 Loop", os.path.expanduser("~"), "ReCycle loops (*.rx2)"
+        )
+        if not path:
+            return
+        try:
+            loop = rx2.load(path)
+        except rx2.Rx2Error as e:
+            debug_log.get_logger().error(f"ProgramEditor: couldn't import {path!r}", exc_info=True)
+            self.status_bar.showMessage(str(e))
+            return
+        samples, markers = loop.mono_buffer()
+        if loop.channels == 2:
+            self.status_bar.showMessage("Stereo loop mixed to mono - the sampler's slices are mono")
+        self._run_slice_editor(
+            rx2.slice_base_name(path),
+            samples,
+            loop.sample_rate,
+            _RX2_ROOT_NOTE,
+            0,
+            0,
+            initial_markers=markers,
+            resident_source=False,
+        )
 
     def _reload_sample_list_with_retries(self, attempts=3, retry_delay_seconds=0.3):
         # submit_sample_list() with a couple of retries on failure. Root

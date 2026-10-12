@@ -10,7 +10,7 @@ from ui.diagnostics_ui import add_open_log_folder_action
 from ui.quickstart_dialog import show_quickstart_dialog
 from ui.update_helper import UpdateCheckRunner
 from core.midi_manager import MidiManager
-from core import app_config, debug_log, dropped_files, sds_encoder
+from core import app_config, debug_log, dropped_files, rx2, sds_encoder
 from controller.sampler_controller import SamplerController
 
 # don't hit the GitHub API on every single launch
@@ -286,6 +286,7 @@ class ApplicationWindow(QMainWindow):
 
 def _build_audio_filter_string():
     extensions = " ".join(
-        f"*{ext}" for ext in sorted(sds_encoder.SUPPORTED_AUDIO_EXTENSIONS)
+        f"*{ext}"
+        for ext in sorted(sds_encoder.SUPPORTED_AUDIO_EXTENSIONS | {rx2.RX2_EXTENSION})
     )
     return f"Audio Files ({extensions})"

@@ -23,6 +23,7 @@ from core import (
     sample_slicing,
     sds_encoder,
     program_editor_bridge,
+    rx2,
     debug_log,
     diagnostics,
     sampler_models,
@@ -35,7 +36,7 @@ from ui.s950_program_editor import S950ProgramEditorWindow
 from ui.yamaha_program_editor import YamahaProgramEditorWindow
 from ui.sample_settings_dialog import SampleSettingsDialog
 from ui.sample_info_dialog import SampleInfoDialog
-from ui.slice_editor_window import SliceEditorWindow
+from ui.slice_editor_window import SliceEditorWindow, slice_export_names
 from ui.ascii_logo import LOGO
 from ui import tooltips
 
@@ -463,11 +464,14 @@ class TransferDashboard(QWidget):
     def on_files_dropped(self, paths):
         paths = self._expand_dropped_paths(paths)
         added = 0
+        rx2_imported = False
         for path in paths:
-            if (
-                os.path.splitext(path)[1].lower()
-                in sds_encoder.SUPPORTED_AUDIO_EXTENSIONS
-            ):
+            extension = os.path.splitext(path)[1].lower()
+            if extension == rx2.RX2_EXTENSION:
+                # one ReCycle loop becomes a queue row per slice; _import_rx2
+                # leaves its own status message (the result, or why not)
+                rx2_imported = self._import_rx2(path) or rx2_imported
+            elif extension in sds_encoder.SUPPORTED_AUDIO_EXTENSIONS:
                 # False means create_local_row already showed its own
                 # "couldn't add" status message (the file was gone before
                 # it could even be copied - see its own comment) - don't
@@ -480,8 +484,83 @@ class TransferDashboard(QWidget):
                 )
         if added:
             self.status_bar.showMessage(f"Added {added} file(s) to the queue")
+        if added or rx2_imported:
             self._update_queue_buttons_state()
         self._update_empty_queue_placeholder()
+
+    def _import_rx2(self, path):
+        # A ReCycle .rx2 -> one ordinary queued WAV per slice, the same rows
+        # the Slice Editor's queue export makes (core/rx2.py: slices are the
+        # raw cut-point audio). From here it is the normal Send path.
+        # Returns True if rows were added.
+        name = os.path.basename(path)
+        try:
+            loop = rx2.load(path)
+        except rx2.Rx2Error as e:
+            debug_log.get_logger().error(
+                f"TransferDashboard: couldn't import {path!r}", exc_info=True
+            )
+            self.status_bar.showMessage(str(e))
+            return False
+
+        # same shared numbering the Slice Editor uses (zero-padded to the batch's width)
+        names = slice_export_names(rx2.slice_base_name(path), len(loop.slices))
+        stereo = loop.channels == 2
+        new_items = []
+        temp_paths = []
+        try:
+            for piece, slice_name in zip(loop.slices, names):
+                fd, temp_path = tempfile.mkstemp(suffix=".wav", prefix="akaisds_rx2_")
+                os.close(fd)
+                temp_paths.append(temp_path)
+                if stereo:
+                    sds_encoder.write_wav_file_stereo(
+                        temp_path, piece.left, piece.right, loop.sample_rate, bit_depth=16
+                    )
+                else:
+                    sds_encoder.write_wav_file(
+                        temp_path, piece.left, loop.sample_rate, bit_depth=16
+                    )
+                if not self.create_local_row(temp_path):
+                    self._remove_rows(new_items)
+                    return False
+                new_item = self.list_local.item(self.list_local.count() - 1)
+                new_items.append(new_item)
+                row_widget = self.list_local.itemWidget(new_item)
+                edit_field = row_widget.findChild(QLineEdit) if row_widget else None
+                if edit_field is not None:
+                    edit_field.setText(slice_name)
+                    edit_field.setCursorPosition(0)
+                if stereo:
+                    # a stereo slice keeps both channels whatever the dashboard's
+                    # global mono default says (same rule as the Slice Editor export)
+                    settings = dict(new_item.data(SETTINGS_ROLE), mono=False)
+                    new_item.setData(SETTINGS_ROLE, settings)
+                    if row_widget is not None:
+                        self._refresh_row_indicators(
+                            row_widget, new_item.data(Qt.ItemDataRole.UserRole), settings
+                        )
+        except Exception:
+            debug_log.get_logger().error(
+                "TransferDashboard: unexpected error importing an .rx2", exc_info=True
+            )
+            self._remove_rows(new_items)
+            self.status_bar.showMessage(
+                f"Couldn't import {name} - see {debug_log.LOG_PATH}"
+            )
+            return False
+        finally:
+            for temp_path in temp_paths:
+                try:
+                    os.remove(temp_path)
+                except OSError:
+                    pass
+
+        self.status_bar.showMessage(
+            f"Added {len(new_items)} slices from {name} "
+            f"({names[0]}..{names[-1]}, {loop.tempo_bpm:g} BPM)"
+        )
+        return True
 
     def _update_empty_queue_placeholder(self):
         self.empty_queue_label.setVisible(self.list_local.count() == 0)

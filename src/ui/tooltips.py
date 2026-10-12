@@ -337,6 +337,10 @@ SLICE_EDITOR_BUTTON = (
     "Chop this sample's audio into slices "
     "and export them back to the sampler as new samples."
 )
+IMPORT_RX2_ACTION = (
+    "Open a ReCycle .rx2 loop in the Slice Editor, its slices already marked. "
+    "Export sends them as samples, optionally with a program."
+)
 DETECT_ROOT_NOTE_BUTTON = (
     "Estimate this sample's fundamental pitch from its "
     "loop region (if one is set). Otherwise analyses a short chunk of "
