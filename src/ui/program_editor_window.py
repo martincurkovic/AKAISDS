@@ -458,6 +458,16 @@ class ProgramEditorWindow(QMainWindow):
         # (_on_samples_loaded) - a resident sample's own index can start
         # meaning something else after that.
         self._sample_waveform_cache = {}
+        # audio this window itself just SENT, by sample NAME -> (samples,
+        # framerate). The cache above is wiped by every sample-list reload
+        # (an index can mean something else afterwards), and the edit/
+        # duplicate/slice flows reload several times, so the sample that was
+        # on screen came back header-only and needed a slow SDS dump to see
+        # again - for audio we were holding the whole time.
+        # _on_sample_detail_loaded attaches it to the fresh header when the
+        # name AND frame count still match. Pruned to names in the list on
+        # every reload; see _retain_sample_audio.
+        self._retained_sample_audio = {}
         # packets decoded during a real receive, waiting for the next
         # _flush_live_chunks - see _on_sample_chunk_received
         self._live_chunk_buffer = []
@@ -4338,6 +4348,9 @@ class ProgramEditorWindow(QMainWindow):
             self._warn_name_in_use("Sample", new_name)
             return
         self._sample_list[sample_index] = new_name
+        # the audio keeps its cache entry (by index); a retained copy under
+        # the old name must not attach to some other sample later
+        self._forget_retained_audio(current_name)
         entry = self._sample_row_labels.get(sample_index)
         if entry is not None:
             _generation, name_label, _duration_label = entry
@@ -4379,6 +4392,7 @@ class ProgramEditorWindow(QMainWindow):
 
     def _on_sample_deleted(self, sample_index):
         self.status_bar.showMessage("Sample deleted")
+        self._forget_retained_audio(self._sample_name_at_row(sample_index))
         # full reload, not a targeted removal - every sample index after
         # the deleted one shifts down by one, same reasoning as
         # _on_program_deleted (no PRGNUM-style renumbering concern here,
@@ -4521,6 +4535,15 @@ class ProgramEditorWindow(QMainWindow):
                     f'Duplicate failed - couldn\'t send "{new_name}"'
                 )
                 return
+
+            # both samples' audio is in hand and unchanged on the sampler -
+            # keep it across the reloads below (see _retain_sample_audio)
+            self._retain_sample_audio(
+                new_name, entry["samples"], entry["framerate"]
+            )
+            self._retain_sample_audio(
+                current_name, entry["samples"], entry["framerate"]
+            )
 
             # find the duplicate's index by name - nothing shifted
             # underneath it the way a replace-in-place delete does, but
@@ -4665,7 +4688,12 @@ class ProgramEditorWindow(QMainWindow):
             max_program_slices=_MAX_SLICES_PER_PROGRAM,
             cancel_callback=sampler_controller.cancel_transfer,
         )
+        # the export reloads the sample list (wiping the cache), so keep the
+        # source's audio across it; dropped again below if nothing was exported
+        self._retain_sample_audio(sample_name, entry["samples"], entry["framerate"])
         dialog.exec()
+        if not dialog.export_succeeded:
+            self._forget_retained_audio(sample_name)
         # slice export can add several new resident samples - refresh so
         # the Samples tab's own list/zone combos pick them up. Only when
         # something was ACTUALLY exported, though (dialog.export_succeeded) -
@@ -4810,6 +4838,13 @@ class ProgramEditorWindow(QMainWindow):
                     "_export_slices: batch send did not complete successfully"
                 )
                 return False, "Export failed - sending the slices did not complete"
+
+            if bit_depth == 16 and sample_rate is None:
+                # sent as-is, so each new slice can come back with its
+                # waveform (see _retain_sample_audio); a requantised or
+                # resampled send is not the audio we hold
+                for name, slice_samples in zip(names, slices):
+                    self._retain_sample_audio(name, slice_samples, framerate)
 
             # nothing numeric to report while this reloads/retries - see
             # _set_busy's own comment above
@@ -6656,6 +6691,11 @@ class ProgramEditorWindow(QMainWindow):
         # silently wrong rather than just stale, so drop it rather than try
         # to carry it forward by name
         self._sample_waveform_cache = {}
+        self._retained_sample_audio = {
+            name: audio
+            for name, audio in self._retained_sample_audio.items()
+            if name in samples
+        }
         self._sample_list_generation += 1
         generation = self._sample_list_generation
         self._sample_row_labels = {}
@@ -6838,10 +6878,18 @@ class ProgramEditorWindow(QMainWindow):
             "ldwell1": values["LDWELL1"],
             "sbandw": values["SBANDW"],
         }
+        has_audio = self._attach_retained_audio(sample_index, entry)
         self._sample_waveform_cache[sample_index] = entry
         if sample_index == self.sample_list_widget.currentRow():
             self._set_marker_spinbox_range(frame_count)
-            self.waveform_view.set_header(frame_count, start, loop_start, loop_end, end)
+            if has_audio:
+                self.waveform_view.set_waveform(
+                    entry["samples"], start, loop_start, loop_end, end
+                )
+            else:
+                self.waveform_view.set_header(
+                    frame_count, start, loop_start, loop_end, end
+                )
             self._update_sample_meta_controls(
                 values["SPTYPE"],
                 values["SPITCH"],
@@ -6849,7 +6897,37 @@ class ProgramEditorWindow(QMainWindow):
                 values["STUNO"],
                 values["LDWELL1"],
             )
-            self._set_sample_edit_buttons_enabled(False)
+            self._set_sample_edit_buttons_enabled(has_audio)
+
+    def _retain_sample_audio(self, name, samples, framerate):
+        # remember audio this window sent under *name*, so the sample comes
+        # back WITH its waveform after the reloads that follow a send. Only
+        # for audio that reached the sampler unchanged (16-bit, same rate) -
+        # the caller's job. A copy of the list is not needed: nothing
+        # mutates a samples list in place.
+        self._retained_sample_audio[name] = (samples, framerate)
+
+    def _forget_retained_audio(self, name):
+        self._retained_sample_audio.pop(name, None)
+
+    def _attach_retained_audio(self, sample_index, entry):
+        # put retained audio onto a header-only cache *entry* if it is
+        # certainly the same sample: same name AND the header's frame count
+        # equals the audio's length (a sample changed on the front panel
+        # since, or a stale detail reply for a shifted index, fails this and
+        # falls back to the normal click-to-load). The header stays the
+        # source of truth for markers and metadata.
+        if not 0 <= sample_index < len(self._sample_list):
+            return False
+        retained = self._retained_sample_audio.get(self._sample_list[sample_index])
+        if retained is None:
+            return False
+        samples, framerate = retained
+        if len(samples) != entry["frame_count"]:
+            return False
+        entry["samples"] = samples
+        entry["framerate"] = framerate
+        return True
 
     def _on_sample_detail_load_failed(self, sample_index, error):
         if sample_index != self.sample_list_widget.currentRow():
@@ -8245,6 +8323,9 @@ class ProgramEditorWindow(QMainWindow):
         entry["loop_start"] = new_loop_start
         entry["loop_end"] = new_loop_end
         entry["end"] = new_end
+        # the cache is edited in place here, so a retained copy of the
+        # pre-edit audio (e.g. from the Slice Editor) would come back stale
+        self._forget_retained_audio(self._sample_name_at_row(sample_index))
         if sample_index == self.sample_list_widget.currentRow():
             self._set_marker_spinbox_range(len(new_samples))
             self.waveform_view.set_waveform(
@@ -8480,7 +8561,10 @@ class ProgramEditorWindow(QMainWindow):
             # to land on a clean final selection: nothing stayed selected
             # through the two reloads above for _on_samples_loaded's own
             # restore-by-name logic to restore, so this explicitly selects
-            # the (correctly renamed again) sample itself
+            # the (correctly renamed again) sample itself. The audio we just
+            # sent is kept for that selection (not before: the reloads above
+            # list the sample under its -TMP name, which would prune it).
+            self._retain_sample_audio(original_name, new_samples, framerate)
             which, args = self._wait_for_any_signal(
                 [self._worker.samples_loaded, self._worker.samples_load_failed],
                 start=self._worker.submit_sample_list,

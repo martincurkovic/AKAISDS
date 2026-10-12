@@ -733,7 +733,7 @@ class FakeSamplerController(QObject):
                 }
                 self._bridge.sample_headers[new_index] = {
                     "SSTART": 0, "SMPEND": 0, "LOOPAT1": 0, "LLNGTH1": 0,
-                    "SLNGTH": 0, "SSRATE": 44100, "SBANDW": 1, "SPTYPE": 0,
+                    "SLNGTH": len(sent_samples), "SSRATE": 44100, "SBANDW": 1, "SPTYPE": 0,
                     "SPITCH": 60, "SHLTO": 0, "STUNO": 0, "LDWELL1": 0,
                 }
         # deferred, not synchronous - _perform_sample_edit_real connects
@@ -4044,6 +4044,140 @@ def test_duplicate_sample_real_mode_happy_path_sends_and_copies_metadata(
         editor._sample_name_at_row(editor.sample_list_widget.currentRow())
         == "SQUARE COPY"
     )
+
+
+def _wait_for_audio(editor, qapp):
+    editor._worker.wait_until_idle()
+    _pump_until(qapp, lambda: editor.waveform_view.has_waveform())
+
+
+def test_reverse_sample_real_mode_keeps_the_sent_waveform_on_screen(
+    editor, qapp, monkeypatch
+):
+    # the sample list reloads several times during a replace-in-place edit,
+    # each wiping the index-keyed cache; the edited sample used to come back
+    # header-only and need a slow SDS dump to see again
+    import ui.program_editor_window as pew
+
+    monkeypatch.delenv("AKAISDS_DEMO_SAMPLER", raising=False)
+    monkeypatch.setattr(
+        pew.QMessageBox, "question", lambda *a, **k: pew.QMessageBox.StandardButton.Yes
+    )
+    editor._main_window.sampler_controller = FakeSamplerController(editor._bridge)
+    original = list(range(100))
+    _select_sample_with_full_audio(
+        editor, qapp, 0, original,
+        {"start": 10, "loop_start": 30, "loop_end": 60, "end": 90},
+    )
+
+    editor._confirm_reverse_sample()
+    _wait_for_audio(editor, qapp)
+
+    row = editor.sample_list_widget.currentRow()
+    assert editor._sample_name_at_row(row) == "SQUARE"
+    assert editor._sample_waveform_cache[row]["samples"] == list(reversed(original))
+    assert editor.reverse_sample_button.isEnabled()
+
+
+def test_retained_audio_is_not_attached_when_the_frame_count_differs(editor, qapp):
+    # e.g. the sample was changed on the front panel since: fall back to the
+    # normal header-only state rather than show the wrong waveform
+    editor._retain_sample_audio("SQUARE", list(range(7)), 44100)
+    editor.sample_list_widget.setCurrentRow(0)
+    editor._worker.wait_until_idle()
+    _pump_until(qapp, lambda: editor.waveform_view.has_header())
+
+    assert editor._sample_waveform_cache[0]["samples"] is None
+    assert not editor.waveform_view.has_waveform()
+
+
+def test_retained_audio_is_dropped_when_the_sample_is_renamed(editor, qapp, monkeypatch):
+    editor._retain_sample_audio("SQUARE", list(range(100)), 44100)
+    editor.sample_list_widget.setCurrentRow(0)
+    monkeypatch.setattr(editor, "_prompt_sample_name", lambda *a, **k: "OTHER")
+
+    editor._confirm_rename_sample()
+
+    assert "SQUARE" not in editor._retained_sample_audio
+
+
+def test_duplicate_sample_real_mode_keeps_both_waveforms(editor, qapp, monkeypatch):
+    monkeypatch.delenv("AKAISDS_DEMO_SAMPLER", raising=False)
+    monkeypatch.setattr(editor, "_prompt_akai_name", lambda *a, **k: "SQUARE COPY")
+    bridge = editor._bridge
+    editor._main_window.sampler_controller = FakeSamplerController(bridge)
+    original = list(range(100))
+    _select_sample_with_full_audio(
+        editor, qapp, 0, original,
+        {"start": 10, "loop_start": 30, "loop_end": 60, "end": 90},
+    )
+    bridge.sample_headers[0]["SLNGTH"] = len(original)  # the fixture's header says 10000
+
+    editor._confirm_duplicate_sample()
+    _wait_for_audio(editor, qapp)
+
+    copy_row = bridge.sample_list().index("SQUARE COPY")
+    assert editor.sample_list_widget.currentRow() == copy_row
+    assert editor._sample_waveform_cache[copy_row]["samples"] == original
+    # and the source, selected later, has its audio too
+    editor.sample_list_widget.setCurrentRow(bridge.sample_list().index("SQUARE"))
+    _wait_for_audio(editor, qapp)
+    assert editor.waveform_view.frame_count() == len(original)
+
+
+def test_slice_export_keeps_the_source_and_the_new_slices_loaded(
+    editor, qapp, monkeypatch
+):
+    monkeypatch.delenv("AKAISDS_DEMO_SAMPLER", raising=False)
+    bridge = editor._bridge
+    editor._main_window.sampler_controller = FakeSamplerController(bridge)
+    source = list(range(200))
+    slices = [source[:100], source[100:]]
+    names = ["BREAK-1", "BREAK-2"]
+    _select_sample_with_full_audio(
+        editor, qapp, 0, source,
+        {"start": 0, "loop_start": 0, "loop_end": 0, "end": 199, "stuno": 0, "shlto": 0},
+    )
+    bridge.sample_headers[0]["SLNGTH"] = len(source)  # the fixture's header says 10000
+
+    class _ExportingDialog:
+        export_succeeded = False
+
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def exec(self):
+            ok, _ = editor._export_slices(
+                names, slices, 44100, 16, None, 60, 0, 0, lambda *a: None, lambda *a: None
+            )
+            type(self).export_succeeded = ok
+
+    monkeypatch.setattr("ui.program_editor_window.SliceEditorWindow", _ExportingDialog)
+
+    editor._open_slice_editor()
+    _wait_for_audio(editor, qapp)
+
+    assert editor._sample_name_at_row(editor.sample_list_widget.currentRow()) == "SQUARE"
+    assert editor.waveform_view.frame_count() == len(source)
+    for name, expected in zip(names, slices):
+        editor.sample_list_widget.setCurrentRow(bridge.sample_list().index(name))
+        _wait_for_audio(editor, qapp)
+        assert editor.waveform_view.frame_count() == len(expected)
+
+
+def test_slice_export_at_a_different_bit_depth_does_not_retain_the_slices(
+    editor, qapp, monkeypatch
+):
+    # not the audio we hold once the sampler requantises it
+    monkeypatch.delenv("AKAISDS_DEMO_SAMPLER", raising=False)
+    editor._main_window.sampler_controller = FakeSamplerController(editor._bridge)
+
+    editor._export_slices(
+        ["BREAK-1"], [list(range(50))], 44100, 12, None, 60, 0, 0,
+        lambda *a: None, lambda *a: None,
+    )
+
+    assert "BREAK-1" not in editor._retained_sample_audio
 
 
 def test_duplicate_sample_refuses_a_name_already_in_use(editor, qapp, monkeypatch):
