@@ -19,12 +19,12 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
 from PySide6.QtCore import QCoreApplication, QEvent, Qt
-from PySide6.QtWidgets import QApplication, QLineEdit
+from PySide6.QtWidgets import QApplication, QLabel, QLineEdit
 
 from core import dropped_files, rx2, sample_slicing, sds_encoder
 from core.midi_manager import MidiManager
 from controller.sampler_controller import SamplerController
-from ui.dashboard import SETTINGS_ROLE, TransferDashboard
+from ui.dashboard import RX2_MARKERS_ROLE, SETTINGS_ROLE, TransferDashboard
 
 
 @pytest.fixture(scope="session")
@@ -1035,20 +1035,129 @@ def _row_names(dashboard):
     ]
 
 
-@pytest.mark.skipif(not rx2.is_available(), reason="VelociLoops not built")
-def test_dropping_an_rx2_queues_one_numbered_row_per_slice(dashboard):
+def _capture_sent_entries(dashboard, monkeypatch):
+    sent = []
+    monkeypatch.setattr(
+        dashboard.sampler_controller, "send_file_queue", lambda entries, **kw: sent.extend(entries) or True
+    )
+    return sent
+
+
+def _drop_stereo_loop(dashboard):
     dashboard.on_files_dropped([os.path.join(_RX2_FIXTURES, "120Stereo.rx2")])
 
-    # a stereo slice is sent as <name>-L / <name>-R, so the base is cut to leave room for the suffix (12 characters in all)
-    assert _row_names(dashboard) == [f"120STER-{i:02d}" for i in range(1, 11)]
-    assert all(len(n + "-L") <= 12 for n in _row_names(dashboard))
-    for i in range(dashboard.list_local.count()):
-        item = dashboard.list_local.item(i)
-        # stereo slices stay stereo whatever the global mono default is
-        assert item.data(SETTINGS_ROLE)["mono"] is False
-        with wave.open(item.data(Qt.ItemDataRole.UserRole), "rb") as wf:
+
+@pytest.mark.skipif(not rx2.is_available(), reason="VelociLoops not built")
+def test_dropping_an_rx2_queues_ONE_row_that_knows_it_is_a_loop_of_slices(dashboard):
+    _drop_stereo_loop(dashboard)
+
+    assert dashboard.list_local.count() == 1
+    assert _row_names(dashboard) == ["120STEREO"]
+    item = dashboard.list_local.item(0)
+    assert len(item.data(RX2_MARKERS_ROLE)) == 9
+    badge = dashboard.list_local.itemWidget(item).findChild(QLabel, "sliceBadge")
+    assert badge.text() == "10 slices" and not badge.isHidden()
+    # the row is an ordinary WAV: the ten slices end to end, stereo, one bar at 120 BPM
+    with wave.open(item.data(Qt.ItemDataRole.UserRole), "rb") as wf:
+        assert (wf.getnchannels(), wf.getframerate(), wf.getnframes()) == (2, 44100, 2 * 44100)
+    assert "10 slices" in dashboard.status_bar.currentMessage()
+
+
+@pytest.mark.skipif(not rx2.is_available(), reason="VelociLoops not built")
+def test_send_cuts_a_queued_loop_into_one_sample_per_slice(dashboard, monkeypatch):
+    _drop_stereo_loop(dashboard)
+    sent = _capture_sent_entries(dashboard, monkeypatch)
+
+    dashboard.send_queued_samples()
+
+    # a stereo slice goes out as <name>-L / <name>-R, so the base is cut to leave room for the suffix (12 characters in all)
+    assert [e["name"] for e in sent] == [f"120STER-{i:02d}" for i in range(1, 11)]
+    assert all(len(e["name"] + "-L") <= 12 for e in sent)
+    frames = 0
+    for entry in sent:
+        with wave.open(entry["filepath"], "rb") as wf:
             assert wf.getnchannels() == 2 and wf.getframerate() == 44100
-    assert "Added 10 slices" in dashboard.status_bar.currentMessage()
+            frames += wf.getnframes()
+        assert entry["mono"] == dashboard._global_mono  # the row's own settings, like any queued file
+    assert frames == 2 * 44100  # nothing lost or repeated
+    assert dashboard.list_local.count() == 1  # the queue still shows the one loop
+
+
+@pytest.mark.skipif(not rx2.is_available(), reason="VelociLoops not built")
+def test_send_uses_the_rows_current_name_and_settings(dashboard, monkeypatch):
+    _drop_stereo_loop(dashboard)
+    item = dashboard.list_local.item(0)
+    dashboard.list_local.itemWidget(item).findChild(QLineEdit).setText("Amen Break")
+    item.setData(SETTINGS_ROLE, dict(item.data(SETTINGS_ROLE), mono=True, bit_depth=12))
+    sent = _capture_sent_entries(dashboard, monkeypatch)
+
+    dashboard.send_queued_samples()
+
+    # sent mono, so no -L/-R suffix to leave room for: the full 12 characters
+    assert sent[0]["name"] == "AMEN BREA-01" and len(sent) == 10
+    assert all(e["mono"] is True and e["bit_depth"] == 12 for e in sent)
+
+
+@pytest.mark.skipif(not rx2.is_available(), reason="VelociLoops not built")
+def test_a_loop_is_sent_alongside_ordinary_files_in_queue_order(dashboard, monkeypatch, tmp_path):
+    plain = tmp_path / "kick.wav"
+    _write_wav(plain)
+    dashboard.on_files_dropped([str(plain)])
+    dashboard.on_files_dropped([os.path.join(_RX2_FIXTURES, "120Mono.rx2")])
+    sent = _capture_sent_entries(dashboard, monkeypatch)
+
+    dashboard.send_queued_samples()
+
+    assert [e["name"] for e in sent][0] == "kick"
+    assert [e["name"] for e in sent][1:] == [f"120MONO-{i:02d}" for i in range(1, 11)]
+
+
+@pytest.mark.skipif(not rx2.is_available(), reason="VelociLoops not built")
+def test_the_slice_editor_opens_on_a_queued_loop_with_its_cut_points_marked(dashboard, monkeypatch):
+    from ui.slice_editor_window import SliceEditorWindow
+
+    _drop_stereo_loop(dashboard)
+    item = dashboard.list_local.item(0)
+    edit_field = dashboard.list_local.itemWidget(item).findChild(QLineEdit)
+    seen = {}
+
+    def _fake_exec(self):
+        seen["markers"] = self.waveform.slice_markers()
+        seen["stereo"] = self.waveform._right is not None
+        return 0
+
+    monkeypatch.setattr(SliceEditorWindow, "exec", _fake_exec)
+    dashboard._open_slice_editor(item, edit_field)
+
+    assert seen["markers"] == item.data(RX2_MARKERS_ROLE) and seen["stereo"] is True
+    assert dashboard.list_local.count() == 1  # closing without exporting changes nothing
+
+
+@pytest.mark.skipif(not rx2.is_available(), reason="VelociLoops not built")
+def test_exporting_from_the_slice_editor_replaces_the_loop_with_its_slices(dashboard, monkeypatch):
+    from ui.slice_editor_window import SliceEditorWindow
+
+    _drop_stereo_loop(dashboard)
+    item = dashboard.list_local.item(0)
+    edit_field = dashboard.list_local.itemWidget(item).findChild(QLineEdit)
+
+    def _fake_exec(self):
+        self.name_edit.setText("HIT")
+        monkeypatch.setattr(sew_module.QMessageBox, "question", lambda *a, **k: sew_module.QMessageBox.StandardButton.Yes)
+        monkeypatch.setattr(sew_module.QMessageBox, "information", lambda *a, **k: None)
+        self.export_button.click()
+        return 0
+
+    from ui import slice_editor_window as sew_module
+
+    monkeypatch.setattr(SliceEditorWindow, "exec", _fake_exec)
+    dashboard._open_slice_editor(item, edit_field)
+
+    assert dashboard.list_local.count() == 10
+    assert all(dashboard.list_local.item(i).data(RX2_MARKERS_ROLE) is None for i in range(10))  # now ordinary rows
+    sent = _capture_sent_entries(dashboard, monkeypatch)
+    dashboard.send_queued_samples()
+    assert len(sent) == 10  # not cut a second time
 
 
 @pytest.mark.skipif(not rx2.is_available(), reason="VelociLoops not built")
