@@ -55,7 +55,7 @@ Download the latest release from the Releases tab on GitHub.
 
 Unzip the download and drag AKAISDS to your applications folder. See the disclaimer section below for instructions about how to bypass Gatekeeper security.
 
-Or install with [Homebrew](https://brew.sh): `brew install --cask martincurkovic/akaisds/akaisds`. Gatekeeper still applies on first launch.
+Or install with [Homebrew](https://brew.sh): `brew install --cask martincurkovic/tap/akaisds`. Gatekeeper still applies on first launch.
 
 macOS 15+ support only for now. There are plans to backport AKAISDS to earlier macOS versions, but that work hasn't been started yet. 
 
