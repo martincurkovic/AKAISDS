@@ -68,7 +68,7 @@ class TimeStretchDialog(QDialog):
     computer's speakers - nothing is sent anywhere - and a changed knob restarts a preview that is already playing, once it has
     settled. `samples` is the (left) channel to preview, played shifted by `pitch_shift_semitones` (the sample's Tune / Root Note, so it sounds as it will on the sampler); the caller runs the edit from `edit()`."""
 
-    def __init__(self, parent, sample_name, samples, framerate, pitch_shift_semitones=0, allow_new_sample=False):
+    def __init__(self, parent, sample_name, samples, framerate, pitch_shift_semitones=0, allow_new_sample=False, applies_to_working_copy=False, send_name="Send to Sampler"):
         super().__init__(parent)
         self.setWindowTitle(f'Time Stretch / Pitch Shift - "{sample_name}"')
         self.setModal(True)
@@ -78,6 +78,9 @@ class TimeStretchDialog(QDialog):
         self._pitch_shift_semitones = pitch_shift_semitones
         # "Send as New Sample" (the caller makes a new sample instead of replacing the original) - only where the caller can
         self._allow_new_sample = allow_new_sample
+        # the Program Editor: OK edits the sample HERE (its working copy); nothing reaches the sampler yet
+        self._applies_to_working_copy = applies_to_working_copy
+        self._send_name = send_name
         self._as_new = False
         self._preview_player = SlicePreviewPlayer(self)
 
@@ -213,7 +216,12 @@ class TimeStretchDialog(QDialog):
         self._semitones_column.setVisible(pitch)
         self._cents_column.setVisible(pitch)
         kept = "The length is kept." if pitch else "The pitch is kept."
-        if self._allow_new_sample:
+        if self._applies_to_working_copy:
+            text = f"{kept} OK applies it to the sample here; nothing is sent until you click {self._send_name}."
+            if self._allow_new_sample:
+                text += " Send as New Sample sends it now and keeps the original."
+            self.warning_label.setText(text)
+        elif self._allow_new_sample:
             self.warning_label.setText(f"{kept} OK overwrites the sample and cannot be undone; Send as New Sample keeps the original.")
         else:
             self.warning_label.setText(f"{kept} This changes the sample and cannot be undone.")

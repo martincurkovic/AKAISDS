@@ -485,6 +485,12 @@ class YamahaProgramEditorWindow(QMainWindow):
         self._import_audio_action.triggered.connect(lambda: self.samples_tab.import_audio())
         self.menuBar().addMenu("&File").addAction(self._import_audio_action)
 
+        # the same actions as the Edit Sample card's buttons and the sample list's right-click menu (one QAction each, owned by the Samples
+        # tab); they only work while the Samples tab is showing, and not while something long runs (see _apply_lock)
+        self._sample_menu = self.menuBar().addMenu("&Sample")
+        for action in self.samples_tab.sample_menu_actions():
+            self._sample_menu.addAction(action)
+
         hardware = self.menuBar().addMenu("&Hardware")
         self._refresh_action = QAction("Refresh from Hardware", self)
         self._refresh_action.setShortcut("Ctrl+R")
@@ -1062,6 +1068,7 @@ class YamahaProgramEditorWindow(QMainWindow):
                 focused.clearFocus()
         for action in (self._restore_action, self._unchanged_action, self._refresh_action, self._import_audio_action, *self._tab_actions):
             action.setEnabled(not busy)
+        self._sample_menu.setEnabled(not busy)
         self.refresh_button.setEnabled(not busy)
         for widget in (
             self.program_list, self.assigned_list, self.show_empty_check, self.samples_tab.sample_list_widget, self.main_tabs.tabBar(),
@@ -1202,6 +1209,18 @@ class YamahaProgramEditorWindow(QMainWindow):
             self.status_bar.showMessage("Still writing to the sampler - try closing again in a moment", 5000)
             event.ignore()
             return
+        if self.samples_tab.has_unsent_edits():
+            names = ", ".join(repr(n) for n in self.samples_tab.unsent_names())
+            answer = QMessageBox.question(
+                self,
+                "Unsent edits",
+                f"These samples have edits that are not on the unit: {names}.\n\nClose anyway and lose them?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                event.ignore()
+                return
         _log("closed")
         self._writer.close()
         self._scan_generation += 1

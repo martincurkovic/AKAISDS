@@ -316,20 +316,20 @@ SAMPLE_LOOP_HOLD_KNOB = (
 )
 
 TRIM_SAMPLE_BUTTON = (
-    "Cut the sample down to the current Start/End markers, "
-    "overwriting it on the sampler. Cannot be undone."
+    "Cut the sample down to the current Start/End markers. "
+    "Stays here until you click Send to Sampler."
 )
 REVERSE_SAMPLE_BUTTON = (
-    "Play the sample backwards, overwriting it on the sampler. Cannot be undone."
+    "Play the sample backwards. Stays here until you click Send to Sampler."
 )
 FADE_SAMPLE_BUTTON = (
     "Linearly fade in from frame 0 up to the Start marker, and "
-    "fade out from the End marker to the last frame, overwriting "
-    "the sample on the sampler. Cannot be undone."
+    "fade out from the End marker to the last frame. "
+    "Stays here until you click Send to Sampler."
 )
 NORMALIZE_SAMPLE_BUTTON = (
     "Gain up the whole sample until its loudest point hits maximum "
-    "amplitude, overwriting it on the sampler. Cannot be undone."
+    "amplitude. Stays here until you click Send to Sampler."
 )
 SEND_AS_NEW_SAMPLE_BUTTON = (
     "Send the result to the sampler as a NEW sample (you choose its name next) "
@@ -342,7 +342,7 @@ LOAD_AUDIO_ACTION = (
 TIME_STRETCH_BUTTON = (
     "Time Stretch makes the sample longer or shorter without changing its pitch; "
     "Pitch Shift changes the pitch without changing its length "
-    "(Akai-style granular, with a preview)."
+    "(Akai-style granular, with a preview). Stays here until you click Send to Sampler."
 )
 TIME_STRETCH_MODE = "Time Stretch keeps the pitch and changes the length. Pitch Shift keeps the length and changes the pitch."
 TIME_STRETCH_LENGTH = "The new length as a percentage of the old one: 200% is twice as long, 50% half. Double-click to reset."
@@ -357,8 +357,8 @@ TIME_STRETCH_PREVIEW_BUTTON = (
     "Play the result through your computer's speakers - doesn't write anything to the sampler."
 )
 FILTER_SAMPLE_BUTTON = (
-    "Apply a highpass or lowpass filter to the whole sample, "
-    "overwriting it on the sampler. Cannot be undone."
+    "Apply a highpass or lowpass filter to the whole sample (with a preview). "
+    "Stays here until you click Send to Sampler."
 )
 DUPLICATE_SAMPLE_BUTTON = (
     "Send this sample's already-loaded audio to the sampler under "
@@ -372,10 +372,16 @@ EXTERNAL_EDIT_BUTTON = (
     "Open this sample's audio in your audio editor (choose it in Settings). "
     "Save the file there, then click Send Edited Audio."
 )
-EXTERNAL_SEND_BUTTON = (
-    "Replace this sample on the sampler with the version you saved in the editor. "
-    "Enabled once the file has been saved."
+EXTERNAL_LOAD_BUTTON = (
+    "Bring the version you saved in the editor into the app. It is not sent to the sampler "
+    "until you click Send to Sampler. Enabled once the file has been saved."
 )
+STAGE_SEND_BUTTON = (
+    "Replace this sample on the sampler with the edited version shown here. "
+    "A copy of the original is saved first."
+)
+STAGE_UNDO_BUTTON = "Undo the last edit to this sample. The first one goes back to what is on the sampler."
+STAGE_REVERT_BUTTON = "Throw away the edits that have not been sent and go back to what is on the sampler."
 EXTERNAL_EDITOR_SETTING = (
     "The audio editor that Edit in External App opens samples in.\n"
     "Leave empty to use your system's default app for WAV files."
@@ -621,7 +627,7 @@ S1000_PAN_LFO_DELAY = "How long after a note starts before the Pan LFO fades in.
 
 
 # --- Yamaha A4000/A5000 Samples tab: edits make a NEW sample (the unit can't delete or overwrite one over MIDI) -----------------------------
-_YAMAHA_COPY_NOTE = " Makes a new sample - the original is not changed. Needs the audio loaded (double-click the waveform)."
+_YAMAHA_COPY_NOTE = " Stays here until you click Send as New Sample. Needs the audio loaded (double-click the waveform)."
 YAMAHA_TRIM_SAMPLE_BUTTON = "Trim the sample down to the Start/End markers." + _YAMAHA_COPY_NOTE
 YAMAHA_REVERSE_SAMPLE_BUTTON = "Reverse the sample so it plays backwards." + _YAMAHA_COPY_NOTE
 YAMAHA_FADE_SAMPLE_BUTTON = "Fade in up to the Start marker and out from the End marker." + _YAMAHA_COPY_NOTE
@@ -640,7 +646,10 @@ YAMAHA_EXTERNAL_EDIT_BUTTON = (
     "Open this sample's audio in your audio editor (choose it in Settings). "
     "Save the file there, then click Send Edited Audio."
 )
-YAMAHA_EXTERNAL_SEND_BUTTON = (
-    "Send the version you saved in the editor to the sampler as a NEW sample "
-    "(the original is not changed). Enabled once the file has been saved."
+YAMAHA_EXTERNAL_LOAD_BUTTON = (
+    "Bring the version you saved in the editor into the app. It is not on the unit until you click Send as New Sample. "
+    "Enabled once the file has been saved."
+)
+YAMAHA_STAGE_SEND_BUTTON = (
+    "Send the edited version to the unit as a NEW sample. The A4000 can't overwrite a sample over MIDI, so the original stays."
 )

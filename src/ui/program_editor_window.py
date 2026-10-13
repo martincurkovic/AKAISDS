@@ -1,4 +1,5 @@
 import functools
+from dataclasses import dataclass, field
 import math
 import os
 import random
@@ -429,11 +430,38 @@ class _ModMatrixGrid(QWidget):
         super().paintEvent(event)
 
 
+_MARKER_KEYS = ("start", "loop_start", "loop_end", "end")
+#: how many earlier working copies Undo can step back through (each is a whole copy of the audio)
+_UNDO_LIMIT = 10
+
+
+@dataclass
+class _StagedEdit:
+    """A sample's WORKING COPY: audio edited in this app (or loaded back from an external editor) that has NOT been sent to the
+    sampler. `original_*` is what the sampler holds (its audio and header markers when the edits began): Revert goes back to it, and
+    it is what gets backed up before a send. `markers` are the working copy's own - marker and loop edits stay local while a sample
+    is staged and go to the sampler with the audio."""
+
+    samples: list
+    markers: dict
+    original_samples: list
+    original_framerate: int
+    original_markers: dict
+    original_frame_count: int
+    #: earlier working copies, oldest first: (samples, markers) before each change, for Undo (see _UNDO_LIMIT)
+    history: list = field(default_factory=list)
+
+    @property
+    def framerate(self):
+        # edits never change the rate: an edited file is resampled back to it on load
+        return self.original_framerate
+
+
 # the Edit Sample card's rows: (label, what the label's tooltip says, control keys in order)
 _EDIT_SAMPLE_ROWS = (
     (
         "Edit audio",
-        "These overwrite the sample's audio on the sampler and can't be undone.",
+        "These change the sample here. Nothing reaches the sampler until you click Send to Sampler.",
         ("trim", "reverse", "fade", "normalize", "filter", "stretch"),
     ),
     (
@@ -444,14 +472,15 @@ _EDIT_SAMPLE_ROWS = (
     (
         "External app",
         "Open the sample in your own audio editor, then send the saved version back.",
-        ("external_edit", "external_send"),
+        ("external_edit", "external_load"),
     ),
 )
 # the Sample menu / right-click menu, in order: groups are separated
 _SAMPLE_MENU_GROUPS = (
     ("trim", "reverse", "fade", "normalize", "filter", "stretch"),
     ("duplicate", "slice"),
-    ("external_edit", "external_send"),
+    ("external_edit", "external_load"),
+    ("stage_undo", "stage_send", "stage_new", "stage_revert"),
     ("detect",),
 )
 
@@ -4527,10 +4556,13 @@ class ProgramEditorWindow(QMainWindow):
         # the audio keeps its cache entry (by index); a retained copy under
         # the old name must not attach to some other sample later
         self._forget_retained_audio(current_name)
+        if current_name in self._staged_edits:
+            self._staged_edits[new_name] = self._staged_edits.pop(current_name)
         entry = self._sample_row_labels.get(sample_index)
         if entry is not None:
             _generation, name_label, _duration_label = entry
             name_label.setText(new_name)
+        self._update_staged_row_labels()
         self._update_zone_sample_combo_names(sample_index, new_name)
         self._write_knob_value(
             "SHNAME", "sample", new_name, keygroup_index=0, index=sample_index
@@ -4563,6 +4595,7 @@ class ProgramEditorWindow(QMainWindow):
         )
         if answer != QMessageBox.StandardButton.Yes:
             return
+        self._discard_staged(sample_name, restore_entry=False)
         self.status_bar.showMessage(f'Deleting sample "{sample_name}"…')
         self._worker.submit_delete_sample(sample_index)
 
@@ -4729,7 +4762,9 @@ class ProgramEditorWindow(QMainWindow):
             # keep it across the reloads below (see _retain_sample_audio)
             self._retain_sample_audio(new_name, send_samples, entry["framerate"])
             self._retain_sample_audio(
-                current_name, entry["samples"], entry["framerate"]
+                current_name,
+                self._sampler_audio(current_name, entry),
+                entry["framerate"],
             )
 
             # find the duplicate's index by name - nothing shifted
@@ -4916,7 +4951,13 @@ class ProgramEditorWindow(QMainWindow):
         # the export reloads the sample list (wiping the cache), so keep the
         # source's audio across it; dropped again below if nothing was exported
         if resident_source:
-            self._retain_sample_audio(sample_name, samples, framerate)
+            self._retain_sample_audio(
+                sample_name,
+                self._staged_edits[sample_name].original_samples
+                if sample_name in self._staged_edits
+                else samples,
+                framerate,
+            )
         dialog.exec()
         if resident_source and not dialog.export_succeeded:
             self._forget_retained_audio(sample_name)
@@ -5669,6 +5710,20 @@ class ProgramEditorWindow(QMainWindow):
             event.ignore()
             return
 
+        if self._staged_edits:
+            names = ", ".join(f'"{name}"' for name in self._staged_edits)
+            answer = QMessageBox.question(
+                self,
+                "Unsent edits",
+                f"These samples have edits that are not on the sampler: {names}.\n\n"
+                "Close anyway and lose them?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                event.ignore()
+                return
+
         # a "Hold" preview loop never stops on its own (see
         # _on_waveform_preview_requested) - closing the window must not
         # leave it sounding forever in the background
@@ -6048,6 +6103,8 @@ class ProgramEditorWindow(QMainWindow):
         # button AND a QAction - see _make_sample_edit_control
         self._sample_edit_controls = {}
         self._sample_control_wanted = {}
+        # name -> _StagedEdit: samples with edits that are not on the sampler yet
+        self._staged_edits = {}
         # same row-widget-free QListWidget + labeled column shape as the
         # Programs tab's own program_list/keygroup_list (see __init__) -
         # deliberately not sharing that code since this list's rows are
@@ -6463,12 +6520,41 @@ class ProgramEditorWindow(QMainWindow):
             tt.EXTERNAL_EDIT_BUTTON,
             self._edit_in_external_app,
         )
-        self.external_send_button = make(
-            "external_send",
-            "Send Edited Audio",
-            tt.EXTERNAL_SEND_BUTTON,
-            self._confirm_send_edited_audio,
+        self.external_load_button = make(
+            "external_load",
+            "Load Edited Audio",
+            tt.EXTERNAL_LOAD_BUTTON,
+            self._load_edited_audio,
         )
+        # The working copy: shown only while the selected sample has edits that
+        # are not on the sampler (see _StagedEdit)
+        self.undo_edits_button = make(
+            "stage_undo", "Undo", tt.STAGE_UNDO_BUTTON, self._undo_staged
+        )
+        self.send_edits_button = make(
+            "stage_send", "Send to Sampler", tt.STAGE_SEND_BUTTON, self._send_staged_to_sampler
+        )
+        self.send_edits_as_new_button = make(
+            "stage_new",
+            "Send as New Sample\u2026",
+            tt.SEND_AS_NEW_SAMPLE_BUTTON,
+            self._send_staged_as_new_sample,
+        )
+        self.revert_edits_button = make(
+            "stage_revert", "Revert", tt.STAGE_REVERT_BUTTON, self._revert_staged
+        )
+        self._staged_banner = QWidget()
+        self._staged_banner.setObjectName("transparentContainer")
+        banner_row = QHBoxLayout(self._staged_banner)
+        banner_row.setContentsMargins(0, 0, 0, 0)
+        banner_row.setSpacing(8)
+        banner_row.addWidget(QLabel("<b>Edited \u2013 not on the sampler yet</b>"))
+        banner_row.addWidget(self.undo_edits_button)
+        banner_row.addWidget(self.send_edits_button)
+        banner_row.addWidget(self.send_edits_as_new_button)
+        banner_row.addWidget(self.revert_edits_button)
+        banner_row.addStretch()
+        self._staged_banner.setVisible(False)
 
         # one labelled row per KIND of action, so what overwrites the sample
         # is in one place
@@ -6487,7 +6573,11 @@ class ProgramEditorWindow(QMainWindow):
             edit_sample_grid.addWidget(name_label, row, 0)
             edit_sample_grid.addLayout(buttons_row, row, 1)
         edit_sample_grid.setColumnStretch(1, 1)
-        edit_sample_card = self._build_section_card("Edit Sample", edit_sample_grid)
+        edit_sample_content = QVBoxLayout()
+        edit_sample_content.setSpacing(8)
+        edit_sample_content.addWidget(self._staged_banner)
+        edit_sample_content.addLayout(edit_sample_grid)
+        edit_sample_card = self._build_section_card("Edit Sample", edit_sample_content)
 
         # two section cards, same style as the Programs tab's own (see
         # _build_section_card) - one for the loop editor itself, one for
@@ -7055,6 +7145,7 @@ class ProgramEditorWindow(QMainWindow):
             for name, audio in self._retained_sample_audio.items()
             if name in samples
         }
+        self._prune_staged_edits(samples)
         self._sample_list_generation += 1
         generation = self._sample_list_generation
         self._sample_row_labels = {}
@@ -7081,6 +7172,7 @@ class ProgramEditorWindow(QMainWindow):
                 duration_label,
             )
         self.sample_list_widget.blockSignals(False)
+        self._update_staged_row_labels()
         # duration isn't in the name/list payload itself - fetch it
         # separately per sample (lightweight, 2 fields, not the full
         # 11-field sample_detail - see submit_sample_length's own comment)
@@ -7239,6 +7331,19 @@ class ProgramEditorWindow(QMainWindow):
             "sbandw": values["SBANDW"],
         }
         has_audio = self._attach_retained_audio(sample_index, entry)
+        staged = self._staged_edits.get(self._sample_name_at_row(sample_index))
+        if staged is not None:
+            # the sampler's header says what it holds; the working copy is what
+            # is shown and edited (the header's tune/root/loop type still apply)
+            self._apply_staged_to_entry(entry, staged)
+            frame_count, start, loop_start, loop_end, end = (
+                entry["frame_count"],
+                entry["start"],
+                entry["loop_start"],
+                entry["loop_end"],
+                entry["end"],
+            )
+            has_audio = True
         self._sample_waveform_cache[sample_index] = entry
         if sample_index == self.sample_list_widget.currentRow():
             self._set_marker_spinbox_range(frame_count)
@@ -7347,6 +7452,7 @@ class ProgramEditorWindow(QMainWindow):
         set_enabled("detect", enabled)
         self._sample_edit_ready = enabled
         self._refresh_external_edit_buttons()
+        self._refresh_staged_controls()
 
     def _make_sample_edit_control(self, key, text, tooltip, slot):
         # a sample action is a button (the Edit Sample card, or Root Note &
@@ -7456,7 +7562,7 @@ class ProgramEditorWindow(QMainWindow):
         name = self._sample_name_at_row(self.sample_list_widget.currentRow())
         self._set_sample_control_enabled("external_edit", ready)
         self._set_sample_control_enabled(
-            "external_send",
+            "external_load",
             ready and bool(name) and self._external_edit.is_ready(name),
         )
 
@@ -8479,20 +8585,7 @@ class ProgramEditorWindow(QMainWindow):
                 "Nothing to trim - Start/End already cover the whole sample"
             )
             return
-        sample_name = self._sample_name_at_row(sample_index)
-        answer = QMessageBox.question(
-            self,
-            "Trim Sample",
-            f'Trim "{sample_name}" down to the current Start/End markers '
-            f"({markers['start']}-{markers['end']} of {frame_count} frames)?\n\n"
-            "This overwrites the sample's audio on the sampler and cannot "
-            "be undone.",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.Yes,
-        )
-        if answer != QMessageBox.StandardButton.Yes:
-            return
-        self._perform_sample_edit(sample_index, sample_editing.trim_samples, "Trim")
+        self._apply_sample_edit(sample_index, sample_editing.trim_samples, "Trim")
 
     def _confirm_reverse_sample(self):
         sample_index = self.sample_list_widget.currentRow()
@@ -8502,19 +8595,7 @@ class ProgramEditorWindow(QMainWindow):
         if entry is None or len(entry["samples"]) <= 1:
             self.status_bar.showMessage("Nothing to reverse - sample is too short")
             return
-        sample_name = self._sample_name_at_row(sample_index)
-        answer = QMessageBox.question(
-            self,
-            "Reverse Sample",
-            f'Reverse "{sample_name}"\'s audio?\n\n'
-            "This overwrites the sample's audio on the sampler and cannot "
-            "be undone.",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.Yes,
-        )
-        if answer != QMessageBox.StandardButton.Yes:
-            return
-        self._perform_sample_edit(
+        self._apply_sample_edit(
             sample_index, sample_editing.reverse_samples, "Reverse"
         )
 
@@ -8534,20 +8615,7 @@ class ProgramEditorWindow(QMainWindow):
                 "Nothing to fade - Start/End already cover the whole sample"
             )
             return
-        sample_name = self._sample_name_at_row(sample_index)
-        answer = QMessageBox.question(
-            self,
-            "Fade Sample",
-            f'Fade in "{sample_name}" from frame 0 up to Start ({markers["start"]}), '
-            f"and fade out from End ({markers['end']}) to the last frame?\n\n"
-            "This overwrites the sample's audio on the sampler and cannot "
-            "be undone.",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.Yes,
-        )
-        if answer != QMessageBox.StandardButton.Yes:
-            return
-        self._perform_sample_edit(
+        self._apply_sample_edit(
             sample_index, sample_editing.fade_in_out_samples, "Fade In/Out"
         )
 
@@ -8570,20 +8638,7 @@ class ProgramEditorWindow(QMainWindow):
         if peak >= sample_editing._MAX_AMPLITUDE:
             self.status_bar.showMessage("Sample is already normalised")
             return
-        sample_name = self._sample_name_at_row(sample_index)
-        answer = QMessageBox.question(
-            self,
-            "Normalise Sample",
-            f'Gain up "{sample_name}" so its loudest point hits maximum '
-            "amplitude?\n\n"
-            "This overwrites the sample's audio on the sampler and cannot "
-            "be undone.",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.Yes,
-        )
-        if answer != QMessageBox.StandardButton.Yes:
-            return
-        self._perform_sample_edit(
+        self._apply_sample_edit(
             sample_index, sample_editing.normalize_samples, "Normalise"
         )
 
@@ -8616,6 +8671,7 @@ class ProgramEditorWindow(QMainWindow):
             entry["framerate"],
             pitch_shift_semitones=self._preview_pitch_shift_semitones(entry),
             allow_new_sample=self._can_send_edit_as_new_sample(),
+            applies_to_working_copy=True,
         )
         if not dialog.exec():
             return
@@ -8641,20 +8697,7 @@ class ProgramEditorWindow(QMainWindow):
                 sample_index, entry, transform, "Filter", " FILT"
             )
             return
-
-        answer = QMessageBox.question(
-            self,
-            "Filter Sample",
-            f'Send the filtered audio for "{sample_name}" to the sampler '
-            "now?\n\n"
-            "This overwrites the sample's audio on the sampler and cannot "
-            "be undone.",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.Yes,
-        )
-        if answer != QMessageBox.StandardButton.Yes:
-            return
-        self._perform_sample_edit(sample_index, transform, "Filter")
+        self._apply_sample_edit(sample_index, transform, "Filter")
 
     def _send_edit_as_new_sample(self, sample_index, entry, transform, label, suffix):
         # "Send as New Sample" in the Filter and Stretch / Pitch dialogs: the
@@ -8726,11 +8769,13 @@ class ProgramEditorWindow(QMainWindow):
                 current_name,
                 new_name,
                 samples=new_samples,
-                markers=dict(
-                    zip(("start", "loop_start", "loop_end", "end"), new_markers)
-                ),
+                markers=dict(zip(_MARKER_KEYS, new_markers)),
                 label=label,
             )
+            if new_name in self._sample_list:
+                # the result now exists as its own sample: the original goes back
+                # to what the sampler holds
+                self._discard_staged(current_name, restore_entry=True)
         finally:
             self._set_hardware_busy_ui(False)
             self.waveform_view.set_loading(False)
@@ -8758,6 +8803,7 @@ class ProgramEditorWindow(QMainWindow):
             entry["framerate"],
             pitch_shift_semitones=self._preview_pitch_shift_semitones(entry),
             allow_new_sample=self._can_send_edit_as_new_sample(),
+            applies_to_working_copy=True,
         )
         if not dialog.exec():
             return
@@ -8772,24 +8818,14 @@ class ProgramEditorWindow(QMainWindow):
                 time_stretch.EDITS[kind][1],
             )
             return
-        answer = QMessageBox.question(
-            self,
-            label,
-            f'Send "{sample_name}", {dialog.summary()}, to the sampler now?\n\n'
-            "This overwrites the sample's audio on the sampler and cannot "
-            "be undone.",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.Yes,
-        )
-        if answer != QMessageBox.StandardButton.Yes:
-            return
         debug_log.get_logger().info(
             f"TimeStretch: {sample_name!r} {kind} {options}, grain "
             f"{dialog.grain_ms()} ms ({len(entry['samples'])} frames at "
             f"{entry['framerate']} Hz)"
         )
-        transform = time_stretch.transform_for(kind, **options)
-        self._perform_sample_edit(sample_index, transform, label)
+        self._apply_sample_edit(
+            sample_index, time_stretch.transform_for(kind, **options), label
+        )
 
     def _edit_in_external_app(self):
         sample_index = self.sample_list_widget.currentRow()
@@ -8819,7 +8855,10 @@ class ProgramEditorWindow(QMainWindow):
         )
         self._refresh_external_edit_buttons()
 
-    def _confirm_send_edited_audio(self):
+    def _load_edited_audio(self):
+        # The editor's saved file becomes the sample's WORKING COPY (see
+        # _StagedEdit): shown in the waveform, editable here, and sent to the
+        # sampler only by Send to Sampler / Send as New Sample.
         sample_index = self.sample_list_widget.currentRow()
         entry = self._sample_waveform_cache.get(sample_index)
         if (
@@ -8854,15 +8893,148 @@ class ProgramEditorWindow(QMainWindow):
             m["end"],
         )
         logger.info(
-            f"ExternalEdit: {name!r} edited: {old_frames} -> {len(new_samples)} frames, "
+            f"ExternalEdit: {name!r} loaded: {old_frames} -> {len(new_samples)} frames, "
             f"{len(channels)} ch at {source_rate} Hz (sampler rate {entry['framerate']}), "
             f"markers {tuple(m.values())} -> {new_markers}"
         )
+        self._stage_working_copy(
+            sample_index, new_samples, dict(zip(_MARKER_KEYS, new_markers))
+        )
+        self._external_edit.mark_sent(name)  # Load waits for the next save
+        self.status_bar.showMessage(
+            f'Loaded the edited audio for "{name}" - not on the sampler yet'
+        )
+
+    # -- the working copy (unsent edits) ----------------------------------------------------------------------
+
+    def _apply_staged_to_entry(self, entry, staged):
+        entry["samples"] = staged.samples
+        entry["framerate"] = staged.framerate
+        entry["frame_count"] = len(staged.samples)
+        entry.update(staged.markers)
+
+    def _show_entry_audio(self, entry):
+        # the waveform + marker spinboxes for a cache entry whose audio changed
+        self._set_marker_spinbox_range(entry["frame_count"])
+        self.waveform_view.set_waveform(
+            entry["samples"],
+            entry["start"],
+            entry["loop_start"],
+            entry["loop_end"],
+            entry["end"],
+        )
+
+    def _stage_working_copy(self, sample_index, samples, markers):
+        # Put `samples` (with `markers`: start/loop_start/loop_end/end) on the
+        # selected sample as its working copy. The first time, remember what the
+        # sampler holds. Nothing is sent.
+        name = self._sample_name_at_row(sample_index)
+        entry = self._sample_waveform_cache.get(sample_index)
+        if not name or entry is None or entry["samples"] is None:
+            return False
+        staged = self._staged_edits.get(name)
+        if staged is None:
+            staged = _StagedEdit(
+                samples=samples,
+                markers=dict(markers),
+                original_samples=entry["samples"],
+                original_framerate=entry["framerate"],
+                original_markers={key: entry[key] for key in _MARKER_KEYS},
+                original_frame_count=entry["frame_count"],
+            )
+            self._staged_edits[name] = staged
+        else:
+            staged.history.append((staged.samples, dict(staged.markers)))
+            del staged.history[:-_UNDO_LIMIT]
+        staged.samples = samples
+        staged.markers = dict(markers)
+        self._apply_staged_to_entry(entry, staged)
+        if sample_index == self.sample_list_widget.currentRow():
+            self._show_entry_audio(entry)
+        self._staged_changed()
+        return True
+
+    def _staged_changed(self):
+        self._update_staged_row_labels()
+        self._refresh_staged_controls()
+        self._update_sample_actions_enabled()
+
+    def _sampler_audio(self, name, entry):
+        # the audio the SAMPLER holds for `name`: the working copy's original
+        # while it has unsent edits, else the cache entry's
+        staged = self._staged_edits.get(name)
+        return staged.original_samples if staged is not None else entry["samples"]
+
+    def _discard_staged(self, name, restore_entry):
+        # Forget `name`'s working copy. restore_entry: also put the sampler's
+        # version back on its cache entry (Revert; a send that left the original
+        # alone) - False when the working copy IS what the sampler now holds.
+        staged = self._staged_edits.pop(name, None)
+        if staged is None:
+            return None
+        if restore_entry and name in self._sample_list:
+            index = self._sample_list.index(name)
+            entry = self._sample_waveform_cache.get(index)
+            if entry is not None:
+                entry["samples"] = staged.original_samples
+                entry["framerate"] = staged.original_framerate
+                entry["frame_count"] = staged.original_frame_count
+                entry.update(staged.original_markers)
+                if index == self.sample_list_widget.currentRow():
+                    self._show_entry_audio(entry)
+        self._staged_changed()
+        return staged
+
+    def _prune_staged_edits(self, names):
+        # a sample that is no longer on the sampler (deleted or renamed on the
+        # front panel) takes its unsent edits with it - but never while this
+        # window is mid-operation: a replace deletes the original and renames
+        # its copy back, so the name is missing from the list for a moment
+        if getattr(self, "_hardware_busy_ui", False):
+            return
+        gone = [name for name in self._staged_edits if name not in names]
+        for name in gone:
+            del self._staged_edits[name]
+        if gone:
+            self.status_bar.showMessage(
+                "Dropped the unsent edits of "
+                + ", ".join(f'"{name}"' for name in gone)
+                + " - no longer on the sampler"
+            )
+
+    def _update_staged_row_labels(self):
+        for row, (_generation, name_label, _duration) in self._sample_row_labels.items():
+            name = self._sample_name_at_row(row)
+            edited = name in self._staged_edits
+            name_label.setText(f"{name}  ●" if edited else name)
+            name_label.setToolTip("Edited - not on the sampler yet" if edited else "")
+
+    def _refresh_staged_controls(self):
+        if not hasattr(self, "_staged_banner"):
+            return  # still building
+        name = self._sample_name_at_row(self.sample_list_widget.currentRow())
+        staged = name in self._staged_edits
+        self._staged_banner.setVisible(staged)
+        ready = staged and self._sample_edit_ready
+        self._set_sample_control_enabled("stage_undo", ready)
+        self._set_sample_control_enabled("stage_send", ready)
+        self._set_sample_control_enabled(
+            "stage_new", ready and self._can_send_edit_as_new_sample()
+        )
+        self._set_sample_control_enabled("stage_revert", ready)
+
+    def _send_staged_to_sampler(self):
+        sample_index = self.sample_list_widget.currentRow()
+        entry = self._sample_waveform_cache.get(sample_index)
+        name = self._sample_name_at_row(sample_index)
+        staged = self._staged_edits.get(name)
+        if staged is None or entry is None or entry["samples"] is None:
+            return
         answer = QMessageBox.question(
             self,
-            "Send Edited Audio",
+            "Send to Sampler",
             f'Replace "{name}" on the sampler with the edited audio '
-            f"({len(new_samples):,} frames, was {old_frames:,})?\n\n"
+            f"({len(staged.samples):,} frames, was {len(staged.original_samples):,})?\n\n"
             "This overwrites the sample's audio and cannot be undone. "
             "A copy of the original is saved first.",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
@@ -8870,23 +9042,119 @@ class ProgramEditorWindow(QMainWindow):
         )
         if answer != QMessageBox.StandardButton.Yes:
             return
+        logger = debug_log.get_logger()
         try:
             backup = external_edit.backup_original(
-                name, entry["samples"], entry["framerate"]
+                name, staged.original_samples, staged.original_framerate
             )
         except OSError:
-            logger.error("ExternalEdit: couldn't save the backup", exc_info=True)
+            logger.error("Staged edit: couldn't save the backup", exc_info=True)
             self.status_bar.showMessage(
                 "Couldn't save a copy of the original - nothing was sent"
             )
             return
-        logger.info(f"ExternalEdit: original of {name!r} saved to {backup}")
+        logger.info(f"Staged edit: original of {name!r} saved to {backup}")
+        samples = staged.samples
+        markers = self.waveform_view.markers_with_loop_in_range()
+        new_markers = tuple(markers[key] for key in _MARKER_KEYS)
 
-        def _edited(*_markers):
-            return (new_samples, *new_markers)
+        def _working_copy(*_markers):
+            return (samples, *new_markers)
 
-        if self._perform_sample_edit(sample_index, _edited, "Replace"):
-            self._external_edit.mark_sent(name)
+        # _perform_sample_edit discards the working copy once it is on the sampler
+        self._perform_sample_edit(sample_index, _working_copy, "Send")
+
+    def _send_staged_as_new_sample(self):
+        sample_index = self.sample_list_widget.currentRow()
+        entry = self._sample_waveform_cache.get(sample_index)
+        name = self._sample_name_at_row(sample_index)
+        staged = self._staged_edits.get(name)
+        if staged is None or entry is None or entry["samples"] is None:
+            return
+        samples = staged.samples
+
+        def _working_copy(_samples, start, loop_start, loop_end, end):
+            return samples, start, loop_start, loop_end, end
+
+        self._send_edit_as_new_sample(
+            sample_index, entry, _working_copy, "Send", " EDIT"
+        )
+
+    def _undo_staged(self):
+        sample_index = self.sample_list_widget.currentRow()
+        name = self._sample_name_at_row(sample_index)
+        staged = self._staged_edits.get(name)
+        entry = self._sample_waveform_cache.get(sample_index)
+        if staged is None or entry is None:
+            return
+        if not staged.history:
+            # nothing before the first change but the sampler's own version
+            self._discard_staged(name, restore_entry=True)
+            self.status_bar.showMessage(f'"{name}" is back to the sampler version')
+            return
+        staged.samples, staged.markers = staged.history.pop()
+        self._apply_staged_to_entry(entry, staged)
+        self._show_entry_audio(entry)
+        self._staged_changed()
+        self.status_bar.showMessage(f'Undid the last edit to "{name}"')
+
+    def _apply_sample_edit(self, sample_index, transform, label):
+        # Trim / Reverse / Fade / Normalise / Filter / Stretch-Pitch: transform the
+        # sample's working copy (or, the first time, the sampler's audio) and
+        # keep the result HERE. Nothing is sent: that is Send to Sampler /
+        # Send as New Sample. Undo and Revert make a mistake cheap, so there is
+        # no confirmation. `transform` is the core/sample_editing shape:
+        # (samples, start, loop_start, loop_end, end) -> (samples, start, ...).
+        entry = self._sample_waveform_cache.get(sample_index)
+        if entry is None or entry["samples"] is None:
+            return False
+        name = self._sample_name_at_row(sample_index)
+        # not .markers(): see _perform_sample_edit for why the loop is clamped
+        markers = self.waveform_view.markers_with_loop_in_range()
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            new_samples, *new_markers = transform(
+                entry["samples"],
+                markers["start"],
+                markers["loop_start"],
+                markers["loop_end"],
+                markers["end"],
+            )
+        except Exception:
+            transform_name = getattr(transform, "__name__", repr(transform))
+            debug_log.get_logger().error(
+                f"_apply_sample_edit: {transform_name} raised", exc_info=True
+            )
+            self.status_bar.showMessage(
+                f"{label} failed - unexpected error, see "
+                f"{debug_log.LOG_PATH} for details"
+            )
+            return False
+        finally:
+            QApplication.restoreOverrideCursor()
+        self._stage_working_copy(
+            sample_index, new_samples, dict(zip(_MARKER_KEYS, new_markers))
+        )
+        self.status_bar.showMessage(
+            f'{label} applied to "{name}" - not on the sampler yet'
+        )
+        return True
+
+    def _revert_staged(self):
+        name = self._sample_name_at_row(self.sample_list_widget.currentRow())
+        if name not in self._staged_edits:
+            return
+        answer = QMessageBox.question(
+            self,
+            "Revert",
+            f'Discard the unsent edits to "{name}" and go back to what is on the sampler?',
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        self._discard_staged(name, restore_entry=True)
+        self.status_bar.showMessage(f'"{name}" is back to the sampler version')
 
     def _perform_sample_edit(self, sample_index, transform, action_label):
         # returns True once the edited audio is on the sampler (or, in demo
@@ -8970,7 +9238,7 @@ class ProgramEditorWindow(QMainWindow):
 
         try:
             if demo_mode:
-                return self._perform_sample_edit_demo(
+                done = self._perform_sample_edit_demo(
                     sample_index,
                     entry,
                     new_samples,
@@ -8982,7 +9250,7 @@ class ProgramEditorWindow(QMainWindow):
                     action_label,
                 )
             else:
-                return self._perform_sample_edit_real(
+                done = self._perform_sample_edit_real(
                     sample_index,
                     sampler_controller,
                     original_name,
@@ -8995,6 +9263,10 @@ class ProgramEditorWindow(QMainWindow):
                     new_end,
                     action_label,
                 )
+            if done:
+                # what the sampler holds now IS the working copy: nothing left unsent
+                self._discard_staged(original_name, restore_entry=False)
+            return done
         finally:
             self._set_hardware_busy_ui(False)
             self.waveform_view.set_loading(False)
@@ -9368,6 +9640,14 @@ class ProgramEditorWindow(QMainWindow):
         # (shouldn't normally happen, since a marker can't be edited
         # before a header/cache entry exists), in which case every field
         # is written to be safe rather than silently skipping one.
+        staged = self._staged_edits.get(self._sample_name_at_row(sample_index))
+        if staged is not None:
+            # a sample with unsent edits has audio the sampler does not: writing
+            # its markers now would put values for a different buffer on the
+            # live sample. They are kept here and go out with the audio.
+            staged.markers = dict(new_markers)
+            return
+
         def _changed(name):
             return old_markers is None or new_markers[name] != old_markers[name]
 

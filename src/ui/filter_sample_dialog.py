@@ -111,7 +111,7 @@ class FilterSampleDialog(QDialog):
     doing underneath this modal dialog.
     """
 
-    def __init__(self, parent, sample_name, samples, framerate, pitch_shift_semitones=0, allow_new_sample=False):
+    def __init__(self, parent, sample_name, samples, framerate, pitch_shift_semitones=0, allow_new_sample=False, applies_to_working_copy=False, send_name="Send to Sampler"):
         super().__init__(parent)
         self.setWindowTitle(f'Filter Sample - "{sample_name}"')
         self.setModal(True)
@@ -182,13 +182,22 @@ class FilterSampleDialog(QDialog):
         self.preview_button.setToolTip(tooltips.FILTER_PREVIEW_BUTTON)
         self.preview_button.clicked.connect(self._preview)
 
-        warning_label = QLabel(
-            "OK overwrites the sample's audio on the sampler and cannot be "
-            "undone; Send as New Sample keeps the original."
-            if allow_new_sample
-            else "This overwrites the sample's audio on the sampler and cannot "
-            "be undone."
-        )
+        if applies_to_working_copy:
+            # the Program Editor: OK edits the sample HERE (its working copy); nothing reaches the sampler yet
+            warning = (
+                "OK applies the filter to the sample here. Nothing is sent until "
+                f"you click {send_name}."
+            )
+            if allow_new_sample:
+                warning += " Send as New Sample sends the result now and keeps the original."
+        elif allow_new_sample:
+            warning = (
+                "OK overwrites the sample's audio on the sampler and cannot be "
+                "undone; Send as New Sample keeps the original."
+            )
+        else:
+            warning = "This overwrites the sample's audio on the sampler and cannot be undone."
+        warning_label = QLabel(warning)
         warning_label.setWordWrap(True)
 
         self._button_box = QDialogButtonBox(
