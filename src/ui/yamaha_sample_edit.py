@@ -93,6 +93,7 @@ class YamahaSampleEditor(QObject):
         self._external = ExternalEditTracker(self)
         self._external.changed.connect(tab.update_edit_buttons)
         self._sending_name = None  # the sample whose working copy is going out as a new sample
+        self._auto_load_scheduled = False  # an automatic Load Edited Audio is about to run (see maybe_auto_load)
 
     # -- what the edits act on ------------------------------------------------------------------------------
 
@@ -304,8 +305,24 @@ class YamahaSampleEditor(QObject):
         self._tab._external_waiting[name] = app_name or "your default app"
         self._tab.update_edit_buttons()
 
-    def load_edited(self):
+    def maybe_auto_load(self, name):
+        """Settings > "Load automatically when the file is saved": once the saved file has stopped changing, load it without the click.
+        Called whenever the controls refresh; only the SHOWN sample is loaded (a later refresh looks again after a selection)."""
+        if self._auto_load_scheduled or not self._external.is_stable(name) or not app_config.get_saved_external_auto_load():
+            return
+        self._auto_load_scheduled = True
+        QTimer.singleShot(0, lambda: self._auto_load(name))
+
+    def _auto_load(self, name):
+        self._auto_load_scheduled = False
+        tab = self._tab
+        if tab._selected != name or tab.long_operation:
+            return
+        self.load_edited(auto=True)
+
+    def load_edited(self, auto=False):
         """The editor's saved file becomes the shown sample's working copy (nothing is sent)."""
+        auto = auto is True  # (a button's clicked(bool) passes False)
         ctx = self._context()
         if ctx is None:
             return
@@ -313,12 +330,15 @@ class YamahaSampleEditor(QObject):
         if not self._external.is_ready(name):
             self._tab.status_message.emit("Save the file in the editor first")
             return
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)  # (a long file in another rate is resampled)
         try:
             channels, source_rate = external_edit.read_edited(self._external.path(name), ctx["rate"])
         except ValueError as e:
             _log(f"couldn't read the edited file for {name!r}: {e}")
             self._tab.status_message.emit(f"Couldn't read the edited file: {e}")
             return
+        finally:
+            QApplication.restoreOverrideCursor()
         # the sample keeps its channel count: a stereo sample given a mono file gets it on both sides, a mono sample given a stereo
         # file gets the mix
         if len(ctx["channels"]) == 1 and len(channels) == 2:
@@ -328,14 +348,18 @@ class YamahaSampleEditor(QObject):
         frames = len(channels[0])
         markers = external_edit.remap_markers(ctx["frames"], frames, *ctx["markers"])
         _log(
-            f"{name!r} edited externally: {ctx['frames']:,} -> {frames:,} frames, {len(channels)} ch at {source_rate} Hz "
+            f"{name!r} edited externally{' (auto-loaded)' if auto else ''}: {ctx['frames']:,} -> {frames:,} frames, {len(channels)} ch at {source_rate} Hz "
             f"(sample rate {ctx['rate']}), markers {ctx['markers']} -> {markers}"
         )
         if self._tab.stage_working_copy(name, channels, markers):
             self._external.mark_sent(name)  # Load waits for the next save
             self._tab._external_waiting.pop(name, None)
             self._tab.update_edit_buttons()
-            self._tab.status_message.emit(f"Loaded the edited audio for {name!r} - not on the unit yet")
+            self._tab.status_message.emit(
+                f"Loaded the edited audio for {name!r} automatically - Undo goes back"
+                if auto
+                else f"Loaded the edited audio for {name!r} - not on the unit yet"
+            )
 
     # -- the working copy goes out -----------------------------------------------------------------------------
 

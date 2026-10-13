@@ -136,6 +136,18 @@ def build_section_card(title, *row_layouts):
     return card
 
 
+def set_enabled_without_scrolling(widget, enabled):
+    """`widget.setEnabled(enabled)`, but a focused widget gives its focus up BEFORE it is disabled.
+
+    A disabled widget hands its keyboard focus to the next one in the tab order, and a QScrollArea scrolls to reveal whichever widget
+    receives it: a button that turns itself off when it is clicked (Run Hardware Test while it runs, Load Edited Audio until the next
+    save, Undo once nothing is left to undo) threw its page 100-200 px down. With no focus there is nothing to hand on. Use this for any
+    control that may be disabled while it has focus - above all one that disables ITSELF."""
+    if not enabled and widget.hasFocus():
+        widget.clearFocus()
+    widget.setEnabled(enabled)
+
+
 def build_scroll_area(page):
     # wraps a whole tab/page rather than adding it directly - lets the
     # window's minimum height stay comfortable without needing to grow

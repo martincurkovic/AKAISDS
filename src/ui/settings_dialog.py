@@ -1,5 +1,6 @@
 from PySide6.QtWidgets import (
     QApplication,
+    QCheckBox,
     QComboBox,
     QDialog,
     QDialogButtonBox,
@@ -31,6 +32,7 @@ from ui.qt_helpers import (
     FullWidthTabBar,
     build_scroll_area,
     build_section_card,
+    set_enabled_without_scrolling,
     widen_popup_to_fit_items,
 )
 from ui import theme, tooltips
@@ -276,6 +278,11 @@ class MidiSettingsDialog(QDialog):
         editor_row.addWidget(self.edit_external_editor, 1)
         editor_row.addWidget(self.button_external_editor)
         editor_form.addRow(QLabel("Audio Editor:"), editor_row)
+        # opt-in: with it off, the user clicks Load Edited Audio after saving in the editor
+        self.check_external_auto_load = QCheckBox("Load automatically when the file is saved")
+        self.check_external_auto_load.setChecked(app_config.get_saved_external_auto_load())
+        self.check_external_auto_load.setToolTip(tooltips.EXTERNAL_AUTO_LOAD)
+        editor_form.addRow(self.check_external_auto_load)
         editor_card = build_section_card("External Audio Editor", editor_form)
 
         # one shared label-column width across all three cards, so every
@@ -455,6 +462,7 @@ class MidiSettingsDialog(QDialog):
         app_config.save_audio_output_device(self.combo_audio_output.currentData())
         app_config.save_audio_buffer_samples(self.combo_audio_buffer.currentData())
         app_config.save_external_editor(self.edit_external_editor.text())
+        app_config.save_external_auto_load(self.check_external_auto_load.isChecked())
 
         self.accept()
 
@@ -501,7 +509,8 @@ class MidiSettingsDialog(QDialog):
         self.midi_manager.open_input(None)
         self.midi_manager.open_output(None)
 
-        self.btn_run_id_request.setEnabled(False)
+        # (not setEnabled(False) directly: the focus would move on and the page scroll - see set_enabled_without_scrolling)
+        set_enabled_without_scrolling(self.btn_run_id_request, False)
         self.btn_run_id_request.setText("Testing...")
         self.id_progress.setVisible(True)
         QApplication.processEvents()
@@ -665,7 +674,7 @@ class MidiSettingsDialog(QDialog):
         self.midi_manager.open_input(None)
         self.midi_manager.open_output(None)
 
-        self.btn_loopback_test.setEnabled(False)
+        set_enabled_without_scrolling(self.btn_loopback_test, False)
         self.btn_loopback_test.setText("Testing...")
         self.loopback_progress.setVisible(True)
         QApplication.processEvents()

@@ -18,6 +18,8 @@ from core import external_edit as ee
 
 #: wait for an editor's burst of writes (temp file, rename, metadata) to settle before telling the window
 DEBOUNCE_MS = 600
+#: ...and, before a saved file counts as STABLE (safe to load by itself), the same size/mtime must be seen again this much later
+STABLE_MS = 400
 
 
 def _log(message):
@@ -37,6 +39,10 @@ class ExternalEditTracker(QObject):
         self._debounce.setSingleShot(True)
         self._debounce.setInterval(DEBOUNCE_MS)
         self._debounce.timeout.connect(self._settled)
+        self._stable_timer = QTimer(self)
+        self._stable_timer.setSingleShot(True)
+        self._stable_timer.setInterval(STABLE_MS)
+        self._stable_timer.timeout.connect(self._check_stability)
 
     # -- the exported file -----------------------------------------------------------------------------------
 
@@ -53,7 +59,7 @@ class ExternalEditTracker(QObject):
         except Exception as e:  # nothing has been opened yet
             _log(f"couldn't write {display_name!r}: {e!r}")
             return f"Couldn't write the file: {e}"
-        entry = {"path": path, "dir": directory, "fingerprint": ee.fingerprint(path)}
+        entry = {"path": path, "dir": directory, "fingerprint": ee.fingerprint(path), "seen": None, "stable": None}
         self._pending[key] = entry
         self._watch(entry)
         editor = app_config.get_saved_external_editor()
@@ -80,11 +86,20 @@ class ExternalEditTracker(QObject):
         now = ee.fingerprint(entry["path"])
         return now is not None and now != entry["fingerprint"]
 
+    def is_stable(self, key):
+        """True when the file was saved over AND has stopped changing (the same size/mtime seen twice, STABLE_MS apart) - the moment it
+        is safe to read it without the user's say-so: an editor's save can be several writes, and an autosave can come at any time."""
+        entry = self._pending.get(key)
+        if entry is None or not self.is_ready(key):
+            return False
+        return entry["stable"] is not None and entry["stable"] == ee.fingerprint(entry["path"])
+
     def mark_sent(self, key):
         """The saved version was used: `is_ready` is false until the editor saves again. The file stays for further edits."""
         entry = self._pending.get(key)
         if entry is not None:
             entry["fingerprint"] = ee.fingerprint(entry["path"])
+            entry["seen"] = entry["stable"] = None
             self.changed.emit()
 
     def discard(self, key):
@@ -120,3 +135,24 @@ class ExternalEditTracker(QObject):
         for entry in self._pending.values():
             self._watch(entry)
         self.changed.emit()
+        self._check_stability()
+
+    def _check_stability(self):
+        """A saved file counts as stable once the same fingerprint is seen on two looks STABLE_MS apart; `changed` fires again then."""
+        recheck, became_stable = False, False
+        for entry in self._pending.values():
+            now = ee.fingerprint(entry["path"])
+            if now is None or now == entry["fingerprint"]:
+                entry["seen"] = entry["stable"] = None  # not saved (or gone)
+            elif entry["stable"] == now:
+                continue
+            elif entry["seen"] == now:
+                entry["stable"] = now
+                became_stable = True
+            else:
+                entry["seen"], entry["stable"] = now, None
+                recheck = True
+        if recheck:
+            self._stable_timer.start()
+        if became_stable:
+            self.changed.emit()

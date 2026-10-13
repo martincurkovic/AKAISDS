@@ -382,6 +382,10 @@ STAGE_SEND_BUTTON = (
 )
 STAGE_UNDO_BUTTON = "Undo the last edit to this sample. The first one goes back to what is on the sampler."
 STAGE_REVERT_BUTTON = "Throw away the edits that have not been sent and go back to what is on the sampler."
+EXTERNAL_AUTO_LOAD = (
+    "Bring the edited audio into the app as soon as the external editor has saved the file, "
+    "without clicking Load Edited Audio. It is only a working copy (nothing is sent), and Undo goes back."
+)
 EXTERNAL_EDITOR_SETTING = (
     "The audio editor that Edit in External App opens samples in.\n"
     "Leave empty to use your system's default app for WAV files."

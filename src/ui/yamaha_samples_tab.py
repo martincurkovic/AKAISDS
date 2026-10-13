@@ -87,7 +87,7 @@ from ui.editor_layout import (
 from ui.envelope_graph import ADSREnvelopeGraph, LevelEnvelopeGraph, yamaha_adsr_values
 from ui.knob import Knob
 from ui.loop_preview_view import HALF_WINDOW_FRAMES, LoopJoinPreview
-from ui.qt_helpers import build_scroll_area, build_section_card
+from ui.qt_helpers import build_scroll_area, build_section_card, set_enabled_without_scrolling
 from ui.waveform_view import WaveformView
 from ui.yamaha_fields import Field, FieldPanel
 from ui.yamaha_sample_edit import YamahaSampleEditor
@@ -1480,9 +1480,14 @@ class YamahaSamplesTab(QWidget):
         self._working_copy_label.setText("Edited \u2013 not on the unit yet" if staged else "Original from the unit")
         for key, enabled in wanted.items():
             self._control_wanted[key] = enabled
-            self._sample_controls[key][0].setEnabled(enabled)
+            button = self._sample_controls[key][0]
+            # (clicking Load Edited Audio, which turns itself off until the next save, threw the page ~220 px down: see
+            # set_enabled_without_scrolling)
+            set_enabled_without_scrolling(button, enabled)
         # Load Edited Audio is the filled (primary) button once there is something to load, and the hint says what is being waited for
         primary = bool(wanted["external_load"])
+        if primary and edits is not None:
+            edits.maybe_auto_load(self._selected)  # Settings > "Load automatically when the file is saved"
         if self.external_load_button.property("primary") != primary:
             self.external_load_button.setProperty("primary", primary)
             self._repolish(self.external_load_button)

@@ -80,7 +80,12 @@ from ui.editor_layout import (
     style_card_page_layout,
     sync_waveform_scrollbar,
 )
-from ui.qt_helpers import FullWidthTabBar, build_scroll_area, build_section_card
+from ui.qt_helpers import (
+    FullWidthTabBar,
+    build_scroll_area,
+    build_section_card,
+    set_enabled_without_scrolling,
+)
 from ui.envelope_graph import ADSREnvelopeGraph, Envelope2Graph
 from ui.keygroup_range_bar import KeygroupRangeBar, keygroup_color
 from ui.waveform_view import WaveformView
@@ -94,7 +99,7 @@ from ui.about_dialog import AboutDialog
 from ui.quickstart_dialog import show_quickstart_dialog
 from ui.update_helper import UpdateCheckRunner
 from ui import tooltips as tt
-from core import debug_log, diagnostics
+from core import debug_log, demo_timing, diagnostics
 from core.akai_sysex import baseline_semitones_for_bandwidth
 from core import midi_manager as midi_manager_module
 from core import program_editor_bridge
@@ -6122,6 +6127,7 @@ class ProgramEditorWindow(QMainWindow):
         self._staged_edits = {}
         # sample name -> what to call the app its audio was opened in, while the external round trip waits for a save / a Load
         self._external_waiting = {}
+        self._auto_load_scheduled = False  # an automatic Load Edited Audio is about to run (see _refresh_external_edit_buttons)
         self._sample_row_dots = {}  # list row -> the dot that marks unsent edits
         # same row-widget-free QListWidget + labeled column shape as the
         # Programs tab's own program_list/keygroup_list (see __init__) -
@@ -7536,7 +7542,9 @@ class ProgramEditorWindow(QMainWindow):
     def _set_sample_control_enabled(self, key, enabled):
         button, _action = self._sample_edit_controls[key]
         self._sample_control_wanted[key] = bool(enabled)
-        button.setEnabled(enabled)
+        # (a button that turns itself off when clicked - Load Edited Audio, Undo, Revert - must not hand its focus on: see
+        # set_enabled_without_scrolling)
+        set_enabled_without_scrolling(button, enabled)
         self._update_sample_actions_enabled()
 
     def _build_sample_menu(self):
@@ -7624,6 +7632,15 @@ class ProgramEditorWindow(QMainWindow):
         if self.external_load_button.property("primary") != primary:
             self.external_load_button.setProperty("primary", primary)
             self._repolish(self.external_load_button)
+        # Settings > "Load automatically when the file is saved": once the saved file has stopped changing, load it without the click
+        if (
+            primary
+            and self._external_edit.is_stable(name)
+            and not self._auto_load_scheduled
+            and app_config.get_saved_external_auto_load()
+        ):
+            self._auto_load_scheduled = True
+            QTimer.singleShot(0, lambda n=name: self._auto_load_edited_audio(n))
         # what the round trip is waiting for
         app = self._external_waiting.get(name)
         if app is None:
@@ -8317,7 +8334,7 @@ class ProgramEditorWindow(QMainWindow):
         # to load in one step instead of waiting out a realistic transfer
         # each time they select one.
         total = len(samples)
-        instant = bool(os.environ.get("AKAISDS_DEMO_INSTANT"))
+        instant = demo_timing.is_instant()
         if instant:
             steps = 1
         else:
@@ -8931,7 +8948,20 @@ class ProgramEditorWindow(QMainWindow):
         self._external_waiting[name] = app_name or "your default app"
         self._refresh_external_edit_buttons()
 
+    def _auto_load_edited_audio(self, name):
+        self._auto_load_scheduled = False
+        # not while this window is mid-operation, nor for a sample that is no longer the selected one: the refresh that follows a
+        # selection (or the end of the operation) looks again and loads it then
+        if getattr(self, "_hardware_busy_ui", False) or not self.main_tabs.isEnabled():
+            return
+        if self._sample_name_at_row(self.sample_list_widget.currentRow()) != name or not self._sample_edit_ready:
+            return
+        self._load_edited_audio_impl(auto=True)
+
     def _load_edited_audio(self):
+        self._load_edited_audio_impl(auto=False)
+
+    def _load_edited_audio_impl(self, auto):
         # The editor's saved file becomes the sample's WORKING COPY (see
         # _StagedEdit): shown in the waveform, editable here, and sent to the
         # sampler only by Send to Sampler / Send as New Sample.
@@ -8949,6 +8979,7 @@ class ProgramEditorWindow(QMainWindow):
             self.status_bar.showMessage("Save the file in the editor first")
             return
         logger = debug_log.get_logger()
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)  # (a long file in another rate is resampled)
         try:
             channels, source_rate = external_edit.read_edited(
                 self._external_edit.path(name), entry["framerate"]
@@ -8957,6 +8988,8 @@ class ProgramEditorWindow(QMainWindow):
             logger.info(f"ExternalEdit: couldn't read the edited file for {name!r}: {e}")
             self.status_bar.showMessage(f"Couldn't read the edited file: {e}")
             return
+        finally:
+            QApplication.restoreOverrideCursor()
         new_samples = external_edit.mix_to_mono(channels)
         old_frames = len(entry["samples"])
         m = self.waveform_view.markers_with_loop_in_range()
@@ -8969,7 +9002,7 @@ class ProgramEditorWindow(QMainWindow):
             m["end"],
         )
         logger.info(
-            f"ExternalEdit: {name!r} loaded: {old_frames} -> {len(new_samples)} frames, "
+            f"ExternalEdit: {name!r} {'auto-' if auto else ''}loaded: {old_frames} -> {len(new_samples)} frames, "
             f"{len(channels)} ch at {source_rate} Hz (sampler rate {entry['framerate']}), "
             f"markers {tuple(m.values())} -> {new_markers}"
         )
@@ -8980,7 +9013,9 @@ class ProgramEditorWindow(QMainWindow):
         self._external_waiting.pop(name, None)
         self._refresh_external_edit_buttons()
         self.status_bar.showMessage(
-            f'Loaded the edited audio for "{name}" - not on the sampler yet'
+            f'Loaded the edited audio for "{name}" automatically - Undo goes back'
+            if auto
+            else f'Loaded the edited audio for "{name}" - not on the sampler yet'
         )
 
     # -- the working copy (unsent edits) ----------------------------------------------------------------------
@@ -9441,6 +9476,8 @@ class ProgramEditorWindow(QMainWindow):
         total_seconds = total * _DEMO_MS_PER_WORD / 1000
         steps = max(6, round(total_seconds / 0.2))
         step_seconds = total_seconds / steps
+        if demo_timing.is_instant():  # --instant / AKAISDS_DEMO_INSTANT: no pacing (see core/demo_timing.py)
+            steps, step_seconds = 1, 0.0
         for step in range(1, steps + 1):
             current = total * step // steps
             self._on_sample_edit_progress(
@@ -10186,6 +10223,8 @@ if __name__ == "__main__":
     # that, while still letting AKAISDS_DEMO_INSTANT be set alongside it on
     # the command line the normal way
     os.environ.setdefault("AKAISDS_DEMO_SAMPLER", "1")
+    if "--instant" in sys.argv:
+        os.environ["AKAISDS_DEMO_INSTANT"] = "1"  # no paced sample loads/replaces (see core/demo_timing.py)
     app = QApplication(sys.argv)
     theme.apply_to_app(app)
     window = ProgramEditorWindow(_StandaloneHost(), bridge=DemoBridge())

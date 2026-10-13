@@ -262,6 +262,17 @@ def save_external_editor(path):
     save_config(config)
 
 
+def get_saved_external_auto_load():
+    # whether the edited file is loaded back by itself as soon as the external editor has saved it (off unless the user turned it on)
+    return load_config().get("external_auto_load", False) is True
+
+
+def save_external_auto_load(enabled):
+    config = load_config()
+    config["external_auto_load"] = bool(enabled)
+    save_config(config)
+
+
 SLICE_DETECTION_SIMPLE = "simple"
 SLICE_DETECTION_SUPERFLUX = "superflux"
 SLICE_DETECTION_VALUES = (SLICE_DETECTION_SIMPLE, SLICE_DETECTION_SUPERFLUX)
