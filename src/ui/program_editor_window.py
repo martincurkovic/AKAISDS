@@ -3303,6 +3303,14 @@ class ProgramEditorWindow(QMainWindow):
         self._worker.submit_global_settings()
 
     def _on_memory_status_loaded(self, info):
+        if not getattr(self, "_system_info_logged", False):
+            # once per window, for bug reports (the per-call RSTAT lines are DEBUG)
+            self._system_info_logged = True
+            debug_log.get_logger().info(
+                f"ProgramEditor: sampler OS {info['version']}, sample memory "
+                f"{info['max_num_samp_words'] - info['num_words_free']:,} of {info['max_num_samp_words']:,} words used, "
+                f"{info['num_blocks_free']:,} of {info.get('max_blocks', '?')} slots free"
+            )
         self.sample_memory_bar.set_status(info)
         self.global_tab.set_system_status(info)
 
@@ -7101,6 +7109,10 @@ class ProgramEditorWindow(QMainWindow):
         keygroup_index = self.keygroup_list.currentRow()
         if keygroup_index < 0:
             return
+        debug_log.get_logger().info(
+            f"ProgramEditor: envelope graph edit on keygroup {keygroup_index}: "
+            + ", ".join(f"{controls[name][2]}={value}" for name, value in values.items())
+        )
         for name, value in values.items():
             _knob, _label, field = controls[name]
             self._schedule_write(field, "keygroup", value, keygroup_index=keygroup_index)
@@ -7910,7 +7922,13 @@ class ProgramEditorWindow(QMainWindow):
             analysis_samples, entry["framerate"], anchor
         )
 
+        sample_name = self._sample_name_at_row(self.sample_list_widget.currentRow())
         if result is None or result[2] < root_note_detection.CONFIDENCE_THRESHOLD:
+            debug_log.get_logger().info(
+                f"ProgramEditor: root note detection for {sample_name!r}: no reliable pitch "
+                f"({len(analysis_samples)} frames analysed at {entry['framerate']} Hz, "
+                f"anchor {midi_note_to_name(anchor)}, result {result})"
+            )
             # per direct user request: nothing actionable here - no note,
             # no confidence number, no Yes/No choice to make. Only an
             # acknowledgement that detection was attempted and came up
@@ -7933,6 +7951,11 @@ class ProgramEditorWindow(QMainWindow):
             "Set this sample's root note and tune to match?",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.Yes,
+        )
+        debug_log.get_logger().info(
+            f"ProgramEditor: root note detection for {sample_name!r}: {note_name} {cents:+.0f} cents, "
+            f"confidence {confidence:.2f} ({len(analysis_samples)} frames analysed, anchor {midi_note_to_name(anchor)}) - "
+            f"{'applied' if answer == QMessageBox.StandardButton.Yes else 'declined'}"
         )
         if answer != QMessageBox.StandardButton.Yes:
             return
@@ -8875,6 +8898,12 @@ class ProgramEditorWindow(QMainWindow):
             lowpass_cutoff_hz=dialog.lowpass_cutoff_hz(),
             lowpass_slope_db_per_octave=dialog.lowpass_slope_db_per_octave(),
         )
+        debug_log.get_logger().info(
+            f"Filter: {sample_name!r} high-pass "
+            f"{'%d Hz, %d dB/oct' % (dialog.highpass_cutoff_hz(), dialog.highpass_slope_db_per_octave()) if dialog.highpass_enabled() else 'off'}, low-pass "
+            f"{'%d Hz, %d dB/oct' % (dialog.lowpass_cutoff_hz(), dialog.lowpass_slope_db_per_octave()) if dialog.lowpass_enabled() else 'off'} "
+            f"({len(entry['samples'])} frames at {entry['framerate']} Hz){' - as a new sample' if dialog.send_as_new() else ''}"
+        )
         if dialog.send_as_new():
             self._send_edit_as_new_sample(
                 sample_index, entry, transform, "Filter", " FILT"
@@ -9373,10 +9402,12 @@ class ProgramEditorWindow(QMainWindow):
             return
         if not staged.history:
             # nothing before the first change but the sampler's own version
+            debug_log.get_logger().info(f"ProgramEditor: undo on {name!r}: back to the sampler's version")
             self._discard_staged(name, restore_entry=True)
             self.status_bar.showMessage(f'"{name}" is back to the sampler version')
             return
         staged.samples, staged.markers = staged.history.pop()
+        debug_log.get_logger().info(f"ProgramEditor: undo on {name!r}: {len(staged.history)} more step(s) to undo")
         self._apply_staged_to_entry(entry, staged)
         self._show_entry_audio(entry)
         self._staged_changed()
@@ -9442,6 +9473,7 @@ class ProgramEditorWindow(QMainWindow):
         )
         if answer != QMessageBox.StandardButton.Yes:
             return
+        debug_log.get_logger().info(f"ProgramEditor: reverted {name!r} to the sampler's version")
         self._discard_staged(name, restore_entry=True)
         self.status_bar.showMessage(f'"{name}" is back to the sampler version')
 
