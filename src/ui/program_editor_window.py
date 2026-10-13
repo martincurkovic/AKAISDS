@@ -121,6 +121,7 @@ from core.program_editor_bridge import (
 from core.global_settings import EXTERNAL_CONTROLLER_LABELS
 from core.sample_duration import sample_duration_seconds
 from ui.global_tab import GlobalSettingsTab, build_external_controller_combo
+from ui.memory_bar import MemoryBar
 from ui.settings_dialog import MidiSettingsDialog
 
 # shared by every list's "Delete ..." QAction (program/keygroup/sample) -
@@ -688,6 +689,8 @@ class ProgramEditorWindow(QMainWindow):
         )
         self._worker.stray_replies_detected.connect(self._on_stray_replies_detected)
         self._worker.global_settings_loaded.connect(self._on_global_settings_loaded)
+        self._worker.memory_status_loaded.connect(self._on_memory_status_loaded)
+        self._worker.memory_status_load_failed.connect(self._on_memory_status_load_failed)
         self._worker.global_settings_load_failed.connect(
             self._on_global_settings_load_failed
         )
@@ -3269,6 +3272,16 @@ class ProgramEditorWindow(QMainWindow):
             self.global_tab.set_unavailable(self._GLOBAL_UNAVAILABLE_DEMO)
             return
         self._worker.submit_global_settings()
+
+    def _on_memory_status_loaded(self, info):
+        self.sample_memory_bar.set_status(info)
+        self.global_tab.set_system_status(info)
+
+    def _on_memory_status_load_failed(self, error):
+        # no stale figure: the bars say they don't know (the log has the reason)
+        reason = f"Couldn't read the sampler's memory: {error}"
+        self.sample_memory_bar.set_unknown(reason)
+        self.global_tab.set_system_unavailable(reason)
 
     def _on_global_settings_loaded(self, values):
         self.global_tab.set_values(values)
@@ -6170,7 +6183,10 @@ class ProgramEditorWindow(QMainWindow):
         self._delete_sample_action.setEnabled(False)
         self.sample_list_widget.addAction(self._delete_sample_action)
 
-        samples_container = build_list_column("Samples", self.sample_list_widget)
+        # how full the sampler's sample memory is (RSTAT), refreshed with every sample list load - so after every send, delete and edit
+        self.sample_memory_bar = MemoryBar()
+        self.sample_memory_bar.setFixedWidth(200)
+        samples_container = build_list_column("Samples", self.sample_list_widget, self.sample_memory_bar)
 
         self.waveform_view = WaveformView()
 
@@ -7196,6 +7212,7 @@ class ProgramEditorWindow(QMainWindow):
         previous_row = self.sample_list_widget.currentRow()
         previous_sample = self._sample_name_at_row(previous_row)
         self._sample_list = samples
+        self._worker.submit_memory_status()
 
         # a sample's INDEX is what addresses its header/audio (see
         # _load_sample_waveform) and that index can mean something

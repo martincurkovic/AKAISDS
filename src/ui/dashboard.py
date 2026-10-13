@@ -31,6 +31,7 @@ from core import (
 from ui.qt_helpers import load_colored_pixmap
 from ui.settings_dialog import MidiSettingsDialog
 from ui.drop_list_widget import DropListWidget
+from ui.memory_bar import apply_memory_status
 from ui.program_editor_window import ProgramEditorWindow
 from ui.s950_program_editor import S950ProgramEditorWindow
 from ui.yamaha_program_editor import YamahaProgramEditorWindow
@@ -1745,29 +1746,7 @@ class TransferDashboard(QWidget):
                 self.sampler_controller.rename_sample(info["sample_number"], new_name)
 
     def on_memory_status_updated(self, info):
-        if info["max_num_samp_words"] > 0:
-            percent_used = int(
-                (info["max_num_samp_words"] - info["num_words_free"])
-                / info["max_num_samp_words"]
-                * 100
-            )
-        else:
-            percent_used = 0
-
-        if percent_used >= 90:
-            self.memory_avail_prog_bar.setProperty("memoryLevel", "critical")
-        elif percent_used >= 70:
-            self.memory_avail_prog_bar.setProperty("memoryLevel", "warning")
-        else:
-            self.memory_avail_prog_bar.setProperty("memoryLevel", "normal")
-
-        self.memory_avail_prog_bar.setValue(percent_used)
-        self.memory_avail_prog_bar.setToolTip(
-            f"{info['num_words_free']:,} sample words free\n"
-            f"{info['num_blocks_free']:,} sample blocks/slots free"
-        )
-        self.memory_avail_prog_bar.style().unpolish(self.memory_avail_prog_bar)
-        self.memory_avail_prog_bar.style().polish(self.memory_avail_prog_bar)
+        apply_memory_status(self.memory_avail_prog_bar, info)
 
     def confirm_and_delete_sample(self, name, sample_number):
         reply = QMessageBox.question(

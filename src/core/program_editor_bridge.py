@@ -7,7 +7,7 @@ import time
 from collections import deque
 from pathlib import Path
 
-from core import akai_sysex, app_config, debug_log, sampler_models
+from core import akai_sysex, app_config, debug_log, midi_identity, sampler_models
 from core import midi_manager as midi_manager_module
 from s3k.bridge import DeviceError, S3kBridge, ThrottledOut
 from PySide6.QtCore import QThread, Signal
@@ -101,7 +101,7 @@ class LoggingBridge:
                         # FAILED logging as everything else on this
                         # connection rather than being invisible to
                         # ~/.akaisds/akaisds.log
-                        "get_header_bytes", "send_and_receive",
+                        "get_header_bytes", "send_and_receive", "status",
                         # delete_program/delete_keygroup/delete_sample were
                         # missing from this list entirely - a failed delete
                         # produced no trace at all in ~/.akaisds/akaisds.log,
@@ -507,6 +507,7 @@ class BridgeWorker(QThread):
         "multi_parts",
         "sample_detail",
         "global_settings",
+        "memory_status",
     }
 
     programs_loaded = Signal(list)
@@ -572,6 +573,10 @@ class BridgeWorker(QThread):
     # can show (a missing key = that one couldn't be read).
     global_settings_loaded = Signal(dict)
     global_settings_load_failed = Signal(str)
+    # RSTAT: the sample memory and the OS version. Keys: max_num_samp_words, num_words_free, num_blocks_free (the names the
+    # Dashboard's memory_status_updated uses, so one bar widget shows either), plus max_blocks and version ("VV.vv")
+    memory_status_loaded = Signal(dict)
+    memory_status_load_failed = Signal(str)
     global_setting_written = Signal(str, int)  # key, value
     global_setting_write_failed = Signal(str, str)  # key, error
 
@@ -735,6 +740,9 @@ class BridgeWorker(QThread):
 
     def submit_global_settings(self):
         self._submit(("global_settings",))
+
+    def submit_memory_status(self):
+        self._submit(("memory_status",))
 
     def submit_set_global_setting(self, key, value):
         # not coalesced: every choice must reach the sampler, in order
@@ -1165,6 +1173,22 @@ class BridgeWorker(QThread):
         )
         self._misc_block_backed_up = True
         debug_log.get_logger().info(f"misc block backed up to {path}")
+
+    def _handle_memory_status(self):
+        try:
+            status = self._bridge.status()
+            info = {
+                "max_num_samp_words": status.max_words,
+                "num_words_free": status.free_words,
+                "num_blocks_free": status.free_blocks,
+                "max_blocks": status.max_blocks,
+                "version": midi_identity.akai_version_string(status.raw.version_major, status.raw.version_minor),
+            }
+        except Exception as e:
+            debug_log.get_logger().warning(f"memory status (RSTAT) not read: {e}")
+            self.memory_status_load_failed.emit(str(e))
+            return
+        self.memory_status_loaded.emit(info)
 
     def _handle_global_settings(self):
         log = debug_log.get_logger()
