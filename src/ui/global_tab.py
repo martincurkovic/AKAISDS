@@ -11,6 +11,8 @@ The External controller combo here mirrors the one in the Program tab's Modulati
 
 import os
 
+from functools import partial
+
 from PySide6.QtCore import QTimer, Signal
 from PySide6.QtWidgets import (
     QAbstractSlider,
@@ -38,7 +40,10 @@ from ui.editor_layout import (
 from ui.knob import Knob
 from ui.memory_bar import MemoryBar
 from ui.note_spinbox import NoteSpinBox
-from ui.qt_helpers import build_scroll_area, build_section_card
+from ui.qt_helpers import build_scroll_area, build_editor_card
+
+# collapsible cards, remembered as "program_editor/<title>" (ui/section_card.py)
+_card = partial(build_editor_card, "program_editor")
 
 _SPINBOX_DEBOUNCE_MS = 250
 _MEMORY_BAR_MIN_WIDTH = 200
@@ -114,7 +119,7 @@ class GlobalSettingsTab(QWidget):
             "output_level",
             [(f"{db:+d} dB" if db else "0 dB", db) for db in range(-18, 19, 6)],
         )
-        tuning_card = build_section_card(
+        tuning_card = _card(
             "Tuning & Output",
             self._row(("Tune", tuning), ("Fine tune", fine), ("Output level", output)),
         )
@@ -129,7 +134,7 @@ class GlobalSettingsTab(QWidget):
         controller_row.addStretch()
         note_row = QHBoxLayout()
         note_row.addWidget(controller_note)
-        controller_card = build_section_card("External Controller", controller_row, note_row)
+        controller_card = _card("External Controller", controller_row, note_row)
 
         program_change = self._combo(
             "program_change_channel",
@@ -137,7 +142,7 @@ class GlobalSettingsTab(QWidget):
             + [(str(channel), channel) for channel in range(1, 17)]
             + [("Omni", PROGRAM_CHANGE_OMNI)],
         )
-        midi_card = build_section_card(
+        midi_card = _card(
             "MIDI", self._row(("Program change channel", program_change))
         )
 
@@ -148,7 +153,7 @@ class GlobalSettingsTab(QWidget):
             "play_channel", [(str(channel), channel) for channel in range(1, 17)]
         )
         play_velocity = self._spinbox("play_velocity", 0, 127)
-        play_card = build_section_card(
+        play_card = _card(
             "Play Button",
             self._row(("Note", play_note), ("Channel", play_channel), ("Velocity", play_velocity)),
         )
@@ -156,7 +161,7 @@ class GlobalSettingsTab(QWidget):
         disk_id = self._combo("scsi_disk_id", [(str(i), i) for i in range(8)])
         sector = self._combo("scsi_sector", [(label, i) for i, label in enumerate(SECTOR_SIZE_LABELS)])
         local_id = self._combo("scsi_local_id", [(str(i), i) for i in range(8)])
-        scsi_card = build_section_card(
+        scsi_card = _card(
             "SCSI",
             self._row(("Disk ID", disk_id), ("Sector size", sector), ("Local ID", local_id)),
         )
@@ -172,7 +177,7 @@ class GlobalSettingsTab(QWidget):
         version_row.addStretch()
         memory_row = QHBoxLayout()
         memory_row.addLayout(build_labeled_combo_column("Sample memory", self.memory_bar, center=False), stretch=1)
-        system_card = build_section_card("Memory & OS", version_row, memory_row)
+        system_card = _card("Memory & OS", version_row, memory_row)
 
         equalize_card_heights(tuning_card, controller_card)
         equalize_card_heights(midi_card, play_card)

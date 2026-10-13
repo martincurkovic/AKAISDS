@@ -83,7 +83,7 @@ from ui.editor_layout import (
 from ui.qt_helpers import (
     FullWidthTabBar,
     build_scroll_area,
-    build_section_card,
+    build_editor_card,
     set_enabled_without_scrolling,
 )
 from ui.envelope_graph import ADSREnvelopeGraph, Envelope2Graph
@@ -1565,7 +1565,7 @@ class ProgramEditorWindow(QMainWindow):
         kg_mod_grid_row.addWidget(kg_mod_matrix)
 
         keygroup_modulation_section = self._build_section_card(
-            "Modulation", kg_mod_grid_row, kg_mod_footnote_row
+            "Modulation", kg_mod_grid_row, kg_mod_footnote_row, key="Keygroup Modulation"
         )
 
         detail_container_layout = QVBoxLayout()
@@ -6084,14 +6084,15 @@ class ProgramEditorWindow(QMainWindow):
         edit.setValidator(QRegularExpressionValidator(name_pattern, edit))
         return edit
 
-    def _build_section_card(self, title, *row_layouts, header_widgets=()):
+    def _build_section_card(self, title, *row_layouts, header_widgets=(), collapsible=True, key=None):
         # groups related rows (e.g. every LFO control, or Volume/Pan/
         # Velocity together on the Program tab; Filter or Envelopes on the
         # Keygroup tab) into one visually distinct card - see
         # ui.qt_helpers.build_section_card's own docstring for the actual
         # implementation and the gotchas it exists to avoid (also used
         # directly, not through this wrapper, by ui/settings_dialog.py).
-        return build_section_card(title, *row_layouts, header_widgets=header_widgets)
+        # collapsible (ui/section_card.py), remembered as "program_editor/<title>"; collapsible=False for a card that must stay open
+        return build_editor_card("program_editor", title, *row_layouts, header_widgets=header_widgets, collapsible=collapsible, key=key)
 
     def _build_scroll_area(self, page):
         # both detail_stack pages (Program, Keygroup) are wrapped in one of
@@ -6652,6 +6653,9 @@ class ProgramEditorWindow(QMainWindow):
         edit_sample_content.addWidget(self._staged_banner)
         edit_sample_content.addLayout(edit_sample_grid)
         edit_sample_card = self._build_section_card("Edit Sample", edit_sample_content)
+        # collapsed, it must still say there are unsent edits (see _sync_edit_sample_card)
+        self._edit_sample_card = edit_sample_card
+        self._edit_card_staged = False
 
         # two section cards, same style as the Programs tab's own (see
         # _build_section_card) - one for the loop editor itself, one for
@@ -6664,7 +6668,7 @@ class ProgramEditorWindow(QMainWindow):
         loop_controls_content.addLayout(legend_row)
         loop_controls_content.addLayout(loop_meta_row)
         loop_controls_card = self._build_section_card(
-            "Loop Controls", loop_controls_content
+            "Loop Controls", loop_controls_content, collapsible=False
         )
 
         # a small, read-only pane showing the actual SPLICE a loop makes -
@@ -9196,6 +9200,18 @@ class ProgramEditorWindow(QMainWindow):
             if dot is not None:
                 dot.setVisible(edited)
 
+    def _sync_edit_sample_card(self, staged):
+        # The Edit Sample card holds the unsent-edits strip and Send to Sampler, so a collapsed card must not hide unsent work: it
+        # shows an amber dot beside its title, and opens (not remembered - it isn't the user's choice) when a working copy APPEARS.
+        # Only on that change, so a user who collapses it while editing is not fought on every refresh.
+        card = getattr(self, "_edit_sample_card", None)
+        if card is None:
+            return
+        card.set_attention(staged, "Edited \u2013 not on the sampler yet")
+        if staged and not self._edit_card_staged and card.is_collapsed():
+            card.set_collapsed(False, remember=False)
+        self._edit_card_staged = staged
+
     def _refresh_staged_controls(self):
         if not hasattr(self, "_staged_banner"):
             return  # still building
@@ -9209,6 +9225,7 @@ class ProgramEditorWindow(QMainWindow):
         self._working_copy_label.setText(
             "Edited \u2013 not on the sampler yet" if staged else "Original from the sampler"
         )
+        self._sync_edit_sample_card(staged)
         ready = staged and self._sample_edit_ready
         self._set_sample_control_enabled("stage_undo", ready)
         self._set_sample_control_enabled("stage_send", ready)

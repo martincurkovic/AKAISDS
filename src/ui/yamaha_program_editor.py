@@ -22,6 +22,8 @@ side effects an edit's own read-back can't show (mirrored bytes, derived EQ coef
 unwritable stays disabled (`FieldPanel`). The window refuses to close or refresh while a write is on its way.
 """
 
+from functools import partial
+
 from PySide6.QtCore import Qt, QTimer, QUrl
 from PySide6.QtGui import QAction, QDesktopServices
 from PySide6.QtWidgets import (
@@ -63,9 +65,12 @@ from ui.editor_layout import (
     style_card_page_layout,
 )
 from ui.keygroup_range_bar import KeygroupRangeBar, keygroup_color
-from ui.qt_helpers import FullWidthTabBar, build_scroll_area, build_section_card
+from ui.qt_helpers import FullWidthTabBar, build_scroll_area, build_editor_card
 from ui.yamaha_fields import Field, FieldPanel
 from ui.yamaha_samples_tab import YamahaSamplesTab, _check, _combo, _knob, _spin
+
+# collapsible cards, remembered as "yamaha_program/<title>" (ui/section_card.py)
+_card = partial(build_editor_card, "yamaha_program")
 
 _SPECIAL_ALL_NOTES = {-1: "All notes"}
 NOTE_MAX = 127
@@ -323,14 +328,14 @@ class YamahaProgramEditorWindow(QMainWindow):
         k, s, c, ck = _knob, _spin, _combo, _check
         note = Field("lfo_reset_note", "Reset note", "note", specials=_SPECIAL_ALL_NOTES)
 
-        program = build_section_card(
+        program = _card(
             "Program",
             row(Field("program_name", "Name", "text")),
             row(Field("assigned_samples", "Assigned samples", "text")),
             knobs([k("program_level", "Level", 56)]),
             row(s("transpose", "Transpose")),
         )
-        lfo = build_section_card(
+        lfo = _card(
             "LFO",
             row(c("lfo_wave", "Wave")),
             row(c("lfo_sync", "Sync")),
@@ -340,12 +345,12 @@ class YamahaProgramEditorWindow(QMainWindow):
             row(note),
             row(c("lfo_reset_midi_channel", "Reset channel")),
         )
-        porta = build_section_card(
+        porta = _card(
             "Portamento & S/H",
             row(c("portamento_type", "Type")),
             knobs([k("portamento_rate", "Rate"), k("portamento_time", "Time"), k("sh_speed", "S/H speed")]),
         )
-        audio = build_section_card(
+        audio = _card(
             "Audio Input",
             row(ck("ad_in_on", "Input on")),
             row(c("ad_in_source", "Source")),
@@ -358,7 +363,7 @@ class YamahaProgramEditorWindow(QMainWindow):
                    k("ad_in_r_output1_level", "R out 1"), k("ad_in_r_output2_level", "R out 2")]),
         )
         steps = [k(f"lfo_step_value_{n}", str(n), 28) for n in range(1, 17)]
-        step_card = build_section_card(
+        step_card = _card(
             "LFO Step Wave",
             row(c("lfo_step_total", "Total steps")),
             row(c("lfo_step_slope", "Slope")),
@@ -407,7 +412,7 @@ class YamahaProgramEditorWindow(QMainWindow):
         head.addLayout(title, stretch=1)
         head.addWidget(self.edit_sample_button)
 
-        key = build_section_card(
+        key = _card(
             "Key",
             row(low_note),
             row(high_note),
@@ -415,30 +420,30 @@ class YamahaProgramEditorWindow(QMainWindow):
             row(s("velocity_limit_low", "Velocity low limit")),
             row(s("velocity_limit_high", "Velocity high limit")),
         )
-        level = build_section_card(
+        level = _card(
             "Level & Pan",
             knobs([k("level_offset", "Level"), k("pan_offset", "Pan"), k("velocity_sensitivity_offset", "Velocity")]),
         )
         equalize_card_heights(key, level)
 
-        pitch = build_section_card(
+        pitch = _card(
             "Pitch",
             knobs([k("coarse_tune_offset", "Coarse"), k("fine_tune_offset", "Fine")]),
             row(c("portamento", "Portamento")),
         )
-        filt = build_section_card(
+        filt = _card(
             "Filter",
             knobs([k("filter_cutoff_offset", "Cutoff"), k("filter_q_offset", "Q / Width"),
                    k("filter_gain_offset", "Gain"), k("cutoff_distance_offset", "Distance")]),
         )
         equalize_card_heights(pitch, filt)
 
-        aeg = build_section_card(
+        aeg = _card(
             "Amplitude Envelope",
             knobs([k("aeg_attack_rate_offset", "Attack"), k("aeg_decay_rate_offset", "Decay"),
                    k("aeg_release_rate_offset", "Release")]),
         )
-        xfade = build_section_card(
+        xfade = _card(
             "Velocity Crossfade",
             knobs([k("velocity_xfade_low_offset", "Low"), k("velocity_xfade_high_offset", "High")]),
         )
@@ -463,7 +468,7 @@ class YamahaProgramEditorWindow(QMainWindow):
         out_columns.setSpacing(20)
         out_columns.addLayout(routing, 1)
         out_columns.addLayout(playback, 1)
-        out = build_section_card("Output & Playback", out_columns)
+        out = _card("Output & Playback", out_columns)
 
         layout = QVBoxLayout()
         style_card_page_layout(layout)

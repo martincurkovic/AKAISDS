@@ -21,6 +21,8 @@ with real hardware writes behind it. Rename a sample from the Transfer Dashboard
 import os
 import tempfile
 
+from functools import partial
+
 from PySide6.QtCore import QObject, Qt, QTimer, Signal
 from PySide6.QtWidgets import (
     QGridLayout,
@@ -43,8 +45,11 @@ from ui.editor_layout import (
     style_card_page_layout,
     sync_waveform_scrollbar,
 )
-from ui.qt_helpers import build_scroll_area, build_section_card
+from ui.qt_helpers import build_scroll_area, build_editor_card
 from ui.waveform_view import WaveformView
+
+# collapsible cards, remembered as "s950_editor/<title>" (ui/section_card.py)
+_card = partial(build_editor_card, "s950_editor")
 
 _REPLAY_MODE_LABELS = {
     s.REPLAY_ONE_SHOT: "One-shot",
@@ -170,12 +175,13 @@ class S950SamplesTab(QWidget):
         self.waveform_hint = QLabel(_LOAD_HINT)
         self.waveform_hint.setObjectName("mutedLabel")
 
-        waveform_card = build_section_card(
+        waveform_card = _card(
             "Waveform",
             zoom_row,
             self._row(self.waveform_view),
             self._row(scrollbar_container),
             self._row(self.waveform_hint),
+            collapsible=False,  # the waveform: the page is no use without it
         )
 
         # the selected sample's parameters
@@ -211,7 +217,7 @@ class S950SamplesTab(QWidget):
         )
         note.setObjectName("mutedLabel")
         note.setWordWrap(True)
-        info_card = build_section_card("Sample", grid, self._row(note))
+        info_card = _card("Sample", grid, self._row(note))
 
         cards = QVBoxLayout()
         style_card_page_layout(cards)

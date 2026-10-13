@@ -290,6 +290,18 @@ def save_slice_detection(mode):
     save_config(config)
 
 
+def get_collapsed_cards():
+    # the section cards the user collapsed in the editors, as "<editor>/<title>" keys (ui/section_card.py); anything that isn't a list of strings reads as none
+    cards = load_config().get("collapsed_cards", [])
+    return [c for c in cards if isinstance(c, str)] if isinstance(cards, list) else []
+
+
+def save_collapsed_cards(keys):
+    config = load_config()
+    config["collapsed_cards"] = sorted(set(keys))
+    save_config(config)
+
+
 # keys with a real default value worth persisting to disk, so a hand-edited
 # or version-upgraded config.json that's missing one of them gets it filled
 # back in rather than only ever defaulting implicitly in the getter above

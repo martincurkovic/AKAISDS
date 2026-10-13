@@ -20,6 +20,8 @@ say "unverified" where even the meaning is inferred, and `control_bits` is read-
 
 import copy
 
+from functools import partial
+
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QAction
 from PySide6.QtWidgets import (
@@ -69,8 +71,11 @@ from ui.envelope_graph import ADSREnvelopeGraph
 from ui.keygroup_range_bar import KeygroupRangeBar, keygroup_color
 from ui.knob import Knob
 from ui.note_spinbox import NoteSpinBox
-from ui.qt_helpers import FullWidthTabBar, build_scroll_area, build_section_card
+from ui.qt_helpers import FullWidthTabBar, build_scroll_area, build_editor_card
 from ui.s950_samples_tab import S950SamplesTab
+
+# collapsible cards, remembered as "s950_editor/<title>" (ui/section_card.py)
+_card = partial(build_editor_card, "s950_editor")
 
 
 def _log(message):
@@ -472,13 +477,13 @@ class S950ProgramEditorWindow(QMainWindow):
             "program", "enable_midi_program", "Program Change"
         )
         respond_row.itemAt(1).widget().setText("Respond to MIDI program change")
-        program_card = build_section_card("Program", name_row, midi_row, respond_row)
+        program_card = _card("Program", name_row, midi_row, respond_row)
 
         tilt_row = self._knob_row("program", [("key_tilt", "Key Tilt")], size=56)
         tilt_row.addStretch()
         xfade_row = self._labeled_row("program", "positional_xfade", "Crossfade")
         xfade_row.itemAt(1).widget().setText("Positional crossfade")
-        keyboard_card = build_section_card("Keyboard", tilt_row, xfade_row)
+        keyboard_card = _card("Keyboard", tilt_row, xfade_row)
         equalize_card_heights(program_card, keyboard_card)
 
         layout = QVBoxLayout()
@@ -503,8 +508,8 @@ class S950ProgramEditorWindow(QMainWindow):
         switch_hint = QLabel(f"{NO_VELOCITY_SWITCH} = off")
         switch_hint.setObjectName("mutedLabel")
         switch_row.insertWidget(switch_row.count() - 1, switch_hint)
-        range_card = build_section_card("Range", note_row, switch_row)
-        filter_card = build_section_card(
+        range_card = _card("Range", note_row, switch_row)
+        filter_card = _card(
             "Filter",
             self._knob_row(
                 "kg",
@@ -524,7 +529,7 @@ class S950ProgramEditorWindow(QMainWindow):
         self.amp_graph.setFixedSize(200, 90)
         self.filter_graph = ADSREnvelopeGraph()
         self.filter_graph.setFixedSize(200, 90)
-        amp_card = build_section_card(
+        amp_card = _card(
             "Amplitude Envelope",
             build_centered_row(self.amp_graph),
             self._knob_row(
@@ -537,7 +542,7 @@ class S950ProgramEditorWindow(QMainWindow):
                 ],
             ),
         )
-        env_filter_card = build_section_card(
+        env_filter_card = _card(
             "Filter Envelope",
             build_centered_row(self.filter_graph),
             self._knob_row(
@@ -597,7 +602,7 @@ class S950ProgramEditorWindow(QMainWindow):
         zone_card = build_zone_card(selector_row, self._zone_stack)
 
         # Velocity + LFO
-        velocity_card = build_section_card(
+        velocity_card = _card(
             "Velocity",
             self._knob_row(
                 "kg",
@@ -611,7 +616,7 @@ class S950ProgramEditorWindow(QMainWindow):
         )
         # Rate and Depth are the LFO's main controls: first row, a little larger; the three
         # that shape it (build-up, aftertouch, mod wheel) sit below at the page's usual size
-        lfo_card = build_section_card(
+        lfo_card = _card(
             "LFO",
             self._centered_knob_row(
                 "kg", [("lfo_rate", "Rate"), ("lfo_depth", "Depth")], _LFO_MAIN_KNOB
@@ -628,7 +633,7 @@ class S950ProgramEditorWindow(QMainWindow):
         equalize_card_heights(velocity_card, lfo_card)
 
         # Pitch warp + Output
-        pitch_card = build_section_card(
+        pitch_card = _card(
             "Pitch Warp",
             self._knob_row(
                 "kg",
@@ -647,7 +652,7 @@ class S950ProgramEditorWindow(QMainWindow):
         options_label.setFixedWidth(110)
         options_row.addWidget(options_label)
         options_row.addWidget(options, stretch=1)
-        output_card = build_section_card(
+        output_card = _card(
             "Output",
             self._labeled_row("kg", "voice_out", "Output"),
             self._labeled_row("kg", "midi_offset", "MIDI Offset"),

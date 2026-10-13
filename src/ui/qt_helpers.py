@@ -1,6 +1,7 @@
 from PySide6.QtGui import QFontMetrics, QPixmap, QPainter, QColor
 from PySide6.QtCore import Qt, QRectF, QEvent
 from PySide6.QtSvg import QSvgRenderer
+
 from PySide6.QtWidgets import (
     QFormLayout,
     QHBoxLayout,
@@ -11,6 +12,8 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+
+from ui.section_card import SectionCard
 
 
 class FullWidthTabBar(QTabBar):
@@ -97,7 +100,7 @@ def widen_popup_to_fit_items(combo):
     combo.view().setMinimumWidth(widest + 40)  # giving extra padding just in case
 
 
-def build_section_card(title, *row_layouts, header_widgets=()):
+def build_section_card(title, *row_layouts, header_widgets=(), collapse_key=None):
     # groups related rows into one visually distinct card - same surface/
     # border look as the Program Editor's own keygroup zone card (see
     # QWidget#sectionCard in style.qss.template). Originally
@@ -105,6 +108,9 @@ def build_section_card(title, *row_layouts, header_widgets=()):
     # cards, scroll areas" notes for the full history of the gotchas
     # below) - moved here, unchanged, once ui/settings_dialog.py needed the
     # exact same behaviour rather than a second hand-rolled copy of it.
+    if collapse_key:
+        # a card with a disclosure arrow (ui/section_card.py); the plain card below stays what the Settings dialog and Dashboard use
+        return SectionCard(title, row_layouts, header_widgets, collapse_key)
     header = QLabel(title)
     header.setObjectName("sectionHeader")
 
@@ -145,6 +151,14 @@ def build_section_card(title, *row_layouts, header_widgets=()):
     # OR compress below it.
     card.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
     return card
+
+
+def build_editor_card(scope, title, *row_layouts, header_widgets=(), collapsible=True, key=None):
+    """`build_section_card` for the editors: collapsible, and remembered under "<scope>/<key or title>" (`scope` names the editor). A title must be
+    unique within its scope - pass `key` when two cards share one. `collapsible=False` for a card that must always be open."""
+    return build_section_card(
+        title, *row_layouts, header_widgets=header_widgets, collapse_key=f"{scope}/{key or title}" if collapsible else None
+    )
 
 
 def set_enabled_without_scrolling(widget, enabled):

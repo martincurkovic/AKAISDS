@@ -46,6 +46,8 @@ import collections
 import time
 from dataclasses import dataclass, field
 
+from functools import partial
+
 from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import QAction
 from PySide6.QtWidgets import (
@@ -87,10 +89,13 @@ from ui.editor_layout import (
 from ui.envelope_graph import ADSREnvelopeGraph, LevelEnvelopeGraph, yamaha_adsr_values
 from ui.knob import Knob
 from ui.loop_preview_view import LoopJoinPreview, LoopPreviewZoomControls
-from ui.qt_helpers import build_scroll_area, build_section_card, set_enabled_without_scrolling
+from ui.qt_helpers import build_scroll_area, build_editor_card, set_enabled_without_scrolling
 from ui.waveform_view import WaveformView
 from ui.yamaha_fields import Field, FieldPanel
 from ui.yamaha_sample_edit import YamahaSampleEditor
+
+# collapsible cards, remembered as "yamaha_sample/<title>" (ui/section_card.py)
+_card = partial(build_editor_card, "yamaha_sample")
 
 _SPECIAL_ORIGINAL = {-1: "Original", 128: "Original"}
 
@@ -253,7 +258,7 @@ def build_sample_cards(panel):
     panel.detect_pitch_button.setToolTip(tt.YAMAHA_DETECT_PITCH_BUTTON)
     panel.detect_pitch_button.setEnabled(False)
     original_key_row.insertWidget(original_key_row.count() - 1, panel.detect_pitch_button)
-    pitch = build_section_card(
+    pitch = _card(
         "Pitch",
         original_key_row,
         knobs([k("coarse_tune", "Coarse"), k("fine_tune_l", "Fine")]),
@@ -262,7 +267,7 @@ def build_sample_cards(panel):
         row(s("pitch_bend_range", "Bend range")),
         row(s("pitch_bend_type", "Bend type")),
     )
-    key_range = build_section_card(
+    key_range = _card(
         "Key & Velocity Range",
         row(note("key_range_low", "Key low", _SPECIAL_ORIGINAL)),
         row(note("key_range_high", "Key high", _SPECIAL_ORIGINAL)),
@@ -274,7 +279,7 @@ def build_sample_cards(panel):
         row(ck("fixed_pitch_on", "Fixed pitch")),
     )
 
-    level = build_section_card(
+    level = _card(
         "Level & Pan",
         knobs([k("sample_level", "Level"), k("pan", "Pan"), k("velocity_sensitivity", "Velocity")]),
         row(s("level_key_scaling_break_1", "Scale break 1")),
@@ -283,7 +288,7 @@ def build_sample_cards(panel):
         row(s("level_key_scaling_level_2", "Scale level 2")),
     )
     # (the loop mode, the four addresses and the edit buttons live in the Loop Controls card above these cards - see the tab's _build)
-    info = build_section_card(
+    info = _card(
         "Wave",
         row(t("sampling_frequency_l", "Sample rate", format_hz)),
         row(t("wave_length", "Wave length", format_address)),
@@ -291,7 +296,7 @@ def build_sample_cards(panel):
         row(t("loop_tempo", "Loop tempo", format_tempo)),
     )
 
-    filt = build_section_card(
+    filt = _card(
         "Filter",
         row(c("filter_type", "Type")),
         knobs([k("filter_cutoff", "Cutoff"), k("filter_q", "Q / Width"), k("filter_gain", "Gain")]),
@@ -308,7 +313,7 @@ def build_sample_cards(panel):
     }
     for graph in graphs.values():
         graph.setFixedSize(*_GRAPH_SIZE)
-    feg = build_section_card(
+    feg = _card(
         "Filter Envelope",
         build_centered_row(graphs["feg"]),
         knobs([k("feg_attack_rate", "Attack"), k("feg_decay_rate", "Decay"), k("feg_release_rate", "Release")]),
@@ -316,14 +321,14 @@ def build_sample_cards(panel):
         knobs([k("feg_rate_key_scaling", "Key scale"), k("feg_rate_velocity_sensitivity", "Vel rate"), k("feg_attack_level_velocity_sensitivity", "Vel att"), k("feg_level_velocity_sensitivity", "Vel lvl")]),
     )
 
-    aeg = build_section_card(
+    aeg = _card(
         "Amplitude Envelope",
         row(c("aeg_attack_mode", "Attack mode")),
         build_centered_row(graphs["aeg"]),
         knobs([k("aeg_attack_rate", "Attack"), k("aeg_decay_rate", "Decay"), k("aeg_sustain_level", "Sustain"), k("aeg_release_rate", "Release")]),
         knobs([k("aeg_rate_key_scaling", "Key scale"), k("aeg_rate_velocity_sensitivity", "Vel rate")]),
     )
-    peg = build_section_card(
+    peg = _card(
         "Pitch Envelope",
         build_centered_row(graphs["peg"]),
         knobs([k("peg_attack_rate", "Attack"), k("peg_decay_rate", "Decay"), k("peg_release_rate", "Release")]),
@@ -331,7 +336,7 @@ def build_sample_cards(panel):
         knobs([k("peg_range", "Range"), k("peg_rate_key_scaling", "Key scale"), k("peg_rate_velocity_sensitivity", "Vel rate"), k("peg_level_velocity_sensitivity", "Vel lvl")]),
     )
 
-    lfo = build_section_card(
+    lfo = _card(
         "LFO",
         row(c("lfo_wave", "Wave")),
         knobs([k("lfo_speed", "Speed"), k("lfo_delay_time", "Delay")]),
@@ -340,7 +345,7 @@ def build_sample_cards(panel):
         row(ck("lfo_cutoff_mod_phase_invert", "Invert cutoff")),
         row(ck("lfo_pitch_mod_phase_invert", "Invert pitch")),
     )
-    eq = build_section_card(
+    eq = _card(
         "EQ",
         row(c("eq_type", "Type")),
         row(s("eq_frequency", "Frequency")),
@@ -348,7 +353,7 @@ def build_sample_cards(panel):
         row(s("eq_width", "Width")),
     )
 
-    out = build_section_card(
+    out = _card(
         "Output",
         row(c("output1", "Output 1")),
         row(c("output2", "Output 2")),
@@ -394,7 +399,7 @@ def _controls_card(panel):
     wrapper = QHBoxLayout()
     wrapper.addLayout(grid)
     wrapper.addStretch()
-    return build_section_card("Controllers", wrapper)
+    return _card("Controllers", wrapper)
 
 
 # -- the tab ---------------------------------------------------------------------------------------------
@@ -560,13 +565,14 @@ class YamahaSamplesTab(QWidget):
         # and a loop tempo, shown in the Wave card below.)
         marker_row = self._build_marker_row()
         loop_mode_row = self.panel.labeled_row(_combo("loop_mode", "Loop Mode"), label_width=70)
-        waveform_card = build_section_card(
+        waveform_card = _card(
             "Loop Controls",
             zoom_row,
             channel_stack,
             self._row(scrollbar_container),
             marker_row,
             loop_mode_row,
+            collapsible=False,  # the waveform: the page is no use without it
         )
         edit_sample_card = self._build_edit_sample_card()
         # what the loop makes of the audio at its join (left channel), kept live with the markers
@@ -575,7 +581,7 @@ class YamahaSamplesTab(QWidget):
         # tiny zoom controls right beside the title; the zoom itself lives in the widget (it also answers Ctrl+scroll and a pinch)
         loop_preview_zoom = LoopPreviewZoomControls(self.loop_preview)
         self.loop_preview.zoom_changed.connect(self._refresh_loop_preview_for_zoom)
-        loop_preview_card = build_section_card("Loop Preview", self._row(self.loop_preview), header_widgets=(loop_preview_zoom,))
+        loop_preview_card = _card("Loop Preview", self._row(self.loop_preview), header_widgets=(loop_preview_zoom,))
         self.waveform_view.markers_changed.connect(self._update_marker_knobs)
         self.waveform_view.markers_changed.connect(lambda _s, ls, le, _e: self._refresh_loop_preview(ls, le))
         self.cards_page = build_sample_cards(self.panel)
@@ -756,7 +762,10 @@ class YamahaSamplesTab(QWidget):
         content.setSpacing(8)
         content.addWidget(self._staged_banner)
         content.addLayout(grid)
-        return build_section_card("Edit Sample", content)
+        # collapsed, it must still say there are unsent edits (see _sync_edit_sample_card)
+        self._edit_sample_card = _card("Edit Sample", content)
+        self._edit_card_staged = False
+        return self._edit_sample_card
 
     def _build_sample_actions(self):
         # "Load Audio" is what a double-click on the waveform does; a right-click only selects the row, and every edit needs the audio
@@ -1463,6 +1472,17 @@ class YamahaSamplesTab(QWidget):
             view.set_loading(False)
         self.cancel_load_button.setVisible(False)
 
+    def _sync_edit_sample_card(self, staged):
+        # The Edit Sample card holds the unsent-edits strip, so a collapsed card shows an amber dot beside its title and opens (not remembered)
+        # when a working copy APPEARS - only on that change, so collapsing it while editing isn't fought on every refresh.
+        card = getattr(self, "_edit_sample_card", None)
+        if card is None:
+            return
+        card.set_attention(staged, "Edited \u2013 not on the unit yet")
+        if staged and not self._edit_card_staged and card.is_collapsed():
+            card.set_collapsed(False, remember=False)
+        self._edit_card_staged = staged
+
     def update_edit_buttons(self):
         """The edit controls need the audio of the SHOWN sample in memory, no load or edit running, and a tab that can write. The working
         copy's own controls (Undo, Send as New Sample, Revert and the banner) need unsent edits as well."""
@@ -1487,6 +1507,7 @@ class YamahaSamplesTab(QWidget):
             self._repolish(self._staged_banner, self._working_copy_label)
         self._working_copy_dot.setVisible(staged)
         self._working_copy_label.setText("Edited \u2013 not on the unit yet" if staged else "Original from the unit")
+        self._sync_edit_sample_card(staged)
         for key, enabled in wanted.items():
             self._control_wanted[key] = enabled
             button = self._sample_controls[key][0]
