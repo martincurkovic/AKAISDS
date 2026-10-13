@@ -4798,6 +4798,9 @@ class ProgramEditorWindow(QMainWindow):
             if markers is None:
                 markers = self.waveform_view.markers()
             loop_length_frames = markers["loop_end"] - markers["loop_start"]
+            new_stuno, new_sbandw = self._tuning_for_resent_sample(
+                new_index, entry["stuno"], entry.get("sbandw"), entry["framerate"]
+            )
             # SHNAME is deliberately not written here - new_name already
             # went out as the send's own filename, so the duplicate is
             # already named correctly, unlike _perform_sample_edit_real's
@@ -4809,7 +4812,7 @@ class ProgramEditorWindow(QMainWindow):
                 ("SPTYPE", entry["sptype"]),
                 ("SPITCH", entry["spitch"]),
                 ("SHLTO", entry["shlto"]),
-                ("STUNO", entry["stuno"]),
+                ("STUNO", new_stuno),
                 ("SSTART", markers["start"]),
                 ("SMPEND", markers["end"]),
                 ("LOOPAT1", markers["loop_end"]),
@@ -4882,6 +4885,7 @@ class ProgramEditorWindow(QMainWindow):
             # a resident sample's slices preview as the sampler plays it (Tune
             # and Root Note); audio from a file has neither, so no shift
             preview_pitch_shift=self._preview_pitch_shift_semitones(entry),
+            sbandw=entry.get("sbandw"),
         )
 
     def _run_slice_editor(
@@ -4896,8 +4900,9 @@ class ProgramEditorWindow(QMainWindow):
         resident_source=True,
         extra_channels=None,
         preview_pitch_shift=0.0,
+        sbandw=None,
     ):
-        # The Slice Editor over *samples*. resident_source is True when they
+        # The Slice Editor over *samples*. sbandw: the source sample's SBANDW (None for audio from a file, which has no tuning to carry). resident_source is True when they
         # are a sample already on the sampler (retained across the export's
         # reloads); False for audio from a file (Import RX2), whose name must
         # not be tied to a resident sample of the same name.
@@ -4932,7 +4937,9 @@ class ProgramEditorWindow(QMainWindow):
             stuno,
             shlto,
             _existing_names,
-            self._export_slices,
+            functools.partial(
+                self._export_slices, source_sbandw=sbandw, source_rate=framerate
+            ),
             demo_mode=bool(os.environ.get("AKAISDS_DEMO_SAMPLER")),
             program_names_provider=_existing_program_names,
             create_program_callback=(
@@ -5051,6 +5058,8 @@ class ProgramEditorWindow(QMainWindow):
         status_callback,
         busy_callback=None,
         extra_slices=None,
+        source_sbandw=None,
+        source_rate=None,
     ):
         # the actual hardware-talking half of the Slice Editor (see
         # ui/slice_editor_window.py's own class docstring for the split) -
@@ -5190,14 +5199,21 @@ class ProgramEditorWindow(QMainWindow):
                 # SSTART/SMPEND cover the whole sent buffer (send_file_queue
                 # only ever sends audio, never these header fields - same
                 # reasoning as Duplicate Sample's own header fixup)
-                for param_name, value in (
+                header_fields = [
                     ("SPTYPE", 3),
                     ("SPITCH", spitch),
                     ("SHLTO", shlto),
-                    ("STUNO", stuno),
-                    ("SSTART", 0),
-                    ("SMPEND", slice_frame_count - 1),
-                ):
+                ]
+                if source_sbandw is not None:
+                    # the tuning of a slice of a resident sample: its own bandwidth baseline plus what the user dialled in on the
+                    # source (see _tuning_for_resent_sample). Audio from a FILE has no tuning to carry, so the sampler's own
+                    # (the baseline the send baked in) is left alone - writing 0 over it played a 11025 Hz import an octave high.
+                    slice_stuno, _slice_sbandw = self._tuning_for_resent_sample(
+                        new_index, stuno, source_sbandw, source_rate or framerate
+                    )
+                    header_fields.append(("STUNO", slice_stuno))
+                header_fields += [("SSTART", 0), ("SMPEND", slice_frame_count - 1)]
+                for param_name, value in header_fields:
                     self._write_knob_value(
                         param_name, "sample", value, keygroup_index=0, index=new_index
                     )
@@ -8924,6 +8940,48 @@ class ProgramEditorWindow(QMainWindow):
             entry["end"],
         )
 
+    def _read_sample_header_blocking(self, sample_index):
+        """The header fields (SBANDW, SSRATE, ...) of resident sample `sample_index`, read now through the worker; None if the read fails."""
+        for _attempt in range(2):
+            which, args = self._wait_for_any_signal(
+                [self._worker.sample_detail_loaded, self._worker.sample_detail_load_failed],
+                start=lambda: self._worker.submit_sample_detail(sample_index),
+                timeout_ms=20000,
+            )
+            if which != 0:
+                return None
+            if args[0] == sample_index:
+                return args[1]
+        return None
+
+    def _tuning_for_resent_sample(self, new_index, source_stuno, source_sbandw, source_rate):
+        """The raw STUNO to leave on a sample that was just SENT from another one's audio. The sent sample gets the bandwidth bucket the send
+        path chose (the nearest one to its rate, for a 16-bit Akai send - or whatever the sampler derives for a generic one), which need
+        not be the SOURCE's: an 11025 Hz sample the sampler imported itself has SBANDW 1 and a baseline of -24 semitones in its STUNO, but
+        a 16-bit send of the same rate lands on SBANDW 0 and a baseline of -12. Copying the source's STUNO across as it was played that
+        pair back an OCTAVE LOW (seen on a real S2000, 2026-10-13). What is carried over is the part of STUNO the USER chose - STUNO minus
+        the source's own baseline - on top of the new sample's baseline. Returns (STUNO raw, SBANDW the new sample has or None)."""
+        if source_sbandw is None:
+            return source_stuno, None  # nothing to compare against: as before
+        header = self._read_sample_header_blocking(new_index)
+        logger = debug_log.get_logger()
+        if header is None:
+            new_sbandw, new_rate = None, source_rate
+            logger.warning(f"tuning: couldn't read the header of the sent sample (index {new_index}) - keeping the source's STUNO")
+            return source_stuno, None
+        new_sbandw, new_rate = header["SBANDW"], header.get("SSRATE") or source_rate
+        user_semitones = self._sample_tune_offset_to_semitones(source_stuno) - baseline_semitones_for_bandwidth(
+            source_rate, source_sbandw
+        )
+        new_stuno = self._semitones_to_sample_tune_offset(
+            user_semitones + baseline_semitones_for_bandwidth(new_rate, new_sbandw)
+        )
+        logger.info(
+            f"tuning: sent sample (index {new_index}) lands at {new_rate} Hz, SBANDW {new_sbandw} (source: {source_rate} Hz, SBANDW "
+            f"{source_sbandw}, STUNO {source_stuno}) -> STUNO {new_stuno} (the sampler's own was {header.get('STUNO')})"
+        )
+        return new_stuno, new_sbandw
+
     def _stage_working_copy(self, sample_index, samples, markers):
         # Put `samples` (with `markers`: start/loop_start/loop_end/end) on the
         # selected sample as its working copy. The first time, remember what the
@@ -9057,6 +9115,10 @@ class ProgramEditorWindow(QMainWindow):
         samples = staged.samples
         markers = self.waveform_view.markers_with_loop_in_range()
         new_markers = tuple(markers[key] for key in _MARKER_KEYS)
+        logger.info(
+            f"Staged edit: sending {name!r}: {len(samples)} frames (sampler has {len(staged.original_samples)}), "
+            f"markers {new_markers} (working copy's own: {tuple(staged.markers[k] for k in _MARKER_KEYS)})"
+        )
 
         def _working_copy(*_markers):
             return (samples, *new_markers)
@@ -9132,6 +9194,11 @@ class ProgramEditorWindow(QMainWindow):
             return False
         finally:
             QApplication.restoreOverrideCursor()
+        debug_log.get_logger().info(
+            f"ProgramEditor: {label} applied to {name!r}: {len(entry['samples'])} -> "
+            f"{len(new_samples)} frames, markers {tuple(markers[k] for k in _MARKER_KEYS)} "
+            f"-> {tuple(new_markers)}"
+        )
         self._stage_working_copy(
             sample_index, new_samples, dict(zip(_MARKER_KEYS, new_markers))
         )
@@ -9528,11 +9595,14 @@ class ProgramEditorWindow(QMainWindow):
             # waveform_view (this sample's audio just changed shape, so
             # the view's current markers don't necessarily apply).
             loop_length_frames = new_loop_end - new_loop_start
+            new_stuno, new_sbandw = self._tuning_for_resent_sample(
+                new_index, entry["stuno"], entry.get("sbandw"), framerate
+            )
             for param_name, value in (
                 ("SPTYPE", entry["sptype"]),
                 ("SPITCH", entry["spitch"]),
                 ("SHLTO", entry["shlto"]),
-                ("STUNO", entry["stuno"]),
+                ("STUNO", new_stuno),
                 ("SSTART", new_start),
                 ("SMPEND", new_end),
                 ("LOOPAT1", new_loop_end),
@@ -9562,8 +9632,17 @@ class ProgramEditorWindow(QMainWindow):
             if which == 0:
                 final_samples = args[0]
                 if original_name in final_samples:
-                    self.sample_list_widget.setCurrentRow(
-                        final_samples.index(original_name)
+                    # Show what was just written as the sample's entry NOW, from what is known, rather than via the header fetch
+                    # a plain selection would start: that arrives later (behind every queued write and length read) and the
+                    # sample sat there with its controls off until the user clicked it again.
+                    self._show_sent_sample(
+                        final_samples.index(original_name),
+                        entry,
+                        new_samples,
+                        framerate,
+                        (new_start, new_loop_start, new_loop_end, new_end),
+                        new_stuno,
+                        new_sbandw,
                     )
             return True
         except Exception:
@@ -9585,6 +9664,31 @@ class ProgramEditorWindow(QMainWindow):
                 os.remove(temp_path)
             except OSError:
                 pass
+
+    def _show_sent_sample(self, index, source_entry, samples, framerate, markers, stuno, sbandw):
+        # The cache entry for the sample at `index` (just sent from `source_entry`'s header + `samples`, written with `markers` and `stuno`),
+        # selected so the waveform AND the controls are live at once.
+        start, loop_start, loop_end, end = markers
+        self._sample_waveform_cache[index] = {
+            "samples": samples,
+            "framerate": framerate,
+            "frame_count": len(samples),
+            "start": start,
+            "loop_start": loop_start,
+            "loop_end": loop_end,
+            "end": end,
+            "sptype": source_entry["sptype"],
+            "spitch": source_entry["spitch"],
+            "shlto": source_entry["shlto"],
+            "stuno": stuno,
+            "ldwell1": source_entry.get("ldwell1", 0),
+            "sbandw": sbandw if sbandw is not None else source_entry.get("sbandw"),
+        }
+        if self.sample_list_widget.currentRow() == index:
+            # no selection change to fire _on_sample_selected: show it by hand
+            self._on_sample_selected(self.sample_list_widget.item(index), None)
+        else:
+            self.sample_list_widget.setCurrentRow(index)
 
     def _on_waveform_marker_committed(self, which, start, loop_start, loop_end, end):
         # canvas drag release - see _on_marker_spinbox_changed/
