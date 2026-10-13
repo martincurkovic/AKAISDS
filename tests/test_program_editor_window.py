@@ -692,6 +692,9 @@ class FakeSamplerController(QObject):
         #: where a sent sample lands in the list (None = the end). A real S2000 gives a new sample the LOWEST FREE slot, which after an
         #: earlier delete is below samples that were there first (measured 2026-10-07)
         self.insert_new_at = None
+        #: the bandwidth bucket a sent sample lands on (SBANDW): 1 = 44100 Hz, 0 = 22050 Hz. A 16-bit Akai send picks the nearest to the
+        #: sample's rate; a sample the sampler imported itself (generic SDS) sits on 1 whatever its rate
+        self.new_sample_sbandw = 1
 
     def is_transfer_busy(self):
         return self.busy
@@ -734,7 +737,7 @@ class FakeSamplerController(QObject):
                 }
                 self._bridge.sample_headers[new_index] = {
                     "SSTART": 0, "SMPEND": 0, "LOOPAT1": 0, "LLNGTH1": 0,
-                    "SLNGTH": len(sent_samples), "SSRATE": 44100, "SBANDW": 1, "SPTYPE": 0,
+                    "SLNGTH": len(sent_samples), "SSRATE": sent_rate, "SBANDW": self.new_sample_sbandw, "SPTYPE": 0,
                     "SPITCH": 60, "SHLTO": 0, "STUNO": 0, "LDWELL1": 0,
                 }
         # deferred, not synchronous - _perform_sample_edit_real connects
@@ -4780,6 +4783,7 @@ def test_export_slices_real_mode_happy_path_sends_batch_and_writes_headers(
         names, slices, 44100, 16, None, 60, 128, 3,
         lambda cur, total: progress_calls.append((cur, total)),
         lambda text: status_calls.append(text),
+        source_sbandw=1, source_rate=44100,
     )
 
     assert success is True
