@@ -4,6 +4,7 @@ on:
   push:
     branches: [master]
   pull_request:
+  workflow_dispatch: # run the suite by hand on any branch from the Actions tab (a branch with no PR yet, say)
   workflow_call: # build.yml runs this as its release gate
 
 concurrency:
