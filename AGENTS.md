@@ -443,6 +443,15 @@ Akai SDATA and generic SDS sends share ONE packet loop; every batch (Dashboard S
 - **A control that disables ITSELF when clicked must give up focus first** (2026-10-13): a disabled widget hands its focus to the next one in the tab order and a `QScrollArea` scrolls to reveal it. Load Edited Audio (off until the next
   save) threw the Yamaha page ~220 px down; Undo/Revert/Send go off when the working copy goes. `_set_sample_control_enabled` (Akai) and `YamahaSamplesTab.update_edit_buttons` now `clearFocus()` a focused button before disabling it.
   Tests: `tests/test_button_focus_scroll.py` (click with focus, assert the scroll bar did not move). Any new self-disabling control needs the same.
+- **Collapsible cards (2026-10-13, `ui/section_card.py`)**: every editor card (Akai Program/Keygroup/Samples/Global, S950, Yamaha) has a painted Finder-style arrow beside its title; the Settings dialog and Dashboard keep plain cards.
+  `qt_helpers.build_editor_card(scope, title, ..., collapsible=True, key=None)` -> `SectionCard`; the editors reach it through `ProgramEditorWindow._build_section_card` or a per-file `_card = partial(build_editor_card, "<scope>")`
+  (scopes `program_editor` - Akai incl. the Global tab -, `s950_editor`, `yamaha_program`, `yamaha_sample`). The rows live in a body widget that hides; the title row stays; `header_widgets` (Loop Preview's zoom buttons) hide with it.
+  - **A pair pinned by `equalize_card_heights` is a GROUP**: it collapses/expands together and is re-pinned to the tallest member each time (`pin_equal_heights`). A lone card is `Preferred, Fixed` and follows its size hint.
+  - **State** is remembered per `"<scope>/<title>"` in `config.json` `collapsed_cards` (cached per process; `section_card.reset_state()`, autouse in `conftest.py`). **A title must be unique within its scope** - the second "Modulation" has `key="Keygroup Modulation"`;
+    `tests/test_section_cards.py` checks every editor. Not collapsible: the waveform cards (Loop Controls on the Akai and Yamaha Samples tabs, Waveform on the S950's), and the Zone card (not a section card).
+  - **Edit Sample holds the unsent-edits strip**, so `_sync_edit_sample_card` (Akai and Yamaha): an amber dot beside the title while collapsed, and the card OPENS (`set_collapsed(False, remember=False)`) when a working copy APPEARS - on that change only, so a user who collapses it while editing is not fought on every refresh.
+  - Traps: collapsing clears focus out of the body first (a hidden focused widget scrolls the page); `refresh_layouts()` also invalidates the BODY's layout - the S1000 gating hides widgets in an unshown window and a stale body hint pinned a card 426 px tall;
+    a QWidget SUBCLASS paints its QSS card frame only with `WA_StyledBackground`. Tests: `tests/test_section_cards.py`.
 - **A fresh `Knob.setValue(0)` emits no `valueChanged`**, so a readout wired only to that signal stays "-": fill it explicitly when loading
   (and after any `blockSignals`).
 - **Envelope graphs** (`ui/envelope_graph.py`): each stage has a FIXED width budget scaled only by its own value - never re-normalize
