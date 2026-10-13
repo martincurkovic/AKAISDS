@@ -385,11 +385,25 @@ def test_view_changed_emits_on_zoom(qapp):
     assert frame_count == 100000
 
 
-def test_max_zoom_reaches_single_sample_resolution(qapp):
+def test_zoom_in_stops_at_a_readable_number_of_samples_like_the_main_waveform(qapp):
+    from ui.waveform_view import _MIN_VISIBLE_FRAMES, WaveformView
+
     view = _view(50000)
     for _ in range(60):
         view.zoom_in()
-    assert view._view_length() == 1
+    assert view._view_length() == _MIN_VISIBLE_FRAMES  # it used to go on to a single frame, with nothing left to see
+    view.set_zoom(1e9)  # a pinch or a wheel past the ceiling is clamped the same way
+    assert view._view_length() == _MIN_VISIBLE_FRAMES
+    main = WaveformView()
+    main.set_waveform([0] * 50000, 0, 0, 0, 49999)
+    assert view._max_zoom() == main._max_zoom()  # one rule for both
+
+
+def test_a_sample_shorter_than_the_minimum_view_does_not_zoom_at_all(qapp):
+    view = _view(20)
+    for _ in range(10):
+        view.zoom_in()
+    assert view._view_length() == 20
 
 
 # --- paint smoke tests -------------------------------------------------------

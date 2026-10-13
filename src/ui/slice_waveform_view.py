@@ -12,6 +12,7 @@ from ui.waveform_view import (
     _MIN_ZOOM,
     brighten_for_hover,
     build_envelope,
+    max_zoom_for,
     frame_for_x,
     x_for_frame,
 )
@@ -253,7 +254,8 @@ class SliceWaveformView(QWidget):
         )
 
     def _max_zoom(self):
-        return max(_MIN_ZOOM, float(self._frame_count))
+        # the same ceiling as the Samples tab's main waveform: a readable view, not a single frame (waveform_view.max_zoom_for)
+        return max_zoom_for(self._frame_count)
 
     def _clamp_view_start(self):
         max_start = max(0, self._frame_count - self._view_length())

@@ -34,6 +34,15 @@ _ZOOM_STEP = 1.6  # multiplicative factor per wheel notch / zoom button click
 # look at. 32 frames across a canvas of several hundred pixels is ~10+ px per sample, so every frame is still plain to see and a marker
 # drag is still sample-accurate (many pixels per frame, never several frames per pixel).
 _MIN_VISIBLE_FRAMES = 32
+
+
+def max_zoom_for(frame_count):
+    """The deepest zoom for a sample of `frame_count` frames: the one that leaves `_MIN_VISIBLE_FRAMES` on screen (the whole sample, if it is shorter).
+    Shared by WaveformView and the Slice Editor's SliceWaveformView so both stop at the same readable view."""
+    if frame_count <= 0:
+        return _MIN_ZOOM
+    visible = min(_MIN_VISIBLE_FRAMES, frame_count)
+    return max(_MIN_ZOOM, frame_count / visible)
 # there used to be a flat _MAX_ZOOM = 500.0 ceiling here ("view can shrink
 # to roughly 1/500th of the sample") - see WaveformView._max_zoom for why
 # that's gone: for any sample bigger than about 500x the canvas's own
@@ -782,10 +791,7 @@ class WaveformView(QWidget):
         # reachable whatever the sample's size, unlike the flat constant this replaced (see the removed _MAX_ZOOM's comment above:
         # for a sample over ~500x the canvas width, 500x could never reach sample-accurate dragging), but stopping at a view you can
         # still read instead of going down to a single frame. _view_length() is round(frame_count / zoom), so frame_count / N shows N.
-        if self._frame_count <= 0:
-            return _MIN_ZOOM
-        visible = min(_MIN_VISIBLE_FRAMES, self._frame_count)
-        return max(_MIN_ZOOM, self._frame_count / visible)
+        return max_zoom_for(self._frame_count)
 
     def _clamp_view_start(self):
         max_start = max(0, self._frame_count - self._view_length())

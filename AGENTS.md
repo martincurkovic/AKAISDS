@@ -524,7 +524,7 @@ own copy of program names - renaming needs `_update_multi_program_combo_names()`
   `markers_with_loop_in_range()`, not `.markers()`.
 - Zoom: `_max_zoom()` scales with `frame_count`; trackpad pinch is `NativeGesture`; `angle.x() != 0` always means pan; unmodified
   vertical scroll does nothing on purpose. The ceiling is `_MIN_VISIBLE_FRAMES` (32) on screen, not a single frame (it used to zoom until
-  nothing was visible); a drag is still sample-accurate there. `SliceWaveformView` still zooms to one frame.
+  nothing was visible); a drag is still sample-accurate there. The Slice Editor's `SliceWaveformView` uses the same ceiling through the shared `waveform_view.max_zoom_for`.
 - **Loop Preview zoom** (`ui/loop_preview_view.py`, shared by the Akai and Yamaha editors): `LoopJoinPreview` owns the zoom (`ZOOM_LADDER`
   19..2400 frames each side, default 150, session-wide, not persisted) and emits `zoom_changed(frames)`; the owner re-requests
   `half_window()` frames from `WaveformView.samples_before/after` (`_refresh_loop_preview_for_zoom`). Drag sensitivity follows for free
