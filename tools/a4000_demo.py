@@ -15,6 +15,8 @@ Double-click a waveform to load its audio. Edits and slices create NEW samples o
 
 Run from the repo root:   uv run python tools/a4000_demo.py            (the Dashboard)
                           uv run python tools/a4000_demo.py --editor   (straight into the Program Editor's Samples tab)
+                          uv run python tools/a4000_demo.py --instant  (no MIDI-speed emulation: sends, loads and verifications run at the
+                                                                     speed of the fake; also AKAISDS_DEMO_INSTANT=1. Default: paced like the unit)
 Headless self-check:      QT_QPA_PLATFORM=offscreen uv run python tools/a4000_demo.py --smoke
 """
 
@@ -33,6 +35,7 @@ from PySide6.QtWidgets import QApplication, QMainWindow
 from controller.sampler_controller import SamplerController
 from core import sampler_models
 from core import yamaha_params as yp
+from core import demo_timing
 from core.demo_a4000 import FakeA4000
 from core.midi_manager import MidiManager
 from ui import theme
@@ -105,7 +108,7 @@ def add_demo_samples(fake):
         fake.assign(number, names[0])
 
 
-def main(smoke=False, editor=False):
+def main(smoke=False, editor=False, instant=False):
     app = QApplication(sys.argv)
     theme.apply_to_app(app)
 
@@ -118,6 +121,8 @@ def main(smoke=False, editor=False):
 
     controller = SamplerController(midi_manager)
     controller.set_device_type(sampler_models.YAMAHA_A4000)
+    if instant:
+        demo_timing.apply_to_yamaha(controller)
 
     dashboard = TransferDashboard(controller, midi_manager)
     window = QMainWindow()
@@ -153,4 +158,4 @@ def main(smoke=False, editor=False):
 
 
 if __name__ == "__main__":
-    main(smoke="--smoke" in sys.argv, editor="--editor" in sys.argv)
+    main(smoke="--smoke" in sys.argv, editor="--editor" in sys.argv, instant=demo_timing.requested(sys.argv))

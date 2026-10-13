@@ -10,6 +10,8 @@ only the ports are fake. The Settings dialog is not usable here (it would
 re-open real ports) - everything else is.
 
 Run from the repo root:   uv run python tools/s950_demo.py
+                          uv run python tools/s950_demo.py --instant   (no MIDI-speed emulation: wire-time waits and the ACK stream run at
+                                                                     the speed of the fake; also AKAISDS_DEMO_INSTANT=1. Default: paced)
 Headless self-check:      QT_QPA_PLATFORM=offscreen uv run python tools/s950_demo.py --smoke
 """
 
@@ -25,6 +27,7 @@ from PySide6.QtWidgets import QApplication, QMainWindow
 
 from controller.sampler_controller import SamplerController
 from core import sampler_models
+from core import demo_timing
 from core.demo_s950 import FakeS950
 from core.midi_manager import MidiManager
 from ui import theme
@@ -50,7 +53,7 @@ class _FakePort:
         pass
 
 
-def main(smoke=False):
+def main(smoke=False, instant=False):
     app = QApplication(sys.argv)
     theme.apply_to_app(app)
 
@@ -62,6 +65,8 @@ def main(smoke=False):
 
     controller = SamplerController(midi_manager)
     controller.set_device_type(sampler_models.AKAI_S900_S950)
+    if instant:
+        demo_timing.apply_to_s950(controller)
 
     dashboard = TransferDashboard(controller, midi_manager)
     window = QMainWindow()
@@ -83,4 +88,4 @@ def main(smoke=False):
 
 
 if __name__ == "__main__":
-    main(smoke="--smoke" in sys.argv)
+    main(smoke="--smoke" in sys.argv, instant=demo_timing.requested(sys.argv))
