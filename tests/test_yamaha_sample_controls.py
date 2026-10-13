@@ -137,7 +137,7 @@ def test_the_edit_buttons_need_the_audio_loaded(window):
     assert all(b.isEnabled() for b in tab.edit_buttons.values()) and tab.slice_button.isEnabled()
 
 
-def test_trim_makes_a_new_sample_from_the_marked_region_and_keeps_the_originals_settings(window):
+def test_trim_edits_the_working_copy_and_sending_it_makes_a_new_sample_that_keeps_the_originals_settings(window):
     tab = user_sample(window, mode=1, end=3500, loop=(1500, 2500))
     put(window.fake, "UM", original_key_l=64, original_key_r=64, fine_tune_l=-9, fine_tune_r=-9, coarse_tune=2)
     tab.reload_sample("UM")
@@ -145,20 +145,26 @@ def test_trim_makes_a_new_sample_from_the_marked_region_and_keeps_the_originals_
     release(tab, "start", 500)
     assert settled(window, ym.Markers(500, 1500, 2500, 3500))
     original_audio = list(window.fake.audio["UM"])
+    before = set(window.fake.samples)
     tab.edit_buttons["trim"].click()
+    # nothing reaches the unit: the working copy is the trimmed audio, shown at once
+    assert set(window.fake.samples) == before and not tab._edit_busy
+    assert tab._staged["UM"].channels[0] == original_audio[500:3500]
+    assert tab._audio_samples == original_audio[500:3500] and not tab._staged_banner.isHidden()
+    tab.send_edits_as_new_button.click()
     assert not tab.edit_buttons["trim"].isEnabled()  # locked while the copy is sent
-    data = new_sample(window, "UM TRIM")
+    data = new_sample(window, "UM EDIT")
     g = lambda key: yp.extract(yp.get("sample", key), data)  # noqa: E731
     # the unit's wave end is 3500 (exclusive), the start 500: 3000 frames
     assert (g("wave_start_address"), g("wave_length"), g("wave_end_address")) == (0, 3000, 3000)
     assert (g("original_key_l"), g("fine_tune_l"), g("coarse_tune"), g("loop_mode")) == (64, -9, 2, 1)
     # the loop moved with the trim (everything is 500 frames earlier)
     assert (g("loop_start_address"), g("loop_end_address")) == (1000, 2000)
-    assert window.fake._audio_for("UM TRIM") == original_audio[500:3500]
+    assert window.fake._audio_for("UM EDIT") == original_audio[500:3500]
     settle_edit(tab)
-    assert wait_until(lambda: tab._selected == "UM TRIM")  # the copy is selected afterwards
+    assert wait_until(lambda: tab._selected == "UM EDIT")  # the copy is selected afterwards
     assert list(window.fake.audio["UM"]) == original_audio  # the original is untouched
-
+    assert tab._staged == {}  # the work lives on as the new sample
 
 def test_trim_with_nothing_to_trim_says_so_and_sends_nothing(window):
     tab = user_sample(window, mode=4, end=4000)
@@ -169,34 +175,36 @@ def test_trim_with_nothing_to_trim_says_so_and_sends_nothing(window):
     assert any("Nothing to trim" in m for m in messages) and set(window.fake.samples) == before
 
 
-def test_reverse_makes_a_reversed_copy(window):
+def test_reverse_then_send_makes_a_reversed_copy(window):
     tab = user_sample(window, mode=4, end=4000)
     tab.edit_buttons["reverse"].click()
-    new_sample(window, "UM REV")
-    assert wait_until(lambda: window.fake.audio.get("UM REV") == list(reversed(window.fake.audio["UM"])) or True)
+    tab.send_edits_as_new_button.click()
+    new_sample(window, "UM EDIT")
+    assert wait_until(lambda: window.fake._audio_for("UM EDIT") == list(reversed(window.fake.audio["UM"])))
     settle_edit(tab)
 
-
-def test_an_edit_shows_its_send_progress_in_a_bar_that_goes_away_afterwards(window):
+def test_sending_the_working_copy_shows_its_progress_in_a_bar_that_goes_away_afterwards(window):
     tab = user_sample(window, mode=4, end=4000)
     shown = []  # (status text, the bar was showing, its value, its maximum) at every progress message
     tab.status_message.connect(lambda m: shown.append((m, not tab.edit_progress.isHidden(), tab.edit_progress.value(), tab.edit_progress.maximum())))
     assert tab.edit_progress.isHidden()
     tab.edit_buttons["reverse"].click()
-    new_sample(window, "UM REV")
+    assert tab.edit_progress.isHidden()  # editing the working copy sends nothing
+    tab.send_edits_as_new_button.click()
+    new_sample(window, "UM EDIT")
     settle_edit(tab)
-    progress = [x for x in shown if x[0].startswith('Reverse "UM" - ')]
+    progress = [x for x in shown if x[0].startswith('Send "UM" - ')]
     assert progress and all(visible and total > 0 and 0 <= value <= total for _m, visible, value, total in progress)
-    assert progress[-1][0].endswith("%") and tab.edit_progress.isHidden()  # hidden again once the edit is over
-
+    assert progress[-1][0].endswith("%") and tab.edit_progress.isHidden()  # hidden again once the send is over
 
 def test_a_stereo_sample_stays_stereo_through_an_edit(window):
     tab = user_sample(window, "ST", mode=4, end=4000, right=True)
     tab.edit_buttons["reverse"].click()
-    data = new_sample(window, "ST REV")
+    assert len(tab._staged["ST"].channels) == 2
+    tab.send_edits_as_new_button.click()
+    data = new_sample(window, "ST EDIT")
     assert yp.is_stereo(data)
     settle_edit(tab)
-
 
 def test_fade_is_refused_when_the_markers_cover_the_whole_sample(window):
     tab = user_sample(window, mode=4, end=4000)
@@ -209,9 +217,10 @@ def test_fade_is_refused_when_the_markers_cover_the_whole_sample(window):
 def test_normalise_gains_a_quiet_sample_up(window):
     tab = user_sample(window, mode=4, end=4000)
     tab.edit_buttons["normalise"].click()
-    new_sample(window, "UM NORM")
+    assert max(abs(v) for v in tab._staged["UM"].channels[0]) > max(abs(v) for v in window.fake.audio["UM"])
+    tab.send_edits_as_new_button.click()
+    new_sample(window, "UM EDIT")
     settle_edit(tab)
-
 
 def test_normalise_says_when_the_sample_is_silent(window):
     window.fake.add_sample("SIL", audio=[0] * 500)
@@ -224,56 +233,74 @@ def test_normalise_says_when_the_sample_is_silent(window):
     assert any("silent" in m for m in messages)
 
 
-def test_filter_runs_the_chosen_filter_and_makes_a_copy(window, monkeypatch):
-    class StubDialog:
-        def __init__(self, parent, name, samples, rate, pitch_shift_semitones=0):
-            self.seen = (name, len(samples), rate)
+class _FilterStub:
+    send_new = False
 
-        def exec(self):
-            return True
+    def __init__(self, parent, name, samples, rate, pitch_shift_semitones=0, allow_new_sample=False,
+                 applies_to_working_copy=False, send_name=""):
+        self.seen = (name, len(samples), rate)
 
-        def highpass_enabled(self): return False
-        def highpass_cutoff_hz(self): return None
-        def highpass_slope_db_per_octave(self): return 12
-        def lowpass_enabled(self): return True
-        def lowpass_cutoff_hz(self): return 800
-        def lowpass_slope_db_per_octave(self): return 24
+    def exec(self):
+        return True
 
-    monkeypatch.setattr(edit_module, "FilterSampleDialog", StubDialog)
+    def send_as_new(self): return type(self).send_new
+    def highpass_enabled(self): return False
+    def highpass_cutoff_hz(self): return None
+    def highpass_slope_db_per_octave(self): return 12
+    def lowpass_enabled(self): return True
+    def lowpass_cutoff_hz(self): return 800
+    def lowpass_slope_db_per_octave(self): return 24
+
+
+def test_filter_ok_applies_to_the_working_copy_and_sending_it_makes_the_copy(window, monkeypatch):
+    monkeypatch.setattr(edit_module, "FilterSampleDialog", _FilterStub)
+    _FilterStub.send_new = False
     tab = user_sample(window, mode=4, end=4000)
+    before = set(window.fake.samples)
     tab.edit_buttons["filter"].click()
-    new_sample(window, "UM FILT")
+    assert set(window.fake.samples) == before and "UM" in tab._staged  # applied here, sent nowhere
+    tab.send_edits_as_new_button.click()
+    new_sample(window, "UM EDIT")
     settle_edit(tab)
 
 
-def test_a_cancelled_filter_dialog_sends_nothing(window, monkeypatch):
+def test_the_filter_dialogs_own_send_as_new_sample_makes_the_unit_copy_at_once(window, monkeypatch):
+    monkeypatch.setattr(edit_module, "FilterSampleDialog", _FilterStub)
+    _FilterStub.send_new = True
+    tab = user_sample(window, mode=4, end=4000)
+    tab.edit_buttons["filter"].click()
+    new_sample(window, "UM FILT")
+    assert tab._staged == {}
+    settle_edit(tab)
+
+def test_a_cancelled_filter_dialog_changes_nothing(window, monkeypatch):
     class Cancel:
-        def __init__(self, *a): pass
+        def __init__(self, *a, **k): pass
         def exec(self): return False
 
     monkeypatch.setattr(edit_module, "FilterSampleDialog", Cancel)
     tab = user_sample(window, mode=4, end=4000)
     before = set(window.fake.samples)
     tab.edit_buttons["filter"].click()
-    assert set(window.fake.samples) == before and not tab._edit_busy
+    assert set(window.fake.samples) == before and not tab._edit_busy and tab._staged == {}
 
-
-def test_declining_the_confirmation_sends_nothing(window, monkeypatch):
+def test_declining_the_send_confirmation_sends_nothing_and_keeps_the_working_copy(window, monkeypatch):
+    tab = user_sample(window, mode=4, end=4000)
+    tab.edit_buttons["reverse"].click()  # (no confirmation: it only changes the working copy)
+    assert "UM" in tab._staged
     monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.StandardButton.No)
-    tab = user_sample(window, mode=4, end=4000)
     before = set(window.fake.samples)
-    tab.edit_buttons["reverse"].click()
-    assert set(window.fake.samples) == before and not tab._edit_busy
+    tab.send_edits_as_new_button.click()
+    assert set(window.fake.samples) == before and not tab._edit_busy and "UM" in tab._staged
 
-
-def test_an_edit_whose_name_is_taken_gets_a_number(window):
+def test_a_send_whose_name_is_taken_gets_a_number(window):
     tab = user_sample(window, mode=4, end=4000)
-    window.fake.add_sample("UM REV", audio=[1] * 100)  # taken on the unit (the sender reads the unit's own list)
+    window.fake.add_sample("UM EDIT", audio=[1] * 100)  # taken on the unit (the sender reads the unit's own list)
     tab.edit_buttons["reverse"].click()
-    new_sample(window, "UM REV 2")
+    tab.send_edits_as_new_button.click()
+    new_sample(window, "UM EDIT 2")
     settle_edit(tab)
-    assert wait_until(lambda: tab._selected == "UM REV 2")
-
+    assert wait_until(lambda: tab._selected == "UM EDIT 2")
 
 # --- the Slice Editor --------------------------------------------------------------------------------------------------
 
@@ -300,6 +327,7 @@ class StubSlicer:
         )
         self.export_succeeded = self.result[0]
         return 1
+
 
 
 def test_the_slice_editor_exports_every_slice_as_a_new_sample(window, monkeypatch):

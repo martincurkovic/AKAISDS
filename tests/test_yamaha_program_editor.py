@@ -93,6 +93,7 @@ def build_window(qapp, fake):  # noqa: F811
 
 
 def dispose(window):
+    window.samples_tab._staged.clear()  # unsent edits would make closing ask a (modal) question
     window.samples_tab.disconnect_controller()
     window._writer.close()
     window._scan_generation += 1
@@ -593,8 +594,8 @@ def test_the_sample_page_is_aligned_pairs_with_no_collapsible_parts(win):
     page.resize(1000, 2600)
     _assert_pairs_line_up(
         page,
-        [("Pitch", "Key & Velocity Range"), ("Level & Pan", "Wave"), ("Filter", "Filter Envelope"),
-         ("Amplitude Envelope", "Pitch Envelope"), ("LFO", "Controllers"), ("Output", "EQ")],
+        [("Pitch", "Key & Velocity Range"), ("Level & Pan", "Output"), ("Filter", "Filter Envelope"),
+         ("Amplitude Envelope", "Pitch Envelope"), ("LFO", "Controllers")],
     )
     # everything is simply shown: nothing hides behind a header
     assert not [b for b in tab.cards_scroll.widget().findChildren(QToolButton) if b.text().startswith(("▸", "▾"))]

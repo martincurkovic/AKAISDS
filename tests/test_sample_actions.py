@@ -46,7 +46,8 @@ def test_the_sample_menu_lists_every_action_in_groups(editor):
         "Load Audio", "-",
         "Trim to Markers", "Reverse", "Fade In/Out", "Normalise", "Filter…", "Stretch / Pitch…", "-",
         "Duplicate", "Slice Editor…", "-",
-        "Edit in External App…", "Send Edited Audio", "-",
+        "Edit in External App…", "Load Edited Audio", "-",
+        "Undo", "Send to Sampler", "Send as New Sample…", "Revert", "-",
         "Detect Root Note", "-",
         "Rename Sample...", "Delete Sample...",
     ]  # fmt: skip
@@ -59,7 +60,7 @@ def test_the_right_click_menu_shares_the_menus_actions_above_rename_and_delete(e
     listed = editor.sample_list_widget.actions()
     assert _texts(listed)[0] == "Load Audio"
     assert _texts(listed)[-3:] == ["Rename Sample...", "-", "Delete Sample..."]
-    for key in _EDIT_KEYS + ["duplicate", "slice", "external_edit", "external_send", "detect"]:
+    for key in _EDIT_KEYS + ["duplicate", "slice", "external_edit", "external_load", "stage_undo", "stage_send", "stage_new", "stage_revert", "detect"]:
         assert editor._sample_edit_controls[key][1] in listed  # the very same QAction as the menu's
 
 
@@ -70,8 +71,8 @@ def test_actions_follow_their_buttons_but_only_on_the_samples_tab(editor, qapp, 
     for key in _EDIT_KEYS + ["slice", "external_edit", "detect"]:
         button, action = editor._sample_edit_controls[key]
         assert button.isEnabled() and action.isEnabled(), key
-    # Duplicate is off in demo mode and Send waits for a save: button and action agree
-    for key in ("duplicate", "external_send"):
+    # Duplicate is off in demo mode, Load waits for a save and the working-copy controls need unsent edits: button and action agree
+    for key in ("duplicate", "external_load", "stage_undo", "stage_send", "stage_new", "stage_revert"):
         button, action = editor._sample_edit_controls[key]
         assert not button.isEnabled() and not action.isEnabled(), key
     # a destructive menu item must not act on a sample the user can't see

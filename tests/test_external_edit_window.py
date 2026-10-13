@@ -61,57 +61,58 @@ def _load_demo_audio(editor, qapp, monkeypatch, samples):
     editor._load_sample_waveform()
 
 
+def _saved(editor, path, samples, rate=44100):
+    _save_over(path, samples, rate)
+    editor._refresh_external_edit_buttons()
+
+
 def test_the_external_buttons_follow_the_loaded_audio_and_the_saved_file(editor, qapp, monkeypatch, launched):
     editor.sample_list_widget.setCurrentRow(0)
     editor._worker.wait_until_idle()
     _pump_until(qapp, lambda: editor.waveform_view.has_header())
-    assert not editor.external_edit_button.isEnabled() and not editor.external_send_button.isEnabled()
+    assert not editor.external_edit_button.isEnabled() and not editor.external_load_button.isEnabled()
 
     _load_demo_audio(editor, qapp, monkeypatch, list(range(500)))
-    assert editor.external_edit_button.isEnabled() and not editor.external_send_button.isEnabled()
+    assert editor.external_edit_button.isEnabled() and not editor.external_load_button.isEnabled()
 
     editor.external_edit_button.click()
     assert len(launched) == 1 and launched[0].endswith(".wav") and os.path.exists(launched[0])
-    assert not editor.external_send_button.isEnabled()  # nothing saved yet
+    assert not editor.external_load_button.isEnabled()  # nothing saved yet
     # the exported file is the sample's audio
     assert sds_encoder.read_wav_samples(launched[0]) == (list(range(500)), 44100)
 
-    _save_over(launched[0], [5] * 500)
-    editor._refresh_external_edit_buttons()
-    assert editor.external_send_button.isEnabled()
+    _saved(editor, launched[0], [5] * 500)
+    assert editor.external_load_button.isEnabled()
 
     editor.sample_list_widget.setCurrentRow(-1)
-    assert not editor.external_edit_button.isEnabled() and not editor.external_send_button.isEnabled()
+    assert not editor.external_edit_button.isEnabled() and not editor.external_load_button.isEnabled()
 
 
-def test_sending_edited_audio_replaces_the_sample_and_keeps_the_markers_when_the_length_is_the_same(
-    editor, qapp, monkeypatch, launched, tmp_path
-):
-    monkeypatch.setattr(ee, "BACKUP_DIR", tmp_path / "bk")
+def test_loading_the_edited_audio_makes_it_the_working_copy_and_sends_nothing(editor, qapp, monkeypatch, launched):
     _load_demo_audio(editor, qapp, monkeypatch, list(range(500)))
     editor.waveform_view.set_marker("start", 10)
     editor.waveform_view.set_marker("end", 400)
     editor.external_edit_button.click()
-    _save_over(launched[0], [7] * 500)
-    editor._refresh_external_edit_buttons()
+    _saved(editor, launched[0], [7] * 500)
 
-    editor.external_send_button.click()
+    editor.external_load_button.click()
 
     entry = editor._sample_waveform_cache[0]
-    assert entry["samples"] == [7] * 500
-    assert (entry["start"], entry["end"]) == (10, 400)
-    # the original audio was saved first
-    backups = list((tmp_path / "bk").glob("*.wav"))
-    assert len(backups) == 1 and sds_encoder.read_wav_samples(str(backups[0]))[0] == list(range(500))
-    # sent: waits for the next save
-    assert not editor.external_send_button.isEnabled()
-    _save_over(launched[0], [8] * 500)
-    editor._refresh_external_edit_buttons()
-    assert editor.external_send_button.isEnabled()
+    assert entry["samples"] == [7] * 500 and (entry["start"], entry["end"]) == (10, 400)
+    assert editor.waveform_view.has_waveform()
+    # the waveform shows the edited audio; the sampler's version is remembered, not touched
+    name = editor._sample_name_at_row(0)
+    staged = editor._staged_edits[name]
+    assert staged.samples == [7] * 500 and staged.original_samples == list(range(500))
+    assert not editor._staged_banner.isHidden()
+    assert "\u25cf" in editor._sample_row_labels[0][1].text()
+    # Load waits for the next save
+    assert not editor.external_load_button.isEnabled()
+    _saved(editor, launched[0], [8] * 500)
+    assert editor.external_load_button.isEnabled()
 
 
-def test_a_shorter_edit_adjusts_the_markers_and_a_stereo_file_is_mixed_to_mono(editor, qapp, monkeypatch, launched, tmp_path):
-    monkeypatch.setattr(ee, "BACKUP_DIR", tmp_path / "bk")
+def test_a_shorter_edit_adjusts_the_markers_and_a_stereo_file_is_mixed_to_mono(editor, qapp, monkeypatch, launched):
     _load_demo_audio(editor, qapp, monkeypatch, list(range(500)))
     editor.external_edit_button.click()
     sds_encoder.write_wav_file_stereo(launched[0], [100] * 300, [300] * 300, 44100, bit_depth=16)
@@ -119,31 +120,25 @@ def test_a_shorter_edit_adjusts_the_markers_and_a_stereo_file_is_mixed_to_mono(e
     os.utime(launched[0], ns=(stat.st_atime_ns, stat.st_mtime_ns + 2_000_000_000))
     editor._refresh_external_edit_buttons()
 
-    editor.external_send_button.click()
+    editor.external_load_button.click()
 
     entry = editor._sample_waveform_cache[0]
     assert entry["samples"] == [200] * 300
     assert entry["frame_count"] == 300 and entry["start"] == 0 and entry["end"] == 299
 
 
-def test_declining_the_confirmation_changes_nothing(editor, qapp, monkeypatch, launched, tmp_path):
-    import ui.program_editor_window as pew
-
-    monkeypatch.setattr(ee, "BACKUP_DIR", tmp_path / "bk")
+def test_a_second_load_replaces_the_working_copy_but_keeps_the_samplers_original(editor, qapp, monkeypatch, launched):
     _load_demo_audio(editor, qapp, monkeypatch, list(range(500)))
     editor.external_edit_button.click()
-    _save_over(launched[0], [7] * 500)
-    editor._refresh_external_edit_buttons()
-    monkeypatch.setattr(pew.QMessageBox, "question", lambda *a, **k: pew.QMessageBox.StandardButton.No)
-
-    editor.external_send_button.click()
-
-    assert editor._sample_waveform_cache[0]["samples"] == list(range(500))
-    assert not (tmp_path / "bk").exists()
-    assert editor.external_send_button.isEnabled()  # still waiting to be sent
+    _saved(editor, launched[0], [7] * 500)
+    editor.external_load_button.click()
+    _saved(editor, launched[0], [9] * 400)
+    editor.external_load_button.click()
+    staged = editor._staged_edits[editor._sample_name_at_row(0)]
+    assert staged.samples == [9] * 400 and staged.original_samples == list(range(500))
 
 
-def test_an_unreadable_edited_file_is_reported_and_nothing_is_sent(editor, qapp, monkeypatch, launched):
+def test_an_unreadable_edited_file_is_reported_and_nothing_is_staged(editor, qapp, monkeypatch, launched):
     _load_demo_audio(editor, qapp, monkeypatch, list(range(500)))
     editor.external_edit_button.click()
     with open(launched[0], "wb") as f:
@@ -152,10 +147,10 @@ def test_an_unreadable_edited_file_is_reported_and_nothing_is_sent(editor, qapp,
     os.utime(launched[0], ns=(stat.st_atime_ns, stat.st_mtime_ns + 2_000_000_000))
     editor._refresh_external_edit_buttons()
 
-    editor.external_send_button.click()
+    editor.external_load_button.click()
 
     assert "Couldn't read the edited file" in editor.status_bar.currentMessage()
-    assert editor._sample_waveform_cache[0]["samples"] == list(range(500))
+    assert editor._staged_edits == {} and editor._sample_waveform_cache[0]["samples"] == list(range(500))
 
 
 def test_a_launch_failure_is_shown_in_the_status_bar(editor, qapp, monkeypatch, launched):
@@ -163,7 +158,7 @@ def test_a_launch_failure_is_shown_in_the_status_bar(editor, qapp, monkeypatch, 
     monkeypatch.setattr(ee, "launch", lambda path, editor=None: "no such app")
     editor.external_edit_button.click()
     assert "no such app" in editor.status_bar.currentMessage()
-    assert not editor.external_send_button.isEnabled()
+    assert not editor.external_load_button.isEnabled()
 
 
 # --- Yamaha editor ---------------------------------------------------------------------------------------------------
@@ -180,18 +175,18 @@ def yamaha_fast(window, monkeypatch):  # noqa: F811
 
 def test_the_yamaha_external_buttons_need_the_audio_and_a_saved_file(window, yamaha_fast, launched):  # noqa: F811
     tab = window.samples_tab
-    assert not tab.external_edit_button.isEnabled() and not tab.external_send_button.isEnabled()
+    assert not tab.external_edit_button.isEnabled() and not tab.external_load_button.isEnabled()
     tab = user_sample(window, mode=4, end=4000)
-    assert tab.external_edit_button.isEnabled() and not tab.external_send_button.isEnabled()
+    assert tab.external_edit_button.isEnabled() and not tab.external_load_button.isEnabled()
     tab.external_edit_button.click()
     assert len(launched) == 1
-    assert not tab.external_send_button.isEnabled()
+    assert not tab.external_load_button.isEnabled()
     _save_over(launched[0], [3] * 2000, rate=sds_encoder.read_wav_info(launched[0])[1])
     tab._edits._external.changed.emit()
-    assert tab.external_send_button.isEnabled()
+    assert tab.external_load_button.isEnabled()
 
 
-def test_sending_edited_audio_makes_a_new_sample_and_leaves_the_original(window, yamaha_fast, launched):  # noqa: F811
+def test_loading_edited_audio_makes_a_working_copy_and_sending_it_makes_a_new_sample(window, yamaha_fast, launched):  # noqa: F811
     tab = user_sample(window, mode=4, end=4000)
     original = list(window.fake.audio["UM"])
     tab.external_edit_button.click()
@@ -201,8 +196,14 @@ def test_sending_edited_audio_makes_a_new_sample_and_leaves_the_original(window,
 
     _save_over(launched[0], [11] * 1500, rate=rate)
     tab._edits._external.changed.emit()
-    tab.external_send_button.click()
+    before = set(window.fake.samples)
+    tab.external_load_button.click()
+    # loaded, not sent: the tab shows the edited audio and the unit is untouched
+    assert set(window.fake.samples) == before and tab._staged["UM"].channels[0] == [11] * 1500
+    assert tab._audio_samples == [11] * 1500 and not tab._staged_banner.isHidden()
+    assert not tab.external_load_button.isEnabled()  # waits for the next save
 
+    tab.send_edits_as_new_button.click()
     assert wait_until(lambda: "UM EDIT" in window.fake.samples, timeout=10)
     assert wait_until(lambda: "UM EDIT" in window.samples_tab.sample_names(), timeout=10)
     assert window.fake._audio_for("UM EDIT") == [11] * 1500
@@ -210,7 +211,7 @@ def test_sending_edited_audio_makes_a_new_sample_and_leaves_the_original(window,
     data = window.fake.samples["UM EDIT"]
     assert yp.extract(yp.get("sample", "wave_length"), data) == 1500
     assert wait_until(lambda: not tab._edit_busy)
-    assert not tab.external_send_button.isEnabled() or tab._selected != "UM"  # the original waits for the next save
+    assert tab._staged == {}  # the work lives on as the new sample
 
 
 def test_a_stereo_yamaha_sample_stays_stereo_through_the_external_editor(window, yamaha_fast, launched):  # noqa: F811
@@ -223,9 +224,30 @@ def test_a_stereo_yamaha_sample_stays_stereo_through_the_external_editor(window,
     stat = os.stat(launched[0])
     os.utime(launched[0], ns=(stat.st_atime_ns, stat.st_mtime_ns + 2_000_000_000))
     tab._edits._external.changed.emit()
-    tab.external_send_button.click()
+    tab.external_load_button.click()
+    assert tab._staged["ST"].channels == [[1] * 1000, [2] * 1000]
+    tab.send_edits_as_new_button.click()
     assert wait_until(lambda: "ST EDIT" in window.fake.samples, timeout=10)
     assert yp.is_stereo(window.fake.samples["ST EDIT"])
+
+
+def test_a_mono_file_for_a_stereo_sample_goes_on_both_sides_and_a_stereo_file_for_a_mono_sample_is_mixed(window, yamaha_fast, launched):  # noqa: F811
+    tab = user_sample(window, "ST", mode=4, end=4000, right=True)
+    tab.external_edit_button.click()
+    _save_over(launched[0], [5] * 800, rate=sds_encoder.read_wav_info(launched[0])[1])
+    tab._edits._external.changed.emit()
+    tab.external_load_button.click()
+    assert tab._staged["ST"].channels == [[5] * 800, [5] * 800]
+    tab = user_sample(window, "MO", mode=4, end=4000)
+    launched.clear()
+    tab.external_edit_button.click()
+    rate = sds_encoder.read_wav_info(launched[0])[1]
+    sds_encoder.write_wav_file_stereo(launched[0], [100] * 600, [300] * 600, rate, bit_depth=16)
+    stat = os.stat(launched[0])
+    os.utime(launched[0], ns=(stat.st_atime_ns, stat.st_mtime_ns + 2_000_000_000))
+    tab._edits._external.changed.emit()
+    tab.external_load_button.click()
+    assert tab._staged["MO"].channels == [[200] * 600]
 
 
 # --- Time Stretch / Pitch Shift (core/time_stretch.py, ui/time_stretch_dialog.py) ----------------------------------------
@@ -343,23 +365,28 @@ def test_declining_the_time_stretch_dialog_changes_nothing(editor, qapp, monkeyp
     assert editor._sample_waveform_cache[0]["frame_count"] == 500
 
 
-def test_yamaha_time_stretch_makes_a_new_longer_sample_and_keeps_stereo(window, yamaha_fast, monkeypatch):  # noqa: F811
+def test_yamaha_time_stretch_applies_to_the_working_copy_and_sending_makes_a_new_longer_sample(window, yamaha_fast, monkeypatch):  # noqa: F811
     tab = user_sample(window, "ST", mode=4, end=4000, right=True)
     original = list(window.fake.audio["ST"])
     _accepting_dialog(monkeypatch, percent=150, grain_ms=10)
+    before = set(window.fake.samples)
     tab.time_stretch_button.click()
-    assert wait_until(lambda: "ST STR" in window.fake.samples, timeout=20)
-    data = window.fake.samples["ST STR"]
+    assert set(window.fake.samples) == before  # OK changes the working copy only
+    assert [len(c) for c in tab._staged["ST"].channels] == [6000, 6000]
+    tab.send_edits_as_new_button.click()
+    assert wait_until(lambda: "ST EDIT" in window.fake.samples, timeout=20)
+    data = window.fake.samples["ST EDIT"]
     assert yp.is_stereo(data)
     assert yp.extract(yp.get("sample", "wave_length"), data) == 6000  # the 4000-frame wave end x 1.5
     assert list(window.fake.audio["ST"]) == original
 
 
-def test_yamaha_pitch_shift_makes_a_new_sample_of_the_same_length(window, yamaha_fast, monkeypatch):  # noqa: F811
+def test_yamaha_pitch_shift_then_send_makes_a_new_sample_of_the_same_length(window, yamaha_fast, monkeypatch):  # noqa: F811
     tab = user_sample(window, mode=4, end=4000)
     original = list(window.fake.audio["UM"])
     _accepting_dialog(monkeypatch, mode="pitch", semitones=-5, grain_ms=40)
     tab.time_stretch_button.click()
-    assert wait_until(lambda: "UM PITCH" in window.fake.samples, timeout=20)
-    assert yp.extract(yp.get("sample", "wave_length"), window.fake.samples["UM PITCH"]) == 4000
+    tab.send_edits_as_new_button.click()
+    assert wait_until(lambda: "UM EDIT" in window.fake.samples, timeout=20)
+    assert yp.extract(yp.get("sample", "wave_length"), window.fake.samples["UM EDIT"]) == 4000
     assert list(window.fake.audio["UM"]) == original

@@ -2992,10 +2992,11 @@ def test_trim_sample_in_demo_mode_shows_a_live_percentage_in_the_status_bar(
 
     monkeypatch.setattr(editor, "_on_sample_receive_progress", _recording_progress)
 
-    editor._confirm_trim_sample()
+    editor._confirm_trim_sample()  # applies to the working copy: nothing to pace yet
+    editor._send_staged_to_sampler()
 
     assert len(messages) >= 6
-    assert all("%" in m and m.startswith('Trim sample (demo)') for m in messages)
+    assert all("%" in m and m.startswith('Send sample (demo)') for m in messages)
 
 
 def test_trim_sample_while_loop_is_off_clamps_the_frozen_loop_first(
@@ -3195,33 +3196,6 @@ def test_confirm_normalize_sample_does_nothing_when_already_at_peak(
     assert editor._sample_waveform_cache[0] == before
 
 
-def test_normalize_sample_does_nothing_when_declined(editor, qapp, monkeypatch):
-    import ui.program_editor_window as pew
-
-    monkeypatch.setenv("AKAISDS_DEMO_SAMPLER", "1")
-    _stub_demo_audio(editor, monkeypatch, [100, -200, 50] * 100)
-    editor.sample_list_widget.setCurrentRow(0)
-    editor._worker.wait_until_idle()
-    _pump_until(qapp, lambda: editor.waveform_view.has_header())
-    editor._load_sample_waveform()
-    before = dict(editor._sample_waveform_cache[0])
-
-    monkeypatch.setattr(
-        pew.QMessageBox, "question", lambda *a, **k: pew.QMessageBox.StandardButton.No
-    )
-    editor._confirm_normalize_sample()
-
-    assert editor._sample_waveform_cache[0] == before
-
-
-# --- Samples tab: small Trim/Reverse/Fade progress bar next to Zoom --------
-# The full-width bar under Trim/Reverse was removed for ordinary sample
-# loading (redundant with the progressively-filling waveform - see
-# AGENTS.md), but Trim/Reverse/Fade SEND already-loaded audio back out with
-# no such visual of their own, so a small one lives next to the zoom
-# controls just for these three - per direct user request.
-
-
 def test_sample_edit_progress_bar_shows_during_trim_and_hides_after(
     editor, qapp, monkeypatch
 ):
@@ -3256,7 +3230,9 @@ def test_sample_edit_progress_bar_shows_during_trim_and_hides_after(
 
     monkeypatch.setattr(editor, "_on_sample_edit_progress", _recording)
 
-    editor._confirm_trim_sample()
+    editor._confirm_trim_sample()  # applies to the working copy: nothing is sent, so no bar
+    assert not shown_during
+    editor._send_staged_to_sampler()
 
     assert shown_during and all(shown_during)  # visible on every tick
     assert editor.sample_edit_progress.isHidden() is True  # hidden again after
@@ -3276,25 +3252,6 @@ def test_sample_edit_progress_bar_stays_hidden_during_ordinary_sample_load(
     editor._load_sample_waveform()
 
     assert editor.sample_edit_progress.isHidden() is True
-
-
-def test_trim_sample_does_nothing_when_declined(editor, qapp, monkeypatch):
-    import ui.program_editor_window as pew
-
-    monkeypatch.setenv("AKAISDS_DEMO_SAMPLER", "1")
-    _stub_demo_audio(editor, monkeypatch, list(range(500)))
-    editor.sample_list_widget.setCurrentRow(0)
-    editor._worker.wait_until_idle()
-    _pump_until(qapp, lambda: editor.waveform_view.has_header())
-    editor._load_sample_waveform()
-    editor.waveform_view.set_marker("start", 100)
-    monkeypatch.setattr(
-        pew.QMessageBox, "question", lambda *a, **k: pew.QMessageBox.StandardButton.No
-    )
-
-    editor._confirm_trim_sample()
-
-    assert editor._sample_waveform_cache[0]["frame_count"] == 500
 
 
 def test_reverse_sample_in_demo_mode_reverses_the_cached_sample(editor, qapp, monkeypatch):
@@ -3326,34 +3283,6 @@ def test_reverse_sample_in_demo_mode_reverses_the_cached_sample(editor, qapp, mo
     assert (entry["start"], entry["loop_start"], entry["loop_end"], entry["end"]) == (
         99 - 90, 99 - 60, 99 - 30, 99 - 10,
     )
-
-
-def test_trim_sample_real_mode_without_sampler_controller_shows_message(
-    editor, qapp, monkeypatch
-):
-    import ui.program_editor_window as pew
-
-    monkeypatch.delenv("AKAISDS_DEMO_SAMPLER", raising=False)
-    editor.sample_list_widget.setCurrentRow(0)
-    editor._worker.wait_until_idle()
-    _pump_until(qapp, lambda: editor.waveform_view.has_header())
-    # real mode has no sampler_controller on the fixture's bare QWidget
-    # main_window, mirroring _load_sample_waveform's own equivalent guard
-    monkeypatch.setattr(
-        pew.QMessageBox, "question", lambda *a, **k: pew.QMessageBox.StandardButton.Yes
-    )
-    # force has_waveform() true without a real (demo-mode-only) audio
-    # fetch, since this test is specifically about the pre-fetch guard
-    editor.waveform_view.set_waveform([0] * 10, 0, 2, 7, 9)
-    editor._sample_waveform_cache[0] = {
-        "samples": [0] * 10, "framerate": 44100, "frame_count": 10,
-        "start": 0, "loop_start": 2, "loop_end": 7, "end": 9,
-        "sptype": 0, "spitch": 60,
-    }
-
-    editor._confirm_reverse_sample()
-
-    assert "no Transfer Dashboard connection available" in editor.status_bar.currentMessage()
 
 
 def _select_sample_with_full_audio(editor, qapp, sample_index, samples, markers):
@@ -3885,7 +3814,8 @@ def test_reverse_sample_real_mode_happy_path_sends_deletes_and_renames(
         {"start": 10, "loop_start": 30, "loop_end": 60, "end": 90},
     )
 
-    editor._confirm_reverse_sample()
+    editor._confirm_reverse_sample()  # applies to the working copy
+    editor._send_staged_to_sampler()
 
     # sent the reversed audio under a distinct temp name first, never the
     # original's own name (see the ambiguous-name-resolution reasoning in
@@ -3934,7 +3864,8 @@ def test_reverse_sample_real_mode_deletes_the_original_by_name_when_the_replacem
     )
     edited = names_before[2]
 
-    editor._confirm_reverse_sample()
+    editor._confirm_reverse_sample()  # applies to the working copy
+    editor._send_staged_to_sampler()
 
     after = bridge.sample_list()
     assert after.count(edited) == 1 and f"{edited}-TMP" not in after
@@ -3967,13 +3898,15 @@ def test_reverse_sample_real_mode_send_failure_leaves_original_untouched(
         {"start": 0, "loop_start": 10, "loop_end": 40, "end": 49},
     )
 
-    editor._confirm_reverse_sample()
+    editor._confirm_reverse_sample()  # applies to the working copy
+    editor._send_staged_to_sampler()
 
     assert bridge.sample_list() == original_samples_before  # nothing deleted
     assert not any(c[0] == "SHNAME" for c in bridge.set_parameter_calls)
     message = editor.status_bar.currentMessage().lower()
     assert "failed" in message
     assert "not touched" in message
+    assert editor._staged_edits  # nothing was lost: the edited copy is still here to send again
 
 
 def test_duplicate_sample_button_disabled_in_demo_mode(editor, monkeypatch):
@@ -4071,7 +4004,8 @@ def test_reverse_sample_real_mode_keeps_the_sent_waveform_on_screen(
         {"start": 10, "loop_start": 30, "loop_end": 60, "end": 90},
     )
 
-    editor._confirm_reverse_sample()
+    editor._confirm_reverse_sample()  # applies to the working copy
+    editor._send_staged_to_sampler()
     _wait_for_audio(editor, qapp)
 
     row = editor.sample_list_widget.currentRow()
@@ -4390,7 +4324,7 @@ def test_open_slice_editor_does_nothing_while_a_transfer_is_busy(editor, qapp):
 
 
 class _FakeFilterSampleDialog:
-    def __init__(self, parent, sample_name, samples, framerate, *, accept=True, pitch_shift_semitones=0, allow_new_sample=False):
+    def __init__(self, parent, sample_name, samples, framerate, *, accept=True, pitch_shift_semitones=0, allow_new_sample=False, applies_to_working_copy=False):
         self.parent = parent
         self.pitch_shift_semitones = pitch_shift_semitones
         self.sample_name = sample_name
@@ -4429,7 +4363,7 @@ def test_confirm_filter_sample_passes_the_right_sample_data_to_the_dialog(
     captured = {}
 
     class _CapturingFakeDialog(_FakeFilterSampleDialog):
-        def __init__(self, parent, sample_name, samples, framerate, pitch_shift_semitones=0, allow_new_sample=False):
+        def __init__(self, parent, sample_name, samples, framerate, pitch_shift_semitones=0, allow_new_sample=False, applies_to_working_copy=False):
             captured["sample_name"] = sample_name
             captured["samples"] = samples
             captured["framerate"] = framerate
@@ -4449,7 +4383,7 @@ def test_confirm_filter_sample_passes_the_right_sample_data_to_the_dialog(
     assert captured["framerate"] == 44100
 
 
-def test_confirm_filter_sample_declined_does_not_call_perform_sample_edit(
+def test_confirm_filter_sample_declined_does_not_apply_the_edit(
     editor, qapp, monkeypatch
 ):
     monkeypatch.setattr(
@@ -4458,7 +4392,7 @@ def test_confirm_filter_sample_declined_does_not_call_perform_sample_edit(
     )
     calls = []
     monkeypatch.setattr(
-        editor, "_perform_sample_edit", lambda *a, **k: calls.append((a, k))
+        editor, "_apply_sample_edit", lambda *a, **k: calls.append((a, k))
     )
     samples = list(range(-500, 500))
     markers = {"start": 0, "loop_start": 100, "loop_end": 900, "end": 999}
@@ -4469,36 +4403,7 @@ def test_confirm_filter_sample_declined_does_not_call_perform_sample_edit(
     assert calls == []
 
 
-def test_confirm_filter_sample_declined_at_the_second_confirmation_does_not_send(
-    editor, qapp, monkeypatch
-):
-    # the dialog itself was accepted (OK clicked), but the extra
-    # QMessageBox.question added after real use (see _confirm_filter_
-    # sample's own comment - an accidental OK click right after Preview
-    # had no way to back out) is answered No - must not perform the edit
-    import ui.program_editor_window as pew
-
-    monkeypatch.setattr(
-        "ui.program_editor_window.FilterSampleDialog",
-        lambda *a, **k: _FakeFilterSampleDialog(*a, **k, accept=True),
-    )
-    monkeypatch.setattr(
-        pew.QMessageBox, "question", lambda *a, **k: pew.QMessageBox.StandardButton.No
-    )
-    calls = []
-    monkeypatch.setattr(
-        editor, "_perform_sample_edit", lambda *a, **k: calls.append((a, k))
-    )
-    samples = list(range(-500, 500))
-    markers = {"start": 0, "loop_start": 100, "loop_end": 900, "end": 999}
-    _select_sample_with_full_audio(editor, qapp, 0, samples, markers)
-
-    editor._confirm_filter_sample()
-
-    assert calls == []
-
-
-def test_confirm_filter_sample_accepted_calls_perform_sample_edit_with_a_working_transform(
+def test_confirm_filter_sample_accepted_applies_a_working_transform_to_the_working_copy(
     editor, qapp, monkeypatch
 ):
     import ui.program_editor_window as pew
@@ -4512,7 +4417,7 @@ def test_confirm_filter_sample_accepted_calls_perform_sample_edit_with_a_working
     )
     calls = []
     monkeypatch.setattr(
-        editor, "_perform_sample_edit", lambda *a, **k: calls.append((a, k))
+        editor, "_apply_sample_edit", lambda *a, **k: calls.append((a, k))
     )
     samples = list(range(-500, 500))
     markers = {"start": 0, "loop_start": 100, "loop_end": 900, "end": 999}
