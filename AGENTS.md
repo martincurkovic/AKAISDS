@@ -13,6 +13,7 @@ corrections, and say what was MEASURED on real hardware versus guessed. Human do
 | S1000 / S900-S950 / Yamaha A4000 | their own sections here, then `dev_docs/` |
 | sample sending, Slice Editor, sample edits | "Sample send hardening", "Sample edit actions", "Slice Editor" |
 | logs, bug reports | "Debug logging" |
+| running the app with no hardware (demo samplers, `--instant`) | "Developing without hardware"; the contributor-facing version is `CONTRIBUTING.md` "Running the app without a sampler" |
 | tests | `TESTING.md` |
 | releases, Homebrew tap, AUR | `dev_docs/packaging/PACKAGING.md` (workflow: `.github/workflows/publish-packages.yml`) |
 
@@ -58,6 +59,11 @@ Where this project's own measurement overrides `s3k.params` (don't "fix" back wi
 
 ## Developing without hardware
 
+- **`--instant` / `AKAISDS_DEMO_INSTANT=1` (2026-10-13, `core/demo_timing.py`)** removes the MIDI-speed emulation from the demos; without it they stay paced like the real thing. The fakes answer at once, but the app's own engines pace
+  themselves: the Yamaha session waits out each bulk message's wire time at 31250 baud + a 400 ms gap (`send_baud/send_gap_ms`), a link waits 4 s (`yamaha_sample_edit.LINK_SETTLE_MS`), a verification read 2.5 s
+  (`YamahaTransfers.verify_delay_ms`); the S950 engine waits out wire time + a NAK window and streams ACKs every 50 ms; the Program Editor's DemoBridge paces a load/replace at `_DEMO_MS_PER_WORD`. Measured: one Yamaha edit send, 10.0 s paced vs
+  0.0 s instant. Accepted by `tools/a4000_demo.py`, `tools/s950_demo.py` and the Program Editor's standalone launcher; `apply_to_yamaha(controller)` / `apply_to_s950(controller)` do it to a controller (the tools call them). The env var
+  counts "", 0, false, no, off as OFF (it used to be `bool(os.environ.get(..))`, where "0" was ON). Default behaviour is unchanged. `_perform_sample_edit_demo` used to ignore the variable.
 - `AKAISDS_DEMO_SAMPLER=1`: `program_editor_bridge.connect()` returns a `DemoBridge` (or `core/demo_s1000.FakeS1000`
   for the S1000 model). Sample audio comes from `tests/test_audio.wav`, paced like a real receive;
   `AKAISDS_DEMO_INSTANT=1` skips the pacing. The standalone launcher at the bottom of `program_editor_window.py` needs both.
@@ -430,6 +436,9 @@ Akai SDATA and generic SDS sends share ONE packet loop; every batch (Dashboard S
 - **`QListWidgetItem` + `setItemWidget` double-paints if the item also has text** - build items with NO text and keep the display in
   the widget. A row widget's `sizeHint()` is used as-is, so give it its own margins.
 - Widget visibility tests use `.isHidden()`, not `.isVisible()` (a never-shown window is never visible).
+- **A control that disables ITSELF when clicked must give up focus first** (2026-10-13): a disabled widget hands its focus to the next one in the tab order and a `QScrollArea` scrolls to reveal it. Load Edited Audio (off until the next
+  save) threw the Yamaha page ~220 px down; Undo/Revert/Send go off when the working copy goes. `_set_sample_control_enabled` (Akai) and `YamahaSamplesTab.update_edit_buttons` now `clearFocus()` a focused button before disabling it.
+  Tests: `tests/test_button_focus_scroll.py` (click with focus, assert the scroll bar did not move). Any new self-disabling control needs the same.
 - **A fresh `Knob.setValue(0)` emits no `valueChanged`**, so a readout wired only to that signal stays "-": fill it explicitly when loading
   (and after any `blockSignals`).
 - **Envelope graphs** (`ui/envelope_graph.py`): each stage has a FIXED width budget scaled only by its own value - never re-normalize
@@ -531,6 +540,11 @@ hides a save).
   one) and clamps the loop inside, in order. Tell the user to check the loop if you extend this.
 - **Yamaha:** "Load Edited Audio" stages the file as the sample's working copy too (see "The Yamaha working copy" below); the channel count is kept (a mono file for a stereo sample goes on both sides, a stereo file for a mono sample is
   mixed). "Send as New Sample" then makes `<name> EDIT` (`EXTERNAL_SUFFIX`) through `_send_copy`, carrying the original's parameters. The original is untouched, so no backup.
+- **Auto-load (opt-in, 2026-10-13):** Settings > External Audio Editor > "Load automatically when the file is saved" (`config.json` `external_auto_load`, off by default; `app_config.get_saved_external_auto_load`). Safe now because a Load only
+  changes the working copy and is one Undo step. The tracker decides WHEN: `is_stable(key)` = saved over AND the same size/mtime seen again `STABLE_MS` (400 ms) later (on top of the 600 ms event debounce), so an editor's multi-write save or an
+  autosave in progress is never read half-written. Each editor then acts from its own refresh (`_refresh_external_edit_buttons` / `YamahaSamplesTab.update_edit_buttons` -> `maybe_auto_load`): only for the SHOWN sample (a save for another
+  sample waits - selecting it later refreshes and loads it), never while the window is busy (`_hardware_busy_ui`, or a Yamaha long operation; the refresh at the end of the operation retries), once at a time (`_auto_load_scheduled`), through
+  `QTimer.singleShot(0)` so it never runs inside the refresh that triggered it. The status bar says "...automatically - Undo goes back"; the log says "auto-loaded". Loads show a wait cursor (a long file in another rate is resampled in pure Python).
 - After a Load the exported file stays and the button waits for the NEXT save, so the user can keep editing. Windows/Linux launching (`os.startfile`, `xdg-open`) is untested; macOS uses `open [-a app]`.
 - Tests: `tests/test_external_edit.py` (pure + tracker), `tests/test_external_edit_window.py` (Program Editor in demo mode, Yamaha against `FakeA4000`; the app is stubbed by patching `external_edit.launch`).
 
