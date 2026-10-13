@@ -331,6 +331,10 @@ NORMALIZE_SAMPLE_BUTTON = (
     "Gain up the whole sample until its loudest point hits maximum "
     "amplitude, overwriting it on the sampler. Cannot be undone."
 )
+LOAD_AUDIO_ACTION = (
+    "Load this sample's audio from the sampler (the same as double-clicking the waveform). "
+    "Every edit needs it."
+)
 TIME_STRETCH_BUTTON = (
     "Time Stretch makes the sample longer or shorter without changing its pitch; "
     "Pitch Shift changes the pitch without changing its length "

@@ -64,14 +64,16 @@ class TimeStretchDialog(QDialog):
     pitch and keeps the length (Semitones + Cents). Grain size is shared. The knobs are the Filter dialog's (ui/knob.py): Length
     and Grain are LogKnobs (100 % sits in the middle of 25-400 %), a double-click resets one. A Preview plays the result through the
     computer's speakers - nothing is sent anywhere - and a changed knob restarts a preview that is already playing, once it has
-    settled. `samples` is the (left) channel to preview; the caller runs the edit from `edit()`."""
+    settled. `samples` is the (left) channel to preview, played shifted by `pitch_shift_semitones` (the sample's Tune / Root Note, so it sounds as it will on the sampler); the caller runs the edit from `edit()`."""
 
-    def __init__(self, parent, sample_name, samples, framerate):
+    def __init__(self, parent, sample_name, samples, framerate, pitch_shift_semitones=0):
         super().__init__(parent)
         self.setWindowTitle(f'Time Stretch / Pitch Shift - "{sample_name}"')
         self.setModal(True)
         self._samples = samples
         self._framerate = framerate
+        # Tune / Root Note, as the sampler would play it (see ProgramEditorWindow._preview_pitch_shift_semitones)
+        self._pitch_shift_semitones = pitch_shift_semitones
         self._preview_player = SlicePreviewPlayer(self)
 
         self.mode_combo = QComboBox()
@@ -206,7 +208,9 @@ class TimeStretchDialog(QDialog):
             result = time_stretch.transform_for(kind, **options)(self._samples, 0, 0, len(self._samples) - 1, len(self._samples) - 1)[0]
         finally:
             QApplication.restoreOverrideCursor()
-        self._preview_player.play(result, 0, len(result) - 1, self._framerate)
+        self._preview_player.play(
+            result, 0, len(result) - 1, self._framerate, pitch_shift_semitones=self._pitch_shift_semitones
+        )
 
     def accept(self):
         self._retrigger.stop()

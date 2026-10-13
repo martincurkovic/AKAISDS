@@ -111,13 +111,15 @@ class FilterSampleDialog(QDialog):
     doing underneath this modal dialog.
     """
 
-    def __init__(self, parent, sample_name, samples, framerate):
+    def __init__(self, parent, sample_name, samples, framerate, pitch_shift_semitones=0):
         super().__init__(parent)
         self.setWindowTitle(f'Filter Sample - "{sample_name}"')
         self.setModal(True)
 
         self._samples = samples
         self._framerate = framerate
+        # Tune / Root Note, as the sampler would play it (see ProgramEditorWindow._preview_pitch_shift_semitones)
+        self._pitch_shift_semitones = pitch_shift_semitones
         self._preview_player = SlicePreviewPlayer(self)
 
         # strictly inside (0, Nyquist) - see sample_editing._biquad_
@@ -249,7 +251,13 @@ class FilterSampleDialog(QDialog):
             lowpass_cutoff_hz=self.lowpass_cutoff_hz(),
             lowpass_slope_db_per_octave=self.lowpass_slope_db_per_octave(),
         )
-        self._preview_player.play(filtered, 0, len(filtered) - 1, self._framerate)
+        self._preview_player.play(
+            filtered,
+            0,
+            len(filtered) - 1,
+            self._framerate,
+            pitch_shift_semitones=self._pitch_shift_semitones,
+        )
 
     def _maybe_retrigger_preview(self, *_args):
         if self._preview_player.is_playing() and (

@@ -429,6 +429,33 @@ class _ModMatrixGrid(QWidget):
         super().paintEvent(event)
 
 
+# the Edit Sample card's rows: (label, what the label's tooltip says, control keys in order)
+_EDIT_SAMPLE_ROWS = (
+    (
+        "Edit audio",
+        "These overwrite the sample's audio on the sampler and can't be undone.",
+        ("trim", "reverse", "fade", "normalize", "filter", "stretch"),
+    ),
+    (
+        "New samples",
+        "These add new samples. The original is not changed.",
+        ("duplicate", "slice"),
+    ),
+    (
+        "External app",
+        "Open the sample in your own audio editor, then send the saved version back.",
+        ("external_edit", "external_send"),
+    ),
+)
+# the Sample menu / right-click menu, in order: groups are separated
+_SAMPLE_MENU_GROUPS = (
+    ("trim", "reverse", "fade", "normalize", "filter", "stretch"),
+    ("duplicate", "slice"),
+    ("external_edit", "external_send"),
+    ("detect",),
+)
+
+
 class ProgramEditorWindow(QMainWindow):
     def __init__(self, main_window, bridge):
         super().__init__()
@@ -2275,6 +2302,7 @@ class ProgramEditorWindow(QMainWindow):
         self._import_audio_action.triggered.connect(self._import_audio)
         file_menu = self.menuBar().addMenu("&File")
         file_menu.addAction(self._import_audio_action)
+        self._build_sample_menu()
 
         self._refresh_action = QAction("Refresh from Hardware", self)
         self._refresh_action.setShortcut("Ctrl+R")  # shows as ⌘R on macOS
@@ -3343,6 +3371,10 @@ class ProgramEditorWindow(QMainWindow):
         self.refresh_button.setEnabled(not busy)
         self._refresh_action.setEnabled(not busy)
         self._import_audio_action.setEnabled(not busy)
+        # the Sample menu too: its actions would reach the sampler mid-operation.
+        # (_sync_window_menu_busy_state's timer must not re-enable it meanwhile)
+        self._hardware_busy_ui = bool(busy)
+        self._sample_menu.setEnabled(not busy)
         for action in (
             self._multi_tab_action,
             self._programs_tab_action,
@@ -5584,6 +5616,11 @@ class ProgramEditorWindow(QMainWindow):
         busy = sampler_controller is not None and sampler_controller.is_transfer_busy()
         self._dashboard_action.setEnabled(not busy)
         self._dashboard_action.setToolTip(tt.BUSY_BLOCKS_OTHER_WINDOWS if busy else "")
+        # a transfer the Dashboard started blocks the Sample menu as well (shared
+        # connection), as does one of this window's own blocking operations
+        self._sample_menu.setEnabled(
+            not (busy or getattr(self, "_hardware_busy_ui", False))
+        )
         # same reasoning as dashboard.py's own btn_settings guard - Settings
         # can reopen the shared ports out from under an in-flight transfer.
         # None when shared_transport_enabled() was false at construction
@@ -5990,6 +6027,10 @@ class ProgramEditorWindow(QMainWindow):
         return knob, value_label, widget
 
     def _build_samples_tab(self):
+        # every sample action (Trim ... Send Edited Audio, Detect Root Note) is a
+        # button AND a QAction - see _make_sample_edit_control
+        self._sample_edit_controls = {}
+        self._sample_control_wanted = {}
         # same row-widget-free QListWidget + labeled column shape as the
         # Programs tab's own program_list/keygroup_list (see __init__) -
         # deliberately not sharing that code since this list's rows are
@@ -6175,8 +6216,6 @@ class ProgramEditorWindow(QMainWindow):
         # section cards
         loop_meta_row = QHBoxLayout()
         loop_meta_row.setSpacing(18)
-        tune_meta_row = QHBoxLayout()
-        tune_meta_row.setSpacing(18)
         loop_type_label = QLabel("Loop Type")
         loop_type_label.setFixedWidth(70)
         self.sample_loop_type_combo = QComboBox()
@@ -6315,12 +6354,6 @@ class ProgramEditorWindow(QMainWindow):
         loop_meta_row.addWidget(loop_tune_widget)
         loop_meta_row.addStretch()
 
-        tune_meta_row.addWidget(root_note_label)
-        tune_meta_row.addWidget(self.sample_root_note_spinbox)
-        tune_meta_row.addSpacing(12)
-        tune_meta_row.addWidget(sample_tune_label)
-        tune_meta_row.addWidget(self.sample_tune_spinbox)
-        tune_meta_row.addSpacing(12)
         # needs real audio in memory to analyse, same has_waveform() gate
         # as Trim/Reverse/etc - see _set_sample_edit_buttons_enabled. Works
         # fine in demo mode - unlike Duplicate Sample/Export, this never
@@ -6328,104 +6361,116 @@ class ProgramEditorWindow(QMainWindow):
         # sample_root_note_spinbox/sample_tune_spinbox already make via
         # their own existing paths (_commit_sample_root_note/
         # _commit_sample_tune), which already work in demo mode fine.
-        self.detect_root_note_button = QPushButton("Detect Root Note")
-        self.detect_root_note_button.setToolTip(tt.DETECT_ROOT_NOTE_BUTTON)
-        self.detect_root_note_button.clicked.connect(self._confirm_detect_root_note)
-        tune_meta_row.addWidget(self.detect_root_note_button)
+        self.detect_root_note_button = self._make_sample_edit_control(
+            "detect",
+            "Detect Root Note",
+            tt.DETECT_ROOT_NOTE_BUTTON,
+            self._confirm_detect_root_note,
+        )
+        # two rows, not one: this card shares its row with the Loop Preview
+        # (half the page width each)
+        root_note_row = QHBoxLayout()
+        root_note_row.setSpacing(8)
+        root_note_row.addWidget(root_note_label)
+        root_note_row.addWidget(self.sample_root_note_spinbox)
+        root_note_row.addSpacing(4)
+        root_note_row.addWidget(self.detect_root_note_button)
+        root_note_row.addStretch()
+        sample_tune_row = QHBoxLayout()
+        sample_tune_row.setSpacing(8)
+        sample_tune_row.addWidget(sample_tune_label)
+        sample_tune_row.addWidget(self.sample_tune_spinbox)
+        sample_tune_row.addStretch()
+        tune_meta_row = QVBoxLayout()
+        tune_meta_row.setSpacing(6)
+        tune_meta_row.addLayout(root_note_row)
+        tune_meta_row.addLayout(sample_tune_row)
         tune_meta_row.addStretch()
 
-        # Trim/Reverse/Fade/Normalise - destructive, hardware-write
-        # actions, so all four stay disabled until has_waveform() is true
-        # (real audio actually in memory to transform, not just
-        # header-only markers) - see _set_sample_edit_buttons_enabled. See
-        # _confirm_trim_sample/_confirm_reverse_sample/_confirm_fade_sample/
-        # _confirm_normalize_sample for the confirmation dialogs and
-        # _perform_sample_edit_real for why this is a real, multi-step
-        # send/delete/rename pipeline rather than a simple in-place write.
-        sample_edit_row = QHBoxLayout()
-        sample_edit_row.setSpacing(8)
-        self.trim_sample_button = QPushButton("Trim to Markers")
-        self.trim_sample_button.setToolTip(tt.TRIM_SAMPLE_BUTTON)
-        self.trim_sample_button.setEnabled(False)
-        self.trim_sample_button.clicked.connect(self._confirm_trim_sample)
-        self.reverse_sample_button = QPushButton("Reverse sample")
-        self.reverse_sample_button.setToolTip(tt.REVERSE_SAMPLE_BUTTON)
-        self.reverse_sample_button.setEnabled(False)
-        self.reverse_sample_button.clicked.connect(self._confirm_reverse_sample)
-        self.fade_sample_button = QPushButton("Fade In/Out")
-        self.fade_sample_button.setToolTip(tt.FADE_SAMPLE_BUTTON)
-        self.fade_sample_button.setEnabled(False)
-        self.fade_sample_button.clicked.connect(self._confirm_fade_sample)
-        self.normalize_sample_button = QPushButton("Normalise Sample")
-        self.normalize_sample_button.setToolTip(tt.NORMALIZE_SAMPLE_BUTTON)
-        self.normalize_sample_button.setEnabled(False)
-        self.normalize_sample_button.clicked.connect(self._confirm_normalize_sample)
-        # unlike the other four transforms here, this one has an actual
-        # PARAMETER (filter type + cutoff frequency) - opens a small
-        # dialog (ui/filter_sample_dialog.py) with a Preview button rather
-        # than a plain QMessageBox.question, same has_waveform() gating
-        # (enabled/disabled alongside the other four - see
-        # _set_sample_edit_buttons_enabled)
-        self.filter_sample_button = QPushButton("Filter Sample…")
-        self.filter_sample_button.setToolTip(tt.FILTER_SAMPLE_BUTTON)
-        self.filter_sample_button.setEnabled(False)
-        self.filter_sample_button.clicked.connect(self._confirm_filter_sample)
-        sample_edit_row.addWidget(self.trim_sample_button)
-        sample_edit_row.addWidget(self.reverse_sample_button)
-        sample_edit_row.addWidget(self.fade_sample_button)
-        sample_edit_row.addWidget(self.normalize_sample_button)
-        sample_edit_row.addWidget(self.filter_sample_button)
-        sample_edit_row.addStretch()
-        # right-aligned, and its own thing rather than a 5th button
-        # grouped with the four above - unlike them it never touches the
-        # source sample's own audio (see _confirm_duplicate_sample's own
-        # comment), it ADDS a new one, so it's not "cannot be undone" in
-        # the same destructive sense those four are
-        self.duplicate_sample_button = QPushButton("Duplicate Sample")
-        self.duplicate_sample_button.setToolTip(tt.DUPLICATE_SAMPLE_BUTTON)
-        self.duplicate_sample_button.setEnabled(False)
-        self.duplicate_sample_button.clicked.connect(self._confirm_duplicate_sample)
-        sample_edit_row.addWidget(self.duplicate_sample_button)
-        # ReCycle-style breakbeat chopper - manual slice markers, no
-        # transient detection (see AGENTS.md's own design discussion), a
-        # whole separate modal window rather than more controls on this
-        # page. Same demo-mode/has_waveform() gating as Duplicate Sample -
-        # see _open_slice_editor/_set_sample_edit_buttons_enabled.
-        self.slice_editor_button = QPushButton("Slice Editor…")
-        self.slice_editor_button.setToolTip(tt.SLICE_EDITOR_BUTTON)
-        self.slice_editor_button.setEnabled(False)
-        self.slice_editor_button.clicked.connect(self._open_slice_editor)
-        sample_edit_row.addWidget(self.slice_editor_button)
-
-        # round trip through the user's own audio editor (Settings > External
-        # Audio Editor): export the loaded audio to a WAV, open it, and when
-        # the editor has saved over it, send it back through the same
-        # send/delete/rename replace Trim/Reverse use (_perform_sample_edit).
-        # Its own row: sample_edit_row is already as wide as the page allows.
+        # Every sample action is a button here (in the Edit Sample card) AND a
+        # QAction (the Sample menu, and the sample list's right-click menu) -
+        # see _make_sample_edit_control. All need has_waveform() true (real
+        # audio in memory, not just header-only markers) - see
+        # _set_sample_edit_buttons_enabled. The first six overwrite the
+        # sample on the sampler: see _confirm_trim_sample/... for their
+        # confirmations and _perform_sample_edit_real for why that is a
+        # real, multi-step send/delete/rename pipeline rather than an
+        # in-place write. Filter and Stretch / Pitch have parameters, so they
+        # open a dialog with a Preview (ui/filter_sample_dialog.py,
+        # ui/time_stretch_dialog.py). Duplicate and the Slice Editor (a
+        # ReCycle-style chopper, own modal window) ADD samples and never touch
+        # the source's audio. The last two are the round trip through the
+        # user's own audio editor (Settings > External Audio Editor): export
+        # the loaded audio to a WAV, open it, and when the editor has saved
+        # over it send it back through the same replace Trim/Reverse use.
         self._external_edit = ExternalEditTracker(self)
         self._external_edit.changed.connect(self._refresh_external_edit_buttons)
         self._sample_edit_ready = False
-        # Akai-style granular time stretch (core/time_stretch.py): own dialog
-        # with a Preview, then the same replace path as the five edits above.
-        # Here rather than in sample_edit_row, which has no width left.
-        self.time_stretch_button = QPushButton("Time Stretch / Pitch\u2026")
-        self.time_stretch_button.setToolTip(tt.TIME_STRETCH_BUTTON)
-        self.time_stretch_button.setEnabled(False)
-        self.time_stretch_button.clicked.connect(self._confirm_time_stretch)
-        self.external_edit_button = QPushButton("Edit in External App\u2026")
-        self.external_edit_button.setToolTip(tt.EXTERNAL_EDIT_BUTTON)
-        self.external_edit_button.setEnabled(False)
-        self.external_edit_button.clicked.connect(self._edit_in_external_app)
-        self.external_send_button = QPushButton("Send Edited Audio")
-        self.external_send_button.setToolTip(tt.EXTERNAL_SEND_BUTTON)
-        self.external_send_button.setEnabled(False)
-        self.external_send_button.clicked.connect(self._confirm_send_edited_audio)
-        external_edit_row = QHBoxLayout()
-        external_edit_row.setSpacing(8)
-        external_edit_row.addWidget(self.time_stretch_button)
-        external_edit_row.addWidget(self.external_edit_button)
-        external_edit_row.addWidget(self.external_send_button)
-        external_edit_row.addStretch()
+        make = self._make_sample_edit_control
+        self.trim_sample_button = make(
+            "trim", "Trim to Markers", tt.TRIM_SAMPLE_BUTTON, self._confirm_trim_sample
+        )
+        self.reverse_sample_button = make(
+            "reverse", "Reverse", tt.REVERSE_SAMPLE_BUTTON, self._confirm_reverse_sample
+        )
+        self.fade_sample_button = make(
+            "fade", "Fade In/Out", tt.FADE_SAMPLE_BUTTON, self._confirm_fade_sample
+        )
+        self.normalize_sample_button = make(
+            "normalize",
+            "Normalise",
+            tt.NORMALIZE_SAMPLE_BUTTON,
+            self._confirm_normalize_sample,
+        )
+        self.filter_sample_button = make(
+            "filter", "Filter\u2026", tt.FILTER_SAMPLE_BUTTON, self._confirm_filter_sample
+        )
+        self.time_stretch_button = make(
+            "stretch",
+            "Stretch / Pitch\u2026",
+            tt.TIME_STRETCH_BUTTON,
+            self._confirm_time_stretch,
+        )
+        self.duplicate_sample_button = make(
+            "duplicate",
+            "Duplicate",
+            tt.DUPLICATE_SAMPLE_BUTTON,
+            self._confirm_duplicate_sample,
+        )
+        self.slice_editor_button = make(
+            "slice", "Slice Editor\u2026", tt.SLICE_EDITOR_BUTTON, self._open_slice_editor
+        )
+        self.external_edit_button = make(
+            "external_edit",
+            "Edit in External App\u2026",
+            tt.EXTERNAL_EDIT_BUTTON,
+            self._edit_in_external_app,
+        )
+        self.external_send_button = make(
+            "external_send",
+            "Send Edited Audio",
+            tt.EXTERNAL_SEND_BUTTON,
+            self._confirm_send_edited_audio,
+        )
+
+        # one labelled row per KIND of action, so what overwrites the sample
+        # is in one place
+        edit_sample_grid = QGridLayout()
+        edit_sample_grid.setHorizontalSpacing(12)
+        edit_sample_grid.setVerticalSpacing(8)
+        for row, (label, tooltip, keys) in enumerate(_EDIT_SAMPLE_ROWS):
+            name_label = QLabel(label)
+            name_label.setFixedWidth(90)
+            name_label.setToolTip(tooltip)
+            buttons_row = QHBoxLayout()
+            buttons_row.setSpacing(8)
+            for key in keys:
+                buttons_row.addWidget(self._sample_edit_controls[key][0])
+            buttons_row.addStretch()
+            edit_sample_grid.addWidget(name_label, row, 0)
+            edit_sample_grid.addLayout(buttons_row, row, 1)
+        edit_sample_grid.setColumnStretch(1, 1)
+        edit_sample_card = self._build_section_card("Edit Sample", edit_sample_grid)
 
         # two section cards, same style as the Programs tab's own (see
         # _build_section_card) - one for the loop editor itself, one for
@@ -6437,8 +6482,6 @@ class ProgramEditorWindow(QMainWindow):
         loop_controls_content.addWidget(scrollbar_container)
         loop_controls_content.addLayout(legend_row)
         loop_controls_content.addLayout(loop_meta_row)
-        loop_controls_content.addLayout(sample_edit_row)
-        loop_controls_content.addLayout(external_edit_row)
         loop_controls_card = self._build_section_card(
             "Loop Controls", loop_controls_content
         )
@@ -6456,13 +6499,15 @@ class ProgramEditorWindow(QMainWindow):
         loop_preview_card = self._build_section_card("Loop Preview", loop_preview_row)
 
         tune_card = self._build_section_card("Root Note & Tune", tune_meta_row)
+        # half the page width each, one height
+        equalize_card_heights(loop_preview_card, tune_card)
 
         # the right margin leaves a gap between the cards and the scrollbar below
         waveform_column = QVBoxLayout()
         style_card_page_layout(waveform_column)
         waveform_column.addWidget(loop_controls_card)
-        waveform_column.addWidget(loop_preview_card)
-        waveform_column.addWidget(tune_card)
+        waveform_column.addWidget(edit_sample_card)
+        waveform_column.addLayout(build_paired_row(loop_preview_card, tune_card))
         waveform_column.addStretch()
         waveform_container = QWidget()
         waveform_container.setLayout(waveform_column)
@@ -7081,6 +7126,7 @@ class ProgramEditorWindow(QMainWindow):
         ):
             self.sample_list_widget.setCurrentRow(0)
         self._update_zoom_actions_enabled()
+        self._update_sample_actions_enabled()
 
     def _update_zoom_actions_enabled(self):
         # the &View menu's Zoom In/Out/to Fit act on self.waveform_view
@@ -7257,23 +7303,19 @@ class ProgramEditorWindow(QMainWindow):
         self._set_sample_edit_buttons_enabled(False)
 
     def _set_sample_edit_buttons_enabled(self, enabled):
-        # Trim/Reverse/Fade/Normalise/Filter need real audio in memory to
-        # transform, not just header-only markers - has_waveform(), same
-        # gate mouseDoubleClickEvent uses to decide whether a double-click
-        # should even try loading audio again
-        self.trim_sample_button.setEnabled(enabled)
-        self.reverse_sample_button.setEnabled(enabled)
-        self.fade_sample_button.setEnabled(enabled)
-        self.normalize_sample_button.setEnabled(enabled)
-        self.filter_sample_button.setEnabled(enabled)
-        self.time_stretch_button.setEnabled(enabled)
-        # Duplicate Sample needs the same loaded audio (it re-sends it
-        # under a new name - see its own construction comment) AND is
-        # unavailable in demo mode (DemoBridge has no add-sample
-        # primitive, same reasoning as _duplicate_program_action/
+        # Every sample action needs real audio in memory to work on, not
+        # just header-only markers - has_waveform(), same gate
+        # mouseDoubleClickEvent uses to decide whether a double-click should
+        # even try loading audio again
+        set_enabled = self._set_sample_control_enabled
+        for key in ("trim", "reverse", "fade", "normalize", "filter", "stretch"):
+            set_enabled(key, enabled)
+        # Duplicate Sample re-sends the loaded audio under a new name AND is
+        # unavailable in demo mode (DemoBridge has no add-sample primitive,
+        # same reasoning as _duplicate_program_action/
         # _duplicate_keygroup_action in _update_list_context_actions_enabled)
         demo_mode = bool(os.environ.get("AKAISDS_DEMO_SAMPLER"))
-        self.duplicate_sample_button.setEnabled(enabled and not demo_mode)
+        set_enabled("duplicate", enabled and not demo_mode)
         # Unlike Duplicate Sample, the Slice Editor is NOT all-or-nothing in
         # demo mode: placing/dragging/previewing slices needs only the
         # audio already in memory, nothing hardware-shaped. Only its Export
@@ -7281,13 +7323,113 @@ class ProgramEditorWindow(QMainWindow):
         # primitive Duplicate Sample needs (DemoBridge has none) - so the
         # button itself stays enabled here, and SliceEditorWindow disables
         # just its own Export button when demo_mode (see _open_slice_editor).
-        self.slice_editor_button.setEnabled(enabled)
-        # same has_waveform() gate as everything above - Detect Root Note
-        # needs real audio to analyse, but (unlike Duplicate/Export) never
-        # needs actual hardware, so no demo_mode restriction here
-        self.detect_root_note_button.setEnabled(enabled)
+        set_enabled("slice", enabled)
+        # Detect Root Note needs real audio to analyse, but (unlike
+        # Duplicate/Export) never needs actual hardware, so no demo_mode
+        # restriction here
+        set_enabled("detect", enabled)
         self._sample_edit_ready = enabled
         self._refresh_external_edit_buttons()
+
+    def _make_sample_edit_control(self, key, text, tooltip, slot):
+        # a sample action is a button (the Edit Sample card, or Root Note &
+        # Tune) AND a QAction (the Sample menu and the sample list's
+        # right-click menu) that do the same thing and are enabled together -
+        # see _set_sample_control_enabled. No shortcuts on purpose.
+        button = QPushButton(text)
+        button.setToolTip(tooltip)
+        button.setEnabled(False)
+        button.clicked.connect(slot)
+        action = QAction(text, self)
+        action.setToolTip(tooltip)
+        action.setEnabled(False)
+        action.triggered.connect(slot)
+        self._sample_edit_controls[key] = (button, action)
+        self._sample_control_wanted[key] = False
+        return button
+
+    def _on_samples_tab(self):
+        # None of the attributes exist yet while the tabs are being built
+        tabs = getattr(self, "main_tabs", None)
+        index = getattr(self, "_samples_tab_index", None)
+        return tabs is not None and index is not None and tabs.currentIndex() == index
+
+    def _set_sample_control_enabled(self, key, enabled):
+        button, _action = self._sample_edit_controls[key]
+        self._sample_control_wanted[key] = bool(enabled)
+        button.setEnabled(enabled)
+        self._update_sample_actions_enabled()
+
+    def _build_sample_menu(self):
+        # The same actions as the Edit Sample card's buttons and the sample
+        # list's right-click menu (all share one QAction each - see
+        # _make_sample_edit_control). Enabled only on the Samples tab and not
+        # while a transfer runs (see _update_sample_actions_enabled,
+        # _set_hardware_busy_ui, _sync_window_menu_busy_state). Rename/Delete
+        # here are menu-only twins of the list's own actions (those keep their
+        # list-scoped Delete shortcut).
+        self._load_audio_action = QAction("Load Audio", self)
+        self._load_audio_action.setToolTip(tt.LOAD_AUDIO_ACTION)
+        self._load_audio_action.setEnabled(False)
+        self._load_audio_action.triggered.connect(self._load_sample_waveform)
+        self._menu_rename_sample_action = QAction("Rename Sample...", self)
+        self._menu_rename_sample_action.setEnabled(False)
+        self._menu_rename_sample_action.triggered.connect(self._confirm_rename_sample)
+        self._menu_delete_sample_action = QAction("Delete Sample...", self)
+        self._menu_delete_sample_action.setEnabled(False)
+        self._menu_delete_sample_action.triggered.connect(self._confirm_delete_sample)
+
+        self._sample_menu = self.menuBar().addMenu("&Sample")
+        self._sample_menu.addAction(self._load_audio_action)
+        for group in _SAMPLE_MENU_GROUPS:
+            self._sample_menu.addSeparator()
+            for key in group:
+                self._sample_menu.addAction(self._sample_edit_controls[key][1])
+        self._sample_menu.addSeparator()
+        self._sample_menu.addAction(self._menu_rename_sample_action)
+        self._sample_menu.addAction(self._menu_delete_sample_action)
+
+        # ...and in the sample list's right-click menu, above its own Rename/
+        # Delete. A right-click selects the row under it, but the actions need
+        # the audio loaded: "Load Audio" is first for that reason.
+        first = self._rename_sample_action
+        for action in self._sample_list_context_actions():
+            self.sample_list_widget.insertAction(first, action)
+        self._update_sample_actions_enabled()
+
+    def _sample_list_context_actions(self):
+        actions = [self._load_audio_action]
+        for group in _SAMPLE_MENU_GROUPS:
+            separator = QAction(self.sample_list_widget)
+            separator.setSeparator(True)
+            actions.append(separator)
+            actions.extend(self._sample_edit_controls[key][1] for key in group)
+        separator = QAction(self.sample_list_widget)
+        separator.setSeparator(True)
+        actions.append(separator)
+        return actions
+
+    def _update_sample_actions_enabled(self):
+        # The menu/right-click actions follow the buttons, but only on the
+        # Samples tab: from another tab a menu item would act, destructively,
+        # on a sample the user can't see (same idea as
+        # _update_zoom_actions_enabled).
+        if not hasattr(self, "_menu_delete_sample_action"):
+            return  # still building
+        on_tab = self._on_samples_tab()
+        for key, (_button, action) in self._sample_edit_controls.items():
+            action.setEnabled(self._sample_control_wanted.get(key, False) and on_tab)
+        # Load Audio is what a double-click on the waveform does: offered while
+        # the header is known and the audio isn't loaded (every edit needs it)
+        has_sample = self.sample_list_widget.currentRow() >= 0
+        can_load = (
+            has_sample
+            and self.waveform_view.has_header()
+            and not self.waveform_view.has_waveform()
+        )
+        self._load_audio_action.setEnabled(can_load and on_tab)
+        self._menu_rename_sample_action.setEnabled(has_sample and on_tab)
+        self._menu_delete_sample_action.setEnabled(has_sample and on_tab)
 
     def _refresh_external_edit_buttons(self):
         # Edit needs the audio in memory like the other edits; Send also needs
@@ -7295,9 +7437,10 @@ class ProgramEditorWindow(QMainWindow):
         # (is_ready re-reads the file, so it doesn't rely on a watcher event)
         ready = self._sample_edit_ready
         name = self._sample_name_at_row(self.sample_list_widget.currentRow())
-        self.external_edit_button.setEnabled(ready)
-        self.external_send_button.setEnabled(
-            ready and bool(name) and self._external_edit.is_ready(name)
+        self._set_sample_control_enabled("external_edit", ready)
+        self._set_sample_control_enabled(
+            "external_send",
+            ready and bool(name) and self._external_edit.is_ready(name),
         )
 
     def _update_sample_meta_controls(
@@ -8450,7 +8593,11 @@ class ProgramEditorWindow(QMainWindow):
         sample_name = self._sample_name_at_row(sample_index)
 
         dialog = FilterSampleDialog(
-            self, sample_name, entry["samples"], entry["framerate"]
+            self,
+            sample_name,
+            entry["samples"],
+            entry["framerate"],
+            pitch_shift_semitones=self._preview_pitch_shift_semitones(entry),
         )
         if not dialog.exec():
             return
@@ -8498,7 +8645,11 @@ class ProgramEditorWindow(QMainWindow):
             return
         sample_name = self._sample_name_at_row(sample_index)
         dialog = TimeStretchDialog(
-            self, sample_name, entry["samples"], entry["framerate"]
+            self,
+            sample_name,
+            entry["samples"],
+            entry["framerate"],
+            pitch_shift_semitones=self._preview_pitch_shift_semitones(entry),
         )
         if not dialog.exec():
             return
@@ -9153,25 +9304,12 @@ class ProgramEditorWindow(QMainWindow):
     def _on_waveform_scrollbar_moved(self, value):
         self.waveform_view.set_view_start(value)
 
-    def _on_waveform_preview_requested(self):
-        # WaveformView.preview_requested - a single click on empty
-        # waveform space. A click while something's already sounding stops
-        # it outright rather than restarting (the user's own "click again
-        # to stop" request) - this is also the ONLY way a "Hold" loop
-        # (see below) ever stops, since that mode never ends on its own.
-        if self._sample_preview_player.is_playing():
-            self._sample_preview_player.stop()
-            return
-
-        sample_index = self.sample_list_widget.currentRow()
-        entry = self._sample_waveform_cache.get(sample_index)
-        if entry is None or entry["samples"] is None:
-            return  # header-only or nothing loaded - nothing to play
-
-        samples = entry["samples"]
-        framerate = entry["framerate"]
-        markers = self.waveform_view.markers()
-
+    def _preview_pitch_shift_semitones(self, entry):
+        # How far a PC preview of this sample's audio has to be shifted to
+        # sound like the sampler playing it: shared by the Samples tab's
+        # click-to-preview and the Preview buttons of the Filter and Stretch /
+        # Pitch dialogs (which played the raw audio before, ignoring Tune and
+        # Root Note).
         # STUNO ("Tune") has to shift the WHOLE preview to match the
         # sampler, not just the loop region SHLTO already handles below -
         # but STUNO also bakes in a baseline compensation for a non-native
@@ -9200,7 +9338,7 @@ class ProgramEditorWindow(QMainWindow):
         # reported bug: such a sample previewed an octave low despite
         # playing back correctly on actual hardware.
         baseline_semitones = baseline_semitones_for_bandwidth(
-            framerate, entry["sbandw"]
+            entry["framerate"], entry["sbandw"]
         )
         stuno_semitones = self._sample_tune_offset_to_semitones(entry["stuno"])
         # transposes from the sample's own root key (SPITCH) up/down to
@@ -9214,6 +9352,28 @@ class ProgramEditorWindow(QMainWindow):
         pitch_shift_semitones = (
             stuno_semitones - baseline_semitones + root_shift_semitones
         )
+        return pitch_shift_semitones
+
+    def _on_waveform_preview_requested(self):
+        # WaveformView.preview_requested - a single click on empty
+        # waveform space. A click while something's already sounding stops
+        # it outright rather than restarting (the user's own "click again
+        # to stop" request) - this is also the ONLY way a "Hold" loop
+        # (see below) ever stops, since that mode never ends on its own.
+        if self._sample_preview_player.is_playing():
+            self._sample_preview_player.stop()
+            return
+
+        sample_index = self.sample_list_widget.currentRow()
+        entry = self._sample_waveform_cache.get(sample_index)
+        if entry is None or entry["samples"] is None:
+            return  # header-only or nothing loaded - nothing to play
+
+        samples = entry["samples"]
+        framerate = entry["framerate"]
+        markers = self.waveform_view.markers()
+
+        pitch_shift_semitones = self._preview_pitch_shift_semitones(entry)
 
         # SPTYPE (sample_loop_type_combo) and LDWELL1 (sample_loop_hold_
         # knob) aren't gated on each other anywhere in this UI (see
