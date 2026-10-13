@@ -263,7 +263,7 @@ and its docstring says what each measurement pinned down and what is inferred - 
 - **Memory & OS card (2026-10-13, right of SCSI) and the Samples tab's memory bar (under the sample list):** both read RSTAT through `BridgeWorker.submit_memory_status` (coalesced; `bridge.status()`, the read-only liveness
   request; emits `memory_status_loaded` with the Dashboard's key names + `version`/`max_blocks`). Requested on every `_on_samples_loaded`, so a send, delete, rename or Refresh updates it. One widget, `ui/memory_bar.py` (`MemoryBar`,
   `apply_memory_status` - the Dashboard uses the same function). OS version = `midi_identity.akai_version_string(version_major, version_minor)`, NOT `DeviceStatus.version` (that is the raw byte: a real S2000 on OS 2.00 sends major 17, which showed as "v17.00"; the panel number is byte - 15, measured on 1.30 and 2.00, same helper as the Settings hardware test); shown in demo mode too (DemoBridge answers, with a plain major, which the helper leaves alone). A failed read CLEARS the bars (`set_unknown`)
-  rather than leave a stale figure. Both appear on an S1000 too (Samples tab only; its Global tab is hidden) - **RSTAT on a real S1000 is untried** (the spec lists it; `FakeS1000` answers it). Tests: `tests/test_memory_status.py`.
+  rather than leave a stale figure. Both appear on an S1000 too (Samples tab only; its Global tab is hidden) - **RSTAT on a real S1000 is untried** (the spec lists it; `FakeS1000` answers it). The Samples tab's and the Dashboard's bars are `MemoryBar(collapsible=True)`: a double-click thins it to 8 px with no text (the percentage moves to the tooltip) and back. ONE setting, `config.json` `memory_bar_compact`, and a module-level notifier makes every collapsible bar follow a change at once; the Global tab's bar never shrinks. A disabled Dashboard bar (no MIDI input) takes no clicks. Tests: `tests/test_memory_status.py`.
 - Hardware checks and the owner's steps are in the docstrings of `tools/s2000_mdata_write_check.py` (`run`, `run --setting pc`),
   `tools/s2000_misc_probe.py` (`dump`/`diff`/`mdump`/`mdiff`) and `tools/s2000_full_dump.py`. `tools/s2000_tune_trigger_check.py`
   is superseded.
@@ -456,6 +456,22 @@ Akai SDATA and generic SDS sends share ONE packet loop; every batch (Dashboard S
   (and after any `blockSignals`).
 - **Envelope graphs** (`ui/envelope_graph.py`): each stage has a FIXED width budget scaled only by its own value - never re-normalize
   one stage against the others (that was the bug).
+- **The envelope graphs are draggable (2026-10-13, NOT tried on hardware)**: Akai ENV1/ENV2 (the S1000's ENV2 is the ADSR graph), S950 amp/filter, Yamaha AEG/FEG/PEG. `_EditableGraph` owns frame, curve, handles and dragging; each graph gives
+  its curve points, which are handles, and the pure inverse maths (`adsr_/env2_/level_values_for_handle`, tested to round-trip with the drawing). A graph NEVER writes: it emits `values_changed({name: value})` live, `edit_committed({...})` once on
+  RELEASE (only the changed values) and `edit_cancelled()`. **Owner's rule: knobs and graph move live, MIDI only on release.**
+  - **Inert until `set_editable(True)`** (a keygroup/sample whose values have loaded, writable knobs, not frozen; S950: a program shown). Akai: off in `_on_keygroup_selected`, on at the end of `_on_detail_loaded`. Yamaha: `_sync_graph_editable`.
+  - **Akai** (`_wire_envelope_graph`): `values_changed` sets the knob with signals BLOCKED (that is also what keeps `_schedule_write` from firing) plus its readout; `edit_committed` calls `_schedule_write` + `_flush_write` per value - the same path a
+    knob release uses. **Yamaha**: `FieldPanel.set_value_quietly` while dragging, `FieldPanel.commit` on release -> the ordinary `_on_edited` -> `WriteCoordinator` (backup, read-back, and the one-time warning, which therefore appears at the
+    RELEASE; declining puts knobs and graph back to what the unit holds). The AEG graph draws TIMES 0-99 while the unit has RATES 0-127 (higher = faster): `yamaha_adsr_rates` is the inverse of `yamaha_adsr_values`.
+    **S950**: `values_changed` just sets the knobs (an ordinary edit of the staged working copy; nothing is sent until Write).
+  - **Interaction**: handles drag from where they were grabbed (no jump); Shift = `_FINE_DIVISOR` slower (relative, no cursor warp; leaving Shift mid-drag keeps the handle put); Esc cancels (the keyboard is grabbed for the drag instead of taking
+    focus, which could scroll the page) - values go back, nothing is committed; double-click a handle resets what it controls to `set_defaults` (the knobs' own defaults) and commits; hiding the graph mid-drag cancels. `set_values` is IGNORED while
+    dragging (a reload must not fight the pointer). There is deliberately NO tooltip/readout while dragging (it got in the way; the knobs show the numbers).
+  - **The flat sustain line is draggable too** (ADSR graphs and the Yamaha filter/pitch EGs; `SEGMENT_POINTS`): up/down only, changes the sustain level alone. A segment is a drag TARGET after the handles (its names/axes are the tail of
+    `HANDLE_NAMES`/`HANDLE_AXES`; `_targets_at` = handles first, then segments); it lights up (thicker) when hovered or dragged. ENV2's 4-stage graph has no flat part, so no segment.
+  - **Overlapping handles** (an instant attack and decay, the Yamaha factory EGs where every stage is rate 127): all handles within 2.5 px of the nearest are candidates and the FIRST move (3 px) decides - sideways takes the first that can move sideways,
+    up/down the first that can move up/down. Without this the later handles of a default envelope were unreachable.
+  - Graphs are `GRAPH_SIZE` (280 x 110) everywhere; the curve is inset 8 px from the border so a handle on an edge is whole. Tests: `tests/test_envelope_editing.py` (+ one S1000 test in `test_program_editor_window_s1000.py`).
 
 ## Theme preference (Settings > Appearance)
 
