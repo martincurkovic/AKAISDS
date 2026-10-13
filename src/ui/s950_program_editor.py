@@ -67,7 +67,7 @@ from ui.editor_layout import (
     keygroup_row_text,
     style_card_page_layout,
 )
-from ui.envelope_graph import ADSREnvelopeGraph
+from ui.envelope_graph import GRAPH_SIZE, ADSREnvelopeGraph
 from ui.keygroup_range_bar import KeygroupRangeBar, keygroup_color
 from ui.knob import Knob
 from ui.note_spinbox import NoteSpinBox
@@ -526,9 +526,9 @@ class S950ProgramEditorWindow(QMainWindow):
 
         # Envelopes
         self.amp_graph = ADSREnvelopeGraph()
-        self.amp_graph.setFixedSize(200, 90)
+        self.amp_graph.setFixedSize(*GRAPH_SIZE)
         self.filter_graph = ADSREnvelopeGraph()
-        self.filter_graph.setFixedSize(200, 90)
+        self.filter_graph.setFixedSize(*GRAPH_SIZE)
         amp_card = _card(
             "Amplitude Envelope",
             build_centered_row(self.amp_graph),
@@ -556,6 +556,12 @@ class S950ProgramEditorWindow(QMainWindow):
             ),
         )
         equalize_card_heights(amp_card, env_filter_card)
+        # draggable: the knobs follow the pointer and each move is an ordinary edit of the working copy (nothing here reaches the sampler until Write)
+        self._wire_envelope_graph(self.amp_graph, {"attack": "attack", "decay": "decay", "sustain": "sustain", "release": "release"})
+        self._wire_envelope_graph(
+            self.filter_graph,
+            {"attack": "filter_attack", "decay": "filter_decay", "sustain": "filter_sustain", "release": "filter_release"},
+        )
 
         # Zone: Soft / Loud, the way the S3000 editor has Zone 1-4
         self._zone_buttons = QButtonGroup(self)
@@ -1055,7 +1061,17 @@ class S950ProgramEditorWindow(QMainWindow):
         )
         combo.setCurrentIndex(index)
 
+    def _wire_envelope_graph(self, graph, attrs):
+        # attrs: the graph's value name -> the keygroup field (and so the knob in self._editors) it is
+        graph.set_defaults({name: self._editors[("kg", attr)].defaultValue() for name, attr in attrs.items()})
+        graph.values_changed.connect(
+            lambda values: [self._set_widget(self._editors[("kg", attrs[name])], value) for name, value in values.items()]
+        )
+
     def _refresh_graphs(self, kg):
+        editable = self._working is not None
+        self.amp_graph.set_editable(editable)
+        self.filter_graph.set_editable(editable)
         self.amp_graph.set_values(kg.attack, kg.decay, kg.sustain, kg.release)
         self.filter_graph.set_values(
             kg.filter_attack, kg.filter_decay, kg.filter_sustain, kg.filter_release

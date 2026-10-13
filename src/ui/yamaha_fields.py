@@ -203,6 +203,19 @@ class FieldPanel(QObject):
         finally:
             self._filling = False
 
+    def set_value_quietly(self, key, value):
+        """Show `value` on key's widget WITHOUT it counting as an edit (what a draggable envelope graph does while the pointer moves: the knob follows, nothing
+        is sent until the release - see `commit`)."""
+        was, self._filling = self._filling, True
+        try:
+            self.set_value(key, value)
+        finally:
+            self._filling = was
+
+    def commit(self, key):
+        """Report key's widget as edited, with the value it shows now (the release of a graph drag that moved it quietly)."""
+        self.edited.emit(key, self.value(key))
+
     def set_value(self, key, value):
         w, field, p = self.widgets[key], self._fields[key], self.param(key)
         if isinstance(w, QLabel):

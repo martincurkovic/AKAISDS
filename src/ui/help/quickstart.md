@@ -135,6 +135,8 @@ Samples are **not** stored in the file. A program refers to its samples by name,
 
 *(S2000/S3000 only - an S1000 doesn't have these two controls.)*
 
+The **envelope graphs** are editable too: drag a dot to change the stage it sits on (or the flat sustain line, up or down, for just the sustain level) (the knobs follow as you drag, and the sampler is only updated when you let go). Hold *Shift* for fine control, double-click a dot to reset it, or press *Esc* mid-drag to cancel.
+
 ### Multi Tab
 
 The Multi tab is where you can assign Programs to various parts of a Multi. You can also rename your Multi if desired.

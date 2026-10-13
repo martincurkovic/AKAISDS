@@ -290,6 +290,17 @@ def save_slice_detection(mode):
     save_config(config)
 
 
+def get_memory_bar_compact():
+    # the Samples tab's memory bar, double-clicked down to a thin line without text (ui/memory_bar.py)
+    return load_config().get("memory_bar_compact", False) is True
+
+
+def save_memory_bar_compact(compact):
+    config = load_config()
+    config["memory_bar_compact"] = bool(compact)
+    save_config(config)
+
+
 def get_collapsed_cards():
     # the section cards the user collapsed in the editors, as "<editor>/<title>" keys (ui/section_card.py); anything that isn't a list of strings reads as none
     cards = load_config().get("collapsed_cards", [])

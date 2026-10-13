@@ -86,7 +86,7 @@ from ui.editor_layout import (
     style_card_page_layout,
     sync_waveform_scrollbar,
 )
-from ui.envelope_graph import ADSREnvelopeGraph, LevelEnvelopeGraph, yamaha_adsr_values
+from ui.envelope_graph import GRAPH_SIZE, ADSREnvelopeGraph, LevelEnvelopeGraph, yamaha_adsr_rates, yamaha_adsr_values
 from ui.knob import Knob
 from ui.loop_preview_view import LoopJoinPreview, LoopPreviewZoomControls
 from ui.qt_helpers import build_scroll_area, build_editor_card, set_enabled_without_scrolling
@@ -145,7 +145,6 @@ _WAVEFORM_HINT = "Double-click to load the audio waveform"
 #: how long a "loop to release" sample's loop is held in a preview (there is no key to release)
 _RELEASE_PREVIEW_MS = 2000
 #: the waveform area is 180 px tall: one mono view, or a stereo pair at half height each
-_GRAPH_SIZE = (200, 80)  # the envelope graphs (the S3000 editor's are 200 x 90)
 _MONO_VIEW_HEIGHT = 180
 _MARKERS = (("start", "Start"), ("loop_start", "Loop Start"), ("loop_end", "Loop End"), ("end", "End"))
 _MARKER_TIPS = {
@@ -312,7 +311,7 @@ def build_sample_cards(panel):
         "peg": LevelEnvelopeGraph("#5aa9e6"),
     }
     for graph in graphs.values():
-        graph.setFixedSize(*_GRAPH_SIZE)
+        graph.setFixedSize(*GRAPH_SIZE)
     feg = _card(
         "Filter Envelope",
         build_centered_row(graphs["feg"]),
@@ -476,6 +475,7 @@ class YamahaSamplesTab(QWidget):
         if writer is not None:
             self.panel.set_editable(True)
             self.panel.edited.connect(self._on_edited)
+        self._wire_envelope_graphs()
         self.panel.detect_pitch_button.clicked.connect(self._detect_pitch)
         self._sample_controls["detect"][1].triggered.connect(self._detect_pitch)
         self._preview.position_changed.connect(self._on_preview_position)
@@ -1021,6 +1021,43 @@ class YamahaSamplesTab(QWidget):
         self.used_label.setText(used)
         self._update_graphs()
 
+    # which knobs each envelope graph's values are, in the graph's own order (`_EditableGraph.NAMES`)
+    _GRAPH_KEYS = {
+        "aeg": ("aeg_attack_rate", "aeg_decay_rate", "aeg_sustain_level", "aeg_release_rate"),
+        "feg": tuple(f"feg_{n}" for n in ("init_level", "attack_level", "sustain_level", "release_level", "attack_rate", "decay_rate", "release_rate")),
+        "peg": tuple(f"peg_{n}" for n in ("init_level", "attack_level", "sustain_level", "release_level", "attack_rate", "decay_rate", "release_rate")),
+    }
+
+    def _wire_envelope_graphs(self):
+        """Make the three envelope graphs draggable. While the pointer drags a handle the knobs follow at once and NOTHING is sent; on release each changed
+        knob is reported as an edit, which is the ordinary write path (backup, one-time warning, read-back). The graphs are inert until `_sync_graph_editable`."""
+        graphs, panel = self.panel.envelope_graphs, self.panel
+        for kind, graph in graphs.items():
+            keys = self._GRAPH_KEYS[kind]
+            if kind == "aeg":
+                # the unit's ADSR is RATES (higher = faster) and the graph draws TIMES on 0-99: convert both ways, and read out the unit's own numbers
+                defaults = yamaha_adsr_values(*[panel.widgets[k].defaultValue() for k in keys])
+                graph.set_defaults(dict(zip(graph.NAMES, defaults)))
+
+                def to_knobs(values, graph=graph, keys=keys):
+                    rates = yamaha_adsr_rates(*[graph.values()[n] for n in graph.NAMES])
+                    return {keys[graph.NAMES.index(name)]: rates[graph.NAMES.index(name)] for name in values}
+
+            else:
+                graph.set_defaults({name: panel.widgets[key].defaultValue() for name, key in zip(graph.NAMES, keys)})
+
+                def to_knobs(values, graph=graph, keys=keys):
+                    return {keys[graph.NAMES.index(name)]: value for name, value in values.items()}
+
+            graph.values_changed.connect(lambda values, to_knobs=to_knobs: [panel.set_value_quietly(k, v) for k, v in to_knobs(values).items()])
+            graph.edit_committed.connect(lambda values, to_knobs=to_knobs: [panel.commit(k) for k in to_knobs(values)])
+
+    def _sync_graph_editable(self):
+        """A graph edits only a sample whose values are shown, through knobs the unit lets us write (not a built-in sample's, not under Bulk Protect)."""
+        shown = self._writer is not None and self._selected is not None and self._selected in self._cache
+        for kind, graph in self.panel.envelope_graphs.items():
+            graph.set_editable(shown and all(self.panel.widgets[k].isEnabled() for k in self._GRAPH_KEYS[kind]))
+
     def _update_graphs(self):
         """Redraw the three envelope graphs from the panel's current widget values (shape only - no calibrated timing)."""
         v = self.panel.value
@@ -1031,6 +1068,7 @@ class YamahaSamplesTab(QWidget):
                 v(f"{prefix}_init_level"), v(f"{prefix}_attack_level"), v(f"{prefix}_sustain_level"), v(f"{prefix}_release_level"),
                 v(f"{prefix}_attack_rate"), v(f"{prefix}_decay_rate"), v(f"{prefix}_release_rate"),
             )
+        self._sync_graph_editable()
 
     # -- editing -------------------------------------------------------------------------------------------
 

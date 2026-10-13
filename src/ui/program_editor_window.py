@@ -86,7 +86,7 @@ from ui.qt_helpers import (
     build_editor_card,
     set_enabled_without_scrolling,
 )
-from ui.envelope_graph import ADSREnvelopeGraph, Envelope2Graph
+from ui.envelope_graph import GRAPH_SIZE, ADSREnvelopeGraph, Envelope2Graph
 from ui.keygroup_range_bar import KeygroupRangeBar, keygroup_color
 from ui.waveform_view import WaveformView
 from ui.loop_preview_view import LoopJoinPreview, LoopPreviewZoomControls
@@ -931,10 +931,12 @@ class ProgramEditorWindow(QMainWindow):
         self.key_filter_track_knob.setFixedSize(56, 56)
         self.key_filter_track_knob.setToolTip(tt.FILTER_KEY_TRACK_KNOB)
 
+        # draggable (ui/envelope_graph.py): see _wire_envelope_graph. Inert until a keygroup's values have loaded
+        self._envelope_graphs = []
         self.env1_graph = ADSREnvelopeGraph()
-        self.env1_graph.setFixedSize(200, 90)
+        self.env1_graph.setFixedSize(*GRAPH_SIZE)
         self.env2_graph = Envelope2Graph()
-        self.env2_graph.setFixedSize(200, 90)
+        self.env2_graph.setFixedSize(*GRAPH_SIZE)
 
         # ENV1 - a standard ADSR: one knob per stage, in a single row.
         # Defaults are the Akai factory-preset values (double-click a knob
@@ -1082,6 +1084,21 @@ class ProgramEditorWindow(QMainWindow):
                 "keygroup",
                 keygroup_index_getter=self.keygroup_list.currentRow,
             )
+
+        self._wire_envelope_graph(
+            self.env1_graph,
+            {
+                "attack": (self.attack1_knob, self.attack1_value_label, "ATTAK1"),
+                "decay": (self.decay1_knob, self.decay1_value_label, "DECAY1"),
+                "sustain": (self.sustain1_knob, self.sustain1_value_label, "SUSTN1"),
+                "release": (self.release1_knob, self.release1_value_label, "RELSE1"),
+            },
+        )
+        env2_controls = {}
+        for i, (rate_field, level_field) in enumerate(zip(_ENV2_FIELDS, ["ENV2L1", "ENV2L2", "SUSTN2", "ENV2L4"]), start=1):
+            env2_controls[f"rate{i}"] = (self._env2_rate_knobs[i - 1], self._env2_rate_value_labels[i - 1], rate_field)
+            env2_controls[f"level{i}"] = (self._env2_level_knobs[i - 1], self._env2_level_value_labels[i - 1], level_field)
+        self._wire_envelope_graph(self.env2_graph, env2_controls)
 
         env1_graph_row = build_centered_row(self.env1_graph)
         env2_graph_row = build_centered_row(self.env2_graph)
@@ -3033,7 +3050,7 @@ class ProgramEditorWindow(QMainWindow):
         # S1000 that card's grid/graph are hidden (see the caller) and an
         # ENV1-style ADSR graph + four knobs take their place.
         self.env2_adsr_graph = ADSREnvelopeGraph()
-        self.env2_adsr_graph.setFixedSize(200, 90)
+        self.env2_adsr_graph.setFixedSize(*GRAPH_SIZE)
 
         # (attr, label, field, default, tooltip) - the defaults are ENV2's
         # own Akai factory-preset values, same as the 4-stage knobs it
@@ -3068,6 +3085,18 @@ class ProgramEditorWindow(QMainWindow):
                 keygroup_index_getter=self.keygroup_list.currentRow,
             )
 
+        self._wire_envelope_graph(
+            self.env2_adsr_graph,
+            {
+                name: (knob, label, field)
+                for name, knob, label, field in zip(
+                    ("attack", "decay", "sustain", "release"),
+                    self._env2_adsr_knobs,
+                    self._env2_adsr_value_labels,
+                    ("ATTAK2", "DECAY2", "SUSTN2", "RELSE2"),
+                )
+            },
+        )
         graph_row = QHBoxLayout()
         graph_row.addStretch()
         graph_row.addWidget(self.env2_adsr_graph)
@@ -5531,6 +5560,7 @@ class ProgramEditorWindow(QMainWindow):
         )
 
     def _on_keygroup_selected(self, current, previous):
+        self._set_envelope_graphs_editable(False)
         if current is None:
             return
         self._zone_stack.setCurrentIndex(0)
@@ -5669,6 +5699,7 @@ class ProgramEditorWindow(QMainWindow):
                 values["ATTAK2"], values["DECAY2"], values["SUSTN2"], values["RELSE2"]
             )
         self._update_zone_panels(values)
+        self._set_envelope_graphs_editable(True)
 
     def _on_detail_load_failed(self, program_index, keygroup_index, error_message):
         if (
@@ -6185,7 +6216,7 @@ class ProgramEditorWindow(QMainWindow):
         self.sample_list_widget.addAction(self._delete_sample_action)
 
         # how full the sampler's sample memory is (RSTAT), refreshed with every sample list load - so after every send, delete and edit
-        self.sample_memory_bar = MemoryBar()
+        self.sample_memory_bar = MemoryBar(collapsible=True)  # double-click: thin line / full bar
         self.sample_memory_bar.setFixedWidth(200)
         samples_container = build_list_column("Samples", self.sample_list_widget, self.sample_memory_bar)
 
@@ -7048,6 +7079,37 @@ class ProgramEditorWindow(QMainWindow):
         self._worker.submit_write(
             key, param_name, region, program_index, value, keygroup_index
         )
+
+    def _wire_envelope_graph(self, graph, controls):
+        # `controls`: {the graph's value name: (knob, its readout label, keygroup field)}. While the pointer drags a handle the knobs and readouts follow
+        # at once but NOTHING is sent (their valueChanged is blocked, which is also what schedules a write); on release the graph says which values
+        # changed and each goes through the same write path a knob release uses.
+        graph.set_defaults({name: knob.defaultValue() for name, (knob, _label, _field) in controls.items()})
+        graph.values_changed.connect(lambda values: self._on_envelope_graph_values(controls, values))
+        graph.edit_committed.connect(lambda values: self._on_envelope_graph_committed(controls, values))
+        self._envelope_graphs.append(graph)
+
+    def _on_envelope_graph_values(self, controls, values):
+        for name, value in values.items():
+            knob, label, _field = controls[name]
+            knob.blockSignals(True)
+            knob.setValue(value)
+            knob.blockSignals(False)
+            label.setText(str(value))
+
+    def _on_envelope_graph_committed(self, controls, values):
+        keygroup_index = self.keygroup_list.currentRow()
+        if keygroup_index < 0:
+            return
+        for name, value in values.items():
+            _knob, _label, field = controls[name]
+            self._schedule_write(field, "keygroup", value, keygroup_index=keygroup_index)
+            self._flush_write(field)
+
+    def _set_envelope_graphs_editable(self, editable):
+        # a graph edits only the keygroup whose values it is showing: off from the moment another one is chosen until its values have loaded
+        for graph in self._envelope_graphs:
+            graph.set_editable(editable)
 
     def _on_env1_knob_changed(self):
         # redraws the graph immediately as any ADSR knob is dragged - the

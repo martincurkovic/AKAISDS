@@ -31,7 +31,7 @@ from core import (
 from ui.qt_helpers import load_colored_pixmap
 from ui.settings_dialog import MidiSettingsDialog
 from ui.drop_list_widget import DropListWidget
-from ui.memory_bar import apply_memory_status
+from ui.memory_bar import MemoryBar
 from ui.program_editor_window import ProgramEditorWindow
 from ui.s950_program_editor import S950ProgramEditorWindow
 from ui.yamaha_program_editor import YamahaProgramEditorWindow
@@ -237,8 +237,7 @@ class TransferDashboard(QWidget):
         self.list_hardware.set_overlay_widget(self.empty_hardware_label)
 
         # MEMORY AVAILABILITY PROGRESS BAR
-        self.memory_avail_prog_bar = QProgressBar()
-        self.memory_avail_prog_bar.setRange(0, 100)
+        self.memory_avail_prog_bar = MemoryBar(collapsible=True)  # double-click: thin line / full bar (the same setting as the editor's)
         self.memory_avail_prog_bar.setVisible(True)
         self.memory_avail_prog_bar.setFormat("%p% memory used")
         # self.memory_avail_prog_bar.setFixedHeight(20) # nup, this looks shit, dont worry about it
@@ -1746,7 +1745,7 @@ class TransferDashboard(QWidget):
                 self.sampler_controller.rename_sample(info["sample_number"], new_name)
 
     def on_memory_status_updated(self, info):
-        apply_memory_status(self.memory_avail_prog_bar, info)
+        self.memory_avail_prog_bar.set_status(info)
 
     def confirm_and_delete_sample(self, name, sample_number):
         reply = QMessageBox.question(
