@@ -9,6 +9,8 @@
 
 A simple way to send and receive audio samples (WAV, AIFF, FLAC, MP3, Ogg) to an Akai S1000/S2000/S3000 series sampler over MIDI using the sample dump standard (MIDI SDS). Also supports generic MIDI SDS transmission for non-Akai samplers.
 
+**Need help? Read the [Quick Start Guide](src/ui/help/quickstart.md).**
+
 ![Main window dark](src/ui/help/screenshots/main-window-dark.png "Main window dark")
 
 ## Features
