@@ -226,7 +226,7 @@ def test_normalise_says_when_the_sample_is_silent(window):
 
 def test_filter_runs_the_chosen_filter_and_makes_a_copy(window, monkeypatch):
     class StubDialog:
-        def __init__(self, parent, name, samples, rate):
+        def __init__(self, parent, name, samples, rate, pitch_shift_semitones=0):
             self.seen = (name, len(samples), rate)
 
         def exec(self):
