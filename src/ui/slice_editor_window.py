@@ -174,6 +174,7 @@ class SliceEditorWindow(QDialog):
         program_confirm_message=None,
         initial_markers=None,
         channel_suffixes=None,
+        preview_pitch_shift_semitones=0,
     ):
         super().__init__(parent)
         self.setWindowTitle(f'Slice Editor - "{sample_name}"')
@@ -252,6 +253,8 @@ class SliceEditorWindow(QDialog):
         # ProgramEditorWindow._open_slice_editor's own use of this.
         self.export_succeeded = False
 
+        # click-to-preview plays shifted by the source sample's Tune / Root Note, as the sampler would (0 for audio from a file)
+        self._preview_pitch_shift_semitones = preview_pitch_shift_semitones
         self._preview_player = SlicePreviewPlayer(self)
 
         self.waveform = SliceWaveformView()
@@ -811,7 +814,11 @@ class SliceEditorWindow(QDialog):
 
     def _preview_slice(self, slice_start, slice_end):
         self._preview_player.play(
-            self._analysis, slice_start, slice_end, self._framerate
+            self._analysis,
+            slice_start,
+            slice_end,
+            self._framerate,
+            pitch_shift_semitones=self._preview_pitch_shift_semitones,
         )
 
     # --- Equal Slices ------------------------------------------------------

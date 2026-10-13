@@ -13,7 +13,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from core import time_stretch
+from core import preview_pitch, time_stretch
 from core.audio_preview import SlicePreviewPlayer
 from ui import tooltips
 from ui.knob import Knob, LogKnob
@@ -219,15 +219,22 @@ class TimeStretchDialog(QDialog):
             self.warning_label.setText(f"{kept} This changes the sample and cannot be undone.")
         frames = self._out_frames()
         too_long = frames > time_stretch.MAX_OUTPUT_FRAMES
-        self.result_label.setText(
-            f"Too long ({frames / self._framerate:,.0f} s)" if too_long else f"{frames:,} frames, {frames / self._framerate:.2f} s"
-        )
+        self.result_label.setText(f"Too long ({frames / self._framerate:,.0f} s)" if too_long else self._result_text(frames))
         # nothing to do at 100% / 0 semitones and 0 cents
         can_send = self._changes_anything() and not too_long
         self._button_box.button(QDialogButtonBox.StandardButton.Ok).setEnabled(can_send)
         if self.new_sample_button is not None:
             self.new_sample_button.setEnabled(can_send)
         self.preview_button.setEnabled(not too_long)
+
+    def _result_text(self, frames):
+        """'N frames, x.xx s' - and, when the sample's Tune / Root Note make the preview play faster or slower than its recorded rate,
+        how long that takes as you will hear it: '(y.yy s as previewed)'."""
+        text = f"{frames:,} frames, {frames / self._framerate:.2f} s"
+        if abs(self._pitch_shift_semitones) >= 0.005:
+            heard = preview_pitch.played_seconds(frames, self._framerate, self._pitch_shift_semitones)
+            text += f" ({heard:.2f} s as previewed)"
+        return text
 
     def _on_changed(self, *_args):
         self._refresh()

@@ -191,7 +191,10 @@ class YamahaSampleEditor(QObject):
         if ctx is None:
             return
         # the dialog previews the left (or only) channel; the chosen filter is then run over every channel
-        dialog = FilterSampleDialog(self._tab, ctx["name"], ctx["channels"][0], ctx["rate"])
+        dialog = FilterSampleDialog(
+            self._tab, ctx["name"], ctx["channels"][0], ctx["rate"],
+            pitch_shift_semitones=self._tab.preview_pitch_shift_semitones(ctx["data"]),
+        )
         if not dialog.exec():
             return
         name = ye.copy_name(ctx["name"], ye.EDITS["filter"][0])
@@ -213,7 +216,10 @@ class YamahaSampleEditor(QObject):
         if ctx is None:
             return
         # the dialog previews the left (or only) channel; both channels of a stereo sample get the same edit
-        dialog = TimeStretchDialog(self._tab, ctx["name"], ctx["channels"][0], ctx["rate"])
+        dialog = TimeStretchDialog(
+            self._tab, ctx["name"], ctx["channels"][0], ctx["rate"],
+            pitch_shift_semitones=self._tab.preview_pitch_shift_semitones(ctx["data"]),
+        )
         if not dialog.exec():
             return
         kind, options = dialog.edit()
@@ -364,6 +370,7 @@ class YamahaSampleEditor(QObject):
                 "fine_tune_l": g("fine_tune_l"),
                 "fine_tune_r": g("fine_tune_r"),
             },
+            preview_pitch_shift=self._tab.preview_pitch_shift_semitones(data),
         )
 
     def import_audio(self):
@@ -390,7 +397,7 @@ class YamahaSampleEditor(QObject):
             initial_markers=imported.markers or None,
         )
 
-    def _run_slicer(self, name, channels, rate, slice_params, initial_markers=None):
+    def _run_slicer(self, name, channels, rate, slice_params, initial_markers=None, preview_pitch_shift=0.0):
         tab = self._tab
         self._slice_params = slice_params
         self._free_programs = tab.free_programs()  # [(number, label)], fixed for as long as the dialog is open
@@ -411,6 +418,8 @@ class YamahaSampleEditor(QObject):
             program_names_provider=lambda: [label for _number, label in self._free_programs],
             create_program_callback=self._create_program,
             initial_markers=initial_markers,
+            # a sample on the unit previews as it plays (Original key, tuning); audio from a file has none
+            preview_pitch_shift_semitones=preview_pitch_shift,
             program_labels={
                 "checkbox": "Also fill a program with the slices",
                 "combo": "Program:",

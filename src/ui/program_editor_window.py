@@ -100,6 +100,7 @@ from core import root_note_detection
 from ui import import_audio
 from core import s1000_bridge as s1000_bridge_module
 from core import sampler_models
+from core import preview_pitch
 from core import sample_editing
 from core import time_stretch
 from core import sds_encoder
@@ -188,7 +189,7 @@ _LOOP_HOLD_HOLD_VALUE = 9999
 # comment). Matching that fixed-note behaviour here is a deliberate
 # approximation of the hardware's FACTORY DEFAULT, not a live read of
 # whatever a given unit is actually configured to right now.
-_PREVIEW_ROOT_NOTE = 60
+_PREVIEW_ROOT_NOTE = preview_pitch.PREVIEW_ROOT_NOTE
 # root note given to slices from an imported file (no sampler header to copy one from) - what the Dashboard's Slice Editor uses too
 _IMPORT_ROOT_NOTE = 60
 # a stereo slice goes out as two mono samples: <slice name>-L (zone 1, panned left) and <slice name>-R (zone 2, panned right)
@@ -4843,6 +4844,9 @@ class ProgramEditorWindow(QMainWindow):
             entry["spitch"],
             entry["stuno"],
             entry["shlto"],
+            # a resident sample's slices preview as the sampler plays it (Tune
+            # and Root Note); audio from a file has neither, so no shift
+            preview_pitch_shift=self._preview_pitch_shift_semitones(entry),
         )
 
     def _run_slice_editor(
@@ -4856,6 +4860,7 @@ class ProgramEditorWindow(QMainWindow):
         initial_markers=None,
         resident_source=True,
         extra_channels=None,
+        preview_pitch_shift=0.0,
     ):
         # The Slice Editor over *samples*. resident_source is True when they
         # are a sample already on the sampler (retained across the export's
@@ -4906,6 +4911,7 @@ class ProgramEditorWindow(QMainWindow):
             # a stereo loop: both channels shown, each slice sent as a -L/-R pair
             extra_channels=extra_channels,
             channel_suffixes=_STEREO_SUFFIXES if extra_channels else None,
+            preview_pitch_shift_semitones=preview_pitch_shift,
         )
         # the export reloads the sample list (wiping the cache), so keep the
         # source's audio across it; dropped again below if nothing was exported

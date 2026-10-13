@@ -61,6 +61,7 @@ from PySide6.QtWidgets import (
 )
 
 from core import debug_log
+from core import preview_pitch
 from core import root_note_detection
 from core import yamaha_markers as ym
 from core import yamaha_params as yp
@@ -1066,6 +1067,15 @@ class YamahaSamplesTab(QWidget):
 
     # -- click to preview ---------------------------------------------------------------------------------------
 
+    def preview_pitch_shift_semitones(self, data):
+        """How far a PC preview of this sample has to be shifted to sound as the unit plays it: Original key to the preview note, plus Coarse
+        and Fine tune (core/preview_pitch.py - the conventions are unverified on a unit). Shared by the click-to-preview and the Preview of
+        the edit dialogs and the Slice Editor."""
+        g = lambda key: yp.extract(yp.get("sample", key), data)  # noqa: E731
+        return preview_pitch.yamaha_shift_semitones(
+            g("original_key_l"), g("coarse_tune"), g("fine_tune_l"), FINE_TUNE_STEPS_PER_CENT
+        )
+
     def _on_preview_requested(self):
         if self._preview.is_playing():
             self._preview.stop()  # a click while something sounds stops it (the only way a held loop ends)
@@ -1079,22 +1089,24 @@ class YamahaSamplesTab(QWidget):
         m = self.waveform_view.markers_with_loop_in_range()
         rate = yp.extract(yp.get("sample", "sampling_frequency_l"), data)
         mode = yp.extract(yp.get("sample", "loop_mode"), data)
+        shift = self.preview_pitch_shift_semitones(data)  # Original key and tuning, as the unit plays it
         if mode in _LOOPING_MODES:
             self._preview_reversed = 0
             self._preview.play_loop(
                 left, m["start"], m["loop_start"], m["loop_end"], m["end"], rate,
-                dwell_ms=None if mode == 1 else _RELEASE_PREVIEW_MS, right_samples=right,
+                dwell_ms=None if mode == 1 else _RELEASE_PREVIEW_MS, pitch_shift_semitones=shift, right_samples=right,
             )
         elif mode in _REVERSE_MODES:
             # play a reversed copy, mapping its positions back for the playhead
             n = len(left)
             self._preview.play(
-                left[::-1], n - 1 - m["end"], n - 1 - m["start"], rate, right_samples=None if right is None else right[::-1]
+                left[::-1], n - 1 - m["end"], n - 1 - m["start"], rate,
+                pitch_shift_semitones=shift, right_samples=None if right is None else right[::-1],
             )
             self._preview_reversed = n if self._preview.is_playing() else 0
         else:
             self._preview_reversed = 0
-            self._preview.play(left, m["start"], m["end"], rate, right_samples=right)
+            self._preview.play(left, m["start"], m["end"], rate, pitch_shift_semitones=shift, right_samples=right)
 
     def _on_preview_position(self, frame):
         if self._preview_reversed:
