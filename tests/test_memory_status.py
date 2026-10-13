@@ -184,3 +184,94 @@ def test_the_memory_card_sits_right_of_scsi_and_is_not_a_setting(editor, qapp):
         assert tab.memory_bar.isEnabled()
     finally:
         editor.hide()
+
+
+# --- the Samples tab's bar shrinks to a thin line and back --------------------------------------------------------------------------------
+
+
+def test_double_clicking_the_samples_bar_thins_it_and_double_clicking_again_restores_it(editor, qapp, monkeypatch, tmp_path):
+    from PySide6.QtCore import QEvent, QPointF, Qt
+    from PySide6.QtGui import QMouseEvent
+    from PySide6.QtWidgets import QApplication
+
+    from core import app_config
+
+    monkeypatch.setattr(app_config, "CONFIG_PATH", tmp_path / "config.json")
+    _pump_until(qapp, lambda: editor.sample_memory_bar.value() == 75)
+    bar = editor.sample_memory_bar
+    full_height = bar.sizeHint().height()
+    assert not bar.is_compact() and bar.isTextVisible() and "Double-click to shrink" in bar.toolTip()
+
+    def double_click():
+        QApplication.sendEvent(bar, QMouseEvent(QEvent.Type.MouseButtonDblClick, QPointF(5, 3), QPointF(5, 3), Qt.MouseButton.LeftButton, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier))
+
+    double_click()
+    assert bar.is_compact() and not bar.isTextVisible() and bar.maximumHeight() == bar.THIN_HEIGHT < full_height
+    assert bar.value() == 75  # still the same figure, just no text
+    assert "75% memory used" in bar.toolTip() and "show the full bar" in bar.toolTip()  # the number moves to the tooltip
+    assert app_config.get_memory_bar_compact() is True
+    editor._on_memory_status_loaded({"max_num_samp_words": 1000, "num_words_free": 50, "num_blocks_free": 5, "version": "2.00"})  # a new reading keeps it thin
+    assert bar.is_compact() and bar.value() == 95 and "95% memory used" in bar.toolTip() and bar.property("memoryLevel") == "critical"
+    double_click()
+    assert not bar.is_compact() and bar.isTextVisible() and bar.maximumHeight() > 1000
+    assert app_config.get_memory_bar_compact() is False
+
+
+def test_the_choice_is_remembered_and_the_global_tabs_bar_never_shrinks(qapp, monkeypatch, tmp_path):
+    from core import app_config
+
+    monkeypatch.setattr(app_config, "CONFIG_PATH", tmp_path / "config.json")
+    first = MemoryBar(collapsible=True)
+    first.set_compact(True)
+    assert MemoryBar(collapsible=True).is_compact()  # the next window starts thin
+    plain = MemoryBar()
+    plain.set_compact(True)
+    assert not plain.is_compact() and plain.isTextVisible()  # not opted in: unchanged
+
+
+# --- the Dashboard's bar is the same widget and the same setting ----------------------------------------------------------------------------
+
+
+def test_the_dashboards_bar_shrinks_too_and_follows_the_editors_bar_live(qapp, editor, monkeypatch, tmp_path):
+    from PySide6.QtCore import QEvent, QPointF, Qt
+    from PySide6.QtGui import QMouseEvent
+    from PySide6.QtWidgets import QApplication
+
+    from controller.sampler_controller import SamplerController
+    from core import app_config
+    from core.midi_manager import MidiManager
+    from ui.dashboard import TransferDashboard
+
+    monkeypatch.setattr(app_config, "CONFIG_PATH", tmp_path / "config.json")
+    dash = TransferDashboard(SamplerController(MidiManager()), MidiManager())
+    try:
+        bar, editor_bar = dash.memory_avail_prog_bar, editor.sample_memory_bar
+        assert isinstance(bar, MemoryBar) and not bar.is_compact()
+        bar.setEnabled(True)  # (the Dashboard disables it with no MIDI input: a disabled widget takes no clicks)
+        dash.on_memory_status_updated({"max_num_samp_words": 1000, "num_words_free": 250, "num_blocks_free": 40})
+        assert bar.value() == 75 and bar.text() == "75% memory used" and "Double-click to shrink" in bar.toolTip()
+        QApplication.sendEvent(bar, QMouseEvent(QEvent.Type.MouseButtonDblClick, QPointF(5, 3), QPointF(5, 3), Qt.MouseButton.LeftButton, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier))
+        assert bar.is_compact() and not bar.isTextVisible() and "75% memory used" in bar.toolTip()
+        assert editor_bar.is_compact()  # one setting: the editor's bar followed at once
+        editor_bar.set_compact(False)  # ...and the other way round
+        assert not bar.is_compact() and bar.isTextVisible()
+    finally:
+        dash.deleteLater()
+
+
+def test_a_closed_windows_bar_does_not_break_the_others(qapp, monkeypatch, tmp_path):
+    from PySide6.QtWidgets import QWidget
+
+    from core import app_config
+
+    monkeypatch.setattr(app_config, "CONFIG_PATH", tmp_path / "config.json")
+    window = QWidget()
+    gone = MemoryBar(window, collapsible=True)
+    window.deleteLater()
+    del window
+    qapp.processEvents()
+    qapp.sendPostedEvents(None, 0)
+    survivor = MemoryBar(collapsible=True)
+    survivor.set_compact(True)  # would raise if the deleted bar were still connected
+    survivor.set_compact(False)
+    assert not survivor.is_compact()

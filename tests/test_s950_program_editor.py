@@ -272,8 +272,8 @@ def test_the_range_bar_and_graphs_follow_the_program(win):
     _show(win, 0)
     assert win.keygroup_range_bar._ranges == [(24, 59), (60, 127)]
     kg = win._working.keygroups[0]
-    assert win.amp_graph._attack == kg.attack
-    assert win.filter_graph._release == kg.filter_release
+    assert win.amp_graph.values()["attack"] == kg.attack
+    assert win.filter_graph.values()["release"] == kg.filter_release
 
 
 def test_control_bits_are_shown_but_not_editable(win):
@@ -358,7 +358,7 @@ def test_editing_a_field_stages_it_without_writing(win):
     assert win.write_button.isEnabled()
     assert "1 unsaved change" in win.dirty_label.text()
     assert win.rig.fake.prgm_writes == 0
-    assert win.amp_graph._attack == 40  # the graph follows live
+    assert win.amp_graph.values()["attack"] == 40  # the graph follows live
 
 
 def test_edits_apply_to_the_selected_keygroup_only(win):

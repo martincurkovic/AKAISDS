@@ -474,17 +474,17 @@ def test_the_envelope_graphs_follow_the_values_on_load_and_on_edit(win):
     graphs = tab.panel.envelope_graphs
     assert set(graphs) == {"aeg", "feg", "peg"}
     # the factory sample: instant attack and decay (rate 127), a release rate of 126 (a hair over instant), full sustain
-    assert (graphs["aeg"]._attack, graphs["aeg"]._decay) == (0, 0)
-    assert tab.panel.value("aeg_release_rate") == 126 and graphs["aeg"]._release == pytest.approx(99 / 127)
-    assert graphs["aeg"]._sustain == pytest.approx(99.0 * tab.panel.value("aeg_sustain_level") / 127)
-    assert graphs["feg"]._values[:4] == tuple(
+    assert (graphs["aeg"].values()["attack"], graphs["aeg"].values()["decay"]) == (0, 0)
+    assert tab.panel.value("aeg_release_rate") == 126 and graphs["aeg"].values()["release"] == pytest.approx(99 / 127)
+    assert graphs["aeg"].values()["sustain"] == pytest.approx(99.0 * tab.panel.value("aeg_sustain_level") / 127)
+    assert tuple(graphs["feg"].values().values())[:4] == tuple(
         tab.panel.value(f"feg_{k}_level") for k in ("init", "attack", "sustain", "release")
     )
     # editing a knob redraws at once (before any read-back)
     tab.panel.widgets["aeg_attack_rate"].setValue(10)
-    assert graphs["aeg"]._attack == pytest.approx((127 - 10) * 99 / 127)
+    assert graphs["aeg"].values()["attack"] == pytest.approx((127 - 10) * 99 / 127)
     tab.panel.widgets["peg_decay_rate"].setValue(20)
-    assert graphs["peg"]._values[5] == 20
+    assert graphs["peg"].values()["decay_rate"] == 20
 
 
 # --- the layout/styling pass ---------------------------------------------------------------------------------------------

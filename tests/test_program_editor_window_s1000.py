@@ -274,6 +274,42 @@ def test_editing_envelope_2_writes_the_adsr_fields(editor, qapp):
     assert editor._fake.ignored_ops == []
 
 
+def test_dragging_the_envelope_2_adsr_graph_writes_the_block_once_on_release(editor, qapp):
+    # the S1000's second envelope is a plain ADSR graph (the 4-stage one is hidden): draggable like Envelope 1, and - because every S1000 write is a whole-block
+    # read-modify-write - nothing is sent until the pointer is released
+    from PySide6.QtCore import QEvent, QPointF, Qt
+    from PySide6.QtGui import QMouseEvent
+
+    editor.detail_stack.setCurrentIndex(1)
+    _select_keygroup(editor, qapp, 0, expect_lo=24)
+    graph = editor.env2_adsr_graph
+    assert graph in editor._envelope_graphs and graph.is_editable()
+    graph.show()
+    qapp.processEvents()
+    block = editor._fake.programs[0]["keygroups"][0]
+    offset = p.lookup("ATTAK2", "keygroup").offset
+    before = block[offset]
+    start = graph.handle_positions()[0]
+    end = start + QPointF(40, 0)
+
+    def send(kind, position, button, buttons):
+        QApplication.sendEvent(graph, QMouseEvent(kind, position, position, button, buttons, Qt.KeyboardModifier.NoModifier))
+
+    send(QEvent.Type.MouseButtonPress, start, Qt.MouseButton.LeftButton, Qt.MouseButton.LeftButton)
+    send(QEvent.Type.MouseMove, end, Qt.MouseButton.NoButton, Qt.MouseButton.LeftButton)
+    attack = graph.values()["attack"]
+    assert attack != before and editor.attack2_knob.value() == attack
+    editor._worker.wait_until_idle()
+    for _ in range(10):
+        qapp.processEvents()
+    assert block[offset] == before  # live on screen, nothing on the (fake) sampler yet
+    send(QEvent.Type.MouseButtonRelease, end, Qt.MouseButton.LeftButton, Qt.MouseButton.NoButton)
+    editor._worker.wait_until_idle()
+    for _ in range(10):
+        qapp.processEvents()
+    assert editor._fake.programs[0]["keygroups"][0][offset] == attack
+
+
 def _section_card(widget):
     while widget.objectName() != "sectionCard":
         widget = widget.parentWidget()
