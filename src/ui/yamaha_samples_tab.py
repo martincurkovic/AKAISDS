@@ -86,7 +86,7 @@ from ui.editor_layout import (
 )
 from ui.envelope_graph import ADSREnvelopeGraph, LevelEnvelopeGraph, yamaha_adsr_values
 from ui.knob import Knob
-from ui.loop_preview_view import HALF_WINDOW_FRAMES, LoopJoinPreview
+from ui.loop_preview_view import LoopJoinPreview, LoopPreviewZoomControls
 from ui.qt_helpers import build_scroll_area, build_section_card, set_enabled_without_scrolling
 from ui.waveform_view import WaveformView
 from ui.yamaha_fields import Field, FieldPanel
@@ -572,7 +572,10 @@ class YamahaSamplesTab(QWidget):
         # what the loop makes of the audio at its join (left channel), kept live with the markers
         self.loop_preview = LoopJoinPreview()
         self.loop_preview.marker_drag_delta.connect(self._on_loop_preview_dragged)
-        loop_preview_card = build_section_card("Loop Preview", self._row(self.loop_preview))
+        # tiny zoom controls right beside the title; the zoom itself lives in the widget (it also answers Ctrl+scroll and a pinch)
+        loop_preview_zoom = LoopPreviewZoomControls(self.loop_preview)
+        self.loop_preview.zoom_changed.connect(self._refresh_loop_preview_for_zoom)
+        loop_preview_card = build_section_card("Loop Preview", self._row(self.loop_preview), header_widgets=(loop_preview_zoom,))
         self.waveform_view.markers_changed.connect(self._update_marker_knobs)
         self.waveform_view.markers_changed.connect(lambda _s, ls, le, _e: self._refresh_loop_preview(ls, le))
         self.cards_page = build_sample_cards(self.panel)
@@ -839,12 +842,18 @@ class YamahaSamplesTab(QWidget):
         self._on_marker_knob_changed(name, self.waveform_view.markers()[name] + delta)
         self._preview_commit_timer.start()
 
+    def _refresh_loop_preview_for_zoom(self, _frames):
+        # the preview's zoom changed: ask for that many frames again, around the markers as they are now
+        markers = self.waveform_view.markers()
+        self._refresh_loop_preview(markers["loop_start"], markers["loop_end"])
+
     def _refresh_loop_preview(self, loop_start, loop_end):
         if not self._loops_enabled:
             self.loop_preview.clear_no_loop()
             return
-        before = self.waveform_view.samples_before(loop_end, HALF_WINDOW_FRAMES)
-        after = self.waveform_view.samples_after(loop_start, HALF_WINDOW_FRAMES)
+        frames = self.loop_preview.half_window()  # frames each side, at the preview's own zoom
+        before = self.waveform_view.samples_before(loop_end, frames)
+        after = self.waveform_view.samples_after(loop_start, frames)
         if before is None or after is None:
             self.loop_preview.clear()
         else:

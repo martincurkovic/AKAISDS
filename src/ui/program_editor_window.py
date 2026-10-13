@@ -89,7 +89,7 @@ from ui.qt_helpers import (
 from ui.envelope_graph import ADSREnvelopeGraph, Envelope2Graph
 from ui.keygroup_range_bar import KeygroupRangeBar, keygroup_color
 from ui.waveform_view import WaveformView
-from ui.loop_preview_view import LoopJoinPreview, HALF_WINDOW_FRAMES
+from ui.loop_preview_view import LoopJoinPreview, LoopPreviewZoomControls
 from ui.slice_editor_window import SliceEditorWindow
 from ui.filter_sample_dialog import FilterSampleDialog
 from ui.time_stretch_dialog import TimeStretchDialog
@@ -6071,14 +6071,14 @@ class ProgramEditorWindow(QMainWindow):
         edit.setValidator(QRegularExpressionValidator(name_pattern, edit))
         return edit
 
-    def _build_section_card(self, title, *row_layouts):
+    def _build_section_card(self, title, *row_layouts, header_widgets=()):
         # groups related rows (e.g. every LFO control, or Volume/Pan/
         # Velocity together on the Program tab; Filter or Envelopes on the
         # Keygroup tab) into one visually distinct card - see
         # ui.qt_helpers.build_section_card's own docstring for the actual
         # implementation and the gotchas it exists to avoid (also used
         # directly, not through this wrapper, by ui/settings_dialog.py).
-        return build_section_card(title, *row_layouts)
+        return build_section_card(title, *row_layouts, header_widgets=header_widgets)
 
     def _build_scroll_area(self, page):
         # both detail_stack pages (Program, Keygroup) are wrapped in one of
@@ -6661,7 +6661,13 @@ class ProgramEditorWindow(QMainWindow):
         self.loop_preview = LoopJoinPreview()
         loop_preview_row = QHBoxLayout()
         loop_preview_row.addWidget(self.loop_preview)
-        loop_preview_card = self._build_section_card("Loop Preview", loop_preview_row)
+        # tiny zoom controls right beside the title (they take no room from the preview); the zoom itself lives in the widget, which
+        # also answers Ctrl+scroll and a trackpad pinch
+        loop_preview_zoom = LoopPreviewZoomControls(self.loop_preview)
+        self.loop_preview.zoom_changed.connect(self._refresh_loop_preview_for_zoom)
+        loop_preview_card = self._build_section_card(
+            "Loop Preview", loop_preview_row, header_widgets=(loop_preview_zoom,)
+        )
 
         tune_card = self._build_section_card("Root Note & Tune", tune_meta_row)
         # half the page width each, one height
@@ -7987,12 +7993,18 @@ class ProgramEditorWindow(QMainWindow):
             # out, they don't draw at all - see set_loop_enabled)
             self.loop_preview.clear_no_loop()
             return
-        end_samples = self.waveform_view.samples_before(loop_end, HALF_WINDOW_FRAMES)
-        start_samples = self.waveform_view.samples_after(loop_start, HALF_WINDOW_FRAMES)
+        frames = self.loop_preview.half_window()  # frames each side, at the preview's own zoom
+        end_samples = self.waveform_view.samples_before(loop_end, frames)
+        start_samples = self.waveform_view.samples_after(loop_start, frames)
         if end_samples is None or start_samples is None:
             self.loop_preview.clear()
         else:
             self.loop_preview.set_join(end_samples, start_samples)
+
+    def _refresh_loop_preview_for_zoom(self, _frames):
+        # the preview's zoom changed: ask for that many frames again, around the markers as they are now
+        markers = self.waveform_view.markers()
+        self._refresh_loop_preview(markers["loop_start"], markers["loop_end"])
 
     def _on_loop_preview_marker_dragged(self, name, delta):
         # LoopJoinPreview owns no marker state itself - it only measures a

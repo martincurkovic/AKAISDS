@@ -3,6 +3,7 @@ from PySide6.QtCore import Qt, QRectF, QEvent
 from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import (
     QFormLayout,
+    QHBoxLayout,
     QLabel,
     QScrollArea,
     QSizePolicy,
@@ -96,7 +97,7 @@ def widen_popup_to_fit_items(combo):
     combo.view().setMinimumWidth(widest + 40)  # giving extra padding just in case
 
 
-def build_section_card(title, *row_layouts):
+def build_section_card(title, *row_layouts, header_widgets=()):
     # groups related rows into one visually distinct card - same surface/
     # border look as the Program Editor's own keygroup zone card (see
     # QWidget#sectionCard in style.qss.template). Originally
@@ -110,7 +111,17 @@ def build_section_card(title, *row_layouts):
     section_layout = QVBoxLayout()
     section_layout.setContentsMargins(12, 10, 12, 12)
     section_layout.setSpacing(10)
-    section_layout.addWidget(header)
+    if header_widgets:
+        # small controls right beside the title (e.g. the Loop Preview's zoom buttons) rather than a row of their own
+        header_row = QHBoxLayout()
+        header_row.setSpacing(8)
+        header_row.addWidget(header)
+        for widget in header_widgets:
+            header_row.addWidget(widget)
+        header_row.addStretch()
+        section_layout.addLayout(header_row)
+    else:
+        section_layout.addWidget(header)
     for row in row_layouts:
         section_layout.addLayout(row)
     # without this, a card whose content is shorter than the row it's

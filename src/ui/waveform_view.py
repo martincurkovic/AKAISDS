@@ -29,6 +29,11 @@ _FINE_DRAG_DIVISOR_MACOS = 12
 
 _MIN_ZOOM = 1.0  # the whole sample visible at once
 _ZOOM_STEP = 1.6  # multiplicative factor per wheel notch / zoom button click
+# The view never zooms in past this many visible frames (or the whole sample, if it is shorter). It used to go on until exactly ONE frame
+# was visible - see _max_zoom for why the flat ceiling before that had to go - which left a single sample on screen and nothing to
+# look at. 32 frames across a canvas of several hundred pixels is ~10+ px per sample, so every frame is still plain to see and a marker
+# drag is still sample-accurate (many pixels per frame, never several frames per pixel).
+_MIN_VISIBLE_FRAMES = 32
 # there used to be a flat _MAX_ZOOM = 500.0 ceiling here ("view can shrink
 # to roughly 1/500th of the sample") - see WaveformView._max_zoom for why
 # that's gone: for any sample bigger than about 500x the canvas's own
@@ -773,15 +778,14 @@ class WaveformView(QWidget):
         )
 
     def _max_zoom(self):
-        # the zoom level at which _view_length() bottoms out at exactly 1
-        # visible sample - always reachable, whatever the sample's own
-        # size, unlike a flat constant (see the removed _MAX_ZOOM's own
-        # comment for the bug this used to cause). frame_count itself is
-        # the right ceiling: _view_length()'s own formula is
-        # round(frame_count / zoom), and that reaches 1 exactly at
-        # zoom == frame_count, with no benefit to allowing anything past
-        # that (view_length is already floored at 1 regardless).
-        return max(_MIN_ZOOM, float(self._frame_count))
+        # The zoom at which _view_length() bottoms out at _MIN_VISIBLE_FRAMES (or at the whole sample, for one shorter than that) -
+        # reachable whatever the sample's size, unlike the flat constant this replaced (see the removed _MAX_ZOOM's comment above:
+        # for a sample over ~500x the canvas width, 500x could never reach sample-accurate dragging), but stopping at a view you can
+        # still read instead of going down to a single frame. _view_length() is round(frame_count / zoom), so frame_count / N shows N.
+        if self._frame_count <= 0:
+            return _MIN_ZOOM
+        visible = min(_MIN_VISIBLE_FRAMES, self._frame_count)
+        return max(_MIN_ZOOM, self._frame_count / visible)
 
     def _clamp_view_start(self):
         max_start = max(0, self._frame_count - self._view_length())

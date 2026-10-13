@@ -1,6 +1,8 @@
-from PySide6.QtWidgets import QApplication, QWidget, QSizePolicy
+import math
+
+from PySide6.QtWidgets import QApplication, QHBoxLayout, QPushButton, QWidget, QSizePolicy
 from PySide6.QtGui import QCursor, QPainter, QPen, QColor
-from PySide6.QtCore import Qt, QRectF, QPointF, Signal
+from PySide6.QtCore import QEvent, Qt, QRectF, QPointF, Signal
 
 from ui import theme
 from ui.waveform_view import (
@@ -26,6 +28,16 @@ _FINE_DRAG_DIVISOR = 8  # how much slower a Shift-held drag moves
 # actually read the seam's own shape at ordinary sample rates without
 # needing to zoom the main waveform in first.
 HALF_WINDOW_FRAMES = 150
+
+# The zoom levels the preview offers: how many frames each side of the loop point it shows, from every sample readable one by one (19)
+# out to the overall shape (2400). Each step doubles or halves the window; 150 is the default and what "reset" returns to. Dragging
+# needs no change when this does: the drag maths measures frames per pixel from whatever is shown, so zooming in makes a drag finer.
+ZOOM_LADDER = (19, 38, 75, 150, 300, 600, 1200, 2400)
+DEFAULT_ZOOM_INDEX = ZOOM_LADDER.index(HALF_WINDOW_FRAMES)
+# Ctrl+scroll: one mouse-wheel notch (120 units) is one step; a trackpad's small deltas add up to one
+_WHEEL_UNITS_PER_STEP = 120
+# trackpad pinch: events carry small incremental scale changes; one ladder step per x1.41 of pinch (half a doubling)
+_PINCH_OCTAVES_PER_STEP = 0.5
 
 _PLACEHOLDER_NO_AUDIO = "No audio loaded"
 _PLACEHOLDER_NO_LOOP = "No loop on this sample"
@@ -82,6 +94,9 @@ class LoopJoinPreview(QWidget):
     """
 
     marker_drag_delta = Signal(str, int)  # ("loop_end"/"loop_start", delta_frames)
+    #: the zoom changed: the new half window (frames each side of the loop point). The editor that owns the audio asks
+    #: WaveformView.samples_before/after for that many frames again and calls set_join.
+    zoom_changed = Signal(int)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -114,6 +129,9 @@ class LoopJoinPreview(QWidget):
         # never moves; a side with fewer real frames available just reads
         # as more zoomed in on that side, which is what "not enough sample
         # left before/after this point" should actually look like.
+        self._zoom_index = DEFAULT_ZOOM_INDEX
+        self._wheel_units = 0  # Ctrl+scroll that has not yet added up to a step
+        self._pinch_octaves = 0.0  # trackpad pinch likewise
         self._end_samples = None
         self._start_samples = None
         self._end_envelope = []
@@ -141,6 +159,75 @@ class LoopJoinPreview(QWidget):
         QApplication.instance().applicationStateChanged.connect(
             self._on_application_state_changed
         )
+
+    # -- zoom ---------------------------------------------------------------------------------------------------
+
+    def half_window(self):
+        """How many frames each side of the loop point to show at the current zoom."""
+        return ZOOM_LADDER[self._zoom_index]
+
+    def can_zoom_in(self):
+        return self._zoom_index > 0
+
+    def can_zoom_out(self):
+        return self._zoom_index < len(ZOOM_LADDER) - 1
+
+    def is_default_zoom(self):
+        return self._zoom_index == DEFAULT_ZOOM_INDEX
+
+    def _set_zoom_index(self, index):
+        index = max(0, min(len(ZOOM_LADDER) - 1, index))
+        if index == self._zoom_index:
+            return False
+        self._zoom_index = index
+        self.zoom_changed.emit(self.half_window())
+        return True
+
+    def zoom_in(self):
+        """Show fewer frames (closer). Returns False at the closest level."""
+        return self._set_zoom_index(self._zoom_index - 1)
+
+    def zoom_out(self):
+        """Show more frames (wider). Returns False at the widest level."""
+        return self._set_zoom_index(self._zoom_index + 1)
+
+    def reset_zoom(self):
+        return self._set_zoom_index(DEFAULT_ZOOM_INDEX)
+
+    def wheelEvent(self, event):
+        # Ctrl+scroll zooms (like the main waveform); a plain scroll is NOT taken, so it scrolls the page this card sits in
+        if not event.modifiers() & Qt.KeyboardModifier.ControlModifier:
+            event.ignore()
+            return
+        angle = event.angleDelta()
+        delta = angle.x() if angle.x() != 0 else angle.y()
+        if delta == 0:
+            return
+        self._wheel_units += delta
+        while self._wheel_units >= _WHEEL_UNITS_PER_STEP:
+            self._wheel_units -= _WHEEL_UNITS_PER_STEP
+            self.zoom_in()
+        while self._wheel_units <= -_WHEEL_UNITS_PER_STEP:
+            self._wheel_units += _WHEEL_UNITS_PER_STEP
+            self.zoom_out()
+        event.accept()
+
+    def event(self, event):
+        # a macOS trackpad pinch is its own native gesture event, not a modified wheel event (see WaveformView.event)
+        if (
+            event.type() == QEvent.Type.NativeGesture
+            and event.gestureType() == Qt.NativeGestureType.ZoomNativeGesture
+        ):
+            # value() is an incremental scale change (~0.02 per increment); spreading the fingers (positive) zooms IN
+            self._pinch_octaves += math.log2(max(0.1, 1.0 + event.value()))
+            while self._pinch_octaves >= _PINCH_OCTAVES_PER_STEP:
+                self._pinch_octaves -= _PINCH_OCTAVES_PER_STEP
+                self.zoom_in()
+            while self._pinch_octaves <= -_PINCH_OCTAVES_PER_STEP:
+                self._pinch_octaves += _PINCH_OCTAVES_PER_STEP
+                self.zoom_out()
+            return True
+        return super().event(event)
 
     def set_join(self, end_samples, start_samples):
         self._end_samples = end_samples
@@ -443,3 +530,44 @@ class LoopJoinPreview(QWidget):
         # exists alongside hideEvent above
         if state != Qt.ApplicationState.ApplicationActive and self._fine_active:
             self._exit_fine_drag()
+
+
+class LoopPreviewZoomControls(QWidget):
+    """Three tiny buttons for a LoopJoinPreview's zoom - out, in, and back to the default - meant to sit right beside the card's title,
+    so they take no room from the preview itself. They give no keyboard focus (nothing to hand on when one switches itself off at the
+    end of the range, which would scroll the page: see qt_helpers.set_enabled_without_scrolling)."""
+
+    def __init__(self, preview, parent=None):
+        super().__init__(parent)
+        self._preview = preview
+        self.zoom_out_button = self._button("-", 22)  # a plain hyphen: the Unicode minus drew a stray dot in this font
+        self.zoom_in_button = self._button("+", 22)
+        self.reset_button = self._button("1:1", 30)
+        self.zoom_out_button.clicked.connect(preview.zoom_out)
+        self.zoom_in_button.clicked.connect(preview.zoom_in)
+        self.reset_button.clicked.connect(preview.reset_zoom)
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(3)
+        for button in (self.zoom_out_button, self.zoom_in_button, self.reset_button):
+            layout.addWidget(button)
+        preview.zoom_changed.connect(self._sync)
+        self._sync()
+
+    @staticmethod
+    def _button(text, width):
+        button = QPushButton(text)
+        button.setProperty("compact", True)  # style.qss.template: no padding, so the symbol fits
+        button.setFixedSize(width, 18)
+        button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        return button
+
+    def _sync(self, *_args):
+        preview = self._preview
+        frames = preview.half_window()
+        self.zoom_out_button.setEnabled(preview.can_zoom_out())
+        self.zoom_in_button.setEnabled(preview.can_zoom_in())
+        self.reset_button.setEnabled(not preview.is_default_zoom())
+        self.zoom_out_button.setToolTip(f"Zoom out - show more of the loop join (now \u00b1{frames} frames). Ctrl+scroll or pinch also zooms.")
+        self.zoom_in_button.setToolTip(f"Zoom in - show less, in more detail (now \u00b1{frames} frames). Ctrl+scroll or pinch also zooms.")
+        self.reset_button.setToolTip(f"Back to the default zoom (\u00b1{HALF_WINDOW_FRAMES} frames; now \u00b1{frames})")

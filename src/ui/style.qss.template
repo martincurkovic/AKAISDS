@@ -124,6 +124,12 @@ QPushButton:disabled {
     color: ${text_disabled};
 }
 
+/* a tiny button (the Loop Preview's zoom controls): the ordinary 12 px of side padding would leave no room for the symbol */
+QPushButton[compact="true"] {
+    padding: 0px;
+    border-radius: 3px;
+}
+
 /* the one button on a card that does the main thing (Send to Sampler, Load Edited Audio once the file was saved): filled with the
    accent, like a dialog's default button. Only while enabled - a disabled one keeps the ordinary disabled look. */
 QPushButton[primary="true"]:enabled {
