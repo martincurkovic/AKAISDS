@@ -152,3 +152,15 @@ def test_parse_stat_response_real_hardware_os_130():
     assert result["num_blocks_free"] == 1000
     assert result["max_num_samp_words"] == 5242880
     assert result["num_words_free"] == 5176064
+
+
+def test_akai_version_string_undoes_the_major_offset_the_samplers_send():
+    # measured on a real S2000: OS 2.00 arrives as major byte 0x11, OS 1.30 as 0x10
+    assert midi_identity.akai_version_string(0x11, 0) == "2.00"
+    assert midi_identity.akai_version_string(0x10, 30) == "1.30"
+    assert midi_identity.akai_version_string(0x11 | 0x80, 5) == "2.05"  # only the low 7 bits count
+
+
+def test_akai_version_string_leaves_a_plain_number_alone():
+    # a fake sampler (s3ked's DemoBridge) reports the number itself, which no offset byte can be
+    assert midi_identity.akai_version_string(2, 0) == "2.00"
