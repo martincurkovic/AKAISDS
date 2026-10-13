@@ -494,7 +494,14 @@ own copy of program names - renaming needs `_update_multi_program_combo_names()`
   freezes the loop markers, which can break `start <= loop_start <= loop_end <= end`. Code transforming audio must read
   `markers_with_loop_in_range()`, not `.markers()`.
 - Zoom: `_max_zoom()` scales with `frame_count`; trackpad pinch is `NativeGesture`; `angle.x() != 0` always means pan; unmodified
-  vertical scroll does nothing on purpose.
+  vertical scroll does nothing on purpose. The ceiling is `_MIN_VISIBLE_FRAMES` (32) on screen, not a single frame (it used to zoom until
+  nothing was visible); a drag is still sample-accurate there. `SliceWaveformView` still zooms to one frame.
+- **Loop Preview zoom** (`ui/loop_preview_view.py`, shared by the Akai and Yamaha editors): `LoopJoinPreview` owns the zoom (`ZOOM_LADDER`
+  19..2400 frames each side, default 150, session-wide, not persisted) and emits `zoom_changed(frames)`; the owner re-requests
+  `half_window()` frames from `WaveformView.samples_before/after` (`_refresh_loop_preview_for_zoom`). Drag sensitivity follows for free
+  (frames per pixel is measured from what is shown). `LoopPreviewZoomControls` is the three tiny buttons (`-`, `+`, `1:1`), put beside the
+  card title through `qt_helpers.build_section_card(header_widgets=...)`. Ctrl+scroll zooms (a plain scroll is ignored so the page scrolls),
+  pinch too (one step per half octave). Tests: `tests/test_loop_preview_zoom.py`.
 
 ## Sample edit actions (Trim/Reverse/Fade/Normalise/Filter/Duplicate)
 
