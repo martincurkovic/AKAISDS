@@ -54,8 +54,8 @@ def test_staging_shows_the_edited_audio_and_remembers_what_the_sampler_has(stage
     assert entry["samples"] == edited and entry["frame_count"] == 100
     staged = editor._staged_edits["SQUARE"]
     assert staged.original_samples == _ORIGINAL and staged.original_markers == _MARKERS
-    assert not editor._staged_banner.isHidden()
-    assert "●" in editor._sample_row_labels[0][1].text()
+    assert bool(editor._staged_banner.property("unsent"))
+    assert not editor._sample_row_dots[0].isHidden()
     for key in ("stage_send", "stage_revert"):
         assert editor._sample_edit_controls[key][0].isEnabled(), key
     # staging again keeps the FIRST original
@@ -91,7 +91,7 @@ def test_the_working_copy_survives_a_sample_list_reload(staged_editor, qapp):
     entry = editor._sample_waveform_cache[0]
     assert entry["samples"] == edited and entry["end"] == 70  # the cache was wiped and rebuilt from the header + the working copy
     assert editor.waveform_view.has_waveform()
-    assert "●" in editor._sample_row_labels[0][1].text()
+    assert not editor._sample_row_dots[0].isHidden()
 
 
 def test_revert_goes_back_to_the_samplers_version_after_a_confirmation(staged_editor, monkeypatch):
@@ -107,7 +107,7 @@ def test_revert_goes_back_to_the_samplers_version_after_a_confirmation(staged_ed
     entry = editor._sample_waveform_cache[0]
     assert editor._staged_edits == {} and entry["samples"] == _ORIGINAL and entry["frame_count"] == 100
     assert {k: entry[k] for k in _MARKERS} == _MARKERS
-    assert editor._staged_banner.isHidden() and "●" not in editor._sample_row_labels[0][1].text()
+    assert not bool(editor._staged_banner.property("unsent")) and editor._sample_row_dots[0].isHidden()
     assert editor.waveform_view.frame_count() == 100
 
 
@@ -126,7 +126,7 @@ def test_send_to_sampler_replaces_the_sample_with_the_working_copy_after_saving_
     from core import sds_encoder
 
     assert sds_encoder.read_wav_samples(str(backups[0]))[0] == _ORIGINAL  # the SAMPLER's audio, not the edit
-    assert editor._staged_banner.isHidden()
+    assert not bool(editor._staged_banner.property("unsent"))
     assert "SQUARE" in editor._bridge.sample_list()
 
 
@@ -171,7 +171,7 @@ def test_renaming_a_sample_takes_its_unsent_edits_along(staged_editor, monkeypat
     monkeypatch.setattr(editor, "_prompt_sample_name", lambda current: "NEW NAME")
     editor._confirm_rename_sample()
     assert "NEW NAME" in editor._staged_edits and "SQUARE" not in editor._staged_edits
-    assert "●" in editor._sample_row_labels[0][1].text()
+    assert not editor._sample_row_dots[0].isHidden()
 
 
 def test_deleting_a_sample_drops_its_unsent_edits(staged_editor):
@@ -216,7 +216,7 @@ def test_closing_the_editor_with_unsent_edits_asks_first(staged_editor, monkeypa
 
 def test_the_working_copy_controls_are_hidden_and_off_without_unsent_edits(staged_editor):
     editor = staged_editor
-    assert editor._staged_banner.isHidden()
+    assert not bool(editor._staged_banner.property("unsent"))
     for key in ("stage_send", "stage_new", "stage_revert"):
         button, action = editor._sample_edit_controls[key]
         assert not button.isEnabled() and not action.isEnabled(), key

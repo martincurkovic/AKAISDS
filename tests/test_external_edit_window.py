@@ -104,8 +104,8 @@ def test_loading_the_edited_audio_makes_it_the_working_copy_and_sends_nothing(ed
     name = editor._sample_name_at_row(0)
     staged = editor._staged_edits[name]
     assert staged.samples == [7] * 500 and staged.original_samples == list(range(500))
-    assert not editor._staged_banner.isHidden()
-    assert "\u25cf" in editor._sample_row_labels[0][1].text()
+    assert bool(editor._staged_banner.property("unsent"))
+    assert not editor._sample_row_dots[0].isHidden()
     # Load waits for the next save
     assert not editor.external_load_button.isEnabled()
     _saved(editor, launched[0], [8] * 500)
@@ -200,7 +200,7 @@ def test_loading_edited_audio_makes_a_working_copy_and_sending_it_makes_a_new_sa
     tab.external_load_button.click()
     # loaded, not sent: the tab shows the edited audio and the unit is untouched
     assert set(window.fake.samples) == before and tab._staged["UM"].channels[0] == [11] * 1500
-    assert tab._audio_samples == [11] * 1500 and not tab._staged_banner.isHidden()
+    assert tab._audio_samples == [11] * 1500 and bool(tab._staged_banner.property("unsent"))
     assert not tab.external_load_button.isEnabled()  # waits for the next save
 
     tab.send_edits_as_new_button.click()

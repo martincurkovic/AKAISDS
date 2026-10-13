@@ -132,7 +132,7 @@ def test_the_replaced_sample_is_shown_with_working_controls_the_moment_the_send_
     entry = editor._sample_waveform_cache[row]
     assert entry["samples"] == list(reversed(_AUDIO)) and entry["frame_count"] == 100
     assert (entry["start"], entry["end"]) == (100 - 1 - 90, 100 - 1 - 10)  # the reversed markers
-    assert editor._staged_banner.isHidden()
+    assert not bool(editor._staged_banner.property("unsent"))
 
 
 def test_a_sample_that_was_already_selected_is_shown_too(eleven_khz):

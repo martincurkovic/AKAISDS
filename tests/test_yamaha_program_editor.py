@@ -461,7 +461,7 @@ def test_sample_rows_show_just_the_name_and_read_no_dumps_to_fill_in_a_duration(
         assert item.text() == "" and item.data(Qt.ItemDataRole.UserRole) == "sine wave"  # no double-painted text
         assert item.sizeHint().height() > 20  # still the row widget's height (its own 6 px margins)
         row = tab.sample_list_widget.itemWidget(item)
-        assert [label.text() for label in row.findChildren(QLabel)] == ["sine wave", ""]  # name only, no duration
+        assert [label.text() for label in row.findChildren(QLabel) if label.objectName() != "unsentDot"] == ["sine wave", ""]  # name only, no duration
         assert not hasattr(tab, "_start_duration_scan")
     finally:
         dispose(window)

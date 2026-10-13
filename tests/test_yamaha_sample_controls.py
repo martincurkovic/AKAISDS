@@ -150,7 +150,7 @@ def test_trim_edits_the_working_copy_and_sending_it_makes_a_new_sample_that_keep
     # nothing reaches the unit: the working copy is the trimmed audio, shown at once
     assert set(window.fake.samples) == before and not tab._edit_busy
     assert tab._staged["UM"].channels[0] == original_audio[500:3500]
-    assert tab._audio_samples == original_audio[500:3500] and not tab._staged_banner.isHidden()
+    assert tab._audio_samples == original_audio[500:3500] and bool(tab._staged_banner.property("unsent"))
     tab.send_edits_as_new_button.click()
     assert not tab.edit_buttons["trim"].isEnabled()  # locked while the copy is sent
     data = new_sample(window, "UM EDIT")

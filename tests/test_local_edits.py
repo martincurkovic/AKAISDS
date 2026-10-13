@@ -42,7 +42,7 @@ def test_every_edit_changes_the_working_copy_and_sends_nothing(staged_editor):
     assert editor._sample_waveform_cache[0]["samples"] is staged.samples
     assert "SQUARE" in editor._bridge.sample_list() and "SQUARE-TMP" not in editor._bridge.sample_list()
     assert "applied" in editor.status_bar.currentMessage() and "not on the sampler" in editor.status_bar.currentMessage()
-    assert not editor._staged_banner.isHidden()
+    assert bool(editor._staged_banner.property("unsent"))
 
 
 def test_edits_chain_on_the_working_copy(staged_editor):
@@ -87,7 +87,7 @@ def test_undo_steps_back_through_the_edits_and_the_first_goes_back_to_the_sample
     assert editor._staged_edits == {}
     entry = editor._sample_waveform_cache[0]
     assert entry["samples"] == _ORIGINAL and {k: entry[k] for k in _MARKERS} == _MARKERS
-    assert editor._staged_banner.isHidden() and not editor.undo_edits_button.isEnabled()
+    assert not bool(editor._staged_banner.property("unsent")) and not editor.undo_edits_button.isEnabled()
 
 
 def test_undo_brings_back_the_earlier_markers_too(staged_editor):

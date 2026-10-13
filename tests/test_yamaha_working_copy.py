@@ -43,7 +43,7 @@ def test_an_edit_changes_what_the_tab_shows_and_sends_nothing(window):  # noqa: 
     assert staged.channels[0] == list(reversed(before_audio)) and staged.original_channels[0] == before_audio
     assert tab._audio_samples == staged.channels[0]
     assert set(window.fake.samples) == before_samples and list(window.fake.audio["UM"]) == before_audio  # the unit is untouched
-    assert not tab._staged_banner.isHidden() and "\u25cf" in tab._row_labels["UM"].text()
+    assert bool(tab._staged_banner.property("unsent")) and not tab._row_dots["UM"].isHidden()
     assert any("applied" in m and "not on the unit" in m for m in messages)
 
 
@@ -87,10 +87,10 @@ def test_the_working_copy_survives_selecting_another_sample_and_coming_back(wind
     other = next(n for n in tab.sample_names() if n != "UM")
     tab.select_sample(other)
     assert wait_until(lambda: tab._selected == other and not tab.cards_scroll.isHidden())
-    assert tab._staged_banner.isHidden()  # the other sample has nothing unsent
+    assert not bool(tab._staged_banner.property("unsent"))  # the other sample has nothing unsent
     tab.select_sample("UM")
     assert wait_until(lambda: tab._selected == "UM")
-    assert tab._audio_name == "UM" and tab._audio_samples == edited and not tab._staged_banner.isHidden()
+    assert tab._audio_name == "UM" and tab._audio_samples == edited and bool(tab._staged_banner.property("unsent"))
     assert tab.waveform_view.has_waveform()
 
 
@@ -99,7 +99,7 @@ def test_the_working_copy_survives_a_reload_of_the_sample_list_and_a_refresh(win
     edited = list(tab._staged["UM"].channels[0])
     tab.set_samples(list(window.fake.samples))
     assert wait_until(lambda: tab._selected == "UM")
-    assert tab._staged["UM"].channels[0] == edited and "●" in tab._row_labels["UM"].text()
+    assert tab._staged["UM"].channels[0] == edited and not tab._row_dots["UM"].isHidden()
     tab.refresh()  # the host re-reads everything
     tab._cache.clear()
     tab.select_sample("UM")
@@ -117,7 +117,7 @@ def test_undo_steps_back_and_the_first_undo_goes_back_to_the_units_version(windo
     tab.undo_edits_button.click()
     assert tab._staged["UM"].channels[0] == list(reversed(original)) and tab._audio_samples == list(reversed(original))
     tab.undo_edits_button.click()
-    assert tab._staged == {} and tab._audio_samples == original and tab._staged_banner.isHidden()
+    assert tab._staged == {} and tab._audio_samples == original and not bool(tab._staged_banner.property("unsent"))
     assert not tab.undo_edits_button.isEnabled()
 
 
@@ -312,5 +312,102 @@ def test_the_edit_sample_card_sits_under_loop_controls_and_the_loop_preview_is_b
         assert trim.y() < preview.y()  # Edit Sample above the pair
         assert wave_text.x() > preview.x() + tab.loop_preview.width()  # the Wave card to the right of the Loop Preview
         assert abs(wave_text.y() - preview.y()) < 150  # ...in the same row
+    finally:
+        window.hide()
+
+
+# --- the Edit Sample card (same look as the Program Editor's) -----------------------------------------------------------------
+
+
+def _unsent(tab):
+    return bool(tab._staged_banner.property("unsent"))
+
+
+def test_the_strip_is_always_there_and_only_its_state_changes(window):  # noqa: F811
+    tab = user_sample(window, mode=4, end=3500)
+    assert not tab._staged_banner.isHidden() and not _unsent(tab)
+    assert tab._working_copy_label.text() == "Original from the unit" and tab._working_copy_dot.isHidden()
+    for button in (tab.undo_edits_button, tab.send_edits_as_new_button, tab.revert_edits_button):
+        assert not button.isEnabled()  # there, but off
+    tab.edit_buttons["reverse"].click()
+    assert not tab._staged_banner.isHidden() and _unsent(tab)
+    assert tab._working_copy_label.text() == "Edited – not on the unit yet" and not tab._working_copy_dot.isHidden()
+    assert tab.send_edits_as_new_button.isEnabled() and tab.revert_edits_button.isEnabled()
+    tab.undo_edits_button.click()
+    assert not _unsent(tab) and tab._working_copy_label.text() == "Original from the unit"
+
+
+def test_send_as_new_sample_is_the_primary_button_and_load_edited_audio_becomes_one_once_saved(window, monkeypatch):  # noqa: F811
+    tab = user_sample(window, mode=4, end=3500)
+    assert tab.send_edits_as_new_button.property("primary") is True
+    assert not tab.external_load_button.property("primary")
+    monkeypatch.setattr(tab._edits, "edited_audio_ready", lambda name: True)
+    tab.update_edit_buttons()
+    assert tab.external_load_button.isEnabled() and tab.external_load_button.property("primary") is True
+    monkeypatch.setattr(tab._edits, "edited_audio_ready", lambda name: False)
+    tab.update_edit_buttons()
+    assert not tab.external_load_button.property("primary")
+
+
+def test_the_external_hint_follows_the_round_trip(window, monkeypatch, tmp_path):  # noqa: F811
+    from core import app_config, dropped_files, external_edit as ee, sds_encoder
+
+    tab = user_sample(window, mode=4, end=3500)
+    assert tab._external_hint.isHidden()
+    monkeypatch.setattr(dropped_files, "_session_dir", tmp_path)
+    opened = []
+    monkeypatch.setattr(ee, "launch", lambda path, editor=None: opened.append(path))
+    monkeypatch.setattr(app_config, "get_saved_external_editor", lambda: "/Applications/iZotope RX 10 Audio Editor.app/")
+    tab.external_edit_button.click()
+    assert tab._external_hint.text() == "Waiting for you to save in iZotope RX 10 Audio Editor" and not tab._external_hint.isHidden()
+    rate = sds_encoder.read_wav_info(opened[0])[1]
+    sds_encoder.write_wav_file(opened[0], [1000] * 500, rate, bit_depth=16)
+    stat = os.stat(opened[0])
+    os.utime(opened[0], ns=(stat.st_atime_ns, stat.st_mtime_ns + 2_000_000_000))
+    tab._edits._external.changed.emit()
+    assert tab._external_hint.text() == "Saved – ready to load" and tab.external_load_button.property("primary") is True
+    tab.external_load_button.click()
+    assert tab._external_hint.isHidden() and not tab.external_load_button.property("primary")
+    assert tab._staged["UM"].channels[0] == [1000] * 500
+
+
+def test_the_card_keeps_its_height_and_both_rows_line_up_without_a_scroll_bar(window):  # noqa: F811
+    from PySide6.QtCore import QPoint
+    from PySide6.QtWidgets import QApplication
+
+    tab = user_sample(window, mode=1, end=3500, loop=(1500, 2500))
+    window.resize(1250, 900)
+    window.show()
+    window.main_tabs.setCurrentIndex(window._samples_tab_index)
+    QApplication.processEvents()
+    try:
+        origin = lambda w: w.mapTo(window, QPoint(0, 0))  # noqa: E731
+        before = origin(tab.loop_preview).y()
+        tab.edit_buttons["reverse"].click()
+        tab._external_waiting["UM"] = "A Really Quite Remarkably Long Audio Editor Application Name Pro Edition"
+        tab.update_edit_buttons()
+        QApplication.processEvents()
+        assert origin(tab.loop_preview).y() == before  # nothing below moved
+        assert origin(tab.edit_buttons["trim"]).x() == origin(tab.slice_button).x()  # both rows start at one x
+        assert tab.cards_scroll.horizontalScrollBar().maximum() == 0  # a long hint never widens the page
+        dividers = [w for w in tab.findChildren(type(tab._staged_banner)) if w.objectName() == "groupDivider"]
+        assert len(dividers) == 1 and origin(tab.slice_button).x() < origin(dividers[0]).x() < origin(tab.external_edit_button).x()
+    finally:
+        tab._staged.clear()
+        window.hide()
+
+
+def test_the_external_hint_is_given_room_to_show(window):  # noqa: F811
+    from PySide6.QtWidgets import QApplication
+
+    tab = user_sample(window, mode=4, end=3500)
+    window.resize(1250, 900)
+    window.show()
+    window.main_tabs.setCurrentIndex(window._samples_tab_index)
+    tab._external_waiting["UM"] = "iZotope RX 10 Audio Editor"
+    tab.update_edit_buttons()
+    QApplication.processEvents()
+    try:
+        assert tab._external_hint.width() > 100  # it had 0 once: an Ignored-policy label beside a trailing stretch
     finally:
         window.hide()
