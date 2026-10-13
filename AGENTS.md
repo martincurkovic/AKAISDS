@@ -556,6 +556,13 @@ potenza-time-stretch's `TimeStretch.h` (GPL-3, see `THIRD_PARTY_NOTICES.md`).
 - Time Stretch scales the markers in proportion (`stretch_with_markers`); Pitch Shift keeps the length, so the markers don't move. Both act on the whole buffer (Start/End don't limit them, like
   Normalise/Reverse). Root note/tune are untouched on purpose (a pitch-shifted sample should now play at its new pitch on the same key).
 
+**"Send as New Sample" (Filter and Stretch / Pitch dialogs, Program Editor only, 2026-10-13):** next to OK the dialogs have a "Send as New Sample..." button (`allow_new_sample=True`; off in demo mode, like the Duplicate
+button - DemoBridge can't add a sample). `dialog.send_as_new()` tells the caller which was chosen; the caller then runs `_send_edit_as_new_sample` instead of the replace: name prompt (default = name + " FILT" / " STR" / " PITCH",
+`_duplicate_default_name(name, suffix)`), the same no-clash rule as Duplicate Sample (an S1000 send under a resident name DELETES that sample), then `_perform_duplicate_sample_real(..., samples=, markers=, label=)` - the Duplicate flow,
+generalised to send EDITED audio and the markers that go with it (`stretch_with_markers` scales them). The original is never touched, so none of the replace path's send/delete/rename applies. Yamaha dialogs don't have the button
+(every Yamaha edit already makes a new sample). `TimeStretchDialog` keeps ONE size across its modes: fixed-width knob columns in a row always wide enough for three, the dialog's width fixed, and the taller of the two warning
+texts reserved - switching to Pitch Shift and back used to widen it by ~30 px. Tests: `tests/test_edit_as_new_sample.py`.
+
 **Previews in the edit dialogs (2026-10-13):** the Filter and Stretch / Pitch dialogs' Preview buttons play the audio shifted by `ProgramEditorWindow._preview_pitch_shift_semitones(entry)` - the same Tune (STUNO minus the
 SBANDW baseline) + Root Note (to the fixed C3 preview note) shift the Samples tab's click-to-preview uses (see "Root Note & Tune" below) - so they sound as the sampler will play the sample. They used to play the raw
 audio. The dialogs take `pitch_shift_semitones=` (default 0). **Not done:** the Slice Editor's click-to-preview and the Yamaha editor's previews (its own tab preview doesn't apply tuning either) still play raw audio.
