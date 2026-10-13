@@ -111,7 +111,7 @@ class FilterSampleDialog(QDialog):
     doing underneath this modal dialog.
     """
 
-    def __init__(self, parent, sample_name, samples, framerate, pitch_shift_semitones=0):
+    def __init__(self, parent, sample_name, samples, framerate, pitch_shift_semitones=0, allow_new_sample=False):
         super().__init__(parent)
         self.setWindowTitle(f'Filter Sample - "{sample_name}"')
         self.setModal(True)
@@ -120,6 +120,9 @@ class FilterSampleDialog(QDialog):
         self._framerate = framerate
         # Tune / Root Note, as the sampler would play it (see ProgramEditorWindow._preview_pitch_shift_semitones)
         self._pitch_shift_semitones = pitch_shift_semitones
+        # "Send as New Sample": the caller makes a new sample instead of replacing the original - only where it can
+        self._allow_new_sample = allow_new_sample
+        self._as_new = False
         self._preview_player = SlicePreviewPlayer(self)
 
         # strictly inside (0, Nyquist) - see sample_editing._biquad_
@@ -180,7 +183,10 @@ class FilterSampleDialog(QDialog):
         self.preview_button.clicked.connect(self._preview)
 
         warning_label = QLabel(
-            "This overwrites the sample's audio on the sampler and cannot "
+            "OK overwrites the sample's audio on the sampler and cannot be "
+            "undone; Send as New Sample keeps the original."
+            if allow_new_sample
+            else "This overwrites the sample's audio on the sampler and cannot "
             "be undone."
         )
         warning_label.setWordWrap(True)
@@ -190,6 +196,13 @@ class FilterSampleDialog(QDialog):
         )
         self._button_box.accepted.connect(self.accept)
         self._button_box.rejected.connect(self.reject)
+        self.new_sample_button = None
+        if allow_new_sample:
+            self.new_sample_button = self._button_box.addButton(
+                "Send as New Sample\u2026", QDialogButtonBox.ButtonRole.ActionRole
+            )
+            self.new_sample_button.setToolTip(tooltips.SEND_AS_NEW_SAMPLE_BUTTON)
+            self.new_sample_button.clicked.connect(self._accept_as_new)
 
         layout = QVBoxLayout(self)
         layout.addLayout(sections_row)
@@ -216,7 +229,18 @@ class FilterSampleDialog(QDialog):
         # disabling OK outright rather than a popup once clicked, since
         # there's already a visible reason (both group boxes unchecked)
         ok_button = self._button_box.button(QDialogButtonBox.StandardButton.Ok)
-        ok_button.setEnabled(self.hp_group.isChecked() or self.lp_group.isChecked())
+        can_send = self.hp_group.isChecked() or self.lp_group.isChecked()
+        ok_button.setEnabled(can_send)
+        if self.new_sample_button is not None:
+            self.new_sample_button.setEnabled(can_send)
+
+    def send_as_new(self):
+        """True if the user chose "Send as New Sample" rather than OK."""
+        return self._as_new
+
+    def _accept_as_new(self):
+        self._as_new = True
+        self.accept()
 
     def highpass_enabled(self):
         return self.hp_group.isChecked()

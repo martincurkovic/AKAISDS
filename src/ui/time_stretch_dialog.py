@@ -22,6 +22,8 @@ from ui.knob import Knob, LogKnob
 _KNOB_SIZE = 56
 #: a changed knob re-renders and restarts a playing preview once it has been left alone this long
 _RETRIGGER_MS = 350
+#: the gap between knob columns
+_COLUMN_SPACING = 12
 
 STRETCH = "stretch"
 PITCH = "pitch"
@@ -66,7 +68,7 @@ class TimeStretchDialog(QDialog):
     computer's speakers - nothing is sent anywhere - and a changed knob restarts a preview that is already playing, once it has
     settled. `samples` is the (left) channel to preview, played shifted by `pitch_shift_semitones` (the sample's Tune / Root Note, so it sounds as it will on the sampler); the caller runs the edit from `edit()`."""
 
-    def __init__(self, parent, sample_name, samples, framerate, pitch_shift_semitones=0):
+    def __init__(self, parent, sample_name, samples, framerate, pitch_shift_semitones=0, allow_new_sample=False):
         super().__init__(parent)
         self.setWindowTitle(f'Time Stretch / Pitch Shift - "{sample_name}"')
         self.setModal(True)
@@ -74,6 +76,9 @@ class TimeStretchDialog(QDialog):
         self._framerate = framerate
         # Tune / Root Note, as the sampler would play it (see ProgramEditorWindow._preview_pitch_shift_semitones)
         self._pitch_shift_semitones = pitch_shift_semitones
+        # "Send as New Sample" (the caller makes a new sample instead of replacing the original) - only where the caller can
+        self._allow_new_sample = allow_new_sample
+        self._as_new = False
         self._preview_player = SlicePreviewPlayer(self)
 
         self.mode_combo = QComboBox()
@@ -95,9 +100,20 @@ class TimeStretchDialog(QDialog):
 
         self.group = QGroupBox()
         self.group.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
+        # The two modes show different numbers of knobs (Length + Grain, or Semitones + Cents + Grain). Every column gets one width and
+        # the row is always wide enough for three, centred, so switching modes never changes what the dialog needs - it used to grow
+        # a little each time it was switched to Pitch Shift and back.
+        columns = (self._length_column, self._semitones_column, self._cents_column, self._grain_column)
+        column_width = max(column.sizeHint().width() for column in columns)
         knob_row = QHBoxLayout(self.group)
-        for column in (self._length_column, self._semitones_column, self._cents_column, self._grain_column):
+        knob_row.setSpacing(_COLUMN_SPACING)
+        knob_row.addStretch()
+        for column in columns:
+            column.setFixedWidth(column_width)
             knob_row.addWidget(column)
+        knob_row.addStretch()
+        margins = knob_row.contentsMargins()
+        self.group.setMinimumWidth(3 * column_width + 2 * _COLUMN_SPACING + margins.left() + margins.right())
 
         self.result_label = QLabel()
         self.result_label.setAlignment(Qt.AlignmentFlag.AlignHCenter)
@@ -110,6 +126,13 @@ class TimeStretchDialog(QDialog):
         self._button_box = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         self._button_box.accepted.connect(self.accept)
         self._button_box.rejected.connect(self.reject)
+        self.new_sample_button = None
+        if allow_new_sample:
+            self.new_sample_button = self._button_box.addButton(
+                "Send as New Sample\u2026", QDialogButtonBox.ButtonRole.ActionRole
+            )
+            self.new_sample_button.setToolTip(tooltips.SEND_AS_NEW_SAMPLE_BUTTON)
+            self.new_sample_button.clicked.connect(self._accept_as_new)
 
         mode_row = QHBoxLayout()
         mode_row.addWidget(QLabel("Mode:"))
@@ -130,6 +153,15 @@ class TimeStretchDialog(QDialog):
         for knob in (self.length_knob, self.semitones_knob, self.cents_knob, self.grain_knob):
             knob.valueChanged.connect(self._on_changed)
         self._refresh()
+        self.setFixedWidth(self.sizeHint().width())
+        # the warning wraps to a different number of lines per mode: reserve the taller of the two, so switching modes moves nothing
+        label_width = self.width() - layout.contentsMargins().left() - layout.contentsMargins().right()
+        tallest = 0
+        for mode in (STRETCH, PITCH):
+            self.mode_combo.setCurrentIndex(self.mode_combo.findData(mode))
+            tallest = max(tallest, self.warning_label.heightForWidth(label_width))
+        self.mode_combo.setCurrentIndex(0)
+        self.warning_label.setMinimumHeight(tallest)
 
     # -- what the user chose --------------------------------------------------------------------------------
 
@@ -180,18 +212,21 @@ class TimeStretchDialog(QDialog):
         self._length_column.setVisible(not pitch)
         self._semitones_column.setVisible(pitch)
         self._cents_column.setVisible(pitch)
-        self.warning_label.setText(
-            "The length is kept. This changes the sample's audio and cannot be undone."
-            if pitch
-            else "The pitch is kept. This changes the sample's length and cannot be undone."
-        )
+        kept = "The length is kept." if pitch else "The pitch is kept."
+        if self._allow_new_sample:
+            self.warning_label.setText(f"{kept} OK overwrites the sample and cannot be undone; Send as New Sample keeps the original.")
+        else:
+            self.warning_label.setText(f"{kept} This changes the sample and cannot be undone.")
         frames = self._out_frames()
         too_long = frames > time_stretch.MAX_OUTPUT_FRAMES
         self.result_label.setText(
             f"Too long ({frames / self._framerate:,.0f} s)" if too_long else f"{frames:,} frames, {frames / self._framerate:.2f} s"
         )
         # nothing to do at 100% / 0 semitones and 0 cents
-        self._button_box.button(QDialogButtonBox.StandardButton.Ok).setEnabled(self._changes_anything() and not too_long)
+        can_send = self._changes_anything() and not too_long
+        self._button_box.button(QDialogButtonBox.StandardButton.Ok).setEnabled(can_send)
+        if self.new_sample_button is not None:
+            self.new_sample_button.setEnabled(can_send)
         self.preview_button.setEnabled(not too_long)
 
     def _on_changed(self, *_args):
@@ -211,6 +246,14 @@ class TimeStretchDialog(QDialog):
         self._preview_player.play(
             result, 0, len(result) - 1, self._framerate, pitch_shift_semitones=self._pitch_shift_semitones
         )
+
+    def send_as_new(self):
+        """True if the user chose "Send as New Sample" rather than OK."""
+        return self._as_new
+
+    def _accept_as_new(self):
+        self._as_new = True
+        self.accept()
 
     def accept(self):
         self._retrigger.stop()

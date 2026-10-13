@@ -331,6 +331,10 @@ NORMALIZE_SAMPLE_BUTTON = (
     "Gain up the whole sample until its loudest point hits maximum "
     "amplitude, overwriting it on the sampler. Cannot be undone."
 )
+SEND_AS_NEW_SAMPLE_BUTTON = (
+    "Send the result to the sampler as a NEW sample (you choose its name next) "
+    "instead of replacing this one. The original is not changed."
+)
 LOAD_AUDIO_ACTION = (
     "Load this sample's audio from the sampler (the same as double-clicking the waveform). "
     "Every edit needs it."

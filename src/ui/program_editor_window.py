@@ -355,7 +355,7 @@ def _sample_edit_temp_name(original_name):
     return (original_name.strip()[: NAME_LENGTH - len(suffix)] + suffix)[:NAME_LENGTH]
 
 
-def _duplicate_default_name(original_name):
+def _duplicate_default_name(original_name, suffix=" COPY"):
     # default name pre-filled into the "Duplicate Program.../Duplicate
     # Sample..." dialogs - same truncate-to-make-room-for-a-suffix shape as
     # _sample_edit_temp_name above, but a real space rather than a hyphen
@@ -363,7 +363,6 @@ def _duplicate_default_name(original_name):
     # sample trim/reverse temp name does) and no requirement to avoid the
     # source's own name - this is only ever a user-editable *suggestion*
     # shown in the prompt, never sent to the hardware as-is
-    suffix = " COPY"
     return (original_name.strip()[: NAME_LENGTH - len(suffix)] + suffix)[:NAME_LENGTH]
 
 
@@ -4643,8 +4642,20 @@ class ProgramEditorWindow(QMainWindow):
             self.sample_edit_progress.setVisible(False)
 
     def _perform_duplicate_sample_real(
-        self, entry, sampler_controller, current_name, new_name
+        self,
+        entry,
+        sampler_controller,
+        current_name,
+        new_name,
+        *,
+        samples=None,
+        markers=None,
+        label="Duplicate",
     ):
+        # samples/markers: send these (an EDITED version of the source - a
+        # filter or time stretch result, with the markers that go with it)
+        # instead of an exact copy. The source's own audio is never touched
+        # either way. markers: {"start", "loop_start", "loop_end", "end"}.
         # Simpler than _perform_sample_edit_real's replace-in-place dance:
         # there's no original to delete and no name-collision window to
         # dodge with a temp name (new_name was already confirmed distinct
@@ -4656,16 +4667,17 @@ class ProgramEditorWindow(QMainWindow):
         # the sampler picks for a fresh sample, not an actual copy of the
         # one it was duplicated from).
         logger = debug_log.get_logger()
+        send_samples = entry["samples"] if samples is None else samples
         fd, temp_path = tempfile.mkstemp(suffix=".wav", prefix="akaisds_dup_")
         os.close(fd)
         try:
             sds_encoder.write_wav_file(
-                temp_path, entry["samples"], entry["framerate"], bit_depth=16
+                temp_path, send_samples, entry["framerate"], bit_depth=16
             )
 
             progress_connection = sampler_controller.transfer_progress.connect(
                 lambda current, total: self._on_sample_edit_progress(
-                    current, total, f'Duplicate "{current_name}"'
+                    current, total, f'{label} "{current_name}"'
                 )
             )
 
@@ -4699,7 +4711,7 @@ class ProgramEditorWindow(QMainWindow):
                     "_perform_duplicate_sample_real: send_file_queue refused to start"
                 )
                 self.status_bar.showMessage(
-                    "Duplicate failed - couldn't start sending the sample"
+                    f"{label} failed - couldn't start sending the sample"
                 )
                 return
             if not args[0]:
@@ -4708,15 +4720,13 @@ class ProgramEditorWindow(QMainWindow):
                     "did not complete successfully"
                 )
                 self.status_bar.showMessage(
-                    f'Duplicate failed - couldn\'t send "{new_name}"'
+                    f'{label} failed - couldn\'t send "{new_name}"'
                 )
                 return
 
             # both samples' audio is in hand and unchanged on the sampler -
             # keep it across the reloads below (see _retain_sample_audio)
-            self._retain_sample_audio(
-                new_name, entry["samples"], entry["framerate"]
-            )
+            self._retain_sample_audio(new_name, send_samples, entry["framerate"])
             self._retain_sample_audio(
                 current_name, entry["samples"], entry["framerate"]
             )
@@ -4749,7 +4759,8 @@ class ProgramEditorWindow(QMainWindow):
                 return
             new_index = samples_after_send.index(new_name)
 
-            markers = self.waveform_view.markers()
+            if markers is None:
+                markers = self.waveform_view.markers()
             loop_length_frames = markers["loop_end"] - markers["loop_start"]
             # SHNAME is deliberately not written here - new_name already
             # went out as the send's own filename, so the duplicate is
@@ -4783,7 +4794,7 @@ class ProgramEditorWindow(QMainWindow):
                 timeout_ms=20000,
             )
             self.status_bar.showMessage(
-                f'Duplicate complete: "{current_name}" -> "{new_name}"'
+                f'{label} complete: "{current_name}" -> "{new_name}"'
             )
             if which == 0:
                 final_samples = args[0]
@@ -4804,7 +4815,7 @@ class ProgramEditorWindow(QMainWindow):
                 "_perform_duplicate_sample_real: unexpected error", exc_info=True
             )
             self.status_bar.showMessage(
-                f'Duplicate failed - unexpected error, see {debug_log.LOG_PATH} '
+                f'{label} failed - unexpected error, see {debug_log.LOG_PATH} '
                 "for details"
             )
         finally:
@@ -8598,23 +8609,10 @@ class ProgramEditorWindow(QMainWindow):
             entry["samples"],
             entry["framerate"],
             pitch_shift_semitones=self._preview_pitch_shift_semitones(entry),
+            allow_new_sample=self._can_send_edit_as_new_sample(),
         )
         if not dialog.exec():
             return
-
-        answer = QMessageBox.question(
-            self,
-            "Filter Sample",
-            f'Send the filtered audio for "{sample_name}" to the sampler '
-            "now?\n\n"
-            "This overwrites the sample's audio on the sampler and cannot "
-            "be undone.",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.Yes,
-        )
-        if answer != QMessageBox.StandardButton.Yes:
-            return
-
         # filter_samples needs framerate + both filters' own
         # enabled/cutoff/slope on top of the standard (samples, start,
         # loop_start, loop_end, end) shape _perform_sample_edit's
@@ -8632,7 +8630,110 @@ class ProgramEditorWindow(QMainWindow):
             lowpass_cutoff_hz=dialog.lowpass_cutoff_hz(),
             lowpass_slope_db_per_octave=dialog.lowpass_slope_db_per_octave(),
         )
+        if dialog.send_as_new():
+            self._send_edit_as_new_sample(
+                sample_index, entry, transform, "Filter", " FILT"
+            )
+            return
+
+        answer = QMessageBox.question(
+            self,
+            "Filter Sample",
+            f'Send the filtered audio for "{sample_name}" to the sampler '
+            "now?\n\n"
+            "This overwrites the sample's audio on the sampler and cannot "
+            "be undone.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
         self._perform_sample_edit(sample_index, transform, "Filter")
+
+    def _send_edit_as_new_sample(self, sample_index, entry, transform, label, suffix):
+        # "Send as New Sample" in the Filter and Stretch / Pitch dialogs: the
+        # same edit, but sent as a NEW sample through the Duplicate Sample
+        # flow instead of replacing the original (which is never touched, so
+        # none of the replace path's send/delete/rename is involved). Name
+        # rules are Duplicate Sample's: no clash with a resident sample - two
+        # sharing a name make every zone using it ambiguous, and on an S1000
+        # the send would DELETE the other one.
+        current_name = self._sample_name_at_row(sample_index)
+        new_name = self._prompt_akai_name(
+            f"{label} - New Sample",
+            "New sample name:",
+            _duplicate_default_name(current_name, suffix),
+        )
+        if new_name is None:
+            return
+        if new_name in list(self._sample_list):
+            QMessageBox.warning(
+                self,
+                f"{label} - New Sample",
+                f'"{new_name}" is already in use by another resident '
+                "sample.\n\nTwo resident samples can't safely share a "
+                "name - pick a different one.",
+            )
+            return
+        sampler_controller = getattr(self._main_window, "sampler_controller", None)
+        if sampler_controller is None:
+            self.status_bar.showMessage(
+                f"Can't {label.lower()} - no Transfer Dashboard connection available"
+            )
+            return
+        if sampler_controller.is_transfer_busy():
+            self.status_bar.showMessage(
+                f"Can't {label.lower()} - a transfer is already in progress "
+                "on the Transfer Dashboard"
+            )
+            return
+        # not .markers(): see _perform_sample_edit for why the loop is clamped
+        markers = self.waveform_view.markers_with_loop_in_range()
+        self.waveform_view.set_loading(True)
+        self._set_hardware_busy_ui(True)
+        self.status_bar.showMessage(
+            f'{label} "{current_name}" as new sample "{new_name}" - this can '
+            "take a while and will freeze the interface..."
+        )
+        QApplication.processEvents()
+        try:
+            try:
+                new_samples, *new_markers = transform(
+                    entry["samples"],
+                    markers["start"],
+                    markers["loop_start"],
+                    markers["loop_end"],
+                    markers["end"],
+                )
+            except Exception:
+                debug_log.get_logger().error(
+                    f"_send_edit_as_new_sample: {label} raised", exc_info=True
+                )
+                self.status_bar.showMessage(
+                    f"{label} failed - unexpected error, see "
+                    f"{debug_log.LOG_PATH} for details"
+                )
+                return
+            self._perform_duplicate_sample_real(
+                entry,
+                sampler_controller,
+                current_name,
+                new_name,
+                samples=new_samples,
+                markers=dict(
+                    zip(("start", "loop_start", "loop_end", "end"), new_markers)
+                ),
+                label=label,
+            )
+        finally:
+            self._set_hardware_busy_ui(False)
+            self.waveform_view.set_loading(False)
+            self.sample_edit_progress.setVisible(False)
+
+    def _can_send_edit_as_new_sample(self):
+        # the same gate as the Duplicate Sample button: DemoBridge has no
+        # add-sample primitive
+        return not os.environ.get("AKAISDS_DEMO_SAMPLER")
 
     def _confirm_time_stretch(self):
         # same two-step shape as _confirm_filter_sample (a dialog with a
@@ -8650,11 +8751,21 @@ class ProgramEditorWindow(QMainWindow):
             entry["samples"],
             entry["framerate"],
             pitch_shift_semitones=self._preview_pitch_shift_semitones(entry),
+            allow_new_sample=self._can_send_edit_as_new_sample(),
         )
         if not dialog.exec():
             return
         kind, options = dialog.edit()
         label = time_stretch.EDITS[kind][2]
+        if dialog.send_as_new():
+            self._send_edit_as_new_sample(
+                sample_index,
+                entry,
+                time_stretch.transform_for(kind, **options),
+                label,
+                time_stretch.EDITS[kind][1],
+            )
+            return
         answer = QMessageBox.question(
             self,
             label,
