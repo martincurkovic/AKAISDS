@@ -124,6 +124,8 @@ The Akai S900/S950 support is partly ported from [s950tools](https://github.com/
 
 The Time Stretch edit is a port of [potenza-time-stretch](https://github.com/dar-io-p/potenza-time-stretch) by _dar-io-p_ (GPLv3). See [THIRD_PARTY_NOTICES](src/ui/help/THIRD_PARTY_NOTICES.md).
 
+`.rx2` (ReCycle) import uses [VelociLoops](https://github.com/kunitoki/VelociLoops) by _kunitoki_ (public domain), vendored in `third_party/velociloops/`. See [THIRD_PARTY_NOTICES](src/ui/help/THIRD_PARTY_NOTICES.md).
+
 _I stand on the shoulders of giants._
 
 I make exactly zero dollars from AKAISDS. If you find this project useful in any way shape or form, I would appreciate any support you can offer, be it by spreading the word of AKAISDS, [donating via Ko-Fi](https://ko-fi.com/martincurkovic) or by [listening to my music](https://martin.fanlink.tv/putitdown) on whatever platform works best for you (sketchy torrent sites included).
