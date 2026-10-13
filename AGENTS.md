@@ -500,7 +500,7 @@ No hardware primitive exists - only `SamplerController.send_file_queue` + `Bridg
   `STUNO` from the source, `SSTART`/`SMPEND`/`LOOPAT1`/`LLNGTH1` from the new markers); Duplicate uses the same pattern.
 - Fade fades the lead-in/out AROUND `[start, end]` (ramps reach gain 1 at the markers), not a trapezoid inside - re-read
   `fade_in_out_samples`'s docstring before "fixing" it. Normalise is whole-buffer (like Reverse), deliberately.
-- All five send-confirmation dialogs default to Yes (owner's request); Filter Sample has a second confirmation after Preview.
+- (Superseded 2026-10-13: the edits no longer send - they change the sample's working copy, see "The working copy" below. The pipeline described here is what **Send to Sampler** runs. Its confirmation defaults to Yes, like the old ones.)
 
 ## Samples tab layout and actions (S1000 + S2000/S3000 editor, 2026-10-13)
 
@@ -518,23 +518,70 @@ Root Note + Detect Root Note, then Tune). Edit Sample has one labelled row per K
   blocking operations pump events). Don't name a menu action Settings/About/Quit/Preferences (macOS moves those to the app menu).
 - Tests: `tests/test_sample_actions.py`. The Yamaha tab is NOT converted yet (its edit buttons are still in the Loop Controls card).
 
-## Edit in External App (Samples tabs, written 2026-10-13, NOT tried on hardware)
+## Edit in External App (Samples tabs, written 2026-10-13; S2000 round trip WORKED on the owner's unit, the working-copy rework below is NOT yet tried on hardware)
 
 "Edit in External App..." (Edit Sample card, "External app" row) writes the loaded audio to a WAV, opens it in the app chosen in Settings > External Audio Editor (`config.json` `external_editor`;
-empty = the OS default for .wav), and "Send Edited Audio" (enabled once the file was saved over) sends it back. Pure parts: `core/external_edit.py`; files and
-watching, shared by both editors: `ui/external_edit_tracker.py` (exports to `dropped_files.session_dir()/external_edit/<n>/<sample name>.wav`; a `QFileSystemWatcher`
-on the directory AND the file, debounced 600 ms; `is_ready` re-reads the file's mtime/size itself so a missed event never hides a save).
-- **Program Editor (S1000 + S2000/S3000, same code):** Send runs the existing `_perform_sample_edit` with a closure that returns the edited audio, label "Replace" -
-  i.e. the send-as-`-TMP` / delete original / rename back / rewrite 8 header fields path of Trim/Reverse. `_perform_sample_edit` now RETURNS True when the audio landed
-  (None for every refusal/failure); only Send uses it, to `mark_sent`. A copy of the original goes to `~/.akaisds/external_edit_backups/` BEFORE anything is sent (no copy, no send).
-  The file is read back mono at the sample's own rate: another rate is resampled to it (`resample_to_target_rate`, lo-fi), stereo is averaged. Through the S1000 adapter this is as
-  untested as Trim/Reverse (see the S1000 section).
+empty = the OS default for .wav). Pure parts: `core/external_edit.py`; files and watching, shared by both editors: `ui/external_edit_tracker.py` (exports to
+`dropped_files.session_dir()/external_edit/<n>/<sample name>.wav`; a `QFileSystemWatcher` on the directory AND the file, debounced 600 ms; `is_ready` re-reads the file's mtime/size itself so a missed event never
+hides a save).
+- **Program Editor (S1000 + S2000/S3000, same code): "Load Edited Audio" (enabled once the file was saved over) does NOT send anything** - the edited file becomes the sample's WORKING COPY (next section).
+  It is read back mono at the sample's own rate: another rate is resampled to it (`resample_to_target_rate`, lo-fi), stereo is averaged. A second Load replaces the working copy (the sampler's original is kept).
+  Until 2026-10-13 this button was "Send Edited Audio" and replaced the sample immediately.
 - **Markers:** same length = untouched; otherwise `remap_markers` keeps Start/End positions clamped into the new audio (markers that covered the whole sample cover the whole new
   one) and clamps the loop inside, in order. Tell the user to check the loop if you extend this.
-- **Yamaha:** the unit can't overwrite, so Send makes a NEW sample `<name> EDIT` (`EXTERNAL_SUFFIX`) through `_send_copy` (the tail of the five edits, factored out of `_run`),
-  carrying the original's parameters; stereo stays stereo (a mono return for a mono sample is kept mono). The original is untouched, so no backup.
-- After a successful send the exported file stays and the button waits for the NEXT save, so the user can keep editing. Windows/Linux launching (`os.startfile`, `xdg-open`) is untested; macOS uses `open [-a app]`.
+- **Yamaha:** "Load Edited Audio" stages the file as the sample's working copy too (see "The Yamaha working copy" below); the channel count is kept (a mono file for a stereo sample goes on both sides, a stereo file for a mono sample is
+  mixed). "Send as New Sample" then makes `<name> EDIT` (`EXTERNAL_SUFFIX`) through `_send_copy`, carrying the original's parameters. The original is untouched, so no backup.
+- After a Load the exported file stays and the button waits for the NEXT save, so the user can keep editing. Windows/Linux launching (`os.startfile`, `xdg-open`) is untested; macOS uses `open [-a app]`.
 - Tests: `tests/test_external_edit.py` (pure + tracker), `tests/test_external_edit_window.py` (Program Editor in demo mode, Yamaha against `FakeA4000`; the app is stubbed by patching `external_edit.launch`).
+
+## The working copy: unsent edits (Program Editor, 2026-10-13 - NOT tried on hardware; step 1's banner/menu confirmed by the owner)
+
+A sample can hold edited audio that is NOT on the sampler: `ProgramEditorWindow._staged_edits[name] = _StagedEdit(samples, markers, original_samples, original_framerate, original_markers, original_frame_count, history)`.
+**Everything that changes audio now edits the working copy and sends nothing:** "Load Edited Audio" (`_load_edited_audio`) and the six edit buttons - Trim, Reverse, Fade, Normalise, Filter, Stretch / Pitch - through
+`_apply_sample_edit(sample_index, transform, label)` -> `_stage_working_copy`. Only **Send to Sampler** and **Send as New Sample** write to the unit. (The `_confirm_*` method names are historical: they no longer confirm anything.)
+Before 2026-10-13 each edit button was a full send/delete/rename replace on the spot; that pipeline (`_perform_sample_edit`, `_perform_sample_edit_real/demo`) still exists and is now Send to Sampler's.
+- **No confirmation on an edit** (Undo/Revert make it cheap). The confirmations that remain are the ones before something reaches the sampler (Send to Sampler) or discards work (Revert, closing with unsent edits).
+- **Undo:** `staged.history` holds the previous (samples, markers) before each change, up to `_UNDO_LIMIT` = 10 (each is a whole copy of the audio). Undo pops one; with none left it goes back to the sampler's version (same as Revert,
+  no prompt). Marker/loop drags are not history items. A second "Load Edited Audio" is one (undoable).
+- **The cache entry IS the working copy while one exists** (`_apply_staged_to_entry`), so every action (preview, Filter, Stretch, Duplicate, Detect Root Note, Slice Editor, Edit in External App) works on what is shown.
+  The cache is wiped on every sample-list reload, so `_on_sample_detail_loaded` re-applies the working copy over the freshly read header (the header still supplies tune/root/loop type).
+- **Marker/loop edits stay LOCAL while a sample is staged** (`_schedule_marker_write` returns early after storing them in `staged.markers`): writing them would put values for a different buffer on the live sample. With no working copy they
+  write immediately, as always (live loop tweaking on the unit is deliberate). Root note, tune, loop type and hold are header fields and stay live either way.
+- **Controls:** a banner at the top of the Edit Sample card ("Edited - not on the sampler yet": Undo, Send to Sampler, Send as New Sample..., Revert; hidden otherwise), the same four in the Sample menu / right-click menu, and a "●" on
+  the sample's list row. **Send to Sampler** = backup of `staged.original_samples` (`external_edit.backup_original`; no backup, no send) then `_perform_sample_edit` (the usual send-as-`-TMP`/delete/rename replace) with a
+  closure returning the working copy; success clears it, a failure KEEPS it so it can be sent again. **Send as New Sample** = `_send_edit_as_new_sample` (Duplicate flow) and then reverts the ORIGINAL to the sampler's version
+  (the work lives on as the new sample). **Revert** (confirmed, default No) restores the entry from `original_*`.
+- **The Filter and Stretch / Pitch dialogs** get `applies_to_working_copy=True` here: OK applies the edit to the working copy (the warning text says nothing is sent until Send to Sampler) and "Send as New Sample..." still sends the
+  result at once as a new sample. The Yamaha editor passes neither flag, so its dialogs keep the old wording (its OK still makes a new sample) - it has no working copy yet.
+- **The sampler's audio vs the working copy:** `_sampler_audio(name, entry)` is what `_perform_duplicate_sample_real` and `_run_slice_editor` retain (`_retain_sample_audio`) for the ORIGINAL name. Retaining the working copy there would
+  hand it back as "the sampler's audio" after the reloads (retained audio attaches when the length matches).
+- **Lifetime:** survives selecting other samples and reloads; follows a rename (`_confirm_rename_sample` moves the key); a user delete drops it; a sample that vanishes from the list drops it with a status message
+  (`_prune_staged_edits`) - **except while `_hardware_busy_ui`**, because a replace deletes the original and renames its copy back, so the name is briefly missing. Closing the editor with unsent edits asks (default No).
+  Not persisted across app restarts. Memory: ~88 KB per second of mono 44.1 kHz audio, held for the original, the working copy and each undo step.
+- Tests: `tests/test_staged_edits.py` (the working copy), `tests/test_local_edits.py` (the edits, Undo, the dialogs).
+
+## The Yamaha working copy (Yamaha Samples tab, 2026-10-13 - NOT tried on a real A4000)
+
+The same idea as the Akai working copy (previous section), adapted to what the A4000 can do. `YamahaSamplesTab._staged[name] = _Staged(channels, markers, original_channels, original_markers, history)`; the six edits (Trim, Reverse,
+Fade, Normalise, Filter, Stretch / Pitch) and "Load Edited Audio" change it (`YamahaSampleEditor._apply` -> `tab.stage_working_copy`) and send nothing. **The unit can't overwrite a sample, so the only way out is "Send as New Sample"**
+(banner / Sample menu, `send_working_copy_as_new` -> `_send_copy`, name `<name> EDIT`, a clash gets ` 2`): there is no "Send to Sampler" and no backup (the original is never touched). Before 2026-10-13 every edit made its own
+new sample at once (` TRIM`/` REV`/`FADE`/` NORM`/` FILT`/` STR`/` PITCH`); those suffixes survive only on the dialogs' own "Send as New Sample..." (below).
+- **What is shown:** `_show` makes the working copy's audio the tab's "loaded" audio (`_audio_name/_audio_samples/_audio_samples_right`) - the tab holds audio for ONE sample at a time, so a staged sample re-asserts it whenever it is selected.
+  `_overlay(name, payload)` returns a COPY of the unit's payload with the working copy's `wave_length`, wave/loop addresses and loop length, and `_show_values`/`_show_waveform` read that copy (the summary, the Wave card and the
+  markers follow the edit). `tab._cache[name]` stays what the unit sent: `ye.params_for_copy(ctx["data"], ...)` carries the ORIGINAL's key/tuning/loop mode onto the new sample.
+- **Marker edits stay local while staged** (`_on_marker_committed` stores them in `staged.markers` and returns - no `_start_marker_edit`, nothing written). Without a working copy they write at once, as always. The other panel fields
+  (loop mode, tuning, ...) write live either way.
+- **Controls:** every action is a button AND a `QAction` (`_make_control`; the editor connects both with `tab.connect_control`), in the new **Edit Sample** card (rows Edit audio / New samples / External app, plus a banner with Undo, Send as New
+  Sample..., Revert while the shown sample is staged), the **Sample** menu (between File and Hardware, `YamahaProgramEditorWindow._sample_menu`) and the sample list's right-click menu (all one QAction each). Actions work only while the
+  Samples tab is showing (`set_active`) and the menu is disabled while `_is_busy()` (`_apply_lock`). A "●" marks a staged sample's list row. "Load Audio" = a double-click on the waveform.
+- **Dialogs:** Filter and Stretch / Pitch get `applies_to_working_copy=True, allow_new_sample=True, send_name="Send as New Sample"`: OK applies the edit to the working copy; the dialog's own "Send as New Sample..." makes the unit's
+  copy at once (`_run`, named by the edit: ` FILT`/` STR`/` PITCH`) - and if the source was staged, the working copy is dropped on success (`_sending_name` -> `_on_send_finished` -> `discard_working_copy`).
+- **Undo** (`_UNDO_LIMIT` = 10) and **Revert** (confirmed, default No) as on the Akai side; the first Undo goes back to the unit's version. `discard_working_copy` puts the original audio (still in memory) back on screen.
+- **Lifetime:** survives selecting other samples, `set_samples` and Refresh; `_prune_staged` drops the edits of a sample that is no longer in the list (with a status message). Closing the editor window with unsent edits asks (default No) -
+  `tests/test_yamaha_program_editor.py` `dispose` clears `_staged` first, or the teardown would block on that modal question. Not kept across restarts.
+- **Layout (same day):** Loop Controls (no edit buttons any more) -> Edit Sample -> **Loop Preview | Wave** side by side (`build_sample_cards` exposes `panel.wave_card`) -> Pitch|Key & Velocity, Level & Pan|Output, Filter|Filter Envelope,
+  Amplitude|Pitch Envelope, LFO|Controllers, EQ alone at the end.
+- Tests: `tests/test_yamaha_working_copy.py`; the older Yamaha edit tests were rewritten to stage first and then use the banner's Send as New Sample.
 
 ## Time Stretch / Pitch Shift (Samples tabs, written 2026-10-13, NOT tried on hardware)
 
