@@ -4390,8 +4390,9 @@ def test_open_slice_editor_does_nothing_while_a_transfer_is_busy(editor, qapp):
 
 
 class _FakeFilterSampleDialog:
-    def __init__(self, parent, sample_name, samples, framerate, *, accept=True):
+    def __init__(self, parent, sample_name, samples, framerate, *, accept=True, pitch_shift_semitones=0):
         self.parent = parent
+        self.pitch_shift_semitones = pitch_shift_semitones
         self.sample_name = sample_name
         self.samples = samples
         self.framerate = framerate
@@ -4425,7 +4426,7 @@ def test_confirm_filter_sample_passes_the_right_sample_data_to_the_dialog(
     captured = {}
 
     class _CapturingFakeDialog(_FakeFilterSampleDialog):
-        def __init__(self, parent, sample_name, samples, framerate):
+        def __init__(self, parent, sample_name, samples, framerate, pitch_shift_semitones=0):
             captured["sample_name"] = sample_name
             captured["samples"] = samples
             captured["framerate"] = framerate
