@@ -563,9 +563,15 @@ generalised to send EDITED audio and the markers that go with it (`stretch_with_
 (every Yamaha edit already makes a new sample). `TimeStretchDialog` keeps ONE size across its modes: fixed-width knob columns in a row always wide enough for three, the dialog's width fixed, and the taller of the two warning
 texts reserved - switching to Pitch Shift and back used to widen it by ~30 px. Tests: `tests/test_edit_as_new_sample.py`.
 
-**Previews in the edit dialogs (2026-10-13):** the Filter and Stretch / Pitch dialogs' Preview buttons play the audio shifted by `ProgramEditorWindow._preview_pitch_shift_semitones(entry)` - the same Tune (STUNO minus the
-SBANDW baseline) + Root Note (to the fixed C3 preview note) shift the Samples tab's click-to-preview uses (see "Root Note & Tune" below) - so they sound as the sampler will play the sample. They used to play the raw
-audio. The dialogs take `pitch_shift_semitones=` (default 0). **Not done:** the Slice Editor's click-to-preview and the Yamaha editor's previews (its own tab preview doesn't apply tuning either) still play raw audio.
+**Previews play as the sampler would (2026-10-13):** every PC preview shifts the audio by the sample's root note and tune (`SlicePreviewPlayer.play(..., pitch_shift_semitones=)`), to the fixed preview note C3 (60).
+- **Akai** (Program Editor): `ProgramEditorWindow._preview_pitch_shift_semitones(entry)` = Tune (STUNO minus the SBANDW baseline) + root note to C3 (see "Root Note & Tune" below). Used by the Samples tab's click-to-preview, the Filter and
+  Stretch / Pitch dialogs' Preview (`pitch_shift_semitones=`) and the Slice Editor (`SliceEditorWindow(preview_pitch_shift_semitones=)`, passed by `_open_slice_editor` -> `_run_slice_editor(preview_pitch_shift=)`).
+- **Yamaha**: `YamahaSamplesTab.preview_pitch_shift_semitones(data)` = `core.preview_pitch.yamaha_shift_semitones(original_key_l, coarse_tune, fine_tune_l, FINE_TUNE_STEPS_PER_CENT)`, used by its click-to-preview (all
+  loop modes, incl. the reversed copy), both dialogs and its Slice Editor (`open_slicer`). **UNVERIFIED on a unit** (the owner has an A4000 but hasn't checked): the C3 preview note, that Coarse is in semitones and a positive Coarse/Fine
+  raises the pitch, and the Fine step size (the same unmeasured guess as Detect Pitch). Each is one line in `core/preview_pitch.py`.
+- **Audio from a FILE gets no shift** (Dashboard Slice Editor, Import Audio / `.rx2`, `_run_slicer` for an import): it has no root note or tune. The default is 0.
+- **The Stretch / Pitch dialog's result line** says how long the preview lasts when the shift changes it: "88,200 frames, 2.00 s (1.00 s as previewed)" (`preview_pitch.played_seconds`); nothing extra under 0.005 semitones.
+- Not shifted on purpose: the Loop Preview pane and the waveform (they show the data, not the sound). Tests: `tests/test_preview_pitch.py`, `tests/test_preview_tuning.py`.
 
 ## Root Note & Tune, and Detect Root Note
 
