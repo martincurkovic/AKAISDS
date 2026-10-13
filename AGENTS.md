@@ -260,6 +260,10 @@ and its docstring says what each measurement pinned down and what is inferred - 
   knobs debounced 250 ms); a control stays disabled until its value was read. The external controller is in TWO places (the
   Modulation card and this tab), mirrored both ways; a failed write re-reads everything. Demo mode shows "Not available";
   an S1000 hides the tab. Not offered: MIDI sysex channel (would cut the connection), MIDI-via-SCSI (never dumped).
+- **Memory & OS card (2026-10-13, right of SCSI) and the Samples tab's memory bar (under the sample list):** both read RSTAT through `BridgeWorker.submit_memory_status` (coalesced; `bridge.status()`, the read-only liveness
+  request; emits `memory_status_loaded` with the Dashboard's key names + `version`/`max_blocks`). Requested on every `_on_samples_loaded`, so a send, delete, rename or Refresh updates it. One widget, `ui/memory_bar.py` (`MemoryBar`,
+  `apply_memory_status` - the Dashboard uses the same function). OS version = `midi_identity.akai_version_string(version_major, version_minor)`, NOT `DeviceStatus.version` (that is the raw byte: a real S2000 on OS 2.00 sends major 17, which showed as "v17.00"; the panel number is byte - 15, measured on 1.30 and 2.00, same helper as the Settings hardware test); shown in demo mode too (DemoBridge answers, with a plain major, which the helper leaves alone). A failed read CLEARS the bars (`set_unknown`)
+  rather than leave a stale figure. Both appear on an S1000 too (Samples tab only; its Global tab is hidden) - **RSTAT on a real S1000 is untried** (the spec lists it; `FakeS1000` answers it). Tests: `tests/test_memory_status.py`.
 - Hardware checks and the owner's steps are in the docstrings of `tools/s2000_mdata_write_check.py` (`run`, `run --setting pc`),
   `tools/s2000_misc_probe.py` (`dump`/`diff`/`mdump`/`mdiff`) and `tools/s2000_full_dump.py`. `tools/s2000_tune_trigger_check.py`
   is superseded.
