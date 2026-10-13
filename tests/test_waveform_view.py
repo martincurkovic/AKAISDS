@@ -1063,36 +1063,61 @@ def test_zoom_and_pan_work_in_header_only_mode(qapp):
     assert view._view_start == 100
 
 
-def test_max_zoom_reaches_single_sample_resolution_for_a_huge_sample(qapp):
-    # regression test: zoom used to be capped at a flat 500x, which for
-    # any sample bigger than ~500 * the canvas's own width in frames
-    # could never reach single-sample resolution at all no matter how far
-    # zoomed in - the actual reason dragging a marker couldn't get
-    # sample-accurate (see AGENTS.md and _max_zoom's own comment)
+def test_max_zoom_reaches_sample_accurate_resolution_for_a_huge_sample_and_stops_at_a_readable_view(qapp):
+    # regression test: zoom used to be capped at a flat 500x, which for any sample bigger than ~500 * the canvas's own width in
+    # frames could never reach sample-accurate dragging no matter how far zoomed in (see AGENTS.md and _max_zoom's own comment). The
+    # ceiling that replaced it let the view shrink to ONE visible sample; it now stops at _MIN_VISIBLE_FRAMES.
+    from ui.waveform_view import _MIN_VISIBLE_FRAMES
+
     view = WaveformView()
     view.resize(400, 180)
     frame_count = 5_000_000  # far past what the old 500x cap could reach
     view.set_header(frame_count, 0, 100, 200, frame_count - 1)
-    view.set_zoom(frame_count)  # the theoretical max, per _max_zoom
-    assert view._view_length() == 1
-    # frames_per_px, the actual per-pixel drag precision mouseMoveEvent
-    # uses, must now be well under 1 - many pixels of movement per frame,
-    # not several frames per pixel
+    view.set_zoom(frame_count)  # asking for far more than the ceiling: it is clamped
+    assert view._view_length() == _MIN_VISIBLE_FRAMES
+    # frames_per_px, the actual per-pixel drag precision mouseMoveEvent uses, is still well under 1 - many pixels of movement per
+    # frame, not several frames per pixel
     frames_per_px = (view._view_length() - 1) / max(1, view.width() - 1)
     assert frames_per_px < 1
 
 
-def test_zoom_in_reaches_single_sample_resolution_through_repeated_steps(qapp):
-    # the discoverable path (Zoom + button / scroll wheel) must be able to
-    # actually reach the new, much higher ceiling through ordinary
-    # repeated zoom_in() calls, not just by calling set_zoom() directly
+def test_zoom_in_stops_at_a_readable_number_of_samples_through_repeated_steps(qapp):
+    # the discoverable path (Zoom + button / scroll wheel / pinch) reaches the ceiling through ordinary repeated zoom_in() calls
+    # - and no further: a single visible sample is nothing to look at
+    from ui.waveform_view import _MIN_VISIBLE_FRAMES
+
     view = WaveformView()
     view.resize(400, 180)
     frame_count = 2000
     view.set_header(frame_count, 0, 100, 200, frame_count - 1)
     for _ in range(200):  # comfortably more than enough steps
         view.zoom_in()
-    assert view._view_length() == 1
+    assert view._view_length() == _MIN_VISIBLE_FRAMES
+    for _ in range(50):  # and more of it changes nothing
+        view.zoom_in()
+    assert view._view_length() == _MIN_VISIBLE_FRAMES
+
+
+def test_a_sample_shorter_than_the_minimum_view_does_not_zoom_at_all(qapp):
+    view = WaveformView()
+    view.resize(400, 180)
+    view.set_header(20, 0, 5, 10, 19)
+    for _ in range(20):
+        view.zoom_in()
+    assert view._view_length() == 20  # the whole sample, already as close as it gets
+    view.set_zoom(1000.0)
+    assert view._view_length() == 20
+
+
+def test_pinch_zoom_stops_at_the_same_ceiling(qapp):
+    from ui.waveform_view import _MIN_VISIBLE_FRAMES
+
+    view = WaveformView()
+    view.resize(400, 180)
+    view.set_header(100000, 0, 100, 200, 99999)
+    for _ in range(100):
+        view.set_zoom(view._zoom * 1.5)  # what _handle_pinch_zoom does with each pinch event
+    assert view._view_length() == _MIN_VISIBLE_FRAMES
 
 
 def test_clear_resets_header_only_state_too(qapp):
