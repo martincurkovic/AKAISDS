@@ -502,9 +502,25 @@ No hardware primitive exists - only `SamplerController.send_file_queue` + `Bridg
   `fade_in_out_samples`'s docstring before "fixing" it. Normalise is whole-buffer (like Reverse), deliberately.
 - All five send-confirmation dialogs default to Yes (owner's request); Filter Sample has a second confirmation after Preview.
 
+## Samples tab layout and actions (S1000 + S2000/S3000 editor, 2026-10-13)
+
+Cards in the scroll area, top to bottom: Loop Controls, **Edit Sample**, then **Loop Preview | Root Note & Tune** side by side (`build_paired_row`, heights equalised; Root Note & Tune is two rows -
+Root Note + Detect Root Note, then Tune). Edit Sample has one labelled row per KIND of action (`_EDIT_SAMPLE_ROWS`): "Edit audio" (Trim, Reverse, Fade, Normalise, Filter, Stretch / Pitch - these OVERWRITE the sample),
+"New samples" (Duplicate, Slice Editor), "External app" (Edit in External App, Send Edited Audio). Nothing else belongs on Loop Controls.
+- **Every action is a button AND a QAction**, made by `_make_sample_edit_control(key, text, tooltip, slot)` and kept in `_sample_edit_controls[key] = (button, action)`. The old `*_sample_button` attributes
+  still exist (tests use them). Enable/disable ONLY through `_set_sample_control_enabled` (via `_set_sample_edit_buttons_enabled` / `_refresh_external_edit_buttons`) so the two never disagree.
+  **A new action = a `_make_sample_edit_control` call + a key in `_SAMPLE_MENU_GROUPS`/`_EDIT_SAMPLE_ROWS` + a line in `_set_sample_edit_buttons_enabled`.**
+- **The Sample menu (between File and Hardware) and the sample list's right-click menu share those same QActions** (`_build_sample_menu`; the list uses `ActionsContextMenu` with the actions inserted above its own
+  Rename/Delete). The menu also has "Load Audio" (= a double-click on the waveform; every edit needs the audio in memory, and a right-click only selects the row) and menu-only Rename/Delete twins (the list's own
+  keep their list-scoped Delete shortcut). No shortcuts on purpose (Ctrl+1-4, Ctrl+T/E, Ctrl+Shift+I are taken).
+- **Menu actions are enabled only on the Samples tab** (`_update_sample_actions_enabled`, from `_on_main_tab_changed`): from another tab a destructive item would act on a sample the user can't see. The Sample MENU is
+  disabled while `_set_hardware_busy_ui` is on (`_hardware_busy_ui`) or any transfer runs (`_sync_window_menu_busy_state`; its 150 ms timer must not re-enable the menu mid-operation - this window's own
+  blocking operations pump events). Don't name a menu action Settings/About/Quit/Preferences (macOS moves those to the app menu).
+- Tests: `tests/test_sample_actions.py`. The Yamaha tab is NOT converted yet (its edit buttons are still in the Loop Controls card).
+
 ## Edit in External App (Samples tabs, written 2026-10-13, NOT tried on hardware)
 
-"Edit in External App..." writes the loaded audio to a WAV, opens it in the app chosen in Settings > External Audio Editor (`config.json` `external_editor`;
+"Edit in External App..." (Edit Sample card, "External app" row) writes the loaded audio to a WAV, opens it in the app chosen in Settings > External Audio Editor (`config.json` `external_editor`;
 empty = the OS default for .wav), and "Send Edited Audio" (enabled once the file was saved over) sends it back. Pure parts: `core/external_edit.py`; files and
 watching, shared by both editors: `ui/external_edit_tracker.py` (exports to `dropped_files.session_dir()/external_edit/<n>/<sample name>.wav`; a `QFileSystemWatcher`
 on the directory AND the file, debounced 600 ms; `is_ready` re-reads the file's mtime/size itself so a missed event never hides a save).
@@ -522,7 +538,7 @@ on the directory AND the file, debounced 600 ms; `is_ready` re-reads the file's 
 
 ## Time Stretch / Pitch Shift (Samples tabs, written 2026-10-13, NOT tried on hardware)
 
-"Time Stretch / Pitch..." (second button row, with Edit in External App) opens `ui/time_stretch_dialog.py`: a Mode dropdown and Filter-style knobs - Length (LogKnob 25-400 %, 100 % in the
+"Stretch / Pitch..." (Edit Sample card, "Edit audio" row) opens `ui/time_stretch_dialog.py`: a Mode dropdown and Filter-style knobs - Length (LogKnob 25-400 %, 100 % in the
 middle), or Semitones (+-24) and Cents (+-50) in Pitch Shift mode, and Grain (LogKnob 5-500 ms) in both. A double-click resets a knob. Preview plays through the speakers (a settled knob restarts a
 playing preview after 350 ms). OK is disabled at 100 % / 0 st 0 ct and above `MAX_OUTPUT_FRAMES` = 16 M (the S3000's RAM). Then a confirmation, then `_perform_sample_edit` (Program Editor:
 the usual replace, label "Time Stretch"/"Pitch Shift") or `YamahaSampleEditor.time_stretch` (a NEW sample `<name> STR` / `<name> PITCH`, stereo channels edited identically). `dialog.edit()`
@@ -539,6 +555,10 @@ potenza-time-stretch's `TimeStretch.h` (GPL-3, see `THIRD_PARTY_NOTICES.md`).
   at 80 ms -> 515; +12 st at 10 ms -> 770 instead of 882, at 80 ms -> 899): short grains pull a tone back toward its original pitch, 60-100 ms tracks it best. Drums and loops are the use case.
 - Time Stretch scales the markers in proportion (`stretch_with_markers`); Pitch Shift keeps the length, so the markers don't move. Both act on the whole buffer (Start/End don't limit them, like
   Normalise/Reverse). Root note/tune are untouched on purpose (a pitch-shifted sample should now play at its new pitch on the same key).
+
+**Previews in the edit dialogs (2026-10-13):** the Filter and Stretch / Pitch dialogs' Preview buttons play the audio shifted by `ProgramEditorWindow._preview_pitch_shift_semitones(entry)` - the same Tune (STUNO minus the
+SBANDW baseline) + Root Note (to the fixed C3 preview note) shift the Samples tab's click-to-preview uses (see "Root Note & Tune" below) - so they sound as the sampler will play the sample. They used to play the raw
+audio. The dialogs take `pitch_shift_semitones=` (default 0). **Not done:** the Slice Editor's click-to-preview and the Yamaha editor's previews (its own tab preview doesn't apply tuning either) still play raw audio.
 
 ## Root Note & Tune, and Detect Root Note
 
