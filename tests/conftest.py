@@ -79,5 +79,18 @@ _app_config.CONFIG_PATH = _TEST_LOG_DIR / "config.json"
 os.environ.pop("AKAISDS_UNLOCK_GLOBAL", None)
 
 
+import pytest as _pytest
+
+
+@_pytest.fixture(autouse=True)
+def _fresh_section_card_state():
+    # which cards are collapsed is cached per process (ui/section_card.py): one test collapsing a card must not start the next one collapsed
+    from ui import section_card
+
+    section_card.reset_state()
+    yield
+    section_card.reset_state()
+
+
 def pytest_sessionfinish(session, exitstatus):
     shutil.rmtree(_TEST_LOG_DIR, ignore_errors=True)
