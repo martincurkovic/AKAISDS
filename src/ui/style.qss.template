@@ -53,6 +53,39 @@ QLabel#mutedLabel {
     color: ${text_disabled};
 }
 
+/* The Samples tab's Edit Sample strip: always there (so the card never changes height), quiet while the sample is as the sampler
+   holds it and a wash of the warning colour while it has edits that are not on the sampler. The property is set by the editor. */
+QFrame#workingCopyStrip {
+    background-color: transparent;
+    border: 1px solid ${border_item};
+    border-radius: 5px;
+}
+
+QFrame#workingCopyStrip[unsent="true"] {
+    background-color: ${warning_tint};
+    border-color: ${warning};
+}
+
+QLabel#workingCopyLabel {
+    color: ${text_disabled};
+}
+
+QFrame#workingCopyStrip[unsent="true"] QLabel#workingCopyLabel {
+    color: ${text_bright};
+    font-weight: bold;
+}
+
+/* the dot that marks a sample with unsent edits: in its list row and on the strip */
+QLabel#unsentDot {
+    color: ${warning};
+}
+
+/* a thin vertical rule between two groups of buttons */
+QFrame#groupDivider {
+    background-color: ${border};
+    border: none;
+}
+
 /* Qt's tooltip (QToolTip) is internally a QLabel too, so without its own
    rule here it inherits the QLabel rule above - "background: transparent"
    on a real top-level popup window, with nothing underneath for the
@@ -89,6 +122,19 @@ QPushButton:disabled {
     background-color: ${bg_disabled};
     border-color: ${border_disabled};
     color: ${text_disabled};
+}
+
+/* the one button on a card that does the main thing (Send to Sampler, Load Edited Audio once the file was saved): filled with the
+   accent, like a dialog's default button. Only while enabled - a disabled one keeps the ordinary disabled look. */
+QPushButton[primary="true"]:enabled {
+    background-color: ${accent};
+    border-color: ${accent};
+    color: ${text_on_accent};
+}
+
+QPushButton[primary="true"]:enabled:hover {
+    background-color: ${accent};
+    border-color: ${text_on_accent};
 }
 
 /* checkable buttons used as a segmented control (e.g. the zone selector) -

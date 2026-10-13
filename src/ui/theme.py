@@ -49,6 +49,8 @@ DARK_PALETTE = {
     "text_on_accent": "#ffffff",
     "warning": "#d9a94a",
     "critical": "#d9544a",
+    # a faint wash of the warning colour (#AARRGGBB, which Qt style sheets accept): the strip that says a sample has unsent edits
+    "warning_tint": "#26d9a94a",
     # subtle alternating-row tint for the Program/Keygroup tabs' Modulation
     # matrix grid (program_editor_window.py's _ModMatrixGrid) - not
     # referenced by style.qss.template, same reasoning as keygroup_color_*
@@ -105,6 +107,7 @@ LIGHT_PALETTE = {
     "text_on_accent": "#ffffff",
     "warning": "#f57927",
     "critical": "#d54439",
+    "warning_tint": "#26f57927",
     # same reasoning as DARK_PALETTE's bg_zebra - close to this theme's own
     # bg_panel ("#ffffff"), just a faint step down rather than a strong tint
     "bg_zebra": "#f6f3fb",

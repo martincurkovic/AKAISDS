@@ -50,6 +50,7 @@ from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import QAction
 from PySide6.QtWidgets import (
     QApplication,
+    QFrame,
     QGridLayout,
     QHBoxLayout,
     QLabel,
@@ -58,6 +59,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QProgressBar,
     QPushButton,
+    QSizePolicy,
     QVBoxLayout,
     QWidget,
 )
@@ -155,15 +157,17 @@ _EDIT_SAMPLE_ROWS = (
     (
         "Edit audio",
         "These change the sample here. Nothing reaches the unit until you click Send as New Sample.",
-        ("trim", "reverse", "fade", "normalise", "filter", "stretch"),
+        (("trim", "reverse", "fade", "normalise", "filter", "stretch"),),
     ),
-    ("New samples", "These make new samples on the unit. The original is not changed.", ("slice",)),
     (
-        "External app",
-        "Open the sample in your own audio editor, then bring the saved version back.",
-        ("external_edit", "external_load"),
+        "More",
+        "The Slice Editor makes new samples on the unit (the original is not changed). The external app round trip opens the sample "
+        "in your own audio editor and brings the saved version back.",
+        (("slice",), ("external_edit", "external_load")),
     ),
 )
+#: the width of the Edit Sample rows' labels - every row's buttons start at the same x
+_EDIT_SAMPLE_LABEL_WIDTH = 80
 #: the Sample menu / right-click menu, in order: groups are separated
 _SAMPLE_MENU_GROUPS = (
     ("trim", "reverse", "fade", "normalise", "filter", "stretch"),
@@ -435,6 +439,9 @@ class YamahaSamplesTab(QWidget):
         self._sample_controls = {}
         self._control_wanted = {}
         self._row_labels = {}  # sample name -> the list row's name label
+        self._row_dots = {}  # sample name -> the dot that marks unsent edits
+        # sample name -> what to call the app its audio was opened in, while the external round trip waits for a save / a Load
+        self._external_waiting = {}
         self._active = False  # the Samples tab is the one showing (the menu's actions only work there)
         #: set by the host: callable() -> [(program number, label)] of the programs that hold no sample (what the Slice Editor can fill)
         self.free_programs_provider = None
@@ -687,31 +694,58 @@ class YamahaSamplesTab(QWidget):
         self.connect_control("stage_undo", self.undo_edit)
         self.connect_control("stage_revert", self.revert_edits)
 
-        # shown only while the selected sample has edits that are not on the unit
-        self._staged_banner = QWidget()
-        self._staged_banner.setObjectName("transparentContainer")
-        banner = QHBoxLayout(self._staged_banner)
-        banner.setContentsMargins(0, 0, 0, 0)
-        banner.setSpacing(8)
-        banner.addWidget(QLabel("<b>Edited \u2013 not on the unit yet</b>"))
-        banner.addWidget(self.undo_edits_button)
-        banner.addWidget(self.send_edits_as_new_button)
-        banner.addWidget(self.revert_edits_button)
-        banner.addStretch()
-        self._staged_banner.setVisible(False)
+        # The working-copy strip: ALWAYS shown, so the card never changes height. Quiet ("Original from the unit", its buttons off) until the
+        # sample has unsent edits, then tinted with the warning colour; style.qss.template keys off the "unsent" property.
+        self._staged_banner = QFrame()
+        self._staged_banner.setObjectName("workingCopyStrip")
+        self._staged_banner.setProperty("unsent", False)
+        strip = QHBoxLayout(self._staged_banner)
+        strip.setContentsMargins(10, 6, 8, 6)
+        strip.setSpacing(8)
+        self._working_copy_dot = QLabel("\u25cf")
+        self._working_copy_dot.setObjectName("unsentDot")
+        self._working_copy_dot.setVisible(False)
+        self._working_copy_label = QLabel("Original from the unit")
+        self._working_copy_label.setObjectName("workingCopyLabel")
+        strip.addWidget(self._working_copy_dot)
+        strip.addWidget(self._working_copy_label, 1)
+        self.send_edits_as_new_button.setProperty("primary", True)  # the filled one (QSS), while enabled
+        for button in (self.undo_edits_button, self.send_edits_as_new_button, self.revert_edits_button):
+            strip.addWidget(button)
 
         grid = QGridLayout()
         grid.setHorizontalSpacing(12)
         grid.setVerticalSpacing(8)
-        for row, (label, tooltip, keys) in enumerate(_EDIT_SAMPLE_ROWS):
+        # what the external app round trip is waiting for (see update_edit_buttons): inline at the end of the last row, so it appearing
+        # never changes the card's height - and it never sets the page's width (a long app name is clipped; the tooltip has it all)
+        self._external_hint = QLabel()
+        self._external_hint.setObjectName("mutedLabel")
+        self._external_hint.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        self._external_hint.setVisible(False)
+        for row, (label, tooltip, groups) in enumerate(_EDIT_SAMPLE_ROWS):
             name_label = QLabel(label)
-            name_label.setFixedWidth(90)
+            name_label.setFixedWidth(_EDIT_SAMPLE_LABEL_WIDTH)
             name_label.setToolTip(tooltip)
             buttons = QHBoxLayout()
             buttons.setSpacing(8)
-            for key in keys:
-                buttons.addWidget(self._sample_controls[key][0])
-            buttons.addStretch()
+            for group_index, keys in enumerate(groups):
+                if group_index:
+                    divider = QFrame()
+                    divider.setObjectName("groupDivider")
+                    divider.setFixedWidth(1)
+                    divider.setMinimumHeight(22)
+                    buttons.addSpacing(4)
+                    buttons.addWidget(divider)
+                    buttons.addSpacing(4)
+                for key in keys:
+                    buttons.addWidget(self._sample_controls[key][0])
+            if row == len(_EDIT_SAMPLE_ROWS) - 1:
+                # the hint takes the rest of the row (stretch 1) - with a plain trailing stretch too, an Ignored-policy label can be
+                # handed no width at all
+                buttons.addSpacing(8)
+                buttons.addWidget(self._external_hint, 1)
+            else:
+                buttons.addStretch()
             grid.addWidget(name_label, row, 0)
             grid.addLayout(buttons, row, 1)
         grid.setColumnStretch(1, 1)
@@ -859,6 +893,7 @@ class YamahaSamplesTab(QWidget):
         self._names = list(names)
         self._prune_staged()
         self._row_labels = {}
+        self._row_dots = {}
         self.sample_list_widget.blockSignals(True)
         self.sample_list_widget.clear()
         for name in self._names:
@@ -867,10 +902,11 @@ class YamahaSamplesTab(QWidget):
             # blank on purpose: reading every sample's length took one full SP dump each, one at a time, over MIDI
             item = QListWidgetItem(self.sample_list_widget)
             item.setData(Qt.ItemDataRole.UserRole, name)
-            row_widget, name_label, _duration_label = build_sample_list_row_widget(name)
+            row_widget, name_label, _duration_label = build_sample_list_row_widget(name, with_unsent_dot=True)
             item.setSizeHint(row_widget.sizeHint())
             self.sample_list_widget.setItemWidget(item, row_widget)
             self._row_labels[name] = name_label
+            self._row_dots[name] = row_widget.unsent_dot
         self.sample_list_widget.blockSignals(False)
         self._update_row_labels()
         if previous in self._names:
@@ -1432,13 +1468,31 @@ class YamahaSamplesTab(QWidget):
         staged = self._selected in self._staged
         edits = getattr(self, "_edits", None)  # (built after the first call)
         wanted = {key: ready for key in ("trim", "reverse", "fade", "normalise", "filter", "stretch", "slice", "external_edit", "detect")}
-        wanted["external_load"] = ready and edits is not None and edits.edited_audio_ready(self._selected)
+        saved = edits is not None and edits.edited_audio_ready(self._selected)
+        wanted["external_load"] = ready and saved
         for key in ("stage_undo", "stage_send", "stage_revert"):
             wanted[key] = ready and staged
-        self._staged_banner.setVisible(staged)
+        # the strip: its look (QSS, by property) and its words
+        if self._staged_banner.property("unsent") != staged:
+            self._staged_banner.setProperty("unsent", staged)
+            self._repolish(self._staged_banner, self._working_copy_label)
+        self._working_copy_dot.setVisible(staged)
+        self._working_copy_label.setText("Edited \u2013 not on the unit yet" if staged else "Original from the unit")
         for key, enabled in wanted.items():
             self._control_wanted[key] = enabled
             self._sample_controls[key][0].setEnabled(enabled)
+        # Load Edited Audio is the filled (primary) button once there is something to load, and the hint says what is being waited for
+        primary = bool(wanted["external_load"])
+        if self.external_load_button.property("primary") != primary:
+            self.external_load_button.setProperty("primary", primary)
+            self._repolish(self.external_load_button)
+        app = self._external_waiting.get(self._selected)
+        if app is None:
+            self._external_hint.setVisible(False)
+        else:
+            self._external_hint.setText("Saved \u2013 ready to load" if saved else f"Waiting for you to save in {app}")
+            self._external_hint.setToolTip(self._external_hint.text())
+            self._external_hint.setVisible(True)
         self._update_actions()
 
     def _update_actions(self):
@@ -1574,8 +1628,18 @@ class YamahaSamplesTab(QWidget):
     def _update_row_labels(self):
         for name, label in self._row_labels.items():
             edited = name in self._staged
-            label.setText(f"{name}  \u25cf" if edited else name)
+            label.setText(name)
             label.setToolTip("Edited - not on the unit yet" if edited else "")
+            dot = self._row_dots.get(name)
+            if dot is not None:
+                dot.setVisible(edited)
+
+    @staticmethod
+    def _repolish(*widgets):
+        # a style sheet rule keyed on a dynamic property only re-applies after an unpolish/polish
+        for widget in widgets:
+            widget.style().unpolish(widget)
+            widget.style().polish(widget)
 
     def _detect_pitch(self):
         """Estimate the loaded sample's pitch (left channel) and, if the user agrees, write Original key and Fine tune."""

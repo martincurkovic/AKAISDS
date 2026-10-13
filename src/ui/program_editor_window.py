@@ -28,6 +28,7 @@ from PySide6.QtCore import QEventLoop, QMimeData, QTimer, QRegularExpression, QU
 from PySide6.QtWidgets import (
     QAbstractSpinBox,
     QApplication,
+    QFrame,
     QGridLayout,
     QHBoxLayout,
     QInputDialog,
@@ -433,6 +434,8 @@ class _ModMatrixGrid(QWidget):
 _MARKER_KEYS = ("start", "loop_start", "loop_end", "end")
 #: how many earlier working copies Undo can step back through (each is a whole copy of the audio)
 _UNDO_LIMIT = 10
+#: the width of the Edit Sample rows' labels - every row's buttons start at the same x
+_EDIT_SAMPLE_LABEL_WIDTH = 80
 
 
 @dataclass
@@ -457,22 +460,18 @@ class _StagedEdit:
         return self.original_framerate
 
 
-# the Edit Sample card's rows: (label, what the label's tooltip says, control keys in order)
+# the Edit Sample card's rows: (label, what the label's tooltip says, groups of control keys - a thin rule goes between groups)
 _EDIT_SAMPLE_ROWS = (
     (
         "Edit audio",
         "These change the sample here. Nothing reaches the sampler until you click Send to Sampler.",
-        ("trim", "reverse", "fade", "normalize", "filter", "stretch"),
+        (("trim", "reverse", "fade", "normalize", "filter", "stretch"),),
     ),
     (
-        "New samples",
-        "These add new samples. The original is not changed.",
-        ("duplicate", "slice"),
-    ),
-    (
-        "External app",
-        "Open the sample in your own audio editor, then send the saved version back.",
-        ("external_edit", "external_load"),
+        "More",
+        "Duplicate and the Slice Editor add new samples (the original is not changed). The external app round trip opens "
+        "the sample in your own audio editor and brings the saved version back.",
+        (("duplicate", "slice"), ("external_edit", "external_load")),
     ),
 )
 # the Sample menu / right-click menu, in order: groups are separated
@@ -6121,6 +6120,9 @@ class ProgramEditorWindow(QMainWindow):
         self._sample_control_wanted = {}
         # name -> _StagedEdit: samples with edits that are not on the sampler yet
         self._staged_edits = {}
+        # sample name -> what to call the app its audio was opened in, while the external round trip waits for a save / a Load
+        self._external_waiting = {}
+        self._sample_row_dots = {}  # list row -> the dot that marks unsent edits
         # same row-widget-free QListWidget + labeled column shape as the
         # Programs tab's own program_list/keygroup_list (see __init__) -
         # deliberately not sharing that code since this list's rows are
@@ -6559,33 +6561,67 @@ class ProgramEditorWindow(QMainWindow):
         self.revert_edits_button = make(
             "stage_revert", "Revert", tt.STAGE_REVERT_BUTTON, self._revert_staged
         )
-        self._staged_banner = QWidget()
-        self._staged_banner.setObjectName("transparentContainer")
-        banner_row = QHBoxLayout(self._staged_banner)
-        banner_row.setContentsMargins(0, 0, 0, 0)
-        banner_row.setSpacing(8)
-        banner_row.addWidget(QLabel("<b>Edited \u2013 not on the sampler yet</b>"))
-        banner_row.addWidget(self.undo_edits_button)
-        banner_row.addWidget(self.send_edits_button)
-        banner_row.addWidget(self.send_edits_as_new_button)
-        banner_row.addWidget(self.revert_edits_button)
-        banner_row.addStretch()
-        self._staged_banner.setVisible(False)
+        # The working-copy strip: ALWAYS shown, so the card never changes height. Quiet ("Original from the sampler", its buttons off)
+        # until the sample has unsent edits, then tinted with the warning colour; the QSS keys off the "unsent" property.
+        self._staged_banner = QFrame()
+        self._staged_banner.setObjectName("workingCopyStrip")
+        self._staged_banner.setProperty("unsent", False)
+        strip = QHBoxLayout(self._staged_banner)
+        strip.setContentsMargins(10, 6, 8, 6)
+        strip.setSpacing(8)
+        self._working_copy_dot = QLabel("\u25cf")
+        self._working_copy_dot.setObjectName("unsentDot")
+        self._working_copy_dot.setVisible(False)
+        self._working_copy_label = QLabel("Original from the sampler")
+        self._working_copy_label.setObjectName("workingCopyLabel")
+        strip.addWidget(self._working_copy_dot)
+        strip.addWidget(self._working_copy_label, 1)
+        self.send_edits_button.setProperty("primary", True)  # the filled one (QSS), while enabled
+        for button in (
+            self.undo_edits_button,
+            self.send_edits_button,
+            self.send_edits_as_new_button,
+            self.revert_edits_button,
+        ):
+            strip.addWidget(button)
 
-        # one labelled row per KIND of action, so what overwrites the sample
-        # is in one place
+        # Two body rows under the strip, their buttons starting at one x: what changes the audio here, and everything else
         edit_sample_grid = QGridLayout()
         edit_sample_grid.setHorizontalSpacing(12)
         edit_sample_grid.setVerticalSpacing(8)
-        for row, (label, tooltip, keys) in enumerate(_EDIT_SAMPLE_ROWS):
+        # what the external app round trip is waiting for (see _refresh_external_edit_buttons): inline at the end of the last row, so
+        # it appearing never changes the card's height
+        self._external_hint = QLabel()
+        self._external_hint.setObjectName("mutedLabel")
+        # never sets the page's width: a long app name is clipped (its tooltip has the whole text) rather than adding a scroll bar
+        self._external_hint.setSizePolicy(
+            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred
+        )
+        self._external_hint.setVisible(False)
+        for row, (label, tooltip, groups) in enumerate(_EDIT_SAMPLE_ROWS):
             name_label = QLabel(label)
-            name_label.setFixedWidth(90)
+            name_label.setFixedWidth(_EDIT_SAMPLE_LABEL_WIDTH)
             name_label.setToolTip(tooltip)
             buttons_row = QHBoxLayout()
             buttons_row.setSpacing(8)
-            for key in keys:
-                buttons_row.addWidget(self._sample_edit_controls[key][0])
-            buttons_row.addStretch()
+            for group_index, keys in enumerate(groups):
+                if group_index:
+                    divider = QFrame()
+                    divider.setObjectName("groupDivider")
+                    divider.setFixedWidth(1)
+                    divider.setMinimumHeight(22)
+                    buttons_row.addSpacing(4)
+                    buttons_row.addWidget(divider)
+                    buttons_row.addSpacing(4)
+                for key in keys:
+                    buttons_row.addWidget(self._sample_edit_controls[key][0])
+            if row == len(_EDIT_SAMPLE_ROWS) - 1:
+                # the hint takes the rest of the row (stretch 1) - with a plain trailing stretch too, an Ignored-policy label can be
+                # handed no width at all
+                buttons_row.addSpacing(8)
+                buttons_row.addWidget(self._external_hint, 1)
+            else:
+                buttons_row.addStretch()
             edit_sample_grid.addWidget(name_label, row, 0)
             edit_sample_grid.addLayout(buttons_row, row, 1)
         edit_sample_grid.setColumnStretch(1, 1)
@@ -7165,6 +7201,7 @@ class ProgramEditorWindow(QMainWindow):
         self._sample_list_generation += 1
         generation = self._sample_list_generation
         self._sample_row_labels = {}
+        self._sample_row_dots = {}
         self.sample_list_widget.blockSignals(True)
         self.sample_list_widget.clear()
         for name in samples:
@@ -7178,7 +7215,10 @@ class ProgramEditorWindow(QMainWindow):
             item = QListWidgetItem()
             self.sample_list_widget.addItem(item)
             row_widget, name_label, duration_label = (
-                build_sample_list_row_widget(name)
+                build_sample_list_row_widget(name, with_unsent_dot=True)
+            )
+            self._sample_row_dots[self.sample_list_widget.row(item)] = (
+                row_widget.unsent_dot
             )
             item.setSizeHint(row_widget.sizeHint())
             self.sample_list_widget.setItemWidget(item, row_widget)
@@ -7576,11 +7616,26 @@ class ProgramEditorWindow(QMainWindow):
         # (is_ready re-reads the file, so it doesn't rely on a watcher event)
         ready = self._sample_edit_ready
         name = self._sample_name_at_row(self.sample_list_widget.currentRow())
+        saved = bool(name) and self._external_edit.is_ready(name)
         self._set_sample_control_enabled("external_edit", ready)
-        self._set_sample_control_enabled(
-            "external_load",
-            ready and bool(name) and self._external_edit.is_ready(name),
-        )
+        self._set_sample_control_enabled("external_load", ready and saved)
+        # the filled (primary) look once there is something to load
+        primary = bool(ready and saved)
+        if self.external_load_button.property("primary") != primary:
+            self.external_load_button.setProperty("primary", primary)
+            self._repolish(self.external_load_button)
+        # what the round trip is waiting for
+        app = self._external_waiting.get(name)
+        if app is None:
+            self._external_hint.setVisible(False)
+        else:
+            self._external_hint.setText(
+                "Saved \u2013 ready to load"
+                if saved
+                else f"Waiting for you to save in {app}"
+            )
+            self._external_hint.setToolTip(self._external_hint.text())
+            self._external_hint.setVisible(True)
 
     def _update_sample_meta_controls(
         self, sptype, spitch, shlto=None, stuno=None, ldwell1=None
@@ -8865,10 +8920,15 @@ class ProgramEditorWindow(QMainWindow):
         if problem:
             self.status_bar.showMessage(problem)
             return
-        hint = "" if app_config.get_saved_external_editor() else " (pick an editor in Settings)"
+        editor_path = app_config.get_saved_external_editor()
+        hint = "" if editor_path else " (pick an editor in Settings)"
         self.status_bar.showMessage(
-            f'Opened "{name}"{hint} - save it there, then click Send Edited Audio'
+            f'Opened "{name}"{hint} - save it there, then click Load Edited Audio'
         )
+        app_name = os.path.basename(editor_path.rstrip("/\\")) if editor_path else ""
+        if app_name.lower().endswith(".app"):
+            app_name = app_name[:-4]
+        self._external_waiting[name] = app_name or "your default app"
         self._refresh_external_edit_buttons()
 
     def _load_edited_audio(self):
@@ -8917,6 +8977,8 @@ class ProgramEditorWindow(QMainWindow):
             sample_index, new_samples, dict(zip(_MARKER_KEYS, new_markers))
         )
         self._external_edit.mark_sent(name)  # Load waits for the next save
+        self._external_waiting.pop(name, None)
+        self._refresh_external_edit_buttons()
         self.status_bar.showMessage(
             f'Loaded the edited audio for "{name}" - not on the sampler yet'
         )
@@ -9064,15 +9126,25 @@ class ProgramEditorWindow(QMainWindow):
         for row, (_generation, name_label, _duration) in self._sample_row_labels.items():
             name = self._sample_name_at_row(row)
             edited = name in self._staged_edits
-            name_label.setText(f"{name}  ●" if edited else name)
+            name_label.setText(name)
             name_label.setToolTip("Edited - not on the sampler yet" if edited else "")
+            dot = self._sample_row_dots.get(row)
+            if dot is not None:
+                dot.setVisible(edited)
 
     def _refresh_staged_controls(self):
         if not hasattr(self, "_staged_banner"):
             return  # still building
         name = self._sample_name_at_row(self.sample_list_widget.currentRow())
         staged = name in self._staged_edits
-        self._staged_banner.setVisible(staged)
+        # the strip's look (QSS, by property) and its words
+        if self._staged_banner.property("unsent") != staged:
+            self._staged_banner.setProperty("unsent", staged)
+            self._repolish(self._staged_banner, self._working_copy_label)
+        self._working_copy_dot.setVisible(staged)
+        self._working_copy_label.setText(
+            "Edited \u2013 not on the sampler yet" if staged else "Original from the sampler"
+        )
         ready = staged and self._sample_edit_ready
         self._set_sample_control_enabled("stage_undo", ready)
         self._set_sample_control_enabled("stage_send", ready)
@@ -9080,6 +9152,13 @@ class ProgramEditorWindow(QMainWindow):
             "stage_new", ready and self._can_send_edit_as_new_sample()
         )
         self._set_sample_control_enabled("stage_revert", ready)
+
+    @staticmethod
+    def _repolish(*widgets):
+        # a style sheet rule keyed on a dynamic property only re-applies after an unpolish/polish
+        for widget in widgets:
+            widget.style().unpolish(widget)
+            widget.style().polish(widget)
 
     def _send_staged_to_sampler(self):
         sample_index = self.sample_list_widget.currentRow()

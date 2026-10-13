@@ -265,7 +265,7 @@ def keygroup_row_label(list_widget, row):
 # -- the Samples tab -----------------------------------------------------------------------------
 
 
-def build_sample_list_row_widget(name):
+def build_sample_list_row_widget(name, with_unsent_dot=False):
     # name on the left, duration on the right in the theme's muted
     # "secondary info" grey so it reads as supplementary to the name rather than part
     # of it. Duration starts blank - it's filled in as each sample's length arrives.
@@ -282,7 +282,18 @@ def build_sample_list_row_widget(name):
     row_layout.setSpacing(6)
 
     name_label = QLabel(name)
-    row_layout.addWidget(name_label, stretch=1)
+    if not with_unsent_dot:
+        row_layout.addWidget(name_label, stretch=1)
+    else:
+        row_layout.addWidget(name_label)
+        # marks a sample with edits that are not on the sampler (hidden unless the editor shows it; the Program Editor only): the editor
+        # reads row_widget.unsent_dot - the return value stays the three widgets every caller already unpacks
+        unsent_dot = QLabel("\u25cf")
+        unsent_dot.setObjectName("unsentDot")  # style.qss.template
+        unsent_dot.setVisible(False)
+        row_layout.addWidget(unsent_dot)
+        row_layout.addStretch(1)
+        row_widget.unsent_dot = unsent_dot
 
     duration_label = QLabel("")
     duration_label.setObjectName("mutedLabel")  # style.qss.template

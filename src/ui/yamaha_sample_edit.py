@@ -295,8 +295,13 @@ class YamahaSampleEditor(QObject):
         if problem:
             self._tab.status_message.emit(problem)
             return
-        hint = "" if app_config.get_saved_external_editor() else " (pick an editor in Settings)"
-        self._tab.status_message.emit(f'Opened "{name}"{hint} - save it there, then click Send Edited Audio')
+        editor_path = app_config.get_saved_external_editor()
+        hint = "" if editor_path else " (pick an editor in Settings)"
+        self._tab.status_message.emit(f'Opened "{name}"{hint} - save it there, then click Load Edited Audio')
+        app_name = os.path.basename(editor_path.rstrip("/\\")) if editor_path else ""
+        if app_name.lower().endswith(".app"):
+            app_name = app_name[:-4]
+        self._tab._external_waiting[name] = app_name or "your default app"
         self._tab.update_edit_buttons()
 
     def load_edited(self):
@@ -328,6 +333,8 @@ class YamahaSampleEditor(QObject):
         )
         if self._tab.stage_working_copy(name, channels, markers):
             self._external.mark_sent(name)  # Load waits for the next save
+            self._tab._external_waiting.pop(name, None)
+            self._tab.update_edit_buttons()
             self._tab.status_message.emit(f"Loaded the edited audio for {name!r} - not on the unit yet")
 
     # -- the working copy goes out -----------------------------------------------------------------------------
