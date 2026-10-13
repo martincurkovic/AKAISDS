@@ -583,6 +583,24 @@ new sample at once (` TRIM`/` REV`/`FADE`/` NORM`/` FILT`/` STR`/` PITCH`); thos
   Amplitude|Pitch Envelope, LFO|Controllers, EQ alone at the end.
 - Tests: `tests/test_yamaha_working_copy.py`; the older Yamaha edit tests were rewritten to stage first and then use the banner's Send as New Sample.
 
+## Re-sent samples keep their pitch (2026-10-13, found on the owner's S2000 from akaisds.log)
+
+**A sample sent FROM another one's audio (Send to Sampler, a new sample from an edit / Duplicate, slice export) must not get the source's STUNO copied across as it was.** STUNO bakes in the baseline for the sample's
+SBANDW bucket (`baseline_semitones_for_bandwidth`), and the sent sample lands on the bucket the SEND chose - the nearest one for a 16-bit Akai send (11025 Hz -> SBANDW 0, baseline -12) - while a sample the sampler imported itself
+(generic SDS) sits on SBANDW 1 whatever its rate (11025 Hz -> baseline -24). Measured in the log: source `SBANDW 1, STUNO 59392` (= -24.00); the replace wrote 59392 onto the new sample's bucket-0 header and it played an
+**octave low**. `_tuning_for_resent_sample(new_index, source_stuno, source_sbandw, source_rate)` reads the NEW sample's real SBANDW/SSRATE (`_read_sample_header_blocking`) and writes `(source STUNO - source baseline) + new
+baseline`, so what the user dialled in survives and the pair stays consistent. A failed read keeps the source's STUNO (as before) and logs a WARNING; every correction logs an INFO `tuning:` line with both sides.
+- Slice export: `_export_slices(..., source_sbandw=, source_rate=)` (bound by `_run_slice_editor` from the source entry). **Audio from a FILE (no `source_sbandw`) no longer gets STUNO written at all** - it used to write 0 over the
+  baseline the send baked in, which played a 11025 Hz import an octave high.
+- Not changed: Dashboard sends and the Yamaha editor (different protocols/tuning). The preview shift (`_preview_pitch_shift_semitones`) already reads the real SBANDW.
+- **After a replace the sample is shown at once** (`_show_sent_sample`): the cache entry is built from what was just written and selected explicitly (by hand if the row is already current). Relying on the header fetch a plain
+  selection starts left the waveform up with the controls off until the user clicked the sample again: that fetch queues behind every write and length read, and the owner's log shows no `sample_detail` request for the replaced
+  sample at all. (Root cause of the missing request not identified; the explicit path doesn't need it.)
+- Logging added: `ProgramEditor: <edit> applied to <name>: N -> M frames, markers a -> b` for every edit and `Staged edit: sending <name>: ...` for every Send to Sampler. **Open report (not reproduced): "Trim to Markers after an
+  external edit doesn't trim".** The log of that session shows Load Edited Audio (30240 frames, markers 0/30239/30239/30239) then Send to Sampler of 30240 frames with SMPEND 15151 / loop end 7023 - i.e. markers moved, no trim applied
+  to the audio. Trim on a staged sample works in tests (`tests/test_local_edits.py`); the new log lines will show whether Trim ran.
+- Tests: `tests/test_resent_tuning.py` (the fake sampler's `new_sample_sbandw` picks the bucket a send lands on).
+
 ## Time Stretch / Pitch Shift (Samples tabs, written 2026-10-13, NOT tried on hardware)
 
 "Stretch / Pitch..." (Edit Sample card, "Edit audio" row) opens `ui/time_stretch_dialog.py`: a Mode dropdown and Filter-style knobs - Length (LogKnob 25-400 %, 100 % in the
