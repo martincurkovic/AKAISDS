@@ -22,6 +22,8 @@ need a real audio output device. Without the library built, the `.rx2` tests are
 Not covered: painted pixels, and real hardware. Hardware test plans live next to the tests: `tests/s1000_test_plan.md`,
 `s950_test_plan.md`, `akai_program_file_test_plan.md`, `midi_transport_consolidation_test_plan.md`.
 
+Looking at the app by hand instead of through a test: the demo samplers (fake units on fake ports) are described in [CONTRIBUTING.md](CONTRIBUTING.md#running-the-app-without-a-sampler).
+
 ## Techniques worth knowing
 
 - **Fake QtCore**: `test_sampler_controller.py` and `test_midi_manager.py` replace `QObject`/`Signal` and make `QTimer.singleShot` fire
