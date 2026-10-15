@@ -2,7 +2,7 @@
 Standalone dev tool - NOT part of the app.
 
 Opens the Transfer Dashboard wired to core.demo_ensoniq.FakeEnsoniq instead of real MIDI ports, with the Sampler Type set to Ensoniq
-EPS/ASR, so the Ensoniq list and receive UI can be iterated on with no hardware. The fake speaks the real wire format (as the codec reads
+EPS/ASR, so the Ensoniq list, receive and send UI can be iterated on with no hardware. A sent file lands in the fake as a new instrument. The fake speaks the real wire format (as the codec reads
 Ensoniq's spec), so this exercises the real SamplerController -> EnsoniqTransfers -> core.ensoniq_sysex stack; only the ports are fake.
 The Settings dialog is not usable here (it would re-open real ports) - everything else is. Sending is not built yet.
 

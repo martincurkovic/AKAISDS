@@ -58,6 +58,8 @@ _BUFFER_SIZE_OPTIONS = [32, 64, 128, 256, 512, 1024, 2048]
 
 # seconds to wait for each message to return. also used for hardware test
 _LOOPBACK_RECEIVE_TIMEOUT = 1.5
+#: how long the Ensoniq hardware test waits for the (optional) universal MIDI identity reply before asking its own question
+_ENSONIQ_IDENTITY_TIMEOUT = 0.8
 
 _MINIMUM_DIALOG_WIDTH = 560  # floor for the degenerate case - see
 # _minimum_width_for_pages's own docstring
@@ -599,14 +601,13 @@ class MidiSettingsDialog(QDialog):
                 )
             )
         elif device_type == sampler_models.FAMILY_ENSONIQ:
-            # read only, one request: "is instrument 1 loaded?" (GET INSTRUMENT). The universal identity request tells nothing here: it
-            # goes to every device and says nothing about whether the unit speaks Ensoniq's own SysEx
-            output_port.send(
-                mido.Message(
-                    "sysex",
-                    data=ensoniq_sysex.build_get_instrument(0, channel=self.spin_channel.value()),
-                )
-            )
+            # read only, two requests one after the other: the universal MIDI identity request (which says what and which version the unit
+            # is, but goes to every device and proves nothing about its own SysEx), then "is instrument 1 loaded?" (GET INSTRUMENT),
+            # which is the real test. The identity answer is optional: a unit may well not give one
+            self._ensoniq_identity_text = self._ensoniq_identity_step(input_port, output_port)
+            request = ensoniq_sysex.build_get_instrument(0, channel=self.spin_channel.value())
+            debug_log.get_logger().info(f"MidiSettingsDialog: Ensoniq hardware test sent {bytes(request).hex(' ')}")
+            output_port.send(mido.Message("sysex", data=request))
         else:
             output_port.send(
                 mido.Message(
@@ -618,14 +619,20 @@ class MidiSettingsDialog(QDialog):
         while time.monotonic() < deadline:
             incoming = input_port.poll()
             if incoming is not None and incoming.type == "sysex":
-                if device_type == sampler_models.FAMILY_ENSONIQ and not self._is_ensoniq_answer(incoming.data):
-                    # not an answer: our own request echoed back (a DAW on the same interface does this), or someone else's SysEx
-                    continue
+                if device_type == sampler_models.FAMILY_ENSONIQ:
+                    debug_log.get_logger().info(
+                        f"MidiSettingsDialog: Ensoniq hardware test received {len(incoming.data)} bytes: "
+                        f"{bytes(incoming.data[:64]).hex(' ')}"
+                    )
+                    if not self._is_ensoniq_answer(incoming.data):
+                        # not an answer: our own request echoed back (a DAW on the same interface does this), or someone else's SysEx
+                        continue
                 response = incoming
                 break
             QApplication.processEvents()
 
         if response is None and device_type == sampler_models.FAMILY_ENSONIQ:
+            debug_log.get_logger().info("MidiSettingsDialog: Ensoniq hardware test got no answer to GET INSTRUMENT")
             return (
                 False,
                 "No reply from an Ensoniq - check it's on, MIDI SysEx is enabled in its MIDI settings, both "
@@ -681,6 +688,37 @@ class MidiSettingsDialog(QDialog):
             f"Samples in memory: {samples}"
         )
 
+    def _ensoniq_identity_step(self, input_port, output_port):
+        """Send the universal MIDI identity request and describe the answer in one line, or None if there is none. Read only."""
+        log = debug_log.get_logger()
+        request = midi_identity.build_identity_request_message()
+        log.info(f"MidiSettingsDialog: Ensoniq hardware test sent the MIDI identity request {bytes(request).hex(' ')}")
+        output_port.send(mido.Message("sysex", data=request))
+        deadline = time.monotonic() + _ENSONIQ_IDENTITY_TIMEOUT
+        text = None
+        while time.monotonic() < deadline and text is None:
+            incoming = input_port.poll()
+            if incoming is not None and incoming.type == "sysex":
+                data = tuple(incoming.data)
+                log.info(f"MidiSettingsDialog: identity step received {len(data)} bytes: {bytes(data[:64]).hex(' ')}")
+                if len(data) >= 13 and data[0] == 0x7E and data[2] == 0x06 and data[3] == 0x02:
+                    try:
+                        parsed = midi_identity.parse_identity_response(data)
+                        text = (
+                            f"MIDI identity: {midi_identity.lookup_manufacturer(parsed['manuf_id'])}, family {parsed['family_code']}, "
+                            f"model {parsed['model_number']}, version {parsed['version_number']:#x}"
+                        )
+                    except (IndexError, KeyError, ValueError) as ex:
+                        log.warning(f"MidiSettingsDialog: unreadable identity reply: {ex}")
+                        text = "MIDI identity: answered, but unreadable (see the log)"
+                continue
+            QApplication.processEvents()
+        if text is None:
+            log.info("MidiSettingsDialog: no MIDI identity reply (not unusual)")
+        while input_port.poll() is not None:
+            pass  # anything late belongs to the identity request, not to the question that follows
+        return text
+
     @staticmethod
     def _is_ensoniq_answer(data):
         # an Ensoniq's answer to a GET is a RESPONSE or a PUT; a GET (command 03-0A) is our own request coming back
@@ -700,7 +738,8 @@ class MidiSettingsDialog(QDialog):
                 detail = f"Status: {ensoniq_sysex.status_name(status)}."
         else:
             detail = "It sent instrument data."
-        return f"Ensoniq EPS/ASR SysEx answered.\n{detail}"
+        identity = getattr(self, "_ensoniq_identity_text", None)
+        return f"Ensoniq EPS/ASR SysEx answered.\n{detail}\n{identity or 'No MIDI identity reply.'}"
 
     def _format_identity_result(self, data):
         manuf_name = midi_identity.lookup_manufacturer(data["manuf_id"])

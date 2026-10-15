@@ -9,7 +9,8 @@ Long-form working documents for people and agents developing AKAISDS - not user 
 | `a4000-native-load-findings.md` | How native sample loading (wave + sample bulk dumps) behaves, as measured. Implemented. |
 | `s1000-delk-findings.md` | Akai S1000 memory layout and the two failed DELK tests behind AGENTS.md's "never DELK" rules. |
 | `s950-support-plan.md` | Akai S900/S950 protocol notes, design facts, guesses and open questions. Built, never run on hardware. |
-| `ensoniq-support-plan.md` | Ensoniq EPS/ASR sample transmission: the proprietary SysEx format (from the ASR-10 / EPS-16+ specs), why Generic SDS can't work, the proposed design and open questions. Research only - nothing built. |
+| `ensoniq-support-plan.md` | Ensoniq EPS/ASR sample transmission: the proprietary SysEx format (from the ASR-10 / EPS-16+ specs), why Generic SDS can't work, the design and open questions. Built (list, receive, send), never run on hardware. |
+| `ensoniq-spec-crosscheck.md` | The EPS spec's text layer checked against the plan: what matched, and the corrections (parameter numbers, the 20-bit range limit, the memory parameters, the rate code). Read before touching `core/ensoniq_sysex.py`. |
 | `s3000-multi-file-format.md` | The S2000/S3000XL multi file (4096 bytes) and what a Save/Load Multi would need. Research only - no code. |
 | `macos12-support-handoff.md` | What blocks macOS 12 (Qt 6.11, NumPy wheel), the experiments and the plan. Not started. |
 | `packaging/` | Draft Homebrew / AUR packaging and a publish workflow with `PACKAGING.md`. Not active. |

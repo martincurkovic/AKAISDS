@@ -192,23 +192,22 @@ def test_hardware_test_speaks_the_akai_protocol_for_the_s1000(qapp):
 
 
 class _FakePort:
-    # the mido-port surface _send_identity_request uses: sent messages are recorded, replies are queued by the test. The input port is
-    # drained before the request goes out, so a reply only appears once something has been sent through the paired output port
-    def __init__(self, replies=()):
+    # the mido-port surface _send_identity_request uses: sent messages are recorded. `script` is one list of replies PER SEND: the n-th
+    # message sent through the paired output port makes the n-th list available on this (input) port, and anything left over from an
+    # earlier send is dropped, as a real drain-before-send would
+    def __init__(self, script=()):
         self.sent = []
-        self._replies = list(replies)
-        self._open = False
+        self._script = [list(r) for r in script]
+        self._queue = []
         self.peer = None
 
     def send(self, message):
         self.sent.append(message)
         if self.peer is not None:
-            self.peer._open = True
+            self.peer._queue = self.peer._script.pop(0) if self.peer._script else []
 
     def poll(self):
-        if self._open and self._replies:
-            return self._replies.pop(0)
-        return None
+        return self._queue.pop(0) if self._queue else None
 
 
 class _Reply:
@@ -225,15 +224,53 @@ def _ensoniq_dialog(qapp, device_id=0):
     return dialog
 
 
-def test_the_ensoniq_hardware_test_sends_one_read_only_get_instrument(qapp):
+def _paired(script):
+    inp, out = _FakePort(script), _FakePort()
+    out.peer = inp
+    return inp, out
+
+
+def _identity_reply(version=(1, 0, 0, 0)):
+    # F0 7E <dev> 06 02 <manufacturer 0F> <family lo hi> <model lo hi> <version x4> F7 (the body between F0 and F7)
+    return _Reply([0x7E, 0x00, 0x06, 0x02, 0x0F, 0x03, 0x00, 0x01, 0x00, *version])
+
+
+def test_the_ensoniq_hardware_test_asks_for_the_identity_then_one_read_only_get_instrument(qapp):
     from core import ensoniq_sysex as e
 
     dialog = _ensoniq_dialog(qapp, device_id=3)
-    inp, out = _FakePort([_Reply(e.build_response(e.STATUS_ACK, 3))]), _FakePort()
-    out.peer = inp
+    inp, out = _paired([[_identity_reply()], [_Reply(e.build_response(e.STATUS_ACK, 3))]])
     ok, result = dialog._send_identity_request(inp, out)
     assert ok and result.command == e.CMD_RESPONSE
-    assert [m.data for m in out.sent] == [tuple(e.build_get_instrument(0, channel=3))]
+    # exactly two read-only requests, one outstanding at a time: the universal identity request, then GET INSTRUMENT 1
+    assert [m.data for m in out.sent] == [(0x7E, 0x7F, 0x06, 0x01), tuple(e.build_get_instrument(0, channel=3))]
+    text = dialog._format_ensoniq_result(result)
+    assert "Instrument 1 is loaded" in text and "MIDI identity: " in text and "family 3" in text
+
+
+def test_the_identity_answer_is_optional(qapp, monkeypatch):
+    from core import ensoniq_sysex as e
+    from ui import settings_dialog
+
+    monkeypatch.setattr(settings_dialog, "_ENSONIQ_IDENTITY_TIMEOUT", 0.02)
+    dialog = _ensoniq_dialog(qapp)
+    inp, out = _paired([[], [_Reply(e.build_response(e.STATUS_INVALID_INSTRUMENT))]])
+    ok, result = dialog._send_identity_request(inp, out)
+    assert ok
+    text = dialog._format_ensoniq_result(result)
+    assert "isn't loaded (a normal answer)" in text and "No MIDI identity reply." in text
+
+
+def test_an_unreadable_identity_reply_does_not_break_the_test(qapp, monkeypatch):
+    from core import ensoniq_sysex as e
+    from ui import settings_dialog
+
+    monkeypatch.setattr(settings_dialog, "_ENSONIQ_IDENTITY_TIMEOUT", 0.02)
+    dialog = _ensoniq_dialog(qapp)
+    short = _Reply([0x7E, 0x00, 0x06, 0x02, 0x0F, 0x03, 0x00, 0x01, 0x00, 0x01, 0x00])  # cut short
+    inp, out = _paired([[short], [_Reply(e.build_response(e.STATUS_ACK))]])
+    ok, _result = dialog._send_identity_request(inp, out)
+    assert ok  # the real question was still asked and answered
 
 
 def test_the_ensoniq_hardware_test_ignores_its_own_request_echoed_back(qapp, monkeypatch):
@@ -242,9 +279,9 @@ def test_the_ensoniq_hardware_test_ignores_its_own_request_echoed_back(qapp, mon
     from ui import settings_dialog
 
     monkeypatch.setattr(settings_dialog, "_LOOPBACK_RECEIVE_TIMEOUT", 0.05)
+    monkeypatch.setattr(settings_dialog, "_ENSONIQ_IDENTITY_TIMEOUT", 0.02)
     dialog = _ensoniq_dialog(qapp)
-    inp, out = _FakePort([_Reply(e.build_get_instrument(0))]), _FakePort()
-    out.peer = inp
+    inp, out = _paired([[], [_Reply(e.build_get_instrument(0))]])
     ok, text = dialog._send_identity_request(inp, out)
     assert not ok and "No reply from an Ensoniq" in text
     assert "SysEx is enabled" in text
@@ -252,8 +289,8 @@ def test_the_ensoniq_hardware_test_ignores_its_own_request_echoed_back(qapp, mon
 
 def test_the_ensoniq_hardware_test_needs_a_device_id_of_0_to_15(qapp):
     dialog = _ensoniq_dialog(qapp, device_id=20)
-    out = _FakePort()
-    ok, text = dialog._send_identity_request(_FakePort(), out)
+    inp, out = _paired([])
+    ok, text = dialog._send_identity_request(inp, out)
     assert not ok and "0-15" in text and out.sent == []
 
 
@@ -261,6 +298,7 @@ def test_the_ensoniq_hardware_test_describes_the_answers(qapp):
     from core import ensoniq_sysex as e
 
     dialog = _ensoniq_dialog(qapp)
+    dialog._ensoniq_identity_text = None
     fmt = lambda status: dialog._format_ensoniq_result(e.parse_message(e.build_response(status)))
     assert "Instrument 1 is loaded" in fmt(e.STATUS_ACK)
     assert "isn't loaded (a normal answer)" in fmt(e.STATUS_INVALID_INSTRUMENT)

@@ -23,9 +23,10 @@ Connect your sampler to your MIDI interface. The MIDI output of your sampler sho
 
 **2. Configure MIDI Settings**
 
-Select your MIDI Input/Output ports and choose your sampler type: Akai S1000, Akai S2000/S3000, Akai S900/S950 (experimental), Generic SDS or Yamaha A4000/A5000 (experimental). Select your SysEx channel (0 is the default for almost all MIDI hardware).
+Select your MIDI Input/Output ports and choose your sampler type: Akai S1000, Akai S2000/S3000, Akai S900/S950 (experimental), Ensoniq EPS/ASR (untested, experimental), Generic SDS or Yamaha A4000/A5000 (experimental). Select your SysEx channel (0 is the default for almost all MIDI hardware).
 
 - The **S900/S950** uses its own protocol, needs both a MIDI input and output, and hasn't been tested on real hardware yet - back up your sampler first.
+- The **Ensoniq EPS/EPS-16+/ASR-10** uses Ensoniq's own protocol (not Generic SDS), needs both a MIDI input and output, and has never been tried on real hardware - back up the unit first. Set the Device ID to its base MIDI channel minus 1 (0-15) and turn *MIDI SysEx Enable* on. Listing, receiving and sending samples work (each sent file becomes a new instrument; nothing is overwritten); there is no editor. The ASR-X has no published SysEx spec and may not respond.
 - The **Yamaha A4000/A5000** needs a *Device Number* set on the sampler (0 is what AKAISDS expects) and *Bulk Protect* switched **off**. See [Yamaha A4000/A5000 Editor](#yamaha-a4000a5000-editor-experimental).
 
 You can test your MIDI setup in the **Troubleshooting** tab. If you're having connectivity issues, check your MIDI connections to ensure they are not reversed. If you still don't see your sampler listed in the MIDI Hardware Test tab, see [MIDI Troubleshooting & Diagnostics](#midi-troubleshooting--diagnostics) for details.

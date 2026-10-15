@@ -289,7 +289,7 @@ class SamplerController(QObject):
         return self._ensoniq_engine is None or self._ensoniq_engine.idle
 
     def _ensoniq_not_supported(self, what):
-        # Ensoniq's own SysEx (core/ensoniq_sysex.py) has an engine for listing and receiving only
+        # Ensoniq's own SysEx (core/ensoniq_sysex.py) has an engine for listing, receiving and sending files only
         # (controller/ensoniq_transfers.py, dev_docs/ensoniq-support-plan.md). Entry points without an Ensoniq version refuse, so
         # choosing that Sampler Type can never put Akai or SDS bytes on the wire that an Ensoniq would misread. Replace a refusal
         # by delegating to the engine
@@ -1054,7 +1054,7 @@ class SamplerController(QObject):
         effective_bits=16,
         target_sample_rate=None,
     ):
-        if self._ensoniq_not_supported("Sending samples"):
+        if self._ensoniq_not_supported("Sending samples this way"):
             return
         if self._s950_not_supported("Sending samples this way"):
             return
@@ -1077,7 +1077,7 @@ class SamplerController(QObject):
         effective_bits=16,
         target_sample_rate=None,
     ):
-        if self._ensoniq_not_supported("Sending samples"):
+        if self._ensoniq_not_supported("Sending samples this way"):
             return
         if self._s950_not_supported("Sending samples this way"):
             return
@@ -1118,7 +1118,7 @@ class SamplerController(QObject):
     def send_sample_file_generic(
         self, filepath, sample_number=0, channel=None, bit_depth=16
     ):
-        if self._ensoniq_not_supported("Sending samples"):
+        if self._ensoniq_not_supported("Sending samples this way"):
             return
         if self._s950_not_supported("Sending samples this way"):
             return
@@ -1143,7 +1143,7 @@ class SamplerController(QObject):
     def send_sample_file_generic_and_rename(
         self, filepath, new_name, channel=None, bit_depth=16
     ):
-        if self._ensoniq_not_supported("Sending samples"):
+        if self._ensoniq_not_supported("Sending samples this way"):
             return
         if self._s950_not_supported("Sending samples this way"):
             return
@@ -1290,8 +1290,8 @@ class SamplerController(QObject):
     # ---------------------------------------------------------
 
     def send_file_queue(self, file_entries, channel=None, starting_sample_number=None):
-        if self._ensoniq_not_supported("Sending samples"):
-            return
+        if self._is_ensoniq():
+            return self._ensoniq.send_file_queue(file_entries)
         if self._is_s950():
             return self._s950.send_file_queue(file_entries)
         if self.is_yamaha_model():

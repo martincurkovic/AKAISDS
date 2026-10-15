@@ -1785,7 +1785,7 @@ def test_s950_refuses_what_it_has_no_protocol_for(s950_controller, tmp_path):
     assert c._s950_engine.calls == []
 
 
-# --- Sampler Type: Ensoniq EPS/ASR (list and receive delegate to the engine; everything else refuses) ---
+# --- Sampler Type: Ensoniq EPS/ASR (list, receive and the file queue delegate to the engine; everything else refuses) ---
 
 
 class _StubEnsoniqEngine:
@@ -1802,6 +1802,10 @@ class _StubEnsoniqEngine:
 
     def receive_samples(self, requests):
         self.calls.append(("receive_samples", requests))
+
+    def send_file_queue(self, entries):
+        self.calls.append(("send_file_queue", entries))
+        return True
 
     def handle_sysex(self, data):
         self.calls.append(("handle_sysex", bytes(data)))
@@ -1827,11 +1831,16 @@ def test_set_device_type_ensoniq_is_its_own_family(controller):
     assert controller.sampler_model == "ensoniq_eps_asr"
 
 
-def test_ensoniq_list_and_receive_delegate_to_the_engine(ensoniq_controller):
+def test_ensoniq_list_receive_and_send_delegate_to_the_engine(ensoniq_controller):
     c = ensoniq_controller
     c.refresh_sample_list(silent=True)
     c.receive_samples([(1, "x.wav")])
-    assert c._ensoniq_engine.calls == [("refresh_catalog", True), ("receive_samples", [(1, "x.wav")])]
+    assert c.send_file_queue([{"filepath": "a.wav"}], starting_sample_number=5) is True
+    assert c._ensoniq_engine.calls == [
+        ("refresh_catalog", True),
+        ("receive_samples", [(1, "x.wav")]),
+        ("send_file_queue", [{"filepath": "a.wav"}]),
+    ]
     # none of it went through the Akai/generic paths
     assert c.midi_manager.sent == [] and c.statuses == []
 
@@ -1851,7 +1860,7 @@ def test_ensoniq_sysex_goes_to_the_engine_not_the_akai_or_sds_parsers(ensoniq_co
 
 
 def test_ensoniq_refuses_what_it_has_no_protocol_for(ensoniq_controller, tmp_path):
-    # sending, renaming, deleting and sample info are not built: none may put Akai or SDS bytes on the wire for an Ensoniq
+    # the legacy per-file senders, renaming, deleting and sample info have no Ensoniq version: none may put Akai or SDS bytes on the wire
     c = ensoniq_controller
     wav = str(tmp_path / "x.wav")
     c.delete_sample(1)
@@ -1861,11 +1870,10 @@ def test_ensoniq_refuses_what_it_has_no_protocol_for(ensoniq_controller, tmp_pat
     c.send_stereo_sample_file(wav, 0, 1)
     c.send_sample_file_generic(wav)
     c.send_sample_file_generic_and_rename(wav, "NEW")
-    c.send_file_queue([{"filepath": wav}], starting_sample_number=3)
     c.receive_sample_generic(1, wav)
     assert c.midi_manager.sent == []
     assert not c._receiving and not c._file_queue and not c._receive_queue and not c._awaiting_memory_status
-    assert len(c.statuses) == 9
+    assert len(c.statuses) == 8
     assert all("Ensoniq" in s and "yet" in s for s in c.statuses)
     assert c._ensoniq_engine.calls == []
 

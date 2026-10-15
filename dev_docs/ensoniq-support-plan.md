@@ -1,6 +1,6 @@
 # Ensoniq (EPS / ASR) sample transmission
 
-Written 2026-10-15. **Status: research, the codec (`core/ensoniq_sysex.py`), the fake (`core/demo_ensoniq.py`), and `controller/ensoniq_transfers.py` (list + receive only, read only) behind the Sampler Type `ensoniq_eps_asr`. Sending is not built. No Ensoniq unit has been tried, no tester has reported back yet; test steps are in `tests/ensoniq_test_plan.md`.**
+Written 2026-10-15. **Status: research, the codec (`core/ensoniq_sysex.py`), the fake (`core/demo_ensoniq.py`), and `controller/ensoniq_transfers.py` (list, receive and send) behind the Sampler Type `ensoniq_eps_asr`. No Ensoniq unit has been tried, no tester has reported back yet; test steps are in `tests/ensoniq_test_plan.md`. The send flow below was built as described, with the changes noted in AGENTS.md (one instrument per file, no PUT INSTRUMENT).**
 Everything below is a reading of Ensoniq's own spec documents (scanned PDFs, read page by page as images) plus one third-party tool's
 source. Grades: **SPEC** = stated in an Ensoniq document, **TOOL** = seen in a community implementation, **GUESS** = ours. Standing rules
 and the code map: `AGENTS.md`. **A cross-check of this plan against the EPS spec's text layer (2026-10-15) is in `ensoniq-spec-crosscheck.md`: read it

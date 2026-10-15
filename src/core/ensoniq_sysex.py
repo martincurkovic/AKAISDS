@@ -264,10 +264,14 @@ PAGE_MIDI = 12
 PAGE_INSTRUMENT = 10
 PAGE_LAYER = 9
 PAGE_WAVESAMPLE = 8
+PAGE_VOLUME = 6
 
 # Free memory is readable (SPEC, EPS and ASR-10): "Free System Blocks", read only, 0-10000. GUESS: one block is 256 words, the
 # unit the instrument size uses.
 SYSTEM_ITEM_FREE_BLOCKS = 0x00
+# "Instrument Size", read only, in blocks (EPS: 0-10000, ASR-10: 0-32,000), item 7 of the instrument page on both. The block word 15
+# of the instrument block holds the same figure in ONE byte, so it can't be the real size of a big instrument: use this parameter.
+INSTRUMENT_ITEM_SIZE = 0x07
 BLOCK_WORDS = 256
 
 # wavesample page items that matched on the EPS and the ASR-10 (item numbers in hex on the ASR-10, decimal on the EPS)

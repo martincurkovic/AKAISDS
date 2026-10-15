@@ -735,16 +735,25 @@ def ensoniq_dashboard(dashboard):
     return dashboard
 
 
-def test_ensoniq_with_an_input_enables_browsing_but_not_sending_or_deleting(ensoniq_dashboard):
+def test_ensoniq_with_an_input_enables_browsing_and_sending_but_not_deleting(ensoniq_dashboard):
     d = ensoniq_dashboard
     assert d.list_hardware.isEnabled()
     assert d.btn_refresh.isEnabled()
-    assert d.btn_send.isEnabled() is False
-    assert "isn't implemented yet" in d.btn_send.toolTip()
+    assert d.btn_send.isEnabled() is True and d.btn_send.toolTip() == ""
     assert d.btn_delete_selected.isEnabled() is False
     assert d.btn_open_editor.isEnabled() is False
     assert "no editor" in d.btn_open_editor.toolTip()
-    assert d.memory_avail_prog_bar.isHidden()
+    assert not d.memory_avail_prog_bar.isHidden()  # free blocks + instrument sizes, read after each list
+
+
+def test_the_ensoniq_memory_bar_shows_a_figure_and_a_zero_total_means_unknown(ensoniq_dashboard):
+    bar = ensoniq_dashboard.memory_avail_prog_bar
+    ensoniq_dashboard.on_memory_status_updated(
+        {"max_num_samp_words": 1000 * 256, "num_words_free": 250 * 256, "num_blocks_free": 250}
+    )
+    assert bar.value() == 75 and "memory used" in bar.format()
+    ensoniq_dashboard.on_memory_status_updated({"max_num_samp_words": 0, "num_words_free": 0, "num_blocks_free": 0})
+    assert bar.value() == 0 and bar.format() == bar.UNKNOWN_FORMAT
 
 
 def test_ensoniq_without_an_input_cant_refresh_or_receive(dashboard):
@@ -753,6 +762,7 @@ def test_ensoniq_without_an_input_cant_refresh_or_receive(dashboard):
     dashboard._update_device_type_ui()
     assert dashboard.btn_refresh.isEnabled() is False
     assert dashboard.btn_receive.isEnabled() is False
+    assert dashboard.btn_send.isEnabled() is False  # every step of a send is answered by the unit
     assert "MIDI input" in dashboard.empty_hardware_label.text()
 
 
@@ -766,10 +776,44 @@ def test_ensoniq_rows_can_be_received_but_not_deleted_or_edited(ensoniq_dashboar
     assert buttons["Delete"].isEnabled() is False and buttons["Edit"].isEnabled() is False
 
 
-def test_a_finished_receive_does_not_re_enable_send_for_an_ensoniq(ensoniq_dashboard):
-    d = ensoniq_dashboard
-    d.on_receive_finished(True)
-    assert d.btn_send.isEnabled() is False
+def test_ensoniq_without_an_input_cant_send_and_says_why(dashboard):
+    dashboard.midi_manager.input_name = None
+    dashboard.sampler_controller.set_device_type("ensoniq_eps_asr")
+    dashboard.list_local.addItem("kick.wav")
+    dashboard._update_device_type_ui()
+    assert dashboard.btn_send.isEnabled() is False
+    assert "MIDI input" in dashboard.btn_send.toolTip()
+
+
+def test_the_ensoniq_experimental_warning_shows_once_and_cancel_blocks_the_send(ensoniq_dashboard, monkeypatch):
+    from PySide6.QtWidgets import QMessageBox
+
+    from core import app_config
+
+    state = {"acknowledged": False, "asked": 0, "answer": QMessageBox.StandardButton.Cancel}
+    monkeypatch.setattr(app_config, "get_ensoniq_transfer_warning_acknowledged", lambda: state["acknowledged"])
+    monkeypatch.setattr(
+        app_config, "save_ensoniq_transfer_warning_acknowledged", lambda value=True: state.update(acknowledged=value)
+    )
+
+    def _warning(*_a, **_k):
+        state["asked"] += 1
+        return state["answer"]
+
+    monkeypatch.setattr(QMessageBox, "warning", _warning)
+    assert ensoniq_dashboard._confirm_ensoniq_experimental() is False
+    assert state == {"acknowledged": False, "asked": 1, "answer": QMessageBox.StandardButton.Cancel}
+    state["answer"] = QMessageBox.StandardButton.Ok
+    assert ensoniq_dashboard._confirm_ensoniq_experimental() is True
+    assert ensoniq_dashboard._confirm_ensoniq_experimental() is True
+    assert state["acknowledged"] is True and state["asked"] == 2
+
+
+def test_other_sampler_types_never_see_the_ensoniq_warning(dashboard, monkeypatch):
+    from PySide6.QtWidgets import QMessageBox
+
+    monkeypatch.setattr(QMessageBox, "warning", lambda *a, **k: pytest.fail("warned a non-Ensoniq user"))
+    assert dashboard._confirm_ensoniq_experimental() is True
 
 
 def test_leaving_the_ensoniq_type_re_enables_send(ensoniq_dashboard):

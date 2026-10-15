@@ -703,14 +703,15 @@ class TransferDashboard(QWidget):
         has_samples = self.list_hardware.count() > 0
 
         if is_ensoniq:
-            # Ensoniq EPS/ASR: listing and receiving work (controller/ensoniq_transfers.py) but need a MIDI input - the unit answers on
-            # it. There is no memory request (so no bar), nothing can be deleted or renamed, and sending is not built yet
+            # Ensoniq EPS/ASR: listing, receiving and sending work (controller/ensoniq_transfers.py) but need a MIDI input - the unit answers on
+            # it. The memory bar is free blocks plus every instrument's size (read after each list), and nothing can be deleted or renamed
             self.list_hardware.setEnabled(True)
             self.btn_select_all.setEnabled(has_samples)
             self.btn_refresh.setEnabled(not is_open_loop)
             self.btn_receive.setEnabled(not is_open_loop and has_samples)
             self.btn_delete_selected.setEnabled(False)
-            self.memory_avail_prog_bar.setVisible(False)
+            self.memory_avail_prog_bar.setVisible(True)
+            self.memory_avail_prog_bar.setEnabled(not is_open_loop)
             if is_open_loop:
                 self.empty_hardware_label.setText(tooltips.ENSONIQ_NEEDS_MIDI_INPUT)
                 self.empty_hardware_label.setVisible(self.list_hardware.count() == 0)
@@ -1192,6 +1193,8 @@ class TransferDashboard(QWidget):
 
         if not self._confirm_s950_experimental():
             return
+        if not self._confirm_ensoniq_experimental():
+            return
 
         started = self.sampler_controller.send_file_queue(
             entries, starting_sample_number=self._global_starting_sample_number
@@ -1212,7 +1215,8 @@ class TransferDashboard(QWidget):
         # determine real units to send so the second progress_bar_overall can be shown appropriately
         total_units = 0
         for entry in entries:
-            if entry["mono"] or self._is_yamaha():  # a Yamaha loads a stereo file as ONE (stereo) sample
+            # a Yamaha loads a stereo file as ONE (stereo) sample; an Ensoniq gets it as one instrument (two layers)
+            if entry["mono"] or self._is_yamaha() or self.sampler_controller.device_type == sampler_models.FAMILY_ENSONIQ:
                 units = 1
             else:
                 try:
@@ -1250,6 +1254,29 @@ class TransferDashboard(QWidget):
         if answer != QMessageBox.StandardButton.Ok:
             return False
         app_config.save_s950_transfer_warning_acknowledged(True)
+        return True
+
+    def _confirm_ensoniq_experimental(self):
+        # Ensoniq sends were written from Ensoniq's spec documents with no Ensoniq on hand (see controller/ensoniq_transfers.py) -
+        # say so before the first send, once
+        if self.sampler_controller.device_type != sampler_models.FAMILY_ENSONIQ:
+            return True
+        if app_config.get_ensoniq_transfer_warning_acknowledged():
+            return True
+        answer = QMessageBox.warning(
+            self,
+            "Ensoniq EPS/ASR - experimental",
+            "Sending samples to an Ensoniq EPS/ASR is experimental.\n\n"
+            "It was written from Ensoniq's spec documents, without an Ensoniq to test against. Each file becomes a NEW "
+            "instrument in the first free slot (nothing is overwritten), but if a send fails, a half-built instrument "
+            "may be left on the unit. It can only be deleted from the front panel.\n\n"
+            "Save anything you can't afford to lose first, and please report problems along with ~/.akaisds/akaisds.log.",
+            QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Cancel,
+        )
+        if answer != QMessageBox.StandardButton.Ok:
+            return False
+        app_config.save_ensoniq_transfer_warning_acknowledged(True)
         return True
 
     def cancel_transfer(self):
@@ -1395,8 +1422,6 @@ class TransferDashboard(QWidget):
         self.btn_send.setEnabled(True)
         self.btn_receive.setEnabled(True)
         self.btn_cancel.setEnabled(False)
-        if self.sampler_controller.device_type == sampler_models.FAMILY_ENSONIQ:
-            self.btn_send.setEnabled(False)  # sending to an Ensoniq isn't built (see _update_queue_buttons_state)
         if completed:
             self.progress_bar_current_smpl.setValue(100)
             # samples that were just downloaded are done with - uncheck them so the list isn't left looking like theyre still queued
@@ -1680,20 +1705,20 @@ class TransferDashboard(QWidget):
         # the S900/S950 answers on the MIDI input (slot choice, readiness check
         # and naming all read replies), so it can't be sent to open loop
         needs_input = (
-            self.sampler_controller.device_type == sampler_models.FAMILY_S950
+            self.sampler_controller.device_type
+            in (sampler_models.FAMILY_S950, sampler_models.FAMILY_ENSONIQ)  # the Ensoniq answers every step of a send
             or self._is_yamaha()  # a native Yamaha load is checked by reading the unit afterwards
         ) and self.sampler_controller.is_open_loop()
-        if self.sampler_controller.device_type == sampler_models.FAMILY_ENSONIQ:
-            # listing and receiving exist; sending to an Ensoniq does not
-            self.btn_send.setEnabled(False)
-            self.btn_send.setToolTip(tooltips.ENSONIQ_SEND_NOT_READY)
-            return
         self.btn_send.setEnabled(has_files and not needs_input)
         self.btn_send.setToolTip(
             (
                 tooltips.YAMAHA_SEND_NEEDS_MIDI_INPUT
                 if self._is_yamaha()
-                else tooltips.S950_NEEDS_MIDI_INPUT
+                else (
+                    tooltips.ENSONIQ_NEEDS_MIDI_INPUT
+                    if self.sampler_controller.device_type == sampler_models.FAMILY_ENSONIQ
+                    else tooltips.S950_NEEDS_MIDI_INPUT
+                )
             )
             if has_files and needs_input
             else ""
@@ -1781,6 +1806,10 @@ class TransferDashboard(QWidget):
                 self.sampler_controller.rename_sample(info["sample_number"], new_name)
 
     def on_memory_status_updated(self, info):
+        if info.get("max_num_samp_words", 0) <= 0:
+            # the Ensoniq engine's way of saying "couldn't read it": show an empty bar saying so, not a stale figure
+            self.memory_avail_prog_bar.set_unknown("The sampler didn't report its memory")
+            return
         self.memory_avail_prog_bar.set_status(info)
 
     def confirm_and_delete_sample(self, name, sample_number):

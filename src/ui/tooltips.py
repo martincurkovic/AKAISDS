@@ -92,16 +92,12 @@ DEVICE_ID_CHANNEL = (
     "SysEx channels to be 1-128 instead of 0-127."
 )
 
-# Ensoniq EPS/ASR (see dev_docs/ensoniq-support-plan.md): listing and receiving samples only so far; it answers on the MIDI input
+# Ensoniq EPS/ASR (see dev_docs/ensoniq-support-plan.md): listing, receiving and sending samples (no editor); it answers on the MIDI input
 ENSONIQ_NEEDS_MIDI_INPUT = (
-    "The Ensoniq EPS/ASR answers on your MIDI input, so listing and\n"
-    "receiving samples needs one - select it in Settings."
+    "The Ensoniq EPS/ASR answers on your MIDI input, so listing, receiving\n"
+    "and sending samples needs one - select it in Settings."
 )
-ENSONIQ_SEND_NOT_READY = (
-    "Sending samples to the Ensoniq EPS/ASR isn't implemented yet -\n"
-    "listing and receiving samples work (experimental)."
-)
-ENSONIQ_NO_EDITOR = "There is no editor for the Ensoniq EPS/ASR - only listing and receiving samples."
+ENSONIQ_NO_EDITOR = "There is no editor for the Ensoniq EPS/ASR - only listing, receiving and sending samples."
 ENSONIQ_CANT_DELETE = "Deleting and renaming samples isn't available for the Ensoniq EPS/ASR."
 
 SAMPLER_TYPE = (
@@ -113,8 +109,9 @@ SAMPLER_TYPE = (
     "and renaming work (experimental), but deleting and the Program\n"
     "Editor aren't available.\n"
     "Ensoniq EPS/ASR (untested, experimental) uses Ensoniq's own\n"
-    "SysEx: listing and receiving samples only (set the Device ID to\n"
-    "its base MIDI channel minus 1).\n"
+    "SysEx: listing, receiving and sending samples (each sent file\n"
+    "becomes a new instrument). Set the Device ID to the unit's base\n"
+    "MIDI channel minus 1.\n"
     "Generic SDS uses only the universal standard - sending and\n"
     "receiving still work, but by sample number only, with no way\n"
     "to browse, rename or delete what's on the device."
