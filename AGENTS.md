@@ -11,6 +11,7 @@ and plans: `dev_docs/`.
 | anything that talks to a real sampler | "Real-hardware safety", "House rules" |
 | the Akai Program Editor (`program_editor_window.py`) | `BridgeWorker`, "Program Editor UI", "Samples tab", "Global tab" |
 | S1000 / S900-S950 / Yamaha A4000 | their own sections, then `dev_docs/` |
+| Ensoniq EPS/ASR (research only, nothing built; Generic SDS can't work) | `dev_docs/ensoniq-support-plan.md` |
 | sending samples, the Slice Editor, sample edits | "Sample send hardening", "Sample edits and the working copy", "Slice Editor" |
 | logs, bug reports | "Debug logging" |
 | running with no hardware | "Developing without hardware" (contributor version: `CONTRIBUTING.md`) |
