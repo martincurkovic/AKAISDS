@@ -191,13 +191,94 @@ def test_hardware_test_speaks_the_akai_protocol_for_the_s1000(qapp):
         assert dialog._selected_protocol_family() == family
 
 
-def test_hardware_test_for_the_ensoniq_sends_nothing_and_says_why(qapp):
-    # there is no Ensoniq discovery yet; the universal identity request would prove nothing about its own SysEx
-    midi = _FakeMidiManager(["In A"], ["Out A"])
-    dialog = MidiSettingsDialog(midi, _FakeSamplerController())
+class _FakePort:
+    # the mido-port surface _send_identity_request uses: sent messages are recorded, replies are queued by the test. The input port is
+    # drained before the request goes out, so a reply only appears once something has been sent through the paired output port
+    def __init__(self, replies=()):
+        self.sent = []
+        self._replies = list(replies)
+        self._open = False
+        self.peer = None
+
+    def send(self, message):
+        self.sent.append(message)
+        if self.peer is not None:
+            self.peer._open = True
+
+    def poll(self):
+        if self._open and self._replies:
+            return self._replies.pop(0)
+        return None
+
+
+class _Reply:
+    type = "sysex"
+
+    def __init__(self, data):
+        self.data = tuple(data)
+
+
+def _ensoniq_dialog(qapp, device_id=0):
+    dialog = MidiSettingsDialog(_FakeMidiManager(["In A"], ["Out A"]), _FakeSamplerController())
     dialog.combo_device_type.setCurrentIndex(dialog.combo_device_type.findData("ensoniq_eps_asr"))
-    dialog._run_identity_request()
-    assert "aren't implemented yet" in dialog.id_results_label.text()
+    dialog.spin_channel.setValue(device_id)
+    return dialog
+
+
+def test_the_ensoniq_hardware_test_sends_one_read_only_get_instrument(qapp):
+    from core import ensoniq_sysex as e
+
+    dialog = _ensoniq_dialog(qapp, device_id=3)
+    inp, out = _FakePort([_Reply(e.build_response(e.STATUS_ACK, 3))]), _FakePort()
+    out.peer = inp
+    ok, result = dialog._send_identity_request(inp, out)
+    assert ok and result.command == e.CMD_RESPONSE
+    assert [m.data for m in out.sent] == [tuple(e.build_get_instrument(0, channel=3))]
+
+
+def test_the_ensoniq_hardware_test_ignores_its_own_request_echoed_back(qapp, monkeypatch):
+    # a DAW on the same interface can send our request straight back: that is not the unit answering
+    from core import ensoniq_sysex as e
+    from ui import settings_dialog
+
+    monkeypatch.setattr(settings_dialog, "_LOOPBACK_RECEIVE_TIMEOUT", 0.05)
+    dialog = _ensoniq_dialog(qapp)
+    inp, out = _FakePort([_Reply(e.build_get_instrument(0))]), _FakePort()
+    out.peer = inp
+    ok, text = dialog._send_identity_request(inp, out)
+    assert not ok and "No reply from an Ensoniq" in text
+    assert "SysEx is enabled" in text
+
+
+def test_the_ensoniq_hardware_test_needs_a_device_id_of_0_to_15(qapp):
+    dialog = _ensoniq_dialog(qapp, device_id=20)
+    out = _FakePort()
+    ok, text = dialog._send_identity_request(_FakePort(), out)
+    assert not ok and "0-15" in text and out.sent == []
+
+
+def test_the_ensoniq_hardware_test_describes_the_answers(qapp):
+    from core import ensoniq_sysex as e
+
+    dialog = _ensoniq_dialog(qapp)
+    fmt = lambda status: dialog._format_ensoniq_result(e.parse_message(e.build_response(status)))
+    assert "Instrument 1 is loaded" in fmt(e.STATUS_ACK)
+    assert "isn't loaded (a normal answer)" in fmt(e.STATUS_INVALID_INSTRUMENT)
+    assert "memory full" in fmt(e.STATUS_MEMORY_FULL)
+    put = e.parse_message(e.build_message(e.CMD_PUT_INSTRUMENT, e.encode_context(0, 0, 1)))
+    assert "instrument data" in dialog._format_ensoniq_result(put)
+    assert all("Ensoniq EPS/ASR SysEx answered" in fmt(s) for s in (0, 5, 12))
+
+
+def test_only_a_response_or_a_put_counts_as_an_ensoniq_answer(qapp):
+    from core import ensoniq_sysex as e
+
+    ok = MidiSettingsDialog._is_ensoniq_answer
+    assert ok(e.build_response(e.STATUS_ACK))
+    assert ok(e.build_message(e.CMD_PUT_INSTRUMENT, e.encode_context(0, 0, 1)))
+    assert not ok(e.build_get_instrument(0))  # our own request
+    assert not ok([0x47, 0x00, 0x05, 0x00])
+    assert not ok([0x0F, 0x03, 0x00])
 
 
 # --- Settings tab + Appearance card ---------------------------------------------------------------

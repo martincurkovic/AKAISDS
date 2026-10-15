@@ -618,6 +618,7 @@ class TransferDashboard(QWidget):
         if self._is_yamaha() or self.sampler_controller.device_type in (
             "akai",
             sampler_models.FAMILY_S950,
+            sampler_models.FAMILY_ENSONIQ,
         ):
             if self.sampler_controller.is_open_loop():
                 self.empty_hardware_label.setText(
@@ -675,7 +676,7 @@ class TransferDashboard(QWidget):
         elif not has_ports:
             self.btn_open_editor.setToolTip(tooltips.OPEN_EDITOR_NEEDS_MIDI_PORTS)
         elif is_ensoniq:
-            self.btn_open_editor.setToolTip(tooltips.ENSONIQ_NOT_READY)
+            self.btn_open_editor.setToolTip(tooltips.ENSONIQ_NO_EDITOR)
         elif is_s950:
             self.btn_open_editor.setToolTip(tooltips.OPEN_EDITOR_S950)
         elif is_yamaha:
@@ -702,16 +703,19 @@ class TransferDashboard(QWidget):
         has_samples = self.list_hardware.count() > 0
 
         if is_ensoniq:
-            # no Ensoniq engine yet (the controller refuses every entry point too): nothing to browse, receive or delete
-            self.list_hardware.clear()
-            self.list_hardware.setEnabled(False)
-            self.btn_select_all.setEnabled(False)
-            self.btn_refresh.setEnabled(False)
-            self.btn_receive.setEnabled(False)
+            # Ensoniq EPS/ASR: listing and receiving work (controller/ensoniq_transfers.py) but need a MIDI input - the unit answers on
+            # it. There is no memory request (so no bar), nothing can be deleted or renamed, and sending is not built yet
+            self.list_hardware.setEnabled(True)
+            self.btn_select_all.setEnabled(has_samples)
+            self.btn_refresh.setEnabled(not is_open_loop)
+            self.btn_receive.setEnabled(not is_open_loop and has_samples)
             self.btn_delete_selected.setEnabled(False)
             self.memory_avail_prog_bar.setVisible(False)
-            self.empty_hardware_label.setText(tooltips.ENSONIQ_NOT_READY)
-            self.empty_hardware_label.setVisible(True)
+            if is_open_loop:
+                self.empty_hardware_label.setText(tooltips.ENSONIQ_NEEDS_MIDI_INPUT)
+                self.empty_hardware_label.setVisible(self.list_hardware.count() == 0)
+            else:
+                self._update_empty_hardware_placeholder()
             self._update_queue_buttons_state()
             return
 
@@ -1391,6 +1395,8 @@ class TransferDashboard(QWidget):
         self.btn_send.setEnabled(True)
         self.btn_receive.setEnabled(True)
         self.btn_cancel.setEnabled(False)
+        if self.sampler_controller.device_type == sampler_models.FAMILY_ENSONIQ:
+            self.btn_send.setEnabled(False)  # sending to an Ensoniq isn't built (see _update_queue_buttons_state)
         if completed:
             self.progress_bar_current_smpl.setValue(100)
             # samples that were just downloaded are done with - uncheck them so the list isn't left looking like theyre still queued
@@ -1678,8 +1684,9 @@ class TransferDashboard(QWidget):
             or self._is_yamaha()  # a native Yamaha load is checked by reading the unit afterwards
         ) and self.sampler_controller.is_open_loop()
         if self.sampler_controller.device_type == sampler_models.FAMILY_ENSONIQ:
+            # listing and receiving exist; sending to an Ensoniq does not
             self.btn_send.setEnabled(False)
-            self.btn_send.setToolTip(tooltips.ENSONIQ_NOT_READY)
+            self.btn_send.setToolTip(tooltips.ENSONIQ_SEND_NOT_READY)
             return
         self.btn_send.setEnabled(has_files and not needs_input)
         self.btn_send.setToolTip(
@@ -1702,10 +1709,12 @@ class TransferDashboard(QWidget):
             if checkbox and checkbox.isChecked():
                 any_checked = True
                 break
-        # nothing is ever deletable on an S900/S950 (no such opcode), nor on a Yamaha A4000/A5000 (none known)
+        # nothing is ever deletable on an S900/S950 (no such opcode), nor on a Yamaha A4000/A5000 (none known), nor on an Ensoniq
+        # (the delete commands exist but are never sent from here)
         self.btn_delete_selected.setEnabled(
             any_checked
-            and self.sampler_controller.device_type != sampler_models.FAMILY_S950
+            and self.sampler_controller.device_type
+            not in (sampler_models.FAMILY_S950, sampler_models.FAMILY_ENSONIQ)
             and not self._is_yamaha()
         )
 
@@ -1744,6 +1753,11 @@ class TransferDashboard(QWidget):
         if self.sampler_controller.device_type == sampler_models.FAMILY_S950:
             btn_del.setEnabled(False)
             btn_del.setToolTip(tooltips.S950_CANT_DELETE)
+        if self.sampler_controller.device_type == sampler_models.FAMILY_ENSONIQ:
+            btn_del.setEnabled(False)
+            btn_del.setToolTip(tooltips.ENSONIQ_CANT_DELETE)
+            btn_edit.setEnabled(False)
+            btn_edit.setToolTip(tooltips.ENSONIQ_CANT_DELETE)
         if self._is_yamaha():
             btn_del.setEnabled(False)
             btn_del.setToolTip(tooltips.YAMAHA_CANT_DELETE)

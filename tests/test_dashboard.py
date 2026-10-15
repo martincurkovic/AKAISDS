@@ -735,14 +735,41 @@ def ensoniq_dashboard(dashboard):
     return dashboard
 
 
-def test_ensoniq_disables_everything_and_says_why(ensoniq_dashboard):
+def test_ensoniq_with_an_input_enables_browsing_but_not_sending_or_deleting(ensoniq_dashboard):
     d = ensoniq_dashboard
-    for button in (d.btn_refresh, d.btn_receive, d.btn_send, d.btn_select_all, d.btn_delete_selected, d.btn_open_editor):
-        assert button.isEnabled() is False
+    assert d.list_hardware.isEnabled()
+    assert d.btn_refresh.isEnabled()
+    assert d.btn_send.isEnabled() is False
+    assert "isn't implemented yet" in d.btn_send.toolTip()
+    assert d.btn_delete_selected.isEnabled() is False
+    assert d.btn_open_editor.isEnabled() is False
+    assert "no editor" in d.btn_open_editor.toolTip()
     assert d.memory_avail_prog_bar.isHidden()
-    assert "aren't implemented yet" in d.empty_hardware_label.text()
-    assert "aren't implemented yet" in d.btn_send.toolTip()
-    assert "aren't implemented yet" in d.btn_open_editor.toolTip()
+
+
+def test_ensoniq_without_an_input_cant_refresh_or_receive(dashboard):
+    dashboard.midi_manager.input_name = None
+    dashboard.sampler_controller.set_device_type("ensoniq_eps_asr")
+    dashboard._update_device_type_ui()
+    assert dashboard.btn_refresh.isEnabled() is False
+    assert dashboard.btn_receive.isEnabled() is False
+    assert "MIDI input" in dashboard.empty_hardware_label.text()
+
+
+def test_ensoniq_rows_can_be_received_but_not_deleted_or_edited(ensoniq_dashboard):
+    d = ensoniq_dashboard
+    d.on_sample_slots_updated([(1, "KICK"), (130, "SNARE")])
+    assert d.list_hardware.count() == 2
+    assert d.btn_receive.isEnabled() is True
+    row = d.list_hardware.itemWidget(d.list_hardware.item(0))
+    buttons = {b.text(): b for b in row.findChildren(type(d.btn_send))}
+    assert buttons["Delete"].isEnabled() is False and buttons["Edit"].isEnabled() is False
+
+
+def test_a_finished_receive_does_not_re_enable_send_for_an_ensoniq(ensoniq_dashboard):
+    d = ensoniq_dashboard
+    d.on_receive_finished(True)
+    assert d.btn_send.isEnabled() is False
 
 
 def test_leaving_the_ensoniq_type_re_enables_send(ensoniq_dashboard):

@@ -67,6 +67,7 @@ class SamplerController(QObject):
         self.device_type = "akai"
         self.sampler_model = sampler_models.AKAI_S2000_S3000
         self._s950_engine = None  # built on first use - see _s950
+        self._ensoniq_engine = None  # built on first use - see _ensoniq
         self._yamaha_transfers_engine = None  # the Dashboard's Yamaha list/receive - see _yamaha_transfers
         self._yamaha_engine = None  # built on first use - see _yamaha
 
@@ -275,10 +276,23 @@ class SamplerController(QObject):
     def _is_ensoniq(self):
         return self.device_type == sampler_models.FAMILY_ENSONIQ
 
+    @property
+    def _ensoniq(self):
+        # the Ensoniq EPS/ASR's list and receive (controller/ensoniq_transfers.py), built the first time they're needed
+        if self._ensoniq_engine is None:
+            from controller.ensoniq_transfers import EnsoniqTransfers
+
+            self._ensoniq_engine = EnsoniqTransfers(self)
+        return self._ensoniq_engine
+
+    def is_ensoniq_idle(self):
+        return self._ensoniq_engine is None or self._ensoniq_engine.idle
+
     def _ensoniq_not_supported(self, what):
-        # Ensoniq's own SysEx (core/ensoniq_sysex.py) is only a codec so far: there is no transfer engine yet
-        # (dev_docs/ensoniq-support-plan.md). Every entry point refuses, so choosing that Sampler Type can never put
-        # Akai or SDS bytes on the wire that an Ensoniq would misread. Replace a refusal by delegating to the engine
+        # Ensoniq's own SysEx (core/ensoniq_sysex.py) has an engine for listing and receiving only
+        # (controller/ensoniq_transfers.py, dev_docs/ensoniq-support-plan.md). Entry points without an Ensoniq version refuse, so
+        # choosing that Sampler Type can never put Akai or SDS bytes on the wire that an Ensoniq would misread. Replace a refusal
+        # by delegating to the engine
         if not self._is_ensoniq():
             return False
         debug_log.get_logger().info(
@@ -288,7 +302,8 @@ class SamplerController(QObject):
         return True
 
     def refresh_sample_list(self, silent=False):
-        if self._ensoniq_not_supported("Listing samples"):
+        if self._is_ensoniq():
+            self._ensoniq.refresh_catalog(silent)
             return
         if self.is_yamaha_model():
             self._yamaha_transfers.refresh_list(silent)
@@ -733,10 +748,8 @@ class SamplerController(QObject):
             return
 
         if self._is_ensoniq():
-            # Ensoniq traffic (F0 0F ...) has no handler yet and must not reach the Akai-family or SDS parsers below
-            debug_log.get_logger().debug(
-                f"SamplerController: ignored {len(data_bytes)} byte SysEx (Ensoniq has no engine yet)"
-            )
+            # Ensoniq traffic (F0 0F ...) must not reach the Akai-family or SDS parsers below, which would misread it
+            self._ensoniq.handle_sysex(data_bytes)
             return
 
         if self._is_s950():
@@ -1466,7 +1479,7 @@ class SamplerController(QObject):
     # -----------------------------------------------------------------------------
 
     def receive_sample_generic(self, sample_number, save_path, channel=None):
-        if self._ensoniq_not_supported("Receiving samples"):
+        if self._ensoniq_not_supported("Receiving samples by number"):
             return
         if self._s950_not_supported("Receiving samples by number"):
             return
@@ -1507,7 +1520,8 @@ class SamplerController(QObject):
         self.status_changed.emit(f"Requesting sample {sample_number} (generic SDS)...")
 
     def receive_samples(self, sample_requests, channel=None):
-        if self._ensoniq_not_supported("Receiving samples"):
+        if self._is_ensoniq():
+            self._ensoniq.receive_samples(sample_requests)
             return
         if self._is_s950():
             self._s950.receive_samples(sample_requests)
@@ -1782,6 +1796,8 @@ class SamplerController(QObject):
         # should be safe to call at any time i think
         if self._s950_engine is not None and self._s950_engine.cancel():
             return
+        if self._ensoniq_engine is not None and self._ensoniq_engine.cancel():
+            return
         if self._yamaha_transfers_engine is not None and self._yamaha_transfers_engine.cancel():
             return
         in_progrss = (
@@ -1874,6 +1890,7 @@ class SamplerController(QObject):
         return bool(
             self.is_sds_transfer_busy()
             or (self._s950_engine is not None and self._s950_engine.busy)
+            or (self._ensoniq_engine is not None and self._ensoniq_engine.busy)
             or (self._yamaha_transfers_engine is not None and self._yamaha_transfers_engine.busy)
         )
 

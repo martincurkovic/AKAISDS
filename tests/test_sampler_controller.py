@@ -1785,12 +1785,36 @@ def test_s950_refuses_what_it_has_no_protocol_for(s950_controller, tmp_path):
     assert c._s950_engine.calls == []
 
 
-# --- Sampler Type: Ensoniq EPS/ASR (a codec only so far: every entry point refuses) ---
+# --- Sampler Type: Ensoniq EPS/ASR (list and receive delegate to the engine; everything else refuses) ---
+
+
+class _StubEnsoniqEngine:
+    # stands in for controller/ensoniq_transfers.EnsoniqTransfers (real Qt timers - tested on its own in test_ensoniq_transfers.py);
+    # this file runs under a fake QtCore and only checks the controller's DELEGATION
+    def __init__(self):
+        self.calls = []
+        self.busy = False
+        self.idle = True
+        self.cancel_result = False
+
+    def refresh_catalog(self, silent=False):
+        self.calls.append(("refresh_catalog", silent))
+
+    def receive_samples(self, requests):
+        self.calls.append(("receive_samples", requests))
+
+    def handle_sysex(self, data):
+        self.calls.append(("handle_sysex", bytes(data)))
+
+    def cancel(self):
+        self.calls.append(("cancel",))
+        return self.cancel_result
 
 
 @pytest.fixture
 def ensoniq_controller(controller):
     controller.set_device_type("ensoniq_eps_asr")
+    controller._ensoniq_engine = _StubEnsoniqEngine()
     statuses = []
     controller.status_changed.connect(statuses.append)
     controller.statuses = statuses
@@ -1803,12 +1827,33 @@ def test_set_device_type_ensoniq_is_its_own_family(controller):
     assert controller.sampler_model == "ensoniq_eps_asr"
 
 
-def test_ensoniq_refuses_every_entry_point_and_puts_nothing_on_the_wire(ensoniq_controller, tmp_path):
-    # no Ensoniq engine exists yet: Akai or SDS bytes sent to an Ensoniq would be misread, so nothing may fall through
+def test_ensoniq_list_and_receive_delegate_to_the_engine(ensoniq_controller):
+    c = ensoniq_controller
+    c.refresh_sample_list(silent=True)
+    c.receive_samples([(1, "x.wav")])
+    assert c._ensoniq_engine.calls == [("refresh_catalog", True), ("receive_samples", [(1, "x.wav")])]
+    # none of it went through the Akai/generic paths
+    assert c.midi_manager.sent == [] and c.statuses == []
+
+
+def test_ensoniq_sysex_goes_to_the_engine_not_the_akai_or_sds_parsers(ensoniq_controller):
+    c = ensoniq_controller
+    updates = []
+    c.sample_list_updated.connect(updates.append)
+    c.on_sysex_received([0x0F, 0x03, 0x00, 0x01, 0x00, 0x00])
+    c.on_sysex_received([0x7E, 0x00, 0x02, 0x00])  # an SDS ACK is the engine's to ignore, not the SDS parser's
+    assert updates == []
+    assert c._ensoniq_engine.calls == [
+        ("handle_sysex", bytes([0x0F, 0x03, 0x00, 0x01, 0x00, 0x00])),
+        ("handle_sysex", bytes([0x7E, 0x00, 0x02, 0x00])),
+    ]
+    assert c.statuses == [] and c.midi_manager.sent == []
+
+
+def test_ensoniq_refuses_what_it_has_no_protocol_for(ensoniq_controller, tmp_path):
+    # sending, renaming, deleting and sample info are not built: none may put Akai or SDS bytes on the wire for an Ensoniq
     c = ensoniq_controller
     wav = str(tmp_path / "x.wav")
-    c.refresh_sample_list()
-    c.refresh_sample_list(silent=True)
     c.delete_sample(1)
     c.rename_sample(1, "NEW")
     c.request_sample_info(1)
@@ -1818,22 +1863,22 @@ def test_ensoniq_refuses_every_entry_point_and_puts_nothing_on_the_wire(ensoniq_
     c.send_sample_file_generic_and_rename(wav, "NEW")
     c.send_file_queue([{"filepath": wav}], starting_sample_number=3)
     c.receive_sample_generic(1, wav)
-    c.receive_samples([(1, wav)])
     assert c.midi_manager.sent == []
     assert not c._receiving and not c._file_queue and not c._receive_queue and not c._awaiting_memory_status
-    assert len(c.statuses) == 12
+    assert len(c.statuses) == 9
     assert all("Ensoniq" in s and "yet" in s for s in c.statuses)
+    assert c._ensoniq_engine.calls == []
 
 
-def test_ensoniq_traffic_never_reaches_the_akai_or_sds_parsers(ensoniq_controller):
+def test_cancel_and_busy_include_the_ensoniq_engine(ensoniq_controller):
     c = ensoniq_controller
-    updates = []
-    c.sample_list_updated.connect(updates.append)
-    # F0 0F 03 00 03 ... would otherwise be tried as SDS (0x7E) / Akai (0x47) and could trip their error paths
-    c.on_sysex_received([0x0F, 0x03, 0x00, 0x01, 0x00, 0x00])
-    c.on_sysex_received([0x7E, 0x00, 0x02, 0x00])  # an SDS ACK
-    assert updates == []
-    assert c.statuses == [] and c.midi_manager.sent == []
+    assert c.is_transfer_busy() is False and c.is_ensoniq_idle() is True
+    c._ensoniq_engine.busy = True
+    c._ensoniq_engine.idle = False
+    assert c.is_transfer_busy() is True and c.is_ensoniq_idle() is False
+    c._ensoniq_engine.cancel_result = True
+    c.cancel_transfer()
+    assert c._ensoniq_engine.calls == [("cancel",)]
 
 
 def test_other_families_are_not_refused_as_ensoniq(controller):

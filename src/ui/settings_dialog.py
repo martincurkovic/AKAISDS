@@ -23,6 +23,7 @@ from core import (
     app_config,
     audio_preview,
     debug_log,
+    ensoniq_sysex,
     midi_identity,
     s950_sysex,
     sampler_models,
@@ -490,12 +491,6 @@ class MidiSettingsDialog(QDialog):
         return sampler_models.protocol_family(self.combo_device_type.currentData())
 
     def _run_identity_request(self):
-        if self._selected_protocol_family() == sampler_models.FAMILY_ENSONIQ:
-            # nothing to send yet: the Ensoniq hardware test is a read-only discovery that doesn't exist (the universal identity
-            # request goes to every device and would say nothing about whether the unit speaks Ensoniq's own SysEx)
-            self.id_results_label.setText(tooltips.ENSONIQ_NOT_READY)
-            return
-
         input_name = self.combo_input.currentData()
         output_name = self.combo_output.currentData()
 
@@ -539,6 +534,10 @@ class MidiSettingsDialog(QDialog):
                         self.id_results_label.setText(
                             self._format_s950_result(id_response)
                         )
+                    elif device_type == sampler_models.FAMILY_ENSONIQ:
+                        self.id_results_label.setText(
+                            self._format_ensoniq_result(id_response)
+                        )
                     else:
                         self.id_results_label.setText(
                             self._format_identity_result(id_response)
@@ -578,6 +577,12 @@ class MidiSettingsDialog(QDialog):
 
         device_type = self._selected_protocol_family()
 
+        if device_type == sampler_models.FAMILY_ENSONIQ and not 0 <= self.spin_channel.value() <= 15:
+            return (
+                False,
+                "The Ensoniq needs a Device ID of 0-15 (its base MIDI channel minus 1) - set it above",
+            )
+
         if device_type == "akai":
             output_port.send(
                 mido.Message("sysex", data=midi_identity.build_rstat_request_message())
@@ -593,6 +598,15 @@ class MidiSettingsDialog(QDialog):
                     ),
                 )
             )
+        elif device_type == sampler_models.FAMILY_ENSONIQ:
+            # read only, one request: "is instrument 1 loaded?" (GET INSTRUMENT). The universal identity request tells nothing here: it
+            # goes to every device and says nothing about whether the unit speaks Ensoniq's own SysEx
+            output_port.send(
+                mido.Message(
+                    "sysex",
+                    data=ensoniq_sysex.build_get_instrument(0, channel=self.spin_channel.value()),
+                )
+            )
         else:
             output_port.send(
                 mido.Message(
@@ -604,15 +618,33 @@ class MidiSettingsDialog(QDialog):
         while time.monotonic() < deadline:
             incoming = input_port.poll()
             if incoming is not None and incoming.type == "sysex":
+                if device_type == sampler_models.FAMILY_ENSONIQ and not self._is_ensoniq_answer(incoming.data):
+                    # not an answer: our own request echoed back (a DAW on the same interface does this), or someone else's SysEx
+                    continue
                 response = incoming
                 break
             QApplication.processEvents()
 
+        if response is None and device_type == sampler_models.FAMILY_ENSONIQ:
+            return (
+                False,
+                "No reply from an Ensoniq - check it's on, MIDI SysEx is enabled in its MIDI settings, both "
+                "cables are connected and the Device ID matches its base MIDI channel minus 1",
+            )
         if response is None:
             return False, "Sampler hardware not found - please check your MIDI setup"
 
         if device_type == "akai":
             received_data = midi_identity.parse_stat_response(response.data)
+        elif device_type == sampler_models.FAMILY_ENSONIQ:
+            try:
+                received_data = ensoniq_sysex.parse_message(response.data)
+            except ValueError as e:
+                return False, f"Got a reply, but it doesn't look like an Ensoniq EPS/ASR answer ({e})"
+            debug_log.get_logger().info(
+                f"MidiSettingsDialog: Ensoniq answered command 0x{received_data.command:02X}, body "
+                f"{bytes(received_data.body[:16]).hex(' ')}"
+            )
         elif device_type == sampler_models.FAMILY_S950:
             try:
                 message = s950_sysex.parse_akai(response.data)
@@ -648,6 +680,27 @@ class MidiSettingsDialog(QDialog):
             f"Programs in memory: {programs}\n"
             f"Samples in memory: {samples}"
         )
+
+    @staticmethod
+    def _is_ensoniq_answer(data):
+        # an Ensoniq's answer to a GET is a RESPONSE or a PUT; a GET (command 03-0A) is our own request coming back
+        if not ensoniq_sysex.is_ensoniq(data) or len(data) < 4:
+            return False
+        command = data[3]
+        return command == ensoniq_sysex.CMD_RESPONSE or ensoniq_sysex.CMD_PUT_INSTRUMENT <= command <= ensoniq_sysex.CMD_PUT_PARAMETER
+
+    def _format_ensoniq_result(self, message):
+        if message.command == ensoniq_sysex.CMD_RESPONSE:
+            status = ensoniq_sysex.parse_response(message)
+            if status == ensoniq_sysex.STATUS_ACK:
+                detail = "Instrument 1 is loaded."
+            elif status == ensoniq_sysex.STATUS_INVALID_INSTRUMENT:
+                detail = "Instrument 1 isn't loaded (a normal answer)."
+            else:
+                detail = f"Status: {ensoniq_sysex.status_name(status)}."
+        else:
+            detail = "It sent instrument data."
+        return f"Ensoniq EPS/ASR SysEx answered.\n{detail}"
 
     def _format_identity_result(self, data):
         manuf_name = midi_identity.lookup_manufacturer(data["manuf_id"])
