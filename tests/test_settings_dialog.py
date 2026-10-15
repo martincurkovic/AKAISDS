@@ -142,7 +142,7 @@ def test_dialog_width_ignores_which_tab_is_currently_shown(qapp):
 # --- Sampler Type combo (S1000 / S2000/S3000 / Generic) ----------------------
 
 
-def test_sampler_type_combo_lists_the_five_models_alphabetically(qapp):
+def test_sampler_type_combo_lists_the_six_models_alphabetically(qapp):
     dialog = MidiSettingsDialog(_FakeMidiManager(["In A"], ["Out A"]), _FakeSamplerController())
     labels = [
         dialog.combo_device_type.itemText(i)
@@ -152,14 +152,16 @@ def test_sampler_type_combo_lists_the_five_models_alphabetically(qapp):
         "Akai S1000",
         "Akai S2000/S3000",
         "Akai S900/S950 (experimental)",
+        "Ensoniq EPS/ASR (untested, experimental)",
         "Generic SDS",
         "Yamaha A4000/A5000 (experimental)",
     ]
     assert labels == sorted(labels)
-    assert [dialog.combo_device_type.itemData(i) for i in range(5)] == [
+    assert [dialog.combo_device_type.itemData(i) for i in range(6)] == [
         "akai_s1000",
         "akai_s2000_s3000",
         "akai_s900_s950",
+        "ensoniq_eps_asr",
         "generic",
         "yamaha_a4000",
     ]
@@ -179,6 +181,7 @@ def test_hardware_test_speaks_the_akai_protocol_for_the_s1000(qapp):
         ("akai_s1000", "akai"),
         ("akai_s2000_s3000", "akai"),
         ("akai_s900_s950", "s950"),
+        ("ensoniq_eps_asr", "ensoniq"),
         ("generic", "generic"),
         ("yamaha_a4000", "generic"),
     ]:
@@ -186,6 +189,15 @@ def test_hardware_test_speaks_the_akai_protocol_for_the_s1000(qapp):
             dialog.combo_device_type.findData(selection)
         )
         assert dialog._selected_protocol_family() == family
+
+
+def test_hardware_test_for_the_ensoniq_sends_nothing_and_says_why(qapp):
+    # there is no Ensoniq discovery yet; the universal identity request would prove nothing about its own SysEx
+    midi = _FakeMidiManager(["In A"], ["Out A"])
+    dialog = MidiSettingsDialog(midi, _FakeSamplerController())
+    dialog.combo_device_type.setCurrentIndex(dialog.combo_device_type.findData("ensoniq_eps_asr"))
+    dialog._run_identity_request()
+    assert "aren't implemented yet" in dialog.id_results_label.text()
 
 
 # --- Settings tab + Appearance card ---------------------------------------------------------------

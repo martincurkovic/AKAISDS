@@ -1,6 +1,6 @@
-# The five "Sampler Type" choices in Settings, and what each one implies.
+# The six "Sampler Type" choices in Settings, and what each one implies.
 #
-# A selection is one of five strings (what MidiSettingsDialog's combo stores
+# A selection is one of six strings (what MidiSettingsDialog's combo stores
 # as item data, and what app_config persists as "device_type"):
 #
 #   "akai_s2000_s3000" - Akai S2000/S3000 series
@@ -10,6 +10,9 @@
 #   "yamaha_a4000"     - Yamaha A4000/A5000: its PROTOCOL FAMILY is "generic", but listing, receiving AND SENDING
 #                        samples and the Program Editor all speak Yamaha SysEx (core/yamaha_sysex.py,
 #                        controller/yamaha_transfers.py - sends are the unit's native bulk load, not SDS)
+#   "ensoniq_eps_asr"  - Ensoniq EPS/EPS-16+/ASR-10 (its own SysEx, manufacturer 0x0F: see core/ensoniq_sysex.py and
+#                        dev_docs/ensoniq-support-plan.md). Research only so far: the Sampler Type is listed, and every
+#                        transfer entry point REFUSES until the engine exists
 #
 # Before the S1000 existed the S2000/S3000 entry was saved as plain "akai".
 # That legacy value is still ACCEPTED everywhere (normalize() maps it), and
@@ -17,7 +20,7 @@
 # the file names the actual hardware - see LEGACY_AKAI.
 #
 # Everything transfer-related (SamplerController) only cares about the
-# PROTOCOL FAMILY - "akai", "generic" or "s950" - since an S1000's SDS/RSTAT/list
+# PROTOCOL FAMILY - "akai", "generic", "s950" or "ensoniq" - since an S1000's SDS/RSTAT/list
 # traffic is the same as the S2000/S3000's (the Dashboard already worked
 # against a real S1000 before this existed). Only the Program Editor cares
 # about the S1000 vs S2000/S3000 split, because the two answer completely
@@ -32,6 +35,7 @@ AKAI_S1000 = "akai_s1000"
 AKAI_S900_S950 = "akai_s900_s950"
 GENERIC_SDS = "generic"
 YAMAHA_A4000 = "yamaha_a4000"
+ENSONIQ_EPS_ASR = "ensoniq_eps_asr"
 
 FAMILY_AKAI = "akai"
 FAMILY_GENERIC = "generic"
@@ -39,6 +43,9 @@ FAMILY_GENERIC = "generic"
 #: codes, one-SysEx sample dumps) - nothing may fall through to the "akai" or
 #: "generic" branches for it
 FAMILY_S950 = "s950"
+#: Ensoniq's own SysEx (manufacturer 0x0F): neither of the above either, so nothing may fall through to the "akai" or
+#: "generic" branches for it (SamplerController refuses every entry point it has no Ensoniq version of)
+FAMILY_ENSONIQ = "ensoniq"
 
 #: (label, selection) in the order the Settings combo shows them -
 #: alphabetical by label
@@ -46,6 +53,7 @@ CHOICES = [
     ("Akai S1000", AKAI_S1000),
     ("Akai S2000/S3000", AKAI_S2000_S3000),
     ("Akai S900/S950 (experimental)", AKAI_S900_S950),
+    ("Ensoniq EPS/ASR (untested, experimental)", ENSONIQ_EPS_ASR),
     ("Generic SDS", GENERIC_SDS),
     ("Yamaha A4000/A5000 (experimental)", YAMAHA_A4000),
 ]
@@ -63,7 +71,7 @@ def normalize(selection):
 
 
 def protocol_family(selection):
-    # "akai", "generic" or "s950" - what SamplerController.device_type holds
+    # "akai", "generic", "s950" or "ensoniq" - what SamplerController.device_type holds
     selection = normalize(selection)
     # still the "generic" family for the code paths that never learnt about the Yamaha; everything user-facing (list, receive,
     # send, editor) branches on is_yamaha() and uses its native protocol
@@ -71,6 +79,8 @@ def protocol_family(selection):
         return FAMILY_GENERIC
     if selection == AKAI_S900_S950:
         return FAMILY_S950
+    if selection == ENSONIQ_EPS_ASR:
+        return FAMILY_ENSONIQ
     return FAMILY_AKAI
 
 
@@ -84,3 +94,7 @@ def is_s950(selection):
 
 def is_yamaha(selection):
     return normalize(selection) == YAMAHA_A4000
+
+
+def is_ensoniq(selection):
+    return normalize(selection) == ENSONIQ_EPS_ASR

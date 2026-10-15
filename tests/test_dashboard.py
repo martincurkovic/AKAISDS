@@ -721,6 +721,38 @@ def test_open_editor_is_enabled_for_the_s1000_too(dashboard):
     assert dashboard.btn_open_editor.isEnabled() is True
 
 
+# --- Ensoniq EPS/ASR (placeholder: no engine yet) ---------------------------------
+
+
+@pytest.fixture
+def ensoniq_dashboard(dashboard):
+    dashboard.midi_manager.input_name = "Fake In"
+    dashboard.midi_manager.output_name = "Fake Out"
+    dashboard.sampler_controller.set_device_type("ensoniq_eps_asr")
+    dashboard.list_local.addItem("kick.wav")
+    dashboard._update_device_type_ui()
+    dashboard._update_open_editor_enabled()
+    return dashboard
+
+
+def test_ensoniq_disables_everything_and_says_why(ensoniq_dashboard):
+    d = ensoniq_dashboard
+    for button in (d.btn_refresh, d.btn_receive, d.btn_send, d.btn_select_all, d.btn_delete_selected, d.btn_open_editor):
+        assert button.isEnabled() is False
+    assert d.memory_avail_prog_bar.isHidden()
+    assert "aren't implemented yet" in d.empty_hardware_label.text()
+    assert "aren't implemented yet" in d.btn_send.toolTip()
+    assert "aren't implemented yet" in d.btn_open_editor.toolTip()
+
+
+def test_leaving_the_ensoniq_type_re_enables_send(ensoniq_dashboard):
+    d = ensoniq_dashboard
+    d.sampler_controller.set_device_type("akai_s2000_s3000")
+    d._update_device_type_ui()
+    assert d.btn_send.isEnabled() is True
+    assert d.btn_send.toolTip() == ""
+
+
 # --- Akai S900/S950 ------------------------------------------------------------
 
 

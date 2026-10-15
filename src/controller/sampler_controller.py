@@ -60,7 +60,7 @@ class SamplerController(QObject):
         # global SysEx device ID/channel (0-127) - NOT THE SAME AS MIDI CHANNELS (1-16)!!!
         # defaults to 0, otherwise it can be set manually for a daisy-chained setup
         self.channel = 0
-        # device_type is the PROTOCOL FAMILY ("akai"/"generic"/"s950") every
+        # device_type is the PROTOCOL FAMILY ("akai"/"generic"/"s950"/"ensoniq") every
         # transfer path below branches on; sampler_model is the full Settings choice
         # (core/sampler_models.py) - only the Program Editor cares about the
         # S1000 vs S2000/S3000 split, which transfers don't
@@ -272,7 +272,24 @@ class SamplerController(QObject):
         self.status_changed.emit(f"{what} isn't available for the Akai S900/S950")
         return True
 
+    def _is_ensoniq(self):
+        return self.device_type == sampler_models.FAMILY_ENSONIQ
+
+    def _ensoniq_not_supported(self, what):
+        # Ensoniq's own SysEx (core/ensoniq_sysex.py) is only a codec so far: there is no transfer engine yet
+        # (dev_docs/ensoniq-support-plan.md). Every entry point refuses, so choosing that Sampler Type can never put
+        # Akai or SDS bytes on the wire that an Ensoniq would misread. Replace a refusal by delegating to the engine
+        if not self._is_ensoniq():
+            return False
+        debug_log.get_logger().info(
+            f"SamplerController: refused {what} - not implemented yet for the Ensoniq EPS/ASR"
+        )
+        self.status_changed.emit(f"{what} isn't available for the Ensoniq EPS/ASR yet")
+        return True
+
     def refresh_sample_list(self, silent=False):
+        if self._ensoniq_not_supported("Listing samples"):
+            return
         if self.is_yamaha_model():
             self._yamaha_transfers.refresh_list(silent)
             return
@@ -330,6 +347,8 @@ class SamplerController(QObject):
         return True
 
     def delete_sample(self, sample_number, channel=None):
+        if self._ensoniq_not_supported("Deleting samples"):
+            return
         if self._yamaha_not_supported("Deleting samples"):
             return
         if self._s950_not_supported(
@@ -345,6 +364,8 @@ class SamplerController(QObject):
         QTimer.singleShot(300, self.refresh_sample_list)
 
     def rename_sample(self, sample_number, new_name, channel=None):
+        if self._ensoniq_not_supported("Renaming samples"):
+            return
         if self._yamaha_not_supported("Renaming samples"):
             return
         if self._is_s950():
@@ -363,6 +384,8 @@ class SamplerController(QObject):
         QTimer.singleShot(300, self.refresh_sample_list)
 
     def request_sample_info(self, sample_number, channel=None):
+        if self._ensoniq_not_supported("Reading sample info"):
+            return
         if self.is_yamaha_model():
             return
         if self._is_s950():
@@ -709,6 +732,13 @@ class SamplerController(QObject):
         if not data_bytes:
             return
 
+        if self._is_ensoniq():
+            # Ensoniq traffic (F0 0F ...) has no handler yet and must not reach the Akai-family or SDS parsers below
+            debug_log.get_logger().debug(
+                f"SamplerController: ignored {len(data_bytes)} byte SysEx (Ensoniq has no engine yet)"
+            )
+            return
+
         if self._is_s950():
             # S900/S950 traffic (also F0 47 ..., but device byte 0x40 and
             # other function codes) must not reach the Akai-family parser
@@ -1011,6 +1041,8 @@ class SamplerController(QObject):
         effective_bits=16,
         target_sample_rate=None,
     ):
+        if self._ensoniq_not_supported("Sending samples"):
+            return
         if self._s950_not_supported("Sending samples this way"):
             return
         if channel is None:
@@ -1032,6 +1064,8 @@ class SamplerController(QObject):
         effective_bits=16,
         target_sample_rate=None,
     ):
+        if self._ensoniq_not_supported("Sending samples"):
+            return
         if self._s950_not_supported("Sending samples this way"):
             return
         if channel is None:
@@ -1071,6 +1105,8 @@ class SamplerController(QObject):
     def send_sample_file_generic(
         self, filepath, sample_number=0, channel=None, bit_depth=16
     ):
+        if self._ensoniq_not_supported("Sending samples"):
+            return
         if self._s950_not_supported("Sending samples this way"):
             return
         if channel is None:
@@ -1094,6 +1130,8 @@ class SamplerController(QObject):
     def send_sample_file_generic_and_rename(
         self, filepath, new_name, channel=None, bit_depth=16
     ):
+        if self._ensoniq_not_supported("Sending samples"):
+            return
         if self._s950_not_supported("Sending samples this way"):
             return
         if channel is None:
@@ -1239,6 +1277,8 @@ class SamplerController(QObject):
     # ---------------------------------------------------------
 
     def send_file_queue(self, file_entries, channel=None, starting_sample_number=None):
+        if self._ensoniq_not_supported("Sending samples"):
+            return
         if self._is_s950():
             return self._s950.send_file_queue(file_entries)
         if self.is_yamaha_model():
@@ -1426,6 +1466,8 @@ class SamplerController(QObject):
     # -----------------------------------------------------------------------------
 
     def receive_sample_generic(self, sample_number, save_path, channel=None):
+        if self._ensoniq_not_supported("Receiving samples"):
+            return
         if self._s950_not_supported("Receiving samples by number"):
             return
         # receive ONE sample from a generic SDS device
@@ -1465,6 +1507,8 @@ class SamplerController(QObject):
         self.status_changed.emit(f"Requesting sample {sample_number} (generic SDS)...")
 
     def receive_samples(self, sample_requests, channel=None):
+        if self._ensoniq_not_supported("Receiving samples"):
+            return
         if self._is_s950():
             self._s950.receive_samples(sample_requests)
             return

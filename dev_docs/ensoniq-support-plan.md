@@ -1,9 +1,10 @@
 # Ensoniq (EPS / ASR) sample transmission
 
-Written 2026-10-15. **Status: research only. Nothing is built, no Ensoniq unit has been tried, no tester has reported back yet.**
+Written 2026-10-15. **Status: research, plus `core/ensoniq_sysex.py` (the codec, with golden tests) and a placeholder Sampler Type `ensoniq_eps_asr` that refuses every transfer. No engine, no Ensoniq unit has been tried, no tester has reported back yet.**
 Everything below is a reading of Ensoniq's own spec documents (scanned PDFs, read page by page as images) plus one third-party tool's
 source. Grades: **SPEC** = stated in an Ensoniq document, **TOOL** = seen in a community implementation, **GUESS** = ours. Standing rules
-and the code map: `AGENTS.md`. The closest precedent for the work is `s950-support-plan.md` (also a separate protocol written without hardware).
+and the code map: `AGENTS.md`. **A cross-check of this plan against the EPS spec's text layer (2026-10-15) is in `ensoniq-spec-crosscheck.md`: read it
+before coding. It corrects the parameter-number encoding, answers open question 7 and adds a 20-bit range limit.** The closest precedent for the work is `s950-support-plan.md` (also a separate protocol written without hardware).
 
 ## Why this exists
 
@@ -90,7 +91,7 @@ pitch tables, `1A`-`1D` cross-fade / loop-position errors, `1E` quiet layer.
 | `1E` | TRUNCATE WAVESAMPLE | none | Drops data before start / after end (TOOL: used to shrink the placeholder before an upload) |
 | `0E` | PUT WAVESAMPLE PARAMETERS | 139 words, 16-bit format, value in the high byte | Name, root key, fine tune, filters, loop mode, offsets, **sample rate** (below) |
 | `0F` | PUT WAVESAMPLE DATA | start offset (4 bytes), end offset (4 bytes), then the 16-bit signed words | Second message = data only |
-| `11` | PUT PARAMETER | param page, param item, then the value as two 12-bit words | No response unless the number or value is bad. Absolute wave offsets live here (page `20`: start `15`, end `16`, loop start `17`, loop end `18`, loop position `19`, loop mode `00`) |
+| `11` | PUT PARAMETER | param page, param item, then the value as two 12-bit words | No response unless the number or value is bad. Absolute wave offsets live here (hex wire bytes `20`: start `15`, end `16`, loop start `17`, loop end `18`, loop position `19`, loop mode `00`) |
 | `14` | SAVE INSTRUMENT | -- | Writes to the current disk directory and **always overwrites a file of the same name without warning**. Never send it |
 | `1C`, `17`, `1A` | DELETE instrument / layer / wavesample | -- | Never send from the app without a deliberate user action |
 
@@ -153,7 +154,7 @@ out of scope (no SCSI stack here).
    parameter table, marked "receive only", which per the spec's Note 1 only means the unit doesn't transmit it when edited from the front panel).
    Resample to the unit's own rate or tell it ours? Unknown.
 6. **Maximum PUT data length per message**, and whether a 7-minute transfer survives the unit's own timeouts.
-7. Memory limits: the instrument size parameter counts 256-word blocks (spec p.34); how to know free RAM before a send (no RSTAT-style command found).
+7. Memory limits: the instrument size parameter counts 256-word blocks (spec p.34). **Free RAM is readable: GET PARAMETER `34 00` "Free System Blocks"** (see the cross-check; the block unit is still a guess).
 8. Whether names need uppercase/limited characters (the spec says 12 ASCII bytes).
 
 ## What to ask the ASR-X tester

@@ -92,6 +92,12 @@ DEVICE_ID_CHANNEL = (
     "SysEx channels to be 1-128 instead of 0-127."
 )
 
+# Ensoniq EPS/ASR (see dev_docs/ensoniq-support-plan.md): the Sampler Type is listed but there is no transfer engine yet
+ENSONIQ_NOT_READY = (
+    "Ensoniq EPS/ASR transfers aren't implemented yet -\n"
+    "this Sampler Type is a placeholder for now."
+)
+
 SAMPLER_TYPE = (
     "Akai S1000 and Akai S2000/S3000 unlock browsing/renaming/\n"
     "deleting samples on the hardware (Akai-specific extension to\n"
@@ -100,6 +106,8 @@ SAMPLER_TYPE = (
     "Akai S900/S950 use a different protocol again: sending, receiving\n"
     "and renaming work (experimental), but deleting and the Program\n"
     "Editor aren't available.\n"
+    "Ensoniq EPS/ASR (untested, experimental) uses Ensoniq's own\n"
+    "SysEx and is not usable yet.\n"
     "Generic SDS uses only the universal standard - sending and\n"
     "receiving still work, but by sample number only, with no way\n"
     "to browse, rename or delete what's on the device."

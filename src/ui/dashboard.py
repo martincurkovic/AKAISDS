@@ -652,6 +652,7 @@ class TransferDashboard(QWidget):
         )
         is_akai = self.sampler_controller.device_type == "akai"
         is_s950 = self.sampler_controller.device_type == sampler_models.FAMILY_S950
+        is_ensoniq = self.sampler_controller.device_type == sampler_models.FAMILY_ENSONIQ
         is_yamaha = sampler_models.is_yamaha(self.sampler_controller.sampler_model)
         # a MIDI transfer in progress (started from here, or from the
         # Program Editor sharing this same sampler_controller) locks out
@@ -673,6 +674,8 @@ class TransferDashboard(QWidget):
             self.btn_open_editor.setToolTip("")
         elif not has_ports:
             self.btn_open_editor.setToolTip(tooltips.OPEN_EDITOR_NEEDS_MIDI_PORTS)
+        elif is_ensoniq:
+            self.btn_open_editor.setToolTip(tooltips.ENSONIQ_NOT_READY)
         elif is_s950:
             self.btn_open_editor.setToolTip(tooltips.OPEN_EDITOR_S950)
         elif is_yamaha:
@@ -685,6 +688,7 @@ class TransferDashboard(QWidget):
     def _update_device_type_ui(self):
         is_generic = self.sampler_controller.device_type == "generic"  # True or False
         is_s950 = self.sampler_controller.device_type == sampler_models.FAMILY_S950
+        is_ensoniq = self.sampler_controller.device_type == sampler_models.FAMILY_ENSONIQ
         is_open_loop = self.sampler_controller.is_open_loop()
         # the rows on show belong to whichever Sampler Type produced them (an
         # Akai list's numbering means nothing to an S900/S950) - drop them
@@ -696,6 +700,20 @@ class TransferDashboard(QWidget):
             self.list_hardware.clear()
             self._hardware_list_family = None
         has_samples = self.list_hardware.count() > 0
+
+        if is_ensoniq:
+            # no Ensoniq engine yet (the controller refuses every entry point too): nothing to browse, receive or delete
+            self.list_hardware.clear()
+            self.list_hardware.setEnabled(False)
+            self.btn_select_all.setEnabled(False)
+            self.btn_refresh.setEnabled(False)
+            self.btn_receive.setEnabled(False)
+            self.btn_delete_selected.setEnabled(False)
+            self.memory_avail_prog_bar.setVisible(False)
+            self.empty_hardware_label.setText(tooltips.ENSONIQ_NOT_READY)
+            self.empty_hardware_label.setVisible(True)
+            self._update_queue_buttons_state()
+            return
 
         if is_s950:
             # S900/S950: browsing/receiving/sending work like the Akai family,
@@ -1659,6 +1677,10 @@ class TransferDashboard(QWidget):
             self.sampler_controller.device_type == sampler_models.FAMILY_S950
             or self._is_yamaha()  # a native Yamaha load is checked by reading the unit afterwards
         ) and self.sampler_controller.is_open_loop()
+        if self.sampler_controller.device_type == sampler_models.FAMILY_ENSONIQ:
+            self.btn_send.setEnabled(False)
+            self.btn_send.setToolTip(tooltips.ENSONIQ_NOT_READY)
+            return
         self.btn_send.setEnabled(has_files and not needs_input)
         self.btn_send.setToolTip(
             (

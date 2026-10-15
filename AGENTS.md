@@ -11,7 +11,7 @@ and plans: `dev_docs/`.
 | anything that talks to a real sampler | "Real-hardware safety", "House rules" |
 | the Akai Program Editor (`program_editor_window.py`) | `BridgeWorker`, "Program Editor UI", "Samples tab", "Global tab" |
 | S1000 / S900-S950 / Yamaha A4000 | their own sections, then `dev_docs/` |
-| Ensoniq EPS/ASR (research only, nothing built; Generic SDS can't work) | `dev_docs/ensoniq-support-plan.md` |
+| Ensoniq EPS/ASR (codec + placeholder Sampler Type only; Generic SDS can't work) | "Ensoniq EPS/ASR", `dev_docs/ensoniq-support-plan.md`, `dev_docs/ensoniq-spec-crosscheck.md` |
 | sending samples, the Slice Editor, sample edits | "Sample send hardening", "Sample edits and the working copy", "Slice Editor" |
 | logs, bug reports | "Debug logging" |
 | running with no hardware | "Developing without hardware" (contributor version: `CONTRIBUTING.md`) |
@@ -35,9 +35,9 @@ Launched from `src/main.py`. The `&Window` menu swaps between windows (one shown
 - **Program Editor** (`ui/program_editor_window.py`, `core/program_editor_bridge.py`): program, keygroup, sample and multi parameters on S1000 and S2000/S3000. Most of this file is about it.
 - **S900/S950 editor** (`ui/s950_*`) and **Yamaha A4000/A5000 editor** (`ui/yamaha_*`): smaller separate windows, opened by the same Open Editor button.
 
-**Sampler Types** (`core/sampler_models.py`): `akai_s1000`, `akai_s2000_s3000`, `akai_s900_s950`, `generic`, `yamaha_a4000`. The legacy `"akai"`
+**Sampler Types** (`core/sampler_models.py`): `akai_s1000`, `akai_s2000_s3000`, `akai_s900_s950`, `generic`, `yamaha_a4000`, `ensoniq_eps_asr`. The legacy `"akai"`
 is accepted and rewritten at startup. The model is a user setting, never detected (S1000/S2000/S3000 answer identity identically).
-`SamplerController.device_type` is the PROTOCOL FAMILY (`akai`/`generic`/`s950`) every transfer path branches on; the choice is
+`SamplerController.device_type` is the PROTOCOL FAMILY (`akai`/`generic`/`s950`/`ensoniq`) every transfer path branches on; the choice is
 `sampler_model`. Yamaha is family `generic` plus `sampler_models.is_yamaha()`.
 
 ## Third-party deps (`s3k`, `s3ked`)
@@ -238,6 +238,15 @@ loaded (`midi_loaded_names`). Watch the unit's display during loads and assigns.
 - Dropdowns whose raw order is assumed from the manual: roadmap item 4.
 - **Detect Pitch** shares Detect Root Note's engine. Two guesses, one-line fixes: `FINE_TUNE_STEPS_PER_CENT = 1.0` and the sign. **A5000 gating** is unverified: one identity request per session, and only an A5000 gets effect4/5/6 outputs.
 - Testing: replies arriving over time use `rig.midi.paced = True` on the shared `_Midi` fake. Never swap a test object's `__class__` (intermittent segfault), and never let a bulk string replace touch more than one place in `yamaha_session.py`.
+
+## Ensoniq EPS/EPS-16+/ASR-10 (written without hardware; NO ENGINE YET)
+
+Nobody involved owns an Ensoniq unit; the plan is to ship an experimental build to forum testers. Research: `dev_docs/ensoniq-support-plan.md`;
+the EPS-spec cross-check (corrections to it, read it before coding): `dev_docs/ensoniq-spec-crosscheck.md`. The specs themselves are copyright and not in the repo.
+- Built so far: `core/ensoniq_sysex.py` (pure codec: 12/16-bit words, 20-bit offsets, parameter numbers, framing, commands, status codes, the 139-word wavesample block; tests in `tests/test_ensoniq_sysex.py`), and the Sampler Type `ensoniq_eps_asr`, listed in Settings as "(untested, experimental)". Not in `quickstart.md` on purpose: it does nothing yet.
+- **Own protocol family `"ensoniq"`: nothing may fall through to the akai/generic branches.** `SamplerController._ensoniq_not_supported` refuses every transfer entry point and `_on_sysex_received_impl` drops Ensoniq traffic; the Dashboard disables every button with `tooltips.ENSONIQ_NOT_READY`; the Settings hardware test says so instead of sending. When the engine arrives, delegate each entry point to it (as `_is_s950()` does) and replace the matching refusal.
+- Never put `ensoniq_sysex.NEVER_SEND` (delete instrument/layer/wavesample, SAVE INSTRUMENT) on the wire from a send or receive. The offset example `00 00 40 00` in two of the specs is a typo (`00 00 08 00`); a parameter number is ONE 12-bit word, not a page byte and an item byte.
+- Unmeasured and open (all in the plan): the channel byte (base channel or SysEx Device ID), the sample-rate code (44.1 kHz isn't representable), how a wavesample grows past its placeholder, the ASR-X (no spec at all).
 
 ## Transfer Dashboard
 

@@ -1785,6 +1785,63 @@ def test_s950_refuses_what_it_has_no_protocol_for(s950_controller, tmp_path):
     assert c._s950_engine.calls == []
 
 
+# --- Sampler Type: Ensoniq EPS/ASR (a codec only so far: every entry point refuses) ---
+
+
+@pytest.fixture
+def ensoniq_controller(controller):
+    controller.set_device_type("ensoniq_eps_asr")
+    statuses = []
+    controller.status_changed.connect(statuses.append)
+    controller.statuses = statuses
+    return controller
+
+
+def test_set_device_type_ensoniq_is_its_own_family(controller):
+    controller.set_device_type("ensoniq_eps_asr")
+    assert controller.device_type == "ensoniq"
+    assert controller.sampler_model == "ensoniq_eps_asr"
+
+
+def test_ensoniq_refuses_every_entry_point_and_puts_nothing_on_the_wire(ensoniq_controller, tmp_path):
+    # no Ensoniq engine exists yet: Akai or SDS bytes sent to an Ensoniq would be misread, so nothing may fall through
+    c = ensoniq_controller
+    wav = str(tmp_path / "x.wav")
+    c.refresh_sample_list()
+    c.refresh_sample_list(silent=True)
+    c.delete_sample(1)
+    c.rename_sample(1, "NEW")
+    c.request_sample_info(1)
+    c.send_sample_file(wav)
+    c.send_stereo_sample_file(wav, 0, 1)
+    c.send_sample_file_generic(wav)
+    c.send_sample_file_generic_and_rename(wav, "NEW")
+    c.send_file_queue([{"filepath": wav}], starting_sample_number=3)
+    c.receive_sample_generic(1, wav)
+    c.receive_samples([(1, wav)])
+    assert c.midi_manager.sent == []
+    assert not c._receiving and not c._file_queue and not c._receive_queue and not c._awaiting_memory_status
+    assert len(c.statuses) == 12
+    assert all("Ensoniq" in s and "yet" in s for s in c.statuses)
+
+
+def test_ensoniq_traffic_never_reaches_the_akai_or_sds_parsers(ensoniq_controller):
+    c = ensoniq_controller
+    updates = []
+    c.sample_list_updated.connect(updates.append)
+    # F0 0F 03 00 03 ... would otherwise be tried as SDS (0x7E) / Akai (0x47) and could trip their error paths
+    c.on_sysex_received([0x0F, 0x03, 0x00, 0x01, 0x00, 0x00])
+    c.on_sysex_received([0x7E, 0x00, 0x02, 0x00])  # an SDS ACK
+    assert updates == []
+    assert c.statuses == [] and c.midi_manager.sent == []
+
+
+def test_other_families_are_not_refused_as_ensoniq(controller):
+    for selection in ("akai_s2000_s3000", "generic", "akai_s900_s950"):
+        controller.set_device_type(selection)
+        assert controller._ensoniq_not_supported("anything") is False
+
+
 def test_cancel_and_busy_include_the_s950_engine(s950_controller):
     c = s950_controller
     assert c.is_transfer_busy() is False

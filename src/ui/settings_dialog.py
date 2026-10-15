@@ -490,6 +490,12 @@ class MidiSettingsDialog(QDialog):
         return sampler_models.protocol_family(self.combo_device_type.currentData())
 
     def _run_identity_request(self):
+        if self._selected_protocol_family() == sampler_models.FAMILY_ENSONIQ:
+            # nothing to send yet: the Ensoniq hardware test is a read-only discovery that doesn't exist (the universal identity
+            # request goes to every device and would say nothing about whether the unit speaks Ensoniq's own SysEx)
+            self.id_results_label.setText(tooltips.ENSONIQ_NOT_READY)
+            return
+
         input_name = self.combo_input.currentData()
         output_name = self.combo_output.currentData()
 
