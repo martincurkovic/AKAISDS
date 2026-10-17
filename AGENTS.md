@@ -131,6 +131,7 @@ hardware bug. Unhandled-exception backstops log here, never `print()`. One INFO 
 - **The S1000 name rule is destructive:** a PDATA/SDATA whose name matches a DIFFERENT resident item deletes that one first. Duplicate and rename refuse a clashing name on an S1000 only; an UNCHANGED name writes nothing. `FakeS1000` assumes rewriting an item under its own name is a plain replace. The spec doesn't say: **the first thing a real S1000 must confirm.**
 - **DELK** is a plain linked-list unlink (no compaction, no `GROUPS` update); a PDATA with a smaller `GROUPS` is rejected. Standalone Delete Keygroup is DISABLED (`KEYGROUP_DELETE_SUPPORTED = False`) after two failed real tests: don't re-enable or try variants blind. Create-from-slices never deletes (`first_keygroup_only=True`). The untested REBUILD alternative is behind `KEYGROUP_DELETE_BY_REBUILD` (off). Evidence: `dev_docs/s1000-delk-findings.md`.
 - Duplicate Program/Keygroup and create-from-slices are enabled so a tester can find out whether they work (the Dashboard shows a one-time experimental warning). Not in either model's UI: `OUTPUT`/`STEREO`, `PLAYLO/HI`, `OSHIFT`, `TEMPER`, `KGTUNO`, per-zone `VZOUT`/`VFREQ`, loops 2-4, `DDATA`/`MDATA` blocks.
+- **Observed working on a real S1100 (tester's log, 2026-10-16, app 1.3.0; the owner has no S1000-family unit):** the Program Editor's program list, sample list and header reads. The owner reports that after the tester set Device ID 0, sample transmission and program editing also work (relayed, no log seen). Which Dashboard operations were tried is unknown.
 - Untested on a real S1000: `LOOPAT1`/`LLNGTH1`/`STUNO`/`SBANDW` semantics, the sample-edit actions through the adapter, and RSTAT (the memory bar and OS version).
 
 ## Program files: Save/Load `.p1`/`.p3`
@@ -269,6 +270,8 @@ catches our inconsistencies, not a misreading. Every wire fact and its confidenc
 
 ## Transfer Dashboard
 
+- **Device ID** (Settings, `config.json` `midi_channel`, `SamplerController.channel`) is the raw SysEx device byte, NOT a MIDI channel, and a sampler silently ignores any other ID. The Program Editor used to ignore the setting and always use s3k's 0, so a mismatch made the Dashboard fail while the editor worked (S1100, 2026-10-16). `program_editor_bridge.connect()` now reads it (`exclusive_channel=`), so both windows agree; changing it in Settings reconnects the editor's bridge. A reply timeout on an Akai with a non-zero ID appends "(it is N; most Akais use 0)". Keep the label/tooltip wording ("not its MIDI channel", "usually 0"). Panel numbering differs by model (S900/S950: no SysEx channel, it is the Basic MIDI channel minus 1; S2000/S3000: 1-128; S1000/S1100: probably 1-128, unproven): `dev_docs/akai-sysex-channel-rom-findings.md`.
+
 - **Open Editor** enables only with both ports selected, family `akai`/`s950` or a Yamaha model, and no transfer in flight.
 - `Ctrl+T`/`Ctrl+E` switch windows. `Ctrl+1/2/3/4` are the Program Editor's tabs (Multi/Programs/Samples/Global); `Ctrl+Shift+I` is File > Import Audio.
 - A short child in a `QHBoxLayout` next to something much taller gets stretched: fix with `setAlignment(child, AlignVCenter)`, not spacing.
@@ -340,6 +343,8 @@ They are also draggable (NOT tried on hardware): Akai ENV1/ENV2 (the S1000's ENV
 - **Tests that switch theme must not restyle the real `QApplication`** (the suite keeps many windows; it went from 20 s to minutes). Pass a stand-in app to `apply_to_app`; `deleteLater()` editor fixtures.
 
 ## Update checker
+
+`check_for_update` passes `ssl.create_default_context(cafile=certifi.where())`: the Nuitka macOS build has no system CA store, so the default context failed with `CERTIFICATE_VERIFY_FAILED` and the startup check failed silently for everyone on that build (S1100 user's log, 2026-10-16). `certifi` is a dependency and the three `scripts/build_*` add `--include-package-data=certifi`. **Not yet verified on a built `.app`** (a dev venv never reproduces it): check the bundle contains `certifi/cacert.pem`.
 
 `core/update_checker.py`/`ui/update_helper.py` poll GitHub `/releases/latest`, which ignores drafts: an unpublished tagged build means
 the checker reports the previous release, not a bug. `UpdateCheckRunner` is a `QThread`: `.wait()` it before closing.
