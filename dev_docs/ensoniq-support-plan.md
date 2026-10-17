@@ -143,7 +143,8 @@ out of scope (no SCSI stack here).
 
 ## Open questions (each needs the ASR-X's own spec or a capture)
 
-1. **Does the ASR-X speak the ASR-10 protocol at all?** `0F 03` product ID? Its manual references an "ASR-X Pro SysEx Specification" we don't have.
+1. **ANSWERED 2026-10-17, NO: see `asrx-rom-findings.md`** (v2.67 ROM, static reading): the ASR-X wants `F0 0F 10 01 <dev> <cmd>` with a different command set and drops `0F 03`; it also has no MIDI SDS. The rest of this plan is ASR-10 / EPS-16+ only.
+   Original question: **Does the ASR-X speak the ASR-10 protocol at all?** `0F 03` product ID? Its manual references an "ASR-X Pro SysEx Specification" we don't have.
    The RCS (Chicken Systems) news says an ASR-X sequencer track can transmit SysEx "for any ENSONIQ product" and that an ASR-X parameter dump of an
    EPS/ASR-translated sound is incomplete, which hints at an ASR-10-like parameter format but proves nothing about wave data.
 2. **Channel byte:** base channel minus 1 (ASR-10 spec) or SysEx Device ID (ASR-X manual)?
