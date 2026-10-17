@@ -20,6 +20,7 @@ A simple way to send and receive audio samples (WAV, AIFF, FLAC, MP3, Ogg) to an
 - Program, Keygroup and Sample editor for Akai S1000 and S2000/S3000 series samplers
 - Experimental Yamaha A4000/A5000 editor support
 - Experimental Akai S900/S950 support: sample send/receive plus a program editor. It uses a different protocol from the other Akai models, was written without access to the hardware and has not been tested on a real unit yet, so back up your sampler first and please report what you find
+- Experimental Ensoniq ASR-X support: list, receive and send samples, written from the ASR-X's firmware (it has no MIDI Sample Dump Standard, so Generic SDS cannot work). It has never been tried on a real unit, so back up the sampler first and please report what you find (the log is `~/.akaisds/akaisds.log`)
 - Experimental Ensoniq EPS / EPS-16+ / ASR-10 support: list, receive and send samples. It uses Ensoniq's own protocol, was written from Ensoniq's spec documents without access to the hardware and has never been tried on a real unit, so back up the sampler first and please report what you find
 - ReCycle style sample slicing
   - Transient detection: a fast simple detector, or SuperFlux (high quality) for drum loops
