@@ -200,6 +200,7 @@ class SamplerController(QObject):
         # a protocol family
         self.sampler_model = sampler_models.normalize(selection)
         self.device_type = sampler_models.protocol_family(self.sampler_model)
+        debug_log.get_logger().info(f"SamplerController: sampler type {self.sampler_model} (protocol family {self.device_type})")
 
     @property
     def _s950(self):
@@ -278,12 +279,24 @@ class SamplerController(QObject):
 
     @property
     def _ensoniq(self):
-        # the Ensoniq EPS/ASR's list and receive (controller/ensoniq_transfers.py), built the first time they're needed
-        if self._ensoniq_engine is None:
-            from controller.ensoniq_transfers import EnsoniqTransfers
+        # the Ensoniq list / receive / send engine, built the first time it is needed. Two dialects share the "ensoniq" family and its Dashboard branches:
+        # the EPS/EPS-16+/ASR-10 one (controller/ensoniq_transfers.py) and the ASR-X one (controller/asrx_transfers.py). The Sampler Type picks; a type change
+        # (Settings is blocked while a transfer runs) swaps the engine
+        want_asrx = sampler_models.is_asrx(self.sampler_model)
+        engine = self._ensoniq_engine
+        if engine is not None and bool(getattr(engine, "IS_ASRX", False)) != want_asrx:
+            engine = self._ensoniq_engine = None
+        if engine is None:
+            if want_asrx:
+                from controller.asrx_transfers import AsrxTransfers
 
-            self._ensoniq_engine = EnsoniqTransfers(self)
-        return self._ensoniq_engine
+                engine = AsrxTransfers(self)
+            else:
+                from controller.ensoniq_transfers import EnsoniqTransfers
+
+                engine = EnsoniqTransfers(self)
+            self._ensoniq_engine = engine
+        return engine
 
     def is_ensoniq_idle(self):
         return self._ensoniq_engine is None or self._ensoniq_engine.idle
@@ -295,10 +308,9 @@ class SamplerController(QObject):
         # by delegating to the engine
         if not self._is_ensoniq():
             return False
-        debug_log.get_logger().info(
-            f"SamplerController: refused {what} - not implemented yet for the Ensoniq EPS/ASR"
-        )
-        self.status_changed.emit(f"{what} isn't available for the Ensoniq EPS/ASR yet")
+        name = sampler_models.ensoniq_display_name(self.sampler_model)
+        debug_log.get_logger().info(f"SamplerController: refused {what} - not implemented yet for the {name}")
+        self.status_changed.emit(f"{what} isn't available for the {name} yet")
         return True
 
     def refresh_sample_list(self, silent=False):

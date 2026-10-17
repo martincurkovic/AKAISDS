@@ -1,6 +1,6 @@
-# The six "Sampler Type" choices in Settings, and what each one implies.
+# The seven "Sampler Type" choices in Settings, and what each one implies.
 #
-# A selection is one of six strings (what MidiSettingsDialog's combo stores
+# A selection is one of seven strings (what MidiSettingsDialog's combo stores
 # as item data, and what app_config persists as "device_type"):
 #
 #   "akai_s2000_s3000" - Akai S2000/S3000 series
@@ -13,6 +13,10 @@
 #   "ensoniq_eps_asr"  - Ensoniq EPS/EPS-16+/ASR-10 (its own SysEx, manufacturer 0x0F: see core/ensoniq_sysex.py and
 #                        dev_docs/ensoniq-support-plan.md). Research only so far: the Sampler Type is listed, and every
 #                        transfer entry point REFUSES until the engine exists
+#
+#   "ensoniq_asrx"    - Ensoniq ASR-X (v2.67 firmware read statically: dev_docs/asrx-rom-findings.md). The SAME protocol family "ensoniq" as the entry above (the
+#                        Dashboard branches are shared) but a DIFFERENT dialect - header 0F 10 01, its own object commands, no ASR-10 messages - so
+#                        SamplerController picks controller/asrx_transfers.py for it. Never run against a unit.
 #
 # Before the S1000 existed the S2000/S3000 entry was saved as plain "akai".
 # That legacy value is still ACCEPTED everywhere (normalize() maps it), and
@@ -36,6 +40,7 @@ AKAI_S900_S950 = "akai_s900_s950"
 GENERIC_SDS = "generic"
 YAMAHA_A4000 = "yamaha_a4000"
 ENSONIQ_EPS_ASR = "ensoniq_eps_asr"
+ENSONIQ_ASRX = "ensoniq_asrx"
 
 FAMILY_AKAI = "akai"
 FAMILY_GENERIC = "generic"
@@ -53,6 +58,7 @@ CHOICES = [
     ("Akai S1000", AKAI_S1000),
     ("Akai S2000/S3000", AKAI_S2000_S3000),
     ("Akai S900/S950 (experimental)", AKAI_S900_S950),
+    ("Ensoniq ASR-X (untested, experimental)", ENSONIQ_ASRX),
     ("Ensoniq EPS/ASR (untested, experimental)", ENSONIQ_EPS_ASR),
     ("Generic SDS", GENERIC_SDS),
     ("Yamaha A4000/A5000 (experimental)", YAMAHA_A4000),
@@ -79,7 +85,7 @@ def protocol_family(selection):
         return FAMILY_GENERIC
     if selection == AKAI_S900_S950:
         return FAMILY_S950
-    if selection == ENSONIQ_EPS_ASR:
+    if selection in (ENSONIQ_EPS_ASR, ENSONIQ_ASRX):
         return FAMILY_ENSONIQ
     return FAMILY_AKAI
 
@@ -97,4 +103,13 @@ def is_yamaha(selection):
 
 
 def is_ensoniq(selection):
-    return normalize(selection) == ENSONIQ_EPS_ASR
+    # either Ensoniq dialect (the EPS/EPS-16+/ASR-10 one, or the ASR-X)
+    return normalize(selection) in (ENSONIQ_EPS_ASR, ENSONIQ_ASRX)
+
+
+def is_asrx(selection):
+    return normalize(selection) == ENSONIQ_ASRX
+
+
+def ensoniq_display_name(selection):
+    return "Ensoniq ASR-X" if is_asrx(selection) else "Ensoniq EPS/ASR"

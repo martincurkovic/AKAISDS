@@ -94,7 +94,7 @@ DEVICE_ID_CHANNEL = (
 
 # Ensoniq EPS/ASR (see dev_docs/ensoniq-support-plan.md): listing, receiving and sending samples (no editor); it answers on the MIDI input
 ENSONIQ_NEEDS_MIDI_INPUT = (
-    "The Ensoniq EPS/ASR answers on your MIDI input, so listing, receiving\n"
+    "The Ensoniq answers on your MIDI input, so listing, receiving\n"
     "and sending samples needs one - select it in Settings."
 )
 ENSONIQ_NO_EDITOR = "There is no editor for the Ensoniq EPS/ASR - only listing, receiving and sending samples."
@@ -112,6 +112,10 @@ SAMPLER_TYPE = (
     "SysEx: listing, receiving and sending samples (each sent file\n"
     "becomes a new instrument). Set the Device ID to the unit's base\n"
     "MIDI channel minus 1.\n"
+    "Ensoniq ASR-X (untested, experimental) has its own, different SysEx:\n"
+    "listing, receiving and sending samples (each sent file becomes a new\n"
+    "sample). Set the Device ID to the unit's SysEx Device ID and turn\n"
+    "SysEx Recv on in its System/MIDI settings.\n"
     "Generic SDS uses only the universal standard - sending and\n"
     "receiving still work, but by sample number only, with no way\n"
     "to browse, rename or delete what's on the device."

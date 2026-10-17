@@ -824,6 +824,78 @@ def test_leaving_the_ensoniq_type_re_enables_send(ensoniq_dashboard):
     assert d.btn_send.toolTip() == ""
 
 
+# --- Ensoniq ASR-X (the same Dashboard branches as the EPS/ASR, its own engine and warning) ----------
+
+
+@pytest.fixture
+def asrx_dashboard(dashboard):
+    dashboard.midi_manager.input_name = "Fake In"
+    dashboard.midi_manager.output_name = "Fake Out"
+    dashboard.sampler_controller.set_device_type("ensoniq_asrx")
+    dashboard.list_local.addItem("kick.wav")
+    dashboard._update_device_type_ui()
+    dashboard._update_open_editor_enabled()
+    return dashboard
+
+
+def test_asrx_with_an_input_enables_browsing_and_sending_but_not_deleting(asrx_dashboard):
+    d = asrx_dashboard
+    assert d.list_hardware.isEnabled() and d.btn_refresh.isEnabled()
+    assert d.btn_send.isEnabled() is True and d.btn_send.toolTip() == ""
+    assert d.btn_delete_selected.isEnabled() is False
+    assert d.btn_open_editor.isEnabled() is False
+
+
+def test_asrx_without_an_input_cant_send_and_says_why(dashboard):
+    dashboard.midi_manager.input_name = None
+    dashboard.sampler_controller.set_device_type("ensoniq_asrx")
+    dashboard.list_local.addItem("kick.wav")
+    dashboard._update_device_type_ui()
+    assert dashboard.btn_send.isEnabled() is False
+    assert "MIDI input" in dashboard.btn_send.toolTip()
+
+
+def test_asrx_rows_can_be_received_but_not_deleted_or_edited(asrx_dashboard):
+    d = asrx_dashboard
+    d.on_sample_slots_updated([(0, "KICK"), (7, "SNARE")])
+    assert d.list_hardware.count() == 2 and d.btn_receive.isEnabled() is True
+    row = d.list_hardware.itemWidget(d.list_hardware.item(0))
+    buttons = {b.text(): b for b in row.findChildren(type(d.btn_send))}
+    assert buttons["Delete"].isEnabled() is False and buttons["Edit"].isEnabled() is False
+
+
+def test_the_asrx_warning_has_its_own_text_and_its_own_flag(asrx_dashboard, monkeypatch):
+    from PySide6.QtWidgets import QMessageBox
+
+    from core import app_config
+
+    state = {"asrx": False, "eps": False, "titles": [], "answer": QMessageBox.StandardButton.Ok}
+    monkeypatch.setattr(app_config, "get_asrx_transfer_warning_acknowledged", lambda: state["asrx"])
+    monkeypatch.setattr(app_config, "save_asrx_transfer_warning_acknowledged", lambda value=True: state.update(asrx=value))
+    monkeypatch.setattr(app_config, "get_ensoniq_transfer_warning_acknowledged", lambda: state["eps"])
+    monkeypatch.setattr(app_config, "save_ensoniq_transfer_warning_acknowledged", lambda value=True: state.update(eps=value))
+
+    def _warning(parent, title, text, *_a, **_k):
+        state["titles"].append((title, text))
+        return state["answer"]
+
+    monkeypatch.setattr(QMessageBox, "warning", _warning)
+    assert asrx_dashboard._confirm_ensoniq_experimental() is True
+    assert asrx_dashboard._confirm_ensoniq_experimental() is True  # once
+    assert state["asrx"] is True and state["eps"] is False
+    assert len(state["titles"]) == 1 and "ASR-X" in state["titles"][0][0] and "akaisds.log" in state["titles"][0][1]
+
+
+def test_cancelling_the_asrx_warning_blocks_the_send(asrx_dashboard, monkeypatch):
+    from PySide6.QtWidgets import QMessageBox
+
+    from core import app_config
+
+    monkeypatch.setattr(app_config, "get_asrx_transfer_warning_acknowledged", lambda: False)
+    monkeypatch.setattr(QMessageBox, "warning", lambda *a, **k: QMessageBox.StandardButton.Cancel)
+    assert asrx_dashboard._confirm_ensoniq_experimental() is False
+
+
 # --- Akai S900/S950 ------------------------------------------------------------
 
 

@@ -23,6 +23,7 @@ from core import (
     app_config,
     audio_preview,
     debug_log,
+    asrx_sysex,
     ensoniq_sysex,
     midi_identity,
     s950_sysex,
@@ -487,6 +488,9 @@ class MidiSettingsDialog(QDialog):
         app_config.save_theme(selected_theme)
         theme.set_theme_preference(selected_theme)
 
+    def _selected_is_asrx(self):
+        return sampler_models.is_asrx(self.combo_device_type.currentData())
+
     def _selected_protocol_family(self):
         # the combo holds the full model selection (S1000 / S2000/S3000 /
         # Generic); the hardware test only cares which protocol to speak
@@ -538,7 +542,9 @@ class MidiSettingsDialog(QDialog):
                         )
                     elif device_type == sampler_models.FAMILY_ENSONIQ:
                         self.id_results_label.setText(
-                            self._format_ensoniq_result(id_response)
+                            self._format_asrx_result(id_response)
+                            if self._selected_is_asrx()
+                            else self._format_ensoniq_result(id_response)
                         )
                     else:
                         self.id_results_label.setText(
@@ -579,7 +585,8 @@ class MidiSettingsDialog(QDialog):
 
         device_type = self._selected_protocol_family()
 
-        if device_type == sampler_models.FAMILY_ENSONIQ and not 0 <= self.spin_channel.value() <= 15:
+        is_asrx = device_type == sampler_models.FAMILY_ENSONIQ and self._selected_is_asrx()
+        if device_type == sampler_models.FAMILY_ENSONIQ and not is_asrx and not 0 <= self.spin_channel.value() <= 15:
             return (
                 False,
                 "The Ensoniq needs a Device ID of 0-15 (its base MIDI channel minus 1) - set it above",
@@ -600,6 +607,13 @@ class MidiSettingsDialog(QDialog):
                     ),
                 )
             )
+        elif is_asrx:
+            # read only: the universal identity request, then the standard "name of sample 0" request (answered with a name, or with 7F 41 when
+            # the slot is empty - both prove the ASR-X heard us on this Device ID)
+            self._ensoniq_identity_text = self._ensoniq_identity_step(input_port, output_port)
+            request = asrx_sysex.build_name_request(self.spin_channel.value(), 0)
+            debug_log.get_logger().info(f"MidiSettingsDialog: ASR-X hardware test sent {bytes(request).hex(' ')}")
+            output_port.send(mido.Message("sysex", data=request))
         elif device_type == sampler_models.FAMILY_ENSONIQ:
             # read only, two requests one after the other: the universal MIDI identity request (which says what and which version the unit
             # is, but goes to every device and proves nothing about its own SysEx), then "is instrument 1 loaded?" (GET INSTRUMENT),
@@ -624,13 +638,20 @@ class MidiSettingsDialog(QDialog):
                         f"MidiSettingsDialog: Ensoniq hardware test received {len(incoming.data)} bytes: "
                         f"{bytes(incoming.data[:64]).hex(' ')}"
                     )
-                    if not self._is_ensoniq_answer(incoming.data):
+                    if not (self._is_asrx_answer(incoming.data) if is_asrx else self._is_ensoniq_answer(incoming.data)):
                         # not an answer: our own request echoed back (a DAW on the same interface does this), or someone else's SysEx
                         continue
                 response = incoming
                 break
             QApplication.processEvents()
 
+        if response is None and is_asrx:
+            debug_log.get_logger().info("MidiSettingsDialog: ASR-X hardware test got no answer to the sample name request")
+            return (
+                False,
+                "No reply from an ASR-X - check it's on, SysEx Recv is on and its SysEx Device ID matches the Device ID above "
+                "(System/MIDI page), and both MIDI cables are connected",
+            )
         if response is None and device_type == sampler_models.FAMILY_ENSONIQ:
             debug_log.get_logger().info("MidiSettingsDialog: Ensoniq hardware test got no answer to GET INSTRUMENT")
             return (
@@ -643,6 +664,14 @@ class MidiSettingsDialog(QDialog):
 
         if device_type == "akai":
             received_data = midi_identity.parse_stat_response(response.data)
+        elif is_asrx:
+            try:
+                received_data = asrx_sysex.parse_message(response.data)
+            except ValueError as e:
+                return False, f"Got a reply, but it doesn't look like an ASR-X answer ({e})"
+            debug_log.get_logger().info(
+                f"MidiSettingsDialog: ASR-X answered [{received_data.kind}]: {bytes(response.data[:48]).hex(' ')}"
+            )
         elif device_type == sampler_models.FAMILY_ENSONIQ:
             try:
                 received_data = ensoniq_sysex.parse_message(response.data)
@@ -726,6 +755,22 @@ class MidiSettingsDialog(QDialog):
             return False
         command = data[3]
         return command == ensoniq_sysex.CMD_RESPONSE or ensoniq_sysex.CMD_PUT_INSTRUMENT <= command <= ensoniq_sysex.CMD_PUT_PARAMETER
+
+    @staticmethod
+    def _is_asrx_answer(data):
+        # an ASR-X answers a sample name request with the name (7E dev 05 03 ...) or 7F 41 (empty slot); our own request coming back (05 04) is not an answer
+        data = bytes(data)
+        if len(data) >= 4 and data[0] == 0x7E:
+            return data[2] == 0x05 and data[3] == 0x03
+        return asrx_sysex.is_asrx(data) and len(data) >= 6 and data[4] == asrx_sysex.REPLY_ERROR
+
+    def _format_asrx_result(self, message):
+        if message.kind == "name":
+            detail = f"Sample 0 is {message.name!r}." if message.name else "Sample 0 has no name."
+        else:
+            detail = "Sample 0 is empty (a normal answer)."
+        identity = getattr(self, "_ensoniq_identity_text", None)
+        return f"Ensoniq ASR-X SysEx answered.\n{detail}\n{identity or 'No MIDI identity reply.'}"
 
     def _format_ensoniq_result(self, message):
         if message.command == ensoniq_sysex.CMD_RESPONSE:

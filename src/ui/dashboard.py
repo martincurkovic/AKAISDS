@@ -1257,9 +1257,27 @@ class TransferDashboard(QWidget):
         return True
 
     def _confirm_ensoniq_experimental(self):
-        # Ensoniq sends were written from Ensoniq's spec documents with no Ensoniq on hand (see controller/ensoniq_transfers.py) -
-        # say so before the first send, once
+        # Ensoniq sends were written without an Ensoniq on hand (see controller/ensoniq_transfers.py and asrx_transfers.py) - say so before the
+        # first send, once. The ASR-X has its own text and its own "don't ask again" flag
         if self.sampler_controller.device_type != sampler_models.FAMILY_ENSONIQ:
+            return True
+        if sampler_models.is_asrx(self.sampler_controller.sampler_model):
+            if app_config.get_asrx_transfer_warning_acknowledged():
+                return True
+            answer = QMessageBox.warning(
+                self,
+                "Ensoniq ASR-X - experimental",
+                "Sending samples to an Ensoniq ASR-X is experimental.\n\n"
+                "It was written from the ASR-X's firmware, without an ASR-X to test against. Each file becomes a NEW sample in the "
+                "first free slot (nothing is overwritten); a stereo file becomes two. Sending is slow (MIDI speed, about 5 minutes for "
+                "10 s of audio). If a send fails a half-written sample may be left, and it can only be deleted from the front panel.\n\n"
+                "Save anything you can't afford to lose first, and please report problems along with ~/.akaisds/akaisds.log.",
+                QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Cancel,
+            )
+            if answer != QMessageBox.StandardButton.Ok:
+                return False
+            app_config.save_asrx_transfer_warning_acknowledged(True)
             return True
         if app_config.get_ensoniq_transfer_warning_acknowledged():
             return True

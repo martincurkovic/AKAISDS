@@ -6,7 +6,7 @@ first person who has one. **Sections A and B only READ the sampler - nothing is 
 creates new instruments (never overwrites, never deletes, never saves to disk), so do it last, with a unit whose contents you can afford
 to lose or have saved. Stop at the first step that misbehaves and send the log (`~/.akaisds/akaisds.log`; every request is in it as hex).
 
-Not covered: the ASR-X (no spec exists for its SysEx; it may not answer at all), Mirage, SQ/VFX/SD-1 and other Ensoniq synths.
+Not covered: the ASR-X (a different dialect with its own Sampler Type: see `tests/asrx_test_plan.md`), Mirage, SQ/VFX/SD-1 and other Ensoniq synths.
 
 ## Before you start
 

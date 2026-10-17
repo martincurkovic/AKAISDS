@@ -154,6 +154,17 @@ def save_ensoniq_transfer_warning_acknowledged(acknowledged=True):
     save_config(config)
 
 
+def get_asrx_transfer_warning_acknowledged():
+    # the one-time "ASR-X transfers are experimental" warning (shown by the Dashboard before the first Send in Ensoniq ASR-X mode)
+    return bool(load_config().get("asrx_transfer_warning_acknowledged", False))
+
+
+def save_asrx_transfer_warning_acknowledged(acknowledged=True):
+    config = load_config()
+    config["asrx_transfer_warning_acknowledged"] = bool(acknowledged)
+    save_config(config)
+
+
 def get_s950_program_write_warning_acknowledged():
     # the one-time "writing S900/S950 programs is experimental" warning, shown
     # before the first program write (ui/s950_program_editor.py)

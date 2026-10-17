@@ -142,7 +142,7 @@ def test_dialog_width_ignores_which_tab_is_currently_shown(qapp):
 # --- Sampler Type combo (S1000 / S2000/S3000 / Generic) ----------------------
 
 
-def test_sampler_type_combo_lists_the_six_models_alphabetically(qapp):
+def test_sampler_type_combo_lists_the_seven_models_alphabetically(qapp):
     dialog = MidiSettingsDialog(_FakeMidiManager(["In A"], ["Out A"]), _FakeSamplerController())
     labels = [
         dialog.combo_device_type.itemText(i)
@@ -152,15 +152,17 @@ def test_sampler_type_combo_lists_the_six_models_alphabetically(qapp):
         "Akai S1000",
         "Akai S2000/S3000",
         "Akai S900/S950 (experimental)",
+        "Ensoniq ASR-X (untested, experimental)",
         "Ensoniq EPS/ASR (untested, experimental)",
         "Generic SDS",
         "Yamaha A4000/A5000 (experimental)",
     ]
     assert labels == sorted(labels)
-    assert [dialog.combo_device_type.itemData(i) for i in range(6)] == [
+    assert [dialog.combo_device_type.itemData(i) for i in range(7)] == [
         "akai_s1000",
         "akai_s2000_s3000",
         "akai_s900_s950",
+        "ensoniq_asrx",
         "ensoniq_eps_asr",
         "generic",
         "yamaha_a4000",
@@ -182,6 +184,7 @@ def test_hardware_test_speaks_the_akai_protocol_for_the_s1000(qapp):
         ("akai_s2000_s3000", "akai"),
         ("akai_s900_s950", "s950"),
         ("ensoniq_eps_asr", "ensoniq"),
+        ("ensoniq_asrx", "ensoniq"),
         ("generic", "generic"),
         ("yamaha_a4000", "generic"),
     ]:
@@ -317,6 +320,59 @@ def test_only_a_response_or_a_put_counts_as_an_ensoniq_answer(qapp):
     assert not ok(e.build_get_instrument(0))  # our own request
     assert not ok([0x47, 0x00, 0x05, 0x00])
     assert not ok([0x0F, 0x03, 0x00])
+
+
+# --- the ASR-X hardware test ---------------------------------------------------------------------
+
+
+def _asrx_dialog(qapp, device_id=0):
+    dialog = MidiSettingsDialog(_FakeMidiManager(["In A"], ["Out A"]), _FakeSamplerController())
+    dialog.combo_device_type.setCurrentIndex(dialog.combo_device_type.findData("ensoniq_asrx"))
+    dialog.spin_channel.setValue(device_id)
+    return dialog
+
+
+def test_the_asrx_hardware_test_asks_for_the_name_of_sample_0(qapp):
+    from core import asrx_sysex as a
+
+    dialog = _asrx_dialog(qapp, device_id=5)
+    name_reply = _Reply(bytes((0x7E, 5, 0x05, 0x03, 0, 0, 0x00, 0x10)) + a.encode_name("KICK"))
+    inp, out = _paired([[], [name_reply]])  # no identity answer, then the name
+    ok, message = dialog._send_identity_request(inp, out)
+    assert ok and message.kind == "name" and message.name == "KICK"
+    assert out.sent[-1].data == tuple(a.build_name_request(5, 0))
+    assert "Sample 0 is 'KICK'" in dialog._format_asrx_result(message)
+
+
+def test_the_asrx_hardware_test_takes_any_device_id_and_an_empty_slot_is_an_answer(qapp):
+    from core import asrx_sysex as a
+
+    dialog = _asrx_dialog(qapp, device_id=100)  # the EPS/ASR limit of 0-15 does not apply
+    empty = _Reply(a.HEADER + bytes((100, 0x7F, 0x41)))
+    inp, out = _paired([[], [empty]])
+    ok, message = dialog._send_identity_request(inp, out)
+    assert ok and message.kind == "error"
+    assert "empty (a normal answer)" in dialog._format_asrx_result(message)
+
+
+def test_the_asrx_hardware_test_ignores_its_own_request_coming_back(qapp):
+    from core import asrx_sysex as a
+
+    ok = MidiSettingsDialog._is_asrx_answer
+    assert ok(bytes((0x7E, 0, 0x05, 0x03, 0, 0, 0, 0x10)))
+    assert ok(a.HEADER + bytes((0, 0x7F, 0x41)))
+    assert not ok(a.build_name_request(0, 0))  # our own request
+    assert not ok(bytes((0x47, 0, 5, 0)))
+
+
+def test_the_asrx_hardware_test_says_what_to_check_when_there_is_no_reply(qapp, monkeypatch):
+    from ui import settings_dialog
+
+    monkeypatch.setattr(settings_dialog, "_LOOPBACK_RECEIVE_TIMEOUT", 0.05)
+    dialog = _asrx_dialog(qapp)
+    inp, out = _paired([[], []])
+    ok, text = dialog._send_identity_request(inp, out)
+    assert not ok and "No reply from an ASR-X" in text and "SysEx Recv" in text
 
 
 # --- Settings tab + Appearance card ---------------------------------------------------------------
