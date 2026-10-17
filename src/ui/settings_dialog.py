@@ -191,7 +191,7 @@ class MidiSettingsDialog(QDialog):
         self.spin_channel.setRange(0, 127)
         self.spin_channel.setValue(self.sampler_controller.channel)
         self.spin_channel.setToolTip(tooltips.DEVICE_ID_CHANNEL)
-        midi_form.addRow(QLabel("Device ID (SysEx ch. 0-127):"), self.spin_channel)
+        midi_form.addRow(QLabel("SysEx Device ID (usually 0):"), self.spin_channel)
 
         # sampler device type - determines which protocol family gets used for each step
         # (send, receive, list, delete, rename etc)

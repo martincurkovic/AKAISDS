@@ -69,7 +69,7 @@ def align_form_label_columns(*forms):
     # every QFormLayout sizes its OWN label column to its own widest label,
     # so a page of several section cards (one form each) ends up with the
     # entry fields starting at a different x in every card - "Theme:" is
-    # short, "Device ID (SysEx ch. 0-127):" is not. Giving every label in
+    # short, "SysEx Device ID (usually 0):" is not. Giving every label in
     # every form the width of the widest one lines the field columns up
     # across the whole page. Rows with no label (a note spanning the full
     # width) are skipped. Call after every row has been added, and before

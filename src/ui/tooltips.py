@@ -86,10 +86,9 @@ BUSY_BLOCKS_OTHER_WINDOWS = "Can't do this while a MIDI transfer is in progress"
 # =============================================================================
 
 DEVICE_ID_CHANNEL = (
-    "The SysEx device ID your hardware is set to (0-127)\n"
-    "Only matters if you have more than one sampler on the\n"
-    "same MIDI chain. Note that some hardware may report\n"
-    "SysEx channels to be 1-128 instead of 0-127."
+    "The sampler's SysEx ID, not its MIDI channel. Almost always 0.\n"
+    "It must match the SysEx channel set on the sampler itself.\n"
+    "Some units show it as 1-128; subtract 1."
 )
 
 # Ensoniq EPS/ASR (see dev_docs/ensoniq-support-plan.md): listing, receiving and sending samples (no editor); it answers on the MIDI input

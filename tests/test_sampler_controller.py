@@ -1228,6 +1228,26 @@ def test_reply_arriving_cancels_the_watchdog(controller):
     assert not any("No reply" in s for s in statuses)
 
 
+def test_no_reply_names_a_non_zero_device_id_on_an_akai(controller):
+    # S1100 report, 2026-10-16: Settings said 1, the sampler answered on 0
+    statuses = _statuses(controller)
+    controller.device_type = "akai"
+    controller.channel = 1
+    controller.refresh_sample_list()
+    controller._on_reply_timeout(controller._reply_generation)
+    assert any("it is 1; most Akais use 0" in s for s in statuses)
+
+
+def test_no_reply_has_no_device_id_hint_when_it_is_already_zero(controller):
+    statuses = _statuses(controller)
+    controller.device_type = "akai"
+    controller.channel = 0
+    controller.refresh_sample_list()
+    controller._on_reply_timeout(controller._reply_generation)
+    assert any("No reply from the sampler" in s for s in statuses)
+    assert not any("most Akais use 0" in s for s in statuses)
+
+
 def test_pre_send_slist_timeout_aborts_the_batch(controller):
     statuses = _statuses(controller)
     finished = []

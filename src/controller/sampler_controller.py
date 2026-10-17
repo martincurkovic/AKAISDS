@@ -656,8 +656,12 @@ class SamplerController(QObject):
         )
         message = (
             f"No reply from the sampler to the {label} request - check the MIDI "
-            f"input port, cabling and SysEx channel"
+            f"input port, cabling and Device ID"
         )
+        if self.device_type == sampler_models.FAMILY_AKAI and self.channel != 0:
+            # an S1100 sat on ID 0 while Settings said 1 (user log, 2026-10-16):
+            # the sampler ignores any other ID and the user never knew why
+            message += f" (it is {self.channel}; most Akais use 0)"
         if (
             self._awaiting_count_for_queue
             or self._awaiting_pre_send_slist
