@@ -76,3 +76,10 @@ stretcher released under the GNU General Public License v3.0 - the same licence 
 is needed here. The derived file is `src/core/time_stretch.py`. `tests/fixtures/time_stretch_golden.json` holds the
 output of the real C++ header, made by `tools/make_time_stretch_golden.py`; the header itself is not in this
 repository.
+
+## s3ked
+
+The Akai S1000/S2000/S3000 Program Editor is built on [s3ked](https://github.com/lentferj/s3ked) by Jan Lentfer and the
+s3ked contributors (`s3k.bridge`, `s3k.params` and `s3ked.demo`), released under the GNU General Public License v2.0 or
+later. AKAISDS uses it unmodified, as a dependency pinned to one commit in `pyproject.toml`, and is itself released
+under GPL v3.0, which the "or later" allows, so no further notice text is needed here.
