@@ -13,6 +13,7 @@ dependencies = [
     "soundfile>=0.14.0",
     "s3ked",
     "miniaudio>=1.71",
+    "certifi>=2026.7.22",
 ]
 
 [dependency-groups]

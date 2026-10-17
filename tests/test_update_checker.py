@@ -25,7 +25,7 @@ class _FakeResponse:
 
 
 def _fake_urlopen(payload):
-    def _urlopen(request, timeout=None):
+    def _urlopen(request, timeout=None, context=None):
         return _FakeResponse(payload)
 
     return _urlopen
@@ -130,3 +130,41 @@ def test_returns_none_when_latest_tag_is_malformed(monkeypatch):
         _fake_urlopen({"tag_name": "not-a-version", "html_url": "x"}),
     )
     assert check_for_update(current_version="1.0.0") is None
+
+
+def test_request_uses_the_certifi_ca_bundle(monkeypatch):
+    # a bundled macOS Python has no system CA store; without this the check
+    # fails with CERTIFICATE_VERIFY_FAILED (S1100 user's log, 2026-10-16)
+    import certifi
+
+    seen = {}
+
+    def fake_context(cafile=None):
+        seen["cafile"] = cafile
+        return "context"
+
+    def fake_urlopen(request, timeout=None, context=None):
+        seen["context"] = context
+        return _fake_urlopen({"tag_name": "v1.0.0", "html_url": "x"})(request)
+
+    monkeypatch.setattr(update_checker.ssl, "create_default_context", fake_context)
+    monkeypatch.setattr(update_checker.urllib.request, "urlopen", fake_urlopen)
+
+    update_checker.check_for_update(current_version="1.0.0")
+
+    assert seen == {"cafile": certifi.where(), "context": "context"}
+
+
+def test_falls_back_to_the_default_context_without_certifi(monkeypatch):
+    import builtins
+
+    real_import = builtins.__import__
+
+    def no_certifi(name, *args, **kwargs):
+        if name == "certifi":
+            raise ImportError(name)
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", no_certifi)
+
+    assert update_checker._ssl_context() is not None

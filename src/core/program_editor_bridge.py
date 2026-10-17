@@ -174,7 +174,12 @@ for _name in LoggingBridge._WRAPPED_METHODS:
 del _name
 
 
-def connect(midi_manager=None, sampler_model=None):
+def connect(midi_manager=None, sampler_model=None, exclusive_channel=None):
+    # exclusive_channel is the SysEx device ID (None = the Settings value).
+    # S3kBridge defaults to 0, so without this a sampler on any other ID
+    # would answer the Dashboard (which honours the setting) and not the editor
+    if exclusive_channel is None:
+        exclusive_channel = app_config.get_saved_channel()
     # sampler_model is one of core/sampler_models.py's three selections
     # (None = the S2000/S3000 default). Only the S1000 differs here: it
     # doesn't implement the byte-addressable header SysEx S3kBridge's
@@ -221,13 +226,14 @@ def connect(midi_manager=None, sampler_model=None):
         # ports set but the flag off) this second check exists to catch.
         logger.info(
             "program_editor_bridge.connect(): shared transport "
-            f"({midi_manager.output_name!r})"
+            f"({midi_manager.output_name!r}, device ID {exclusive_channel})"
         )
         bridge = make_reply_tolerant(
             S3kBridge(
                 ThrottledOut(midi_manager.raw_output),
                 midi_manager.raw_input,
                 f"{midi_manager.output_name} (shared)",
+                exclusive_channel=exclusive_channel,
             ),
             logger,
         )
@@ -240,9 +246,13 @@ def connect(midi_manager=None, sampler_model=None):
         # than guess at during hardware testing
         _input_name, output_name = app_config.get_saved_ports()
         logger.info(
-            f"program_editor_bridge.connect(): standard connection ({output_name!r})"
+            f"program_editor_bridge.connect(): standard connection "
+            f"({output_name!r}, device ID {exclusive_channel})"
         )
-        bridge = make_reply_tolerant(S3kBridge.standard(output_name), logger)  # type: ignore
+        bridge = make_reply_tolerant(
+            S3kBridge.standard(output_name, exclusive_channel=exclusive_channel),  # type: ignore
+            logger,
+        )
     if s1000:
         logger.info("program_editor_bridge.connect(): S1000 block adapter")
         bridge = S1000Bridge(bridge)

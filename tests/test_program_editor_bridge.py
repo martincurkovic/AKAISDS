@@ -47,7 +47,7 @@ def test_connect_opens_saved_output_port_when_not_demo(monkeypatch):
     calls = []
     sentinel = object()
 
-    def fake_standard(output_name):
+    def fake_standard(output_name, **kwargs):
         calls.append(output_name)
         return sentinel
 
@@ -58,6 +58,46 @@ def test_connect_opens_saved_output_port_when_not_demo(monkeypatch):
     assert isinstance(bridge, LoggingBridge)
     assert bridge._bridge is sentinel
     assert calls == ["Some Output"]
+
+
+def test_connect_passes_the_saved_device_id_to_a_standard_connection(monkeypatch):
+    # the Dashboard sends on Settings > Device ID; the editor used to always
+    # use s3k's default 0 (an S1100 on ID 0 worked in the editor only)
+    monkeypatch.delenv("AKAISDS_DEMO_SAMPLER", raising=False)
+    monkeypatch.setattr(
+        program_editor_bridge.app_config, "get_saved_ports", lambda: ("In", "Out")
+    )
+    monkeypatch.setattr(program_editor_bridge.app_config, "get_saved_channel", lambda: 5)
+    kwargs_seen = []
+
+    def fake_standard(output_name, **kwargs):
+        kwargs_seen.append(kwargs)
+        return object()
+
+    monkeypatch.setattr(program_editor_bridge.S3kBridge, "standard", fake_standard)
+
+    program_editor_bridge.connect()
+    program_editor_bridge.connect(exclusive_channel=9)
+
+    assert kwargs_seen == [{"exclusive_channel": 5}, {"exclusive_channel": 9}]
+
+
+def test_connect_passes_the_saved_device_id_to_the_shared_transport(monkeypatch):
+    monkeypatch.delenv("AKAISDS_DEMO_SAMPLER", raising=False)
+    monkeypatch.setenv("AKAISDS_SHARED_MIDI_TRANSPORT", "1")
+    monkeypatch.setattr(program_editor_bridge.app_config, "get_saved_channel", lambda: 7)
+    kwargs_seen = []
+
+    def fake_s3kbridge(midi_out, midi_in, description, **kwargs):
+        kwargs_seen.append(kwargs)
+        return object()
+
+    monkeypatch.setattr(program_editor_bridge, "S3kBridge", fake_s3kbridge)
+    monkeypatch.setattr(program_editor_bridge, "ThrottledOut", lambda port: port)
+
+    program_editor_bridge.connect(_FakeMidiManagerWithRawPorts(object(), object()))
+
+    assert kwargs_seen == [{"exclusive_channel": 7}]
 
 
 # --- connect(): AKAISDS_SHARED_MIDI_TRANSPORT=1 (see core/midi_transport.py) -
@@ -118,7 +158,7 @@ def test_connect_falls_back_to_standard_when_flag_set_but_ports_not_open(monkeyp
     )
     sentinel = object()
     monkeypatch.setattr(
-        program_editor_bridge.S3kBridge, "standard", lambda output_name: sentinel
+        program_editor_bridge.S3kBridge, "standard", lambda output_name, **kw: sentinel
     )
     midi_manager = _FakeMidiManagerWithRawPorts(raw_input=None, raw_output=None)
 
@@ -139,7 +179,7 @@ def test_connect_falls_back_to_standard_when_flag_set_but_no_midi_manager_given(
     )
     sentinel = object()
     monkeypatch.setattr(
-        program_editor_bridge.S3kBridge, "standard", lambda output_name: sentinel
+        program_editor_bridge.S3kBridge, "standard", lambda output_name, **kw: sentinel
     )
 
     bridge = program_editor_bridge.connect()  # no midi_manager at all
@@ -164,7 +204,7 @@ def test_connect_ignores_shared_transport_when_flag_is_off(monkeypatch):
     )
     sentinel = object()
     monkeypatch.setattr(
-        program_editor_bridge.S3kBridge, "standard", lambda output_name: sentinel
+        program_editor_bridge.S3kBridge, "standard", lambda output_name, **kw: sentinel
     )
     midi_manager = _FakeMidiManagerWithRawPorts(object(), object())
 
