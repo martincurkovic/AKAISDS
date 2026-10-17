@@ -122,6 +122,7 @@ from core.global_settings import EXTERNAL_CONTROLLER_LABELS
 from core.sample_duration import sample_duration_seconds
 from ui.global_tab import GlobalSettingsTab, build_external_controller_combo
 from ui.memory_bar import MemoryBar
+from ui.audition_bar import AuditionBar
 from ui.settings_dialog import MidiSettingsDialog
 
 # shared by every list's "Delete ..." QAction (program/keygroup/sample) -
@@ -688,6 +689,9 @@ class ProgramEditorWindow(QMainWindow):
             )
         )
         self._worker.stray_replies_detected.connect(self._on_stray_replies_detected)
+        self._worker.midi_send_failed.connect(
+            lambda e: self.status_bar.showMessage(f"Couldn't send a note: {e}")
+        )
         self._worker.global_settings_loaded.connect(self._on_global_settings_loaded)
         self._worker.memory_status_loaded.connect(self._on_memory_status_loaded)
         self._worker.memory_status_load_failed.connect(self._on_memory_status_load_failed)
@@ -2331,8 +2335,15 @@ class ProgramEditorWindow(QMainWindow):
         bottom_row.addStretch()
         bottom_row.addWidget(close_button)
 
+        # the keyboard along the bottom (View > Audition Keyboard, Cmd/Ctrl+K). Always starts CLOSED: an open bar takes over the computer keyboard.
+        # It sends through the BridgeWorker's queue, so a note never overlaps a SysEx exchange.
+        self.audition_bar = AuditionBar()
+        self.audition_bar.set_demo(bool(os.environ.get("AKAISDS_DEMO_SAMPLER")))
+        self.audition_bar.midi_out.connect(self._worker.submit_midi)
+
         main_layout = QVBoxLayout()
         main_layout.addWidget(self.main_tabs)
+        main_layout.addWidget(self.audition_bar)
         main_layout.addLayout(bottom_row)
 
         container = QWidget()
@@ -2456,6 +2467,17 @@ class ProgramEditorWindow(QMainWindow):
         view_menu.addAction(self.zoom_in_action)
         view_menu.addAction(self.zoom_out_action)
         view_menu.addAction(self.zoom_fit_action)
+        view_menu.addSeparator()
+        self.audition_action = QAction("Audition Keyboard", self)
+        self.audition_action.setCheckable(True)
+        self.audition_action.setShortcut("Ctrl+K")  # (Cmd+K on a Mac)
+        self.audition_action.setToolTip("Show or hide the keyboard along the bottom. Hidden, it plays nothing.")
+        self.audition_action.triggered.connect(
+            lambda checked: self.audition_bar.set_open(checked, focus=checked)
+        )
+        self.audition_bar.open_changed.connect(self.audition_action.setChecked)
+        view_menu.addAction(self.audition_action)
+        self._sync_audition_available()
 
         # append each action's own resolved (platform-native) shortcut text
         # to the zoom buttons' existing tooltips, rather than hardcoding
@@ -3458,6 +3480,7 @@ class ProgramEditorWindow(QMainWindow):
         # (_sync_window_menu_busy_state's timer must not re-enable it meanwhile)
         self._hardware_busy_ui = bool(busy)
         self._sample_menu.setEnabled(not busy)
+        self._sync_audition_available()
         for action in (
             self._multi_tab_action,
             self._programs_tab_action,
@@ -5760,6 +5783,18 @@ class ProgramEditorWindow(QMainWindow):
             self._settings_action.setToolTip(
                 tt.BUSY_BLOCKS_OTHER_WINDOWS if busy else ""
             )
+        self._sync_audition_available()
+
+    def _sync_audition_available(self):
+        # The keyboard is off during any blocking hardware operation (a sample load, a send) and while the Dashboard's controller has a transfer in flight: a note
+        # must not land in the middle of a SysEx exchange. Off = nothing is routed, so a dead keyboard never swallows typing.
+        sampler_controller = getattr(self._main_window, "sampler_controller", None)
+        transfer = sampler_controller is not None and sampler_controller.is_transfer_busy()
+        working = getattr(self, "_hardware_busy_ui", False)
+        self.audition_bar.set_available(
+            not (transfer or working),
+            "The keyboard is off while the sampler is busy." if (transfer or working) else "",
+        )
 
     def closeEvent(self, event):
         # refuse to switch back to the Dashboard (whether via Ctrl+T, the
@@ -5800,6 +5835,7 @@ class ProgramEditorWindow(QMainWindow):
         # _on_waveform_preview_requested) - closing the window must not
         # leave it sounding forever in the background
         self._sample_preview_player.stop()
+        self.audition_bar.set_open(False)  # lets go of every note and gives the computer keyboard back
         self._external_edit.close()
 
         # runs regardless of how the window closes (close button, command + w,

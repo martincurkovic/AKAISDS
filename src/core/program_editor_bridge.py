@@ -520,6 +520,10 @@ class BridgeWorker(QThread):
         "memory_status",
     }
 
+    # Jobs that go through the queue (so they never overlap a SysEx exchange on the wire) but are invisible to busy_changed: a note from the on-screen keyboard
+    # must not light the loading bar for a few milliseconds each time a key is pressed.
+    _SILENT_KINDS = {"midi"}
+
     programs_loaded = Signal(list)
     programs_load_failed = Signal(str)
 
@@ -563,6 +567,7 @@ class BridgeWorker(QThread):
 
     change_sent = Signal(int, str)  # part_index, program_name (for the status bar)
     change_send_failed = Signal(int, str)
+    midi_send_failed = Signal(str)  # a keyboard note or Panic could not be sent
 
     # writer_key, param_name, new_value / error - writer_key is whatever
     # _active_writers used to be keyed by (param_name, or a per-part key for
@@ -674,6 +679,8 @@ class BridgeWorker(QThread):
         self._idle = threading.Condition(self._lock)
         self._queue = deque()
         self._busy = False
+        self._running_silent = False  # the job running now is one of _SILENT_KINDS
+        self._busy_announced = False  # busy_changed(True) has been emitted and its False has not
         self._stopped = False
         # PRGNUM (a program's own MIDI program number, independent of its
         # position in the program list) is what a Program Change actually
@@ -693,11 +700,15 @@ class BridgeWorker(QThread):
 
     def _submit(self, job):
         with self._idle:
-            was_idle = not self._queue and not self._busy
             kind = job[0]
+            # "idle" as far as busy_changed is concerned: nothing queued and nothing running except silent jobs
+            was_idle = all(j[0] in self._SILENT_KINDS for j in self._queue) and (not self._busy or self._running_silent)
             if kind in self._COALESCE_KINDS:
                 self._queue = deque(j for j in self._queue if j[0] != kind)
             self._queue.append(job)
+            announce = was_idle and kind not in self._SILENT_KINDS
+            if announce:
+                self._busy_announced = True
             self._idle.notify_all()
         # diagnostic-only - see AGENTS.md's "Diagnosing a load that
         # silently does nothing". isRunning()/isFinished() are QThread's
@@ -711,8 +722,12 @@ class BridgeWorker(QThread):
             f"BridgeWorker._submit: queued {job!r} (queue_len={len(self._queue)}, "
             f"is_running={self.isRunning()}, is_finished={self.isFinished()})"
         )
-        if was_idle:
+        if announce:
             self.busy_changed.emit(True)
+
+    def submit_midi(self, message):
+        """One raw MIDI channel message (bytes; a keyboard note or a Panic message), sent on the bridge's own open port. Never coalesced, in order with everything else."""
+        self._submit(("midi", bytes(message)))
 
     def submit_program_list(self):
         self._submit(("program_list",))
@@ -837,12 +852,16 @@ class BridgeWorker(QThread):
                     return
                 job = self._queue.popleft()
                 self._busy = True
+                self._running_silent = job[0] in self._SILENT_KINDS
             self._safe_dispatch(job)
             with self._idle:
                 self._busy = False
-                now_idle = not self._queue
+                self._running_silent = False
+                announce_idle = not self._queue and self._busy_announced
+                if announce_idle:
+                    self._busy_announced = False
                 self._idle.notify_all()
-            if now_idle:
+            if announce_idle:
                 self.busy_changed.emit(False)
 
     def process_pending(self):
@@ -857,12 +876,16 @@ class BridgeWorker(QThread):
                     return
                 job = self._queue.popleft()
                 self._busy = True
+                self._running_silent = job[0] in self._SILENT_KINDS
             self._safe_dispatch(job)
             with self._idle:
                 self._busy = False
-                now_idle = not self._queue
+                self._running_silent = False
+                announce_idle = not self._queue and self._busy_announced
+                if announce_idle:
+                    self._busy_announced = False
                 self._idle.notify_all()
-            if now_idle:
+            if announce_idle:
                 self.busy_changed.emit(False)
 
     def _safe_dispatch(self, job):
@@ -1100,6 +1123,17 @@ class BridgeWorker(QThread):
             self.change_send_failed.emit(part_index, str(e))
             return
         self.change_sent.emit(part_index, program_name)
+
+    def _handle_midi(self, message):
+        # A keyboard note or Panic (ui/audition_bar.py): a plain channel message on the bridge's own open port, nothing read back. The demo bridge has no port: silently nothing.
+        out = getattr(self._bridge, "out", None)
+        if out is None:
+            return
+        try:
+            out.send_message(list(message))
+        except Exception as e:
+            debug_log.get_logger().error(f"BridgeWorker: couldn't send MIDI message {bytes(message).hex()}", exc_info=True)
+            self.midi_send_failed.emit(str(e))
 
     def _handle_write(
         self, writer_key, param_name, region, program_index, value, keygroup_index

@@ -156,6 +156,23 @@ QPushButton:checked:hover {
 }
 
 /* ---------- Line edits (queue row names, dialog fields) ---------- */
+/* the Audition button on the keyboard bar: flat, with only a soft highlight on hover */
+QToolButton#auditionToggle {
+    background-color: transparent;
+    border: 1px solid transparent;
+    border-radius: 4px;
+    padding: 4px 8px;
+    color: ${text};
+}
+
+QToolButton#auditionToggle:hover {
+    background-color: ${bg_button_hover};
+}
+
+QToolButton#auditionToggle:pressed {
+    background-color: ${bg_button_pressed};
+}
+
 QLineEdit {
     background-color: ${bg_input};
     border: 1px solid ${accent};

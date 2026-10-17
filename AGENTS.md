@@ -357,6 +357,15 @@ list reload (if "assigning picks the wrong program" recurs, check for collisions
 (`display_offset=1`); `_handle_program_change` subtracts it back for the raw byte. The 16 part combos hold their own copy of program
 names: renaming needs `_update_multi_program_combo_names()`. Multi FILE format research: `dev_docs/s3000-multi-file-format.md`.
 
+## On-screen keyboard (Program Editor only; NOT tried on hardware)
+
+**View > Audition Keyboard (Cmd/Ctrl+K)** shows a piano along the bottom of the Akai Program Editor. It copies JV-Studio's audition bar (`~/Development/jv-studio`, same behaviour) minus its patch/bank browser and Master slider: a sampler has no banks. `ui/keyboard.py` (`PianoKeyboard`, `ScrollableKeyboard`), `ui/audition_bar.py`, `core/audition.py` are generic, so another window can reuse them. Not wired into the Dashboard, S950 or Yamaha editors (owner's call).
+- **It always starts CLOSED and nothing is remembered**: an open bar OWNS the computer keyboard (app-level event filter, nothing can be typed into a text box). It stands aside for Ctrl/Cmd/Alt shortcuts, Tab/arrows/Esc/Enter/Space/Home/End/Page/F-keys, an open drop-down and any other window in front (`bar._window_in_front`; tests patch it, an offscreen window is never active). Keys: A W S E D F T G Y H U J K O L P ; from middle C (note 60), Z/X octave, C/V velocity (snaps to a multiple of 10, then one step). `, . [ ]` are swallowed but do nothing.
+- Notes are named by `midi_note_to_name` (60 = "C3"). Range 24-108 (JV's is 12-108): the lowest note an Akai keygroup covers.
+- **Plain channel messages only** (note on/off, Panic = CC 64/120/123). They go through `BridgeWorker.submit_midi` -> `_handle_midi` -> `bridge.out.send_message`, in the one queue so a note never lands inside a SysEx exchange. `"midi"` is in `_SILENT_KINDS`: it does not emit `busy_changed` (a key press must not light the loading bar), and `_busy_announced` keeps True/False paired when silent and real jobs mix. The DemoBridge has no port, so a note is dropped.
+- The bar is unavailable (`_sync_audition_available`) during `_hardware_busy_ui` and while the Dashboard's controller has a transfer in flight; unavailable = nothing routed, so a dead keyboard never swallows typing. Closing the window closes the bar. Tests: `tests/test_audition_keyboard.py`.
+- Unknown on a sampler: which channel the owner's multi parts listen on (the bar defaults to 1); echo from a DAW sharing the interface would send the notes back (harmless, but see "Real-hardware safety": close DAWs anyway).
+
 ## Note names
 
 `core.midi_notes.midi_note_to_name()` calls note 60 **"C3"** (the S3000XL panel's convention). Don't "correct" it to C4. `ui/note_spinbox.py`'s parser
