@@ -128,7 +128,8 @@ class TransferDashboard(QWidget):
         self.lbl_logo.setFont(logo_font)
         self.lbl_logo.setTextFormat(Qt.TextFormat.PlainText)
         self.lbl_logo.setWordWrap(False)
-        self.lbl_logo.setStyleSheet("background: transparent;")
+        # (the app stylesheet fixes every font at 13 px: only a rule on the label itself can change it; 10 px is JV-Studio's logo size)
+        self.lbl_logo.setStyleSheet("background: transparent; font-size: 10px;")
         top_bar.addWidget(self.lbl_logo)
 
         top_bar.addStretch()
