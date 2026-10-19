@@ -97,10 +97,56 @@ Only after A (and ideally after the owner's compare run). Design, following how 
   loop the proven program-load path. Not requested yet.
 - **Load a `.s3`** exists (Samples tab, `akai_sample_file.restore_plan`) and is the model for "send, then write fields back one by one".
 
+## Hardware findings so far (2026-10-19, the owner's S2000, OS 2.00 = RSTAT version 17.00, via a PreSonus Studio 26)
+
+- **Cabling and echo are clean**: `tools/midi_echo_check.py` got exactly one STAT per request and nothing else, with no DAW running.
+- **"Nothing in memory" is the power-up state, not empty**: the unit holds the factory `TEST PROGRAM` (1 keygroup, PRGNUM shown as 1) and four 256-word 44.1 kHz waveforms
+  (`SQUARE`, `SAWTOOTH`, `PULSE`, `SINE`, all SPTYPE 0). That is what the repo's test fakes imitate. The resident multi is named `MULTI FILE` (FX1-FX4 all 0).
+- **A mistake of mine, corrected (so nobody repeats it)**: the first hardware run made every part look like a copy of the multi header. That was NOT the sampler: `get_header_bytes`
+  defaults to selector 0 (the multi header), and a part is `RMULTIDATA` selector 1 (`s3k.bridge._REGION_SELECTOR["multipart"]`); `read_from_bridge` left the selector out. The first
+  diagnosis ("the multi has no parts yet") was wrong, and the owner's panel report (part 1 = TEST PROGRAM, parts 2-16 empty on channels 2-16) is what exposed it. Fixed:
+  `PART_SELECTOR = 1`, a regression test that every part is asked for with selector 1, and a guard kept on purpose (a part whose first 32 bytes equal the header is refused: that is
+  exactly what a missing selector produces). **Any new code that reads a multi part through `get_header_bytes` must pass `selector=1`**; `get_header("multipart", i)` does it itself.
+- **With the selector fixed, the power-up multi reads exactly as the panel shows it**: name `MULTI FILE`, FX1-FX4 = 0; part 1 `TEST PROGRAM` on channel 1; parts 2-16 blank, channels 2-16
+  (stored 0-indexed). Every part has the defaults in the research note: polyphony `1F`, priority normal (1), play range 24-127, output `FF`, level 99, pan 0, `VOSCL` 50, transpose 0,
+  FX bus 0, FX send 25, tune 0.
+- **Guess (1) settled: byte 0 of a part on the wire is `01`**, as in the one real file (so the writer's "set byte 0 to 01" changes nothing on this unit). **Header bytes 0-2 on the wire are
+  `00 00 00`** (whether a real FILE wants the same is still for `compare`).
+- **The end link on the wire is not always `FF FF`**: part 1 (assigned) reads `00 60`, parts 2-16 (unassigned) `FF FF`. Our file writes `FF FF` for all, as a third-party note says a disk
+  file must have; `compare` will say what the sampler's own file holds. The link pointers (`+1,+2`) read `0C 60` (part 1) and `F4 8F` (empty): close to the real file's `0C 90` / `F4 BF`,
+  so they are sampler addresses that move with its memory, as assumed. "Last note played" (`+0x6D`) reads 0 on every part.
+
+- **The owner's S2000 has no multi-output board and no FX card.** So `OUTPUT`, `VOSCL`, `PFXCHAN`, `PFXSLEV` and `FX1`-`FX4` cannot be observed to DO anything on it (the panel may not even show
+  them). A write check there can only read the byte back, not hear or see an effect. Consequence for the plan: a first Load Multi should write only what the owner's unit can verify on the
+  panel - name, channel, level, pan, priority, play range, transpose, tune - and list the FX/output fields as "not loaded (needs a unit with the cards to test)" until someone with the
+  hardware has tried them. `plan_load` already tags each field with its evidence; add a "can't be verified here" tier for these.
+- **First live field checks (the owner changed the panel, I read it back, nothing written from here)**: after the owner set part 3's channel to 10 the read showed part 3 channel 10 and
+  nothing else different from the previous read, so `PMCHAN` (stored 0-indexed, 9) is decoded and positioned correctly; part 2's level 80 and pan -20 (set earlier) likewise read back
+  as `STEREO` 80 / `PANPOS` -20. Program names bind by name as expected: parts 1-4 read `TEST PROGRAM`, `PROG A`, `PROG B`, `PROG C`.
+
+- **All four panel-visible unmeasured part fields are decoded and positioned correctly (owner set them on part 4, read back with nothing written from here)**: priority high -> `PRIORT` (+0x12) 2;
+  play range C3-C5 -> `PLAYLO`/`PLAYHI` (+0x13/+0x14) 60/84; transpose +5 -> `TRANSPOSE` (+0x4B) 5; tune +20 cents -> `PTUNOCM` (+0x73) 20. Every other part and field was unchanged. These are READ
+  confirmations only: whether WRITING them is safe is still the write check's job.
+- **A part record mirrors its PROGRAM's header, so unmodelled part bytes change when a program is edited.** Part 3 differed from the default at `+0x19` (60 vs 80): that is `PRLOUD`, the program's own
+  loudness, which the owner had changed on `PROG B` (the program header's `+0x19` reads 60 for `PROG B`, 80 for the others). Consequences: (1) a Load must never write the unmodelled bytes (it
+  doesn't plan to: `plan_load` counts them under "not loaded"); (2) `compare REAL.m3` can show differences at program-derived offsets if a program changed after the multi was saved to disk,
+  so save the multi to disk right before exporting it and do not edit programs in between; (3) the panel's "Level" for a part (`STEREO` +0x17) and the program's loudness (`PRLOUD` +0x19)
+  are different bytes.
+- **The earlier no-reply** (one request timed out while the owner was editing on the panel) did not recur once the sampler was idle on a normal page: leave it idle before running a tool.
+- **Program values read back too** (existing decode, now checked on the unit): `PROG C` keygroup 1 range A#3-G8 (notes 70-127), zone 1 tune raw 1331 = +5.1992 semitones, which is the panel's
+  "05.20" semitones.cents (20 cents = 0.20 semitone; 5.2 x 256 = 1331.2), and every other zone and program unchanged.
+
 ## Results from the owner's unit (fill in)
 
 | Date | Command | Result |
 |---|---|---|
+| 2026-10-19 | `midi_echo_check.py` | clean (5/5 single STAT, nothing stray) |
+| 2026-10-19 | `s2000_check.py snapshot` | 1 program `TEST PROGRAM`, samples SQUARE/SAWTOOTH/PULSE/SINE |
+| 2026-10-19 | `s2000_multi_check.py save` on the power-up multi | first run: every part read as the header (my missing selector, fixed); second run: reads as the panel shows, defaults match the research note |
+| 2026-10-19 | `s2000_multi_check.py plan` of the saved file over its own source | 0 changes, 197 loadable fields match |
+| 2026-10-19 | panel changes read back (part 2 level/pan, part 3 channel) | decoded and positioned correctly |
+| 2026-10-19 | panel changes on part 4 (priority, play range, transpose, tune) read back | all four decoded and positioned correctly |
+| 2026-10-19 | program values (keygroup range, zone tune) read back | correct (range 70-127, zone 1 tune +5.1992 st = panel 05.20) |
 | | `s2000_multi_check.py compare REAL.m3` | |
 | | `s2000_multi_check.py plan REAL.m3` | |
 | | write check (A), per field | |

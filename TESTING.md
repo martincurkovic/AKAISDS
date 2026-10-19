@@ -53,4 +53,10 @@ Looking at the app by hand instead of through a test: the demo samplers (fake un
   stand-in app object to `apply_to_app` and `deleteLater()` window fixtures.
 - Audio-preview tests poll (`_wait_until`) instead of sleeping, and stop their players in an autouse fixture (a running device at
   exit crashes macOS). `test_update_loop_points_with_degenerate_bounds_is_ignored` has flaked once on timing; re-run it alone.
+- **One full run hung once (2026-10-19) and was not reproduced** (the run straight after passed: 3461 tests in 6:46). `sample <pid>` showed a deadlock: the main thread waiting on
+  a Python lock while the `BridgeWorker` thread sat inside `QMainWindow`'s destructor (`QWidget::~QWidget` -> `QWindow::close()`), i.e. a Program Editor window was destroyed on the
+  worker thread (which needs the GUI thread) - the same family as the audio-preview player bug (a Qt object whose last reference is dropped on another thread; see AGENTS.md, "Slice
+  Editor"). It happened while hardware tools were using the MIDI ports at the same time, which is probably only the timing that exposed it. `pyproject.toml` now sets
+  `faulthandler_timeout = 300`, so a stuck test dumps all threads' stacks: if it recurs, the traceback names the test and what the main thread waits for; look for the code that lets
+  the worker thread (or a signal it emits) hold the last reference to an editor window.
 - One harmless warning: `Wave_write.__del__` from the stdlib `wave`, from a test that writes to an unwritable path.

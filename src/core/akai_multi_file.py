@@ -29,6 +29,7 @@ HEADER_SIZE = 1024
 WIRE_HEADER_SIZE = 32  # what RMULTIDATA selector 0 returns, and the first 32 bytes of the file
 PART_SIZE = 192
 PART_COUNT = 16
+PART_SELECTOR = 1  # RMULTIDATA selector for a part (0 is the multi header): s3k.bridge._REGION_SELECTOR["multipart"]
 EXTENSION = ".m3"
 DEFAULT_NAME = "MULTI FILE"
 
@@ -101,10 +102,22 @@ def read_from_bridge(bridge):
     """The resident multi as a MultiFile, read over SysEx (an `S3kBridge`, or anything with its `get_header_bytes`). READ ONLY.
 
     One request at a time, and parts 0-15 only: a read of part 16 or more silently returns part 15's buffer (s3ked), so nothing here ever probes
-    upward. Sizes are checked, not block identifiers: what byte 0 of a part is on the wire is not known."""
+    upward. Sizes are checked, not block identifiers: what byte 0 of a part is on the wire is not known.
+
+    A part is RMULTIDATA with selector 1 (the item index is the part); selector 0 is the multi header. `get_header_bytes` defaults to selector 0, so the
+    selector MUST be passed: the first version of this left it out and every "part" was the header (found on the owner's S2000, 2026-10-19)."""
     header = bytes(bridge.get_header_bytes("multi", 0, 0, WIRE_HEADER_SIZE))
-    parts = [bytes(bridge.get_header_bytes("multipart", index, 0, PART_SIZE)) for index in range(PART_COUNT)]
+    parts = [bytes(bridge.get_header_bytes("multipart", index, 0, PART_SIZE, selector=PART_SELECTOR)) for index in range(PART_COUNT)]
     validate(header, parts)
+    for index, part in enumerate(parts):
+        if part[:WIRE_HEADER_SIZE] == header:
+            # A real part never equals the multi header (its name offset holds a program name, its channel byte a channel...). If one does, the sampler
+            # answered a part read with the header - which is exactly what a read with the wrong selector gets - so it is not part data, and saving it
+            # would write a file of identical bogus parts.
+            raise MultiFileError(
+                f"the sampler sent its multi header where part {index + 1} should be, so that isn't part data and nothing was saved. "
+                "Check the MIDI connection and try again."
+            )
     return MultiFile(header=header, parts=parts)
 
 

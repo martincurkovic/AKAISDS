@@ -169,14 +169,15 @@ class RecordingBridge:
         self.calls = []
 
     def get_header_bytes(self, region, index, offset, count, **kwargs):
-        self.calls.append((region, index, offset, count))
+        self.calls.append((region, index, offset, count, kwargs.get("selector", 0)))
         return self.inner.get_header_bytes(region, index, offset, count, **kwargs)
 
 
 def test_reading_asks_only_for_the_header_and_parts_0_to_15_one_request_each():
     recording = RecordingBridge(DemoBridge())
     multi = amf.read_from_bridge(recording)
-    assert recording.calls == [("multi", 0, 0, 32)] + [("multipart", i, 0, 192) for i in range(16)]
+    # a part is selector 1; the default selector 0 is the multi HEADER (the first version of the read forgot it: every part came back as the header)
+    assert recording.calls == [("multi", 0, 0, 32, 0)] + [("multipart", i, 0, 192, 1) for i in range(16)]
     assert len(multi.parts) == 16 and len(multi.header) == 32
 
 
@@ -187,6 +188,50 @@ def test_a_short_answer_is_refused_not_saved():
 
     with pytest.raises(amf.MultiFileError, match="part 5"):
         amf.read_from_bridge(Short(DemoBridge()))
+
+
+class SelectorAwareBridge:
+    """The real sampler's behaviour for RMULTIDATA: selector 0 answers with the multi header, selector 1 with the part (item index = part).
+    `ignore_selector` models the bug of asking for a part without the selector (every part is then the header)."""
+
+    def __init__(self, ignore_selector=False, bad_from=16):
+        header, parts = make_blocks()
+        self.header = header
+        self.parts = parts
+        self.ignore_selector = ignore_selector
+        self.bad_from = bad_from
+
+    def get_header_bytes(self, region, index, offset, count, selector=0, **kwargs):
+        if region == "multi" or (region == "multipart" and (selector == 0 or self.ignore_selector)):
+            block = self.header + bytes(160)
+        elif index >= self.bad_from:
+            block = self.header + bytes(160)  # (some other way of answering with the header)
+        else:
+            block = self.parts[index]
+        return block[offset : offset + count]
+
+
+def test_the_parts_are_asked_for_with_selector_1_so_they_are_not_the_header():
+    multi = amf.read_from_bridge(SelectorAwareBridge())
+    assert multi.parts[0][3:15] == make_blocks()[1][0][3:15] and multi.parts[0][3:15] != multi.header[3:15]
+    assert len({p[3:15] for p in multi.parts}) == 16  # distinct parts, not 16 copies of the header
+
+
+def test_parts_that_are_copies_of_the_header_are_refused_not_saved():
+    with pytest.raises(amf.MultiFileError, match="part 1 should be"):
+        amf.read_from_bridge(SelectorAwareBridge(ignore_selector=True))  # what the missing selector did on the owner's S2000
+    with pytest.raises(amf.MultiFileError, match="part 4 should be"):
+        amf.read_from_bridge(SelectorAwareBridge(bad_from=3))  # the first three were real, the rest not
+
+
+def test_the_worker_reports_header_copies_as_a_failed_read(qapp):
+    worker = BridgeWorker(SelectorAwareBridge(ignore_selector=True))
+    got, failed = [], []
+    worker.multi_exported.connect(got.append)
+    worker.multi_export_failed.connect(failed.append)
+    worker.submit_export_multi()
+    worker.process_pending()
+    assert got == [] and failed and "multi header where part 1" in failed[0]
 
 
 def test_the_worker_exports_the_resident_multi(qapp):
@@ -230,6 +275,8 @@ class FakeBridgeWithMulti(FakeBridge):
             return self.multi_header[offset : offset + count]
         if region == "multipart":
             self.multi_reads.append((region, index))
+            if selector != 1:
+                return (self.multi_header + bytes(160))[offset : offset + count]  # the real sampler: selector 0 is the multi header
             return self.multi_parts[index][offset : offset + count]
         return super().get_header_bytes(region, index, offset, count, selector, **kwargs)
 

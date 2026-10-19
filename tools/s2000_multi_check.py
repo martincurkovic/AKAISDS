@@ -65,7 +65,12 @@ def read_resident():
     midi.open_output(out_name)
     bridge = peb.connect(midi, "akai_s2000_s3000")
     print(f"ports {in_name} / {out_name}", flush=True)
-    multi = amf.read_from_bridge(bridge)
+    try:
+        multi = amf.read_from_bridge(bridge)
+    except amf.MultiFileError as e:
+        print(f"\nNOT READ: {e}", flush=True)
+        sys.stdout.flush()
+        os._exit(1)
     print(f"read the resident multi {multi.name!r} (32-byte header + {amf.PART_COUNT} parts)", flush=True)
     return multi
 
