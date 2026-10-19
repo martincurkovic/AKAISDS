@@ -9,7 +9,7 @@ writes a line for everything it sends and receives, and when something fails it 
 
 1. Use MIDI in **both** directions. The unit answers on your MIDI input; with only an output selected, Refresh/Receive/Send refuse.
 2. AKAISDS: **Settings > Sampler Type > Ensoniq ASR-X (untested, experimental)**, pick the MIDI input AND output.
-3. **Device ID** in AKAISDS = the unit's **SysEx Device ID** (System/MIDI page, default 0). `127` means "all devices" and also works.
+3. **Device ID** in AKAISDS = the unit's **SysEx Device ID** (System/MIDI page, default 0). `127` means "all devices" and also works. If nothing answers the ID you set, the app tries 127 once and, if the unit answers, tells you the ID it really has (and uses it); put that number in Settings.
 4. On the unit: turn **SysEx Recv on** (System/MIDI page).
 5. Close any DAW or MIDI monitor that shares the interface (it can echo the unit's replies back at it).
 6. Put one short sample (a second or less) in the unit for the first receive.

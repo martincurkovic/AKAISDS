@@ -628,22 +628,15 @@ class MidiSettingsDialog(QDialog):
                     "sysex", data=midi_identity.build_identity_request_message()
                 )
             )
-        deadline = time.monotonic() + _LOOPBACK_RECEIVE_TIMEOUT
-        response = None
-        while time.monotonic() < deadline:
-            incoming = input_port.poll()
-            if incoming is not None and incoming.type == "sysex":
-                if device_type == sampler_models.FAMILY_ENSONIQ:
-                    debug_log.get_logger().info(
-                        f"MidiSettingsDialog: Ensoniq hardware test received {len(incoming.data)} bytes: "
-                        f"{bytes(incoming.data[:64]).hex(' ')}"
-                    )
-                    if not (self._is_asrx_answer(incoming.data) if is_asrx else self._is_ensoniq_answer(incoming.data)):
-                        # not an answer: our own request echoed back (a DAW on the same interface does this), or someone else's SysEx
-                        continue
-                response = incoming
-                break
-            QApplication.processEvents()
+        response = self._wait_for_answer(input_port, device_type, is_asrx)
+        if response is None and is_asrx and self.spin_channel.value() != asrx_sysex.BROADCAST_DEVICE:
+            # nothing answered the Device ID above: ask once as 127 (all devices). A unit set to another ID answers and says which
+            request = asrx_sysex.build_name_request(asrx_sysex.BROADCAST_DEVICE, 0)
+            debug_log.get_logger().info(
+                f"MidiSettingsDialog: ASR-X hardware test got no answer on Device ID {self.spin_channel.value()}, trying {bytes(request).hex(' ')}"
+            )
+            output_port.send(mido.Message("sysex", data=request))
+            response = self._wait_for_answer(input_port, device_type, is_asrx)
 
         if response is None and is_asrx:
             debug_log.get_logger().info("MidiSettingsDialog: ASR-X hardware test got no answer to the sample name request")
@@ -717,6 +710,24 @@ class MidiSettingsDialog(QDialog):
             f"Samples in memory: {samples}"
         )
 
+    def _wait_for_answer(self, input_port, device_type, is_asrx):
+        """The first SysEx that answers the hardware test's question, or None after the timeout."""
+        deadline = time.monotonic() + _LOOPBACK_RECEIVE_TIMEOUT
+        while time.monotonic() < deadline:
+            incoming = input_port.poll()
+            if incoming is not None and incoming.type == "sysex":
+                if device_type == sampler_models.FAMILY_ENSONIQ:
+                    debug_log.get_logger().info(
+                        f"MidiSettingsDialog: Ensoniq hardware test received {len(incoming.data)} bytes: "
+                        f"{bytes(incoming.data[:64]).hex(' ')}"
+                    )
+                    if not (self._is_asrx_answer(incoming.data) if is_asrx else self._is_ensoniq_answer(incoming.data)):
+                        # not an answer: our own request echoed back (a DAW on the same interface does this), or someone else's SysEx
+                        continue
+                return incoming
+            QApplication.processEvents()
+        return None
+
     def _ensoniq_identity_step(self, input_port, output_port):
         """Send the universal MIDI identity request and describe the answer in one line, or None if there is none. Read only."""
         log = debug_log.get_logger()
@@ -770,7 +781,10 @@ class MidiSettingsDialog(QDialog):
         else:
             detail = "Sample 0 is empty (a normal answer)."
         identity = getattr(self, "_ensoniq_identity_text", None)
-        return f"Ensoniq ASR-X SysEx answered.\n{detail}\n{identity or 'No MIDI identity reply.'}"
+        text = f"Ensoniq ASR-X SysEx answered.\n{detail}\n{identity or 'No MIDI identity reply.'}"
+        if message.device != self.spin_channel.value() and message.device != asrx_sysex.BROADCAST_DEVICE:
+            text += f"\nThe unit's SysEx Device ID is {message.device}: set the Device ID above to {message.device}."
+        return text
 
     def _format_ensoniq_result(self, message):
         if message.command == ensoniq_sysex.CMD_RESPONSE:

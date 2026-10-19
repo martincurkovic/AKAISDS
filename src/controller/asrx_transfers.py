@@ -109,6 +109,9 @@ class AsrxTransfers(QObject):
         self.occupied = None  # set of slots that answered with a name, None until the first scan
         self.hidden = set()  # slots that answered a range read but have no name (internal recording buffers)
 
+        #: (Device ID in Settings, Device ID the unit really answered with) once the broadcast fallback found a unit set to another ID
+        self._found_device = None
+
         self._op = None
         self._x = None
         self._silent = False
@@ -305,7 +308,11 @@ class AsrxTransfers(QObject):
     # -- plumbing -----------------------------------------------------------------------------------------------
 
     def _device(self):
-        return self._c.channel & 0x7F
+        """The Device ID requests go to: the one in Settings, or the one the broadcast fallback found for that setting."""
+        configured = self._c.channel & 0x7F
+        if self._found_device is not None and self._found_device[0] == configured:
+            return self._found_device[1]
+        return configured
 
     def _begin(self, op, what, silent=False):
         if self._op is not None:
@@ -473,10 +480,10 @@ class AsrxTransfers(QObject):
 
     # -- requests, with the matching rule for each -----------------------------------------------------------------
 
-    def _ask_name(self, slot, callback, *, label=None):
+    def _ask_name(self, slot, callback, *, label=None, device=None):
         self._ask(
             label or f"the name of slot {slot}",
-            a.build_name_request(self._device(), slot),
+            a.build_name_request(self._device() if device is None else device, slot),
             lambda m, s=slot: m.kind == "name" and m.slot == s,
             callback,
         )
@@ -527,11 +534,10 @@ class AsrxTransfers(QObject):
             if s["timeouts"] >= 2:
                 if s["found"]:
                     self._fail(f"The ASR-X stopped answering while its sample list was being read (slot {slot})")
+                elif self._device() != a.BROADCAST_DEVICE and not s.get("broadcast_tried"):
+                    self._scan_try_broadcast(slot)
                 else:
-                    self._fail(
-                        "No reply from the ASR-X. Check it's on, SysEx Recv is on and its SysEx Device ID matches the Device ID in Settings "
-                        "(System/MIDI page), both MIDI cables are connected, and no other MIDI program has the ports open"
-                    )
+                    self._fail_silent_unit()
                 return
             self._after(self.pace_ms, self._scan_next)  # one more try for the same slot
             return
@@ -552,6 +558,43 @@ class AsrxTransfers(QObject):
                 self._log().warning(f"AsrxTransfers: slot {slot} answered with an unexpected error code 0x{r.error.error_code:02X}")
         s["slot"] += 1
         self._after(0, self._scan_next)
+
+    def _fail_silent_unit(self, tried_broadcast=False):
+        self._fail(
+            "No reply from the ASR-X. Check it's on, SysEx Recv is on and its SysEx Device ID matches the Device ID in Settings "
+            "(System/MIDI page), both MIDI cables are connected, and no other MIDI program has the ports open"
+            + (" (Device ID 127, all devices, got no reply either)" if tried_broadcast else "")
+        )
+
+    def _scan_try_broadcast(self, slot):
+        """Nothing answered the Device ID in Settings: ask once more as Device ID 127 (all devices). Read only. A unit set to another ID answers it
+        and its reply names the ID it really has, which is then used for the rest of the session."""
+        self._scan["broadcast_tried"] = True
+        self._log().warning(
+            f"AsrxTransfers: no answer on Device ID {self._device()}; asking the name of slot {slot} as Device ID {a.BROADCAST_DEVICE} (all devices) in case the unit has another ID"
+        )
+        self._ask_name(slot, self._scan_got_broadcast, label=f"the name of slot {slot} (Device ID {a.BROADCAST_DEVICE})", device=a.BROADCAST_DEVICE)
+
+    def _scan_got_broadcast(self, r):
+        if r.timeout:
+            self._stats["retries"] += 1
+            self._fail_silent_unit(tried_broadcast=True)
+            return
+        configured = self._device()
+        unit = r.message.device
+        if unit != configured and unit != a.BROADCAST_DEVICE:
+            self._found_device = (self._c.channel & 0x7F, unit)
+            self._log().warning(
+                f"AsrxTransfers: the unit answered Device ID {a.BROADCAST_DEVICE} with its own Device ID {unit}, not {configured} (Settings); using {unit} until the setting changes"
+            )
+            if not self._silent:
+                self._c.status_changed.emit(
+                    f"The ASR-X's SysEx Device ID is {unit}, not {configured}. Using {unit}; set it in Settings to keep it."
+                )
+        else:
+            self._log().warning(f"AsrxTransfers: Device ID {a.BROADCAST_DEVICE} was answered with Device ID {unit}; the earlier requests were probably lost")
+        self._scan["timeouts"] = 0
+        self._scan_got(r)
 
     def _scan_finish(self):
         s, cont = self._scan, self._scan_cont

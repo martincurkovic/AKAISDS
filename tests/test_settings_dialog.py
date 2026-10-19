@@ -375,6 +375,30 @@ def test_the_asrx_hardware_test_says_what_to_check_when_there_is_no_reply(qapp, 
     assert not ok and "No reply from an ASR-X" in text and "SysEx Recv" in text
 
 
+def test_the_asrx_hardware_test_tries_127_and_names_the_units_real_device_id(qapp, monkeypatch):
+    from core import asrx_sysex as a
+    from ui import settings_dialog
+
+    monkeypatch.setattr(settings_dialog, "_LOOPBACK_RECEIVE_TIMEOUT", 0.05)
+    dialog = _asrx_dialog(qapp, device_id=0)
+    reply = _Reply(bytes((0x7E, 9, 0x05, 0x03, 0, 0, 0x00, 0x10)) + a.encode_name("KICK"))
+    inp, out = _paired([[], [], [reply]])  # no identity answer, nothing on ID 0, an answer to 127 from a unit set to 9
+    ok, message = dialog._send_identity_request(inp, out)
+    assert ok and message.device == 9
+    assert [m.data for m in out.sent[-2:]] == [tuple(a.build_name_request(0, 0)), tuple(a.build_name_request(127, 0))]
+    assert "Device ID is 9: set the Device ID above to 9" in dialog._format_asrx_result(message)
+
+
+def test_the_asrx_hardware_test_does_not_repeat_itself_when_the_id_is_already_127(qapp, monkeypatch):
+    from ui import settings_dialog
+
+    monkeypatch.setattr(settings_dialog, "_LOOPBACK_RECEIVE_TIMEOUT", 0.05)
+    dialog = _asrx_dialog(qapp, device_id=127)
+    inp, out = _paired([[], []])
+    ok, _text = dialog._send_identity_request(inp, out)
+    assert not ok and len(out.sent) == 2  # the identity request and one name request
+
+
 # --- Settings tab + Appearance card ---------------------------------------------------------------
 
 

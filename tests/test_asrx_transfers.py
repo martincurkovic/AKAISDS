@@ -252,25 +252,95 @@ def test_hidden_slots_are_not_listed(qapp, monkeypatch):
         _teardown(rig)
 
 
+def _deaf(fake):
+    """A unit that answers nobody: off, SysEx Recv off, or not on this cable."""
+    fake._addressed = lambda device: False
+    return fake
+
+
 def test_silence_fails_with_advice(qapp, monkeypatch):
-    rig = _build(qapp, monkeypatch, FakeASRX(device=9))  # answers only device 9 or broadcast: our id 0 is ignored
+    rig = _build(qapp, monkeypatch, _deaf(FakeASRX()))
     try:
         rig.controller.refresh_sample_list()
         assert wait_until(lambda: rig.engine.idle)
         assert rig.rec.status_has("No reply from the ASR-X")
         assert rig.rec.status_has("Device ID")
+        assert rig.rec.status_has("127")
         assert rig.log.has("FAILED", logging.WARNING)
         assert rig.log.has("last messages before", logging.WARNING)
     finally:
         _teardown(rig)
 
 
+def test_silence_asks_twice_on_the_setting_then_once_as_127(qapp, monkeypatch):
+    rig = _build(qapp, monkeypatch, _deaf(FakeASRX()))
+    try:
+        rig.controller.refresh_sample_list()
+        assert wait_until(lambda: rig.engine.idle)
+        devices = [m[1] for m in rig.midi.sent]
+        assert devices == [0x00, 0x00, 0x7F]
+    finally:
+        _teardown(rig)
+
+
 def test_a_silent_refresh_says_nothing(qapp, monkeypatch):
-    rig = _build(qapp, monkeypatch, FakeASRX(device=9))
+    rig = _build(qapp, monkeypatch, _deaf(FakeASRX()))
     try:
         rig.controller.refresh_sample_list(silent=True)
         assert wait_until(lambda: rig.engine.idle)
         assert rig.rec.statuses == []
+    finally:
+        _teardown(rig)
+
+
+def test_a_unit_with_another_device_id_is_found_by_the_fallback(qapp, monkeypatch):
+    rig = _build(qapp, monkeypatch, FakeASRX(device=9))  # Settings say 0
+    try:
+        rig.engine.scan_empty_run = 3
+        assert [s for s, _ in list_samples(rig)] == [0, 1, 2]
+        assert rig.rec.status_has("Device ID is 9, not 0")
+        assert rig.log.has("with its own Device ID 9", logging.WARNING)
+        # the 127 request was a read; everything after it goes to the unit's own ID
+        devices = [m[1] for m in rig.midi.sent]
+        assert devices.count(0x7F) == 1
+        assert devices[-1] == 9
+    finally:
+        _teardown(rig)
+
+
+def test_a_silent_refresh_finds_the_unit_without_a_message(qapp, monkeypatch):
+    rig = _build(qapp, monkeypatch, FakeASRX(device=9))
+    try:
+        rig.engine.scan_empty_run = 3
+        rig.controller.refresh_sample_list(silent=True)
+        assert wait_until(lambda: rig.engine.idle)
+        assert rig.rec.statuses == []
+        assert rig.engine._device() == 9
+    finally:
+        _teardown(rig)
+
+
+def test_the_found_device_id_is_dropped_when_the_setting_changes(qapp, monkeypatch):
+    rig = _build(qapp, monkeypatch, FakeASRX(device=9))
+    try:
+        rig.engine.scan_empty_run = 3
+        list_samples(rig)
+        assert rig.engine._device() == 9
+        rig.controller.set_channel(5)
+        assert rig.engine._device() == 5
+        rig.controller.set_channel(0)
+        assert rig.engine._device() == 9  # same setting again: the unit is still the one that answered
+    finally:
+        _teardown(rig)
+
+
+def test_a_send_to_a_unit_with_another_id_never_uses_127_for_the_upload(qapp, monkeypatch, tmp_path):
+    rig = _build(qapp, monkeypatch, FakeASRX(device=9))
+    try:
+        send(rig, [entry(wav(tmp_path, "kick", [1000, -1000] * 500))])
+        assert wait_until(lambda: rig.engine.idle)
+        puts = [m for m in rig.midi.sent if len(m) > 4 and m[:3] == bytes(a.HEADER) and m[4] == a.CMD_PUT_OBJECT]
+        assert puts and all(m[3] == 9 for m in puts)
     finally:
         _teardown(rig)
 
