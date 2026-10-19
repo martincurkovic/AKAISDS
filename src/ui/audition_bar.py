@@ -27,7 +27,7 @@ from ui.keyboard import TYPING_KEYS, PianoKeyboard, ScrollableKeyboard
 
 HELP = (
     "Play the sampler from the keyboard below.\n"
-    "While open, the computer keyboard keys A-L play notes, Z and X change the octave, C and V the velocity. "
+    "While open, the computer keyboard keys A-L play notes, Z and X change the octave, C and V the velocity, [ and ] the MIDI channel. "
     "Cmd+K to show or hide keyboard."
 )
 
@@ -145,6 +145,7 @@ class AuditionBar(QWidget):
         self.keyboard.typing_base_changed.connect(lambda _n: self._show_typing())
         self.keyboard.held_changed.connect(self._show_playing)
         self.keyboard.velocity_step.connect(self.step_velocity)
+        self.keyboard.channel_step.connect(self.step_channel)
         self.keyboard_scroll = ScrollableKeyboard(
             self.keyboard
         )  # (scrolls sideways when the window is too narrow for the keys)
@@ -276,6 +277,12 @@ class AuditionBar(QWidget):
         """Louder (+) or quieter (-): the next multiple of 10, or 1 / 127 at the ends (the C and V keys); the new value is shown in the read-out."""
         self.velocity.setValue(audition.step_velocity(self.velocity.value(), direction))
         self.playing_label.setText(f"Velocity {self.velocity.value()}")
+
+    def step_channel(self, direction):
+        """The previous (-) or next (+) MIDI channel (the [ and ] keys); it stops at 1 and 16 rather than wrapping. Notes already sounding keep their channel until released."""
+        index = max(0, min(15, self.channel_combo.currentIndex() + direction))
+        self.channel_combo.setCurrentIndex(index)
+        self.playing_label.setText(f"Channel {index + 1}")
 
     def _show_playing(self, notes):
         self.playing_label.setText(

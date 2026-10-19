@@ -38,7 +38,7 @@ from core import yamaha_params as yp
 from core import demo_timing
 from core.demo_a4000 import FakeA4000
 from core.midi_manager import MidiManager
-from ui import theme, wheel_guard
+from ui import spinbox_drag, theme, wheel_guard
 from ui.dashboard import TransferDashboard
 
 RATE = 22050
@@ -112,6 +112,7 @@ def main(smoke=False, editor=False, instant=False):
     app = QApplication(sys.argv)
     theme.apply_to_app(app)
     wheel_guard.install(app)
+    spinbox_drag.install(app)
 
     fake = FakeA4000()
     add_demo_samples(fake)

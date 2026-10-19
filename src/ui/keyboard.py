@@ -3,7 +3,7 @@
 
 Computer keys (QWERTY, the usual DAW layout), only while this widget has the focus so typing in a text box never plays a note: A W S E D F T G Y H U J K O L P ; are the notes
 from `typing_base` (C, C#, D ... E an octave up); Z and X move that base down and up an octave, C and V ask for a quieter / louder note (`velocity_step`, -1 / +1: the owner
-of the value decides the size of the step). The range those keys play is marked by a bar under the keyboard and a light tint on its keys. Every note that is held is released
+of the value decides the size of the step), [ and ] ask for the previous / next MIDI channel (`channel_step`). The range those keys play is marked by a bar under the keyboard and a light tint on its keys. Every note that is held is released
 when the widget loses focus or is disabled. (Same behaviour as JV-Studio's keyboard, minus the patch and bank keys: a sampler has no banks.)
 """
 
@@ -32,6 +32,7 @@ class PianoKeyboard(QWidget):
     note_off = Signal(int)
     typing_base_changed = Signal(int)
     velocity_step = Signal(int)  # -1 (quieter) or +1 (louder): the C and V keys
+    channel_step = Signal(int)  # -1 (previous MIDI channel) or +1 (next): the [ and ] keys
     held_changed = Signal(list)  # the notes held now, lowest first (for a live read-out)
 
     def __init__(self, parent=None, first=FIRST_NOTE, last=LAST_NOTE, typing=True):
@@ -183,6 +184,10 @@ class PianoKeyboard(QWidget):
             self.velocity_step.emit(-1)
         elif text == "v":
             self.velocity_step.emit(1)
+        elif text == "[":
+            self.channel_step.emit(-1)
+        elif text == "]":
+            self.channel_step.emit(1)
         elif len(text) == 1 and text in TYPING_KEYS and event.modifiers() in (Qt.KeyboardModifier.NoModifier, Qt.KeyboardModifier.ShiftModifier):
             note = self.typing_base + TYPING_KEYS.index(text)
             if self._first <= note <= self._last and event.key() not in self._typed:

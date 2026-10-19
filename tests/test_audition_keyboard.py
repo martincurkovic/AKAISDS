@@ -101,7 +101,7 @@ def test_losing_focus_or_being_disabled_releases_everything(keys):
 
 
 def test_the_patch_and_bank_keys_of_jv_studio_do_not_exist_here(keys):
-    # a sampler has no banks: `,` `.` `[` `]` are swallowed by the bar but play nothing and send nothing
+    # a sampler has no banks: `,` `.` play nothing and send nothing (`[` `]` change the channel, tested below; on the bare keyboard they play nothing either)
     for key, text in ((Qt.Key.Key_Comma, ","), (Qt.Key.Key_Period, "."), (Qt.Key.Key_BracketLeft, "["), (Qt.Key.Key_BracketRight, "]")):
         keys.keyPressEvent(key_event(QEvent.Type.KeyPress, key, text))
     assert keys.played == []
@@ -167,6 +167,35 @@ def test_c_and_v_snap_the_velocity_to_a_multiple_of_ten_then_step(bar):
     bar.velocity.setValue(97)
     bar.keyboard.keyPressEvent(key_event(QEvent.Type.KeyPress, Qt.Key.Key_C, "c"))
     assert bar.velocity.value() == 90
+
+
+def test_the_bracket_keys_step_the_midi_channel_and_stop_at_the_ends(bar):
+    press = lambda key, text: bar.keyboard.keyPressEvent(key_event(QEvent.Type.KeyPress, key, text))  # noqa: E731
+    assert bar.channel() == 0
+    press(Qt.Key.Key_BracketRight, "]")
+    press(Qt.Key.Key_BracketRight, "]")
+    assert bar.channel() == 2 and bar.playing_label.text() == "Channel 3"
+    press(Qt.Key.Key_BracketLeft, "[")
+    assert bar.channel() == 1 and bar.playing_label.text() == "Channel 2"
+    for _ in range(5):
+        press(Qt.Key.Key_BracketLeft, "[")
+    assert bar.channel() == 0  # no wrap to 16
+    for _ in range(20):
+        press(Qt.Key.Key_BracketRight, "]")
+    assert bar.channel() == 15
+    assert bar.sent == []  # changing the channel sends nothing
+
+
+def test_a_note_held_while_the_channel_changes_is_released_on_the_channel_it_started_on(bar):
+    bar.keyboard._press(60)
+    bar.keyboard.keyPressEvent(key_event(QEvent.Type.KeyPress, Qt.Key.Key_BracketRight, "]"))
+    bar.keyboard._release(60)
+    assert bar.sent == [audition.note_on(0, 60, 100), audition.note_off(0, 60)]
+
+
+def test_the_bracket_keys_reach_the_bar_while_it_is_open(routed):
+    assert routed.eventFilter(QWidget(), key_event(QEvent.Type.KeyPress, Qt.Key.Key_BracketRight, "]")) is True
+    assert routed.channel() == 1
 
 
 def test_the_notes_being_played_are_shown_live_with_the_akai_note_names(bar):
