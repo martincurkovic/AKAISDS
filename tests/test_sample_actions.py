@@ -46,7 +46,7 @@ def test_the_sample_menu_lists_every_action_in_groups(editor):
         "Load Audio", "-",
         "Trim to Markers", "Reverse", "Fade In/Out", "Normalise", "Filter…", "Stretch / Pitch…", "Reverb…", "-",
         "Duplicate", "Slice Editor…", "-",
-        "Edit in External App…", "Load Edited Audio", "Save as Akai File…", "-",
+        "Edit in External App…", "Load Edited Audio", "Save as Akai File…", "Load Akai File…", "-",
         "Undo", "Send to Sampler", "Send as New Sample…", "Revert", "-",
         "Detect Root Note", "-",
         "Rename Sample...", "Delete Sample...",
@@ -66,7 +66,9 @@ def test_the_right_click_menu_shares_the_menus_actions_above_rename_and_delete(e
 
 def test_actions_follow_their_buttons_but_only_on_the_samples_tab(editor, qapp, monkeypatch):
     _go_to_samples(editor, qapp)
-    assert not any(a.isEnabled() for _b, a in editor._sample_edit_controls.values())  # no audio yet
+    # no audio yet: nothing acts on a sample - except Load Akai File, which makes a new one and needs no sample (only the Samples tab and a real sampler)
+    assert not any(a.isEnabled() for key, (_b, a) in editor._sample_edit_controls.items() if key != "load_akai")
+    assert editor._sample_edit_controls["load_akai"][0].isEnabled() and editor._sample_edit_controls["load_akai"][1].isEnabled()
     _load_audio(editor, monkeypatch, list(range(500)))
     for key in _EDIT_KEYS + ["slice", "external_edit", "detect"]:
         button, action = editor._sample_edit_controls[key]
@@ -77,7 +79,7 @@ def test_actions_follow_their_buttons_but_only_on_the_samples_tab(editor, qapp, 
         assert not button.isEnabled() and not action.isEnabled(), key
     # a destructive menu item must not act on a sample the user can't see
     editor.main_tabs.setCurrentIndex(1)
-    assert not any(a.isEnabled() for _b, a in editor._sample_edit_controls.values())
+    assert not any(a.isEnabled() for _b, a in editor._sample_edit_controls.values())  # (Load Akai File included)
     assert editor._sample_edit_controls["reverse"][0].isEnabled()  # (the button just sits on a hidden tab)
     editor.main_tabs.setCurrentIndex(editor._samples_tab_index)
     assert editor._sample_edit_controls["reverse"][1].isEnabled()

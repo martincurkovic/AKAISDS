@@ -148,6 +148,101 @@ def test_headers_compare_ignoring_the_addresses_and_naming_the_rest():
     assert asf.compare_headers(a, a[:150]) and "lengths differ" in asf.compare_headers(a, a[:150])[0]
 
 
+# -- loading a file back: what is written to the sampler -------------------------------------------------------------------
+
+
+def loop_header(n, at, length_frames, dwell, base=None):
+    block = bytearray(base or make_header(length=1000))
+    base_offset = {1: 38, 2: 50, 3: 62, 4: 74}[n]
+    block[base_offset : base_offset + 4] = at.to_bytes(4, "little")
+    block[base_offset + 4 : base_offset + 10] = int(length_frames * 65536).to_bytes(6, "little")
+    block[base_offset + 10 : base_offset + 12] = dwell.to_bytes(2, "little")
+    return bytes(block)
+
+
+def test_a_plan_carries_the_settings_the_file_holds():
+    plan = asf.restore_plan(make_header(length=1000, rate=22050), 1000)
+    assert (plan.rate, plan.sptype, plan.spitch, plan.shlto, plan.sbandw) == (22050, 2, 60, 7, 1)
+    assert plan.stuno == 0xFF00  # raw, as the editor's cache holds it
+    assert (plan.start, plan.end) == (1, 998)
+    assert plan.writes == [
+        ("SPTYPE", 2), ("SPITCH", 60), ("SHLTO", 7), ("SSTART", 1), ("SMPEND", 998),
+        ("LOOPAT1", 999), ("LLNGTH1", 3 * 65536), ("LDWELL1", 9999),
+    ]  # fmt: skip
+    assert (plan.loop_start, plan.loop_end) == (996, 999) and plan.notes == []
+
+
+def test_the_loop_length_is_kept_exactly_including_its_fraction():
+    header = bytearray(make_header(length=1000))
+    header[42:48] = (3 * 65536 + 12345).to_bytes(6, "little")
+    assert ("LLNGTH1", 3 * 65536 + 12345) in asf.restore_plan(bytes(header), 1000).writes
+
+
+def test_the_rate_is_ssrate_when_valid_and_the_bandwidth_bucket_otherwise():
+    assert asf.playback_rate(make_header(rate=12345)) == 12345
+    invalid = bytearray(make_header(rate=12345))
+    invalid[15] = 0  # SSRVLD: the rate field isn't valid
+    assert asf.playback_rate(bytes(invalid)) == 44100  # SBANDW 1
+    invalid[1] = 0
+    assert asf.playback_rate(bytes(invalid)) == 22050  # SBANDW 0
+    assert asf.playback_rate(make_header(rate=0)) == 44100
+    unknown_bucket = bytearray(make_header(rate=0))
+    unknown_bucket[1] = 9
+    assert asf.playback_rate(bytes(unknown_bucket)) == 44100
+
+
+def test_other_loops_are_written_only_when_they_are_in_use():
+    header = loop_header(3, at=700, length_frames=100, dwell=250)
+    header = loop_header(2, at=500, length_frames=50, dwell=0, base=header)  # dwell 0 = no loop: left alone
+    writes = dict(asf.restore_plan(header, 1000).writes)
+    assert writes["LOOPAT3"] == 700 and writes["LLNGTH3"] == 100 * 65536 and writes["LDWELL3"] == 250
+    assert "LOOPAT2" not in writes and "LOOPAT4" not in writes
+
+
+def test_an_unusable_loop_is_cleared_or_left_out_with_a_note():
+    plan = asf.restore_plan(loop_header(1, at=5000, length_frames=10, dwell=9999), 1000)  # loop end past the sample
+    assert dict(plan.writes)["LOOPAT1"] == 1000 and dict(plan.writes)["LLNGTH1"] == 0 and dict(plan.writes)["LDWELL1"] == 0
+    assert any("loop 1" in n for n in plan.notes)
+    plan = asf.restore_plan(loop_header(2, at=100, length_frames=500, dwell=9999, base=make_header(length=1000)), 1000)  # longer than where it ends
+    assert "LOOPAT2" not in dict(plan.writes) and any("loop 2" in n for n in plan.notes)
+
+
+def test_a_start_and_end_that_do_not_fit_become_the_whole_sample():
+    header = bytearray(make_header(length=1000))
+    header[30:34] = (900).to_bytes(4, "little")
+    header[34:38] = (100).to_bytes(4, "little")  # start after end
+    plan = asf.restore_plan(bytes(header), 1000)
+    assert (plan.start, plan.end) == (0, 999) and any("start 900" in n for n in plan.notes)
+    header[30:34] = (0).to_bytes(4, "little")
+    header[34:38] = (5000).to_bytes(4, "little")  # end past the audio
+    assert asf.restore_plan(bytes(header), 1000).end == 999
+
+
+def test_values_the_sampler_could_not_use_are_left_at_its_defaults():
+    header = bytearray(make_header(length=1000))
+    header[19] = 9  # SPTYPE 9
+    header[2] = 10  # SPITCH 10 (below A1)
+    plan = asf.restore_plan(bytes(header), 1000)
+    names = [n for n, _v in plan.writes]
+    assert "SPTYPE" not in names and "SPITCH" not in names and "SHLTO" in names
+    assert plan.sptype == 2 and plan.spitch == 60  # what a fresh sample has
+    assert len(plan.notes) == 2
+
+
+def test_an_s1000_header_gives_the_same_kind_of_plan():
+    plan = asf.restore_plan(make_header(length=1000, size=150), 1000)
+    assert plan.rate == 44100 and ("LOOPAT1", 999) in plan.writes
+    assert all(asf.sample_param(name).end <= 141 for name, _value in plan.writes)  # nothing the S1000's block can't hold
+
+
+def test_every_field_a_plan_writes_fits_the_s1000_block():
+    from core import s1000_bridge
+
+    header = loop_header(4, at=800, length_frames=10, dwell=300, base=loop_header(3, 700, 10, 200, base=loop_header(2, 600, 10, 100)))
+    for name, _value in asf.restore_plan(header, 1000).writes:
+        assert s1000_bridge.supports(asf.sample_param(name)), name
+
+
 # -- the worker's header read -------------------------------------------------------------------------------------------
 
 
@@ -313,3 +408,164 @@ def test_save_as_akai_file_on_an_s1000_writes_an_s1_file(qapp, tmp_path, monkeyp
         assert asked[0][0].endswith("KICK.s1") and "*.s1" in asked[0][1]
     finally:
         _dispose(editor)
+
+
+# -- the Samples tab: Load Akai File ------------------------------------------------------------------------------------------
+
+
+from core import program_editor_bridge  # noqa: E402,F401
+from test_program_editor_window import FakeSamplerController  # noqa: E402
+
+
+@pytest.fixture
+def load_editor(editor, qapp, monkeypatch):
+    monkeypatch.delenv("AKAISDS_DEMO_SAMPLER", raising=False)
+    fake = FakeSamplerController(editor._bridge)
+    editor._main_window.sampler_controller = fake
+    editor._test_fake = fake
+    editor._set_sample_edit_buttons_enabled(False)  # (re-reads the demo flag)
+    return editor
+
+
+def _header_writes(editor, name):
+    index = editor._bridge.sample_list().index(name)
+    editor._worker.wait_until_idle()
+    return [(c[0], c[2]) for c in editor._bridge.set_parameter_calls if c[1] == index]
+
+
+def _file(tmp_path, header, samples, name="LOADED.s3"):
+    path = tmp_path / name
+    path.write_bytes(asf.build_file(header, samples))
+    return str(path)
+
+
+def _choose(monkeypatch, editor, path, name=None):
+    monkeypatch.setattr("ui.program_editor_window.QFileDialog.getOpenFileName", lambda *a, **k: (path, ""))
+    monkeypatch.setattr(editor, "_prompt_akai_name", lambda title, label, current: current if name is None else name)
+
+
+def test_loading_a_file_sends_its_audio_under_its_name_then_writes_its_settings_back(load_editor, tmp_path, monkeypatch):
+    editor = load_editor
+    audio = [(i * 37) % 2000 - 1000 for i in range(1000)]
+    header = loop_header(1, at=800, length_frames=300, dwell=500, base=make_header(length=1000, name="LOADED", rate=44100))
+    path = _file(tmp_path, header, audio)
+    _choose(monkeypatch, editor, path)
+    editor._load_akai_sample_from_file()
+    sent = editor._test_fake.sent_entries
+    assert len(sent) == 1 and sent[0]["name"] == "LOADED" and sent[0]["samples"] == audio
+    writes = _header_writes(editor, "LOADED")
+    names = [n for n, _v in writes]
+    assert names[:5] == ["SPTYPE", "SPITCH", "SHLTO", "STUNO", "SSTART"]  # STUNO right after SHLTO, as the other flows write them
+    values = dict(writes)
+    assert values["SPITCH"] == 60 and values["SHLTO"] == 7 and values["SSTART"] == 1 and values["SMPEND"] == 998
+    assert values["LOOPAT1"] == 800 and values["LLNGTH1"] == 300 * 65536 and values["LDWELL1"] == 500
+    assert "Load complete" in editor.status_bar.currentMessage()
+    assert editor._sample_name_at_row(editor.sample_list_widget.currentRow()) == "LOADED"
+
+
+def test_the_names_prompt_starts_with_the_files_name(load_editor, tmp_path, monkeypatch):
+    editor = load_editor
+    asked = []
+    path = _file(tmp_path, make_header(length=100, name="FROM FILE"), [1] * 100)
+    monkeypatch.setattr("ui.program_editor_window.QFileDialog.getOpenFileName", lambda *a, **k: (path, ""))
+    monkeypatch.setattr(editor, "_prompt_akai_name", lambda title, label, current: asked.append(current) or None)
+    editor._load_akai_sample_from_file()
+    assert asked == ["FROM FILE"] and editor._test_fake.sent_entries == []  # cancelling the prompt sends nothing
+
+
+def test_a_name_already_on_the_sampler_is_asked_for_again(load_editor, tmp_path, monkeypatch):
+    editor = load_editor
+    shown = []
+    monkeypatch.setattr(QMessageBox, "warning", lambda parent, title, text, *a, **k: shown.append(text))
+    path = _file(tmp_path, make_header(length=100, name="SQUARE"), [1] * 100)  # SQUARE is resident
+    monkeypatch.setattr("ui.program_editor_window.QFileDialog.getOpenFileName", lambda *a, **k: (path, ""))
+    answers = iter(["SQUARE", "SQUARE 2"])
+    monkeypatch.setattr(editor, "_prompt_akai_name", lambda *a, **k: next(answers))
+    editor._load_akai_sample_from_file()
+    assert len(shown) == 1 and "already in use" in shown[0]
+    assert [e["name"] for e in editor._test_fake.sent_entries] == ["SQUARE 2"]
+
+
+def test_a_file_that_is_not_a_sample_is_refused(load_editor, tmp_path, monkeypatch):
+    editor = load_editor
+    shown = []
+    monkeypatch.setattr(QMessageBox, "warning", lambda parent, title, text, *a, **k: shown.append(text))
+    bad = tmp_path / "junk.s3"
+    bad.write_bytes(bytes(500))
+    _choose(monkeypatch, editor, str(bad))
+    editor._load_akai_sample_from_file()
+    assert shown and "Couldn't read this file" in shown[0] and editor._test_fake.sent_entries == []
+
+
+def test_a_file_padded_after_its_audio_still_loads(load_editor, tmp_path, monkeypatch):
+    editor = load_editor
+    path = tmp_path / "PADDED.s3"
+    path.write_bytes(asf.build_file(make_header(length=100, name="PADDED"), [5] * 100) + bytes(1024))
+    _choose(monkeypatch, editor, str(path))
+    editor._load_akai_sample_from_file()
+    assert [e["name"] for e in editor._test_fake.sent_entries] == ["PADDED"]
+
+
+def test_things_left_at_the_samplers_defaults_are_said_in_the_status_bar(load_editor, tmp_path, monkeypatch):
+    editor = load_editor
+    header = loop_header(1, at=5000, length_frames=10, dwell=9999, base=make_header(length=100, name="ODD"))
+    _choose(monkeypatch, editor, _file(tmp_path, header, [1] * 100))
+    editor._load_akai_sample_from_file()
+    assert "defaults" in editor.status_bar.currentMessage() and "loop 1" in editor.status_bar.currentMessage()
+    assert dict(_header_writes(editor, "ODD"))["LDWELL1"] == 0
+
+
+def test_an_s1_file_loads_on_an_s2000_without_a_question(load_editor, tmp_path, monkeypatch):
+    editor = load_editor
+    asked = []
+    monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: asked.append(a) or QMessageBox.StandardButton.No)
+    _choose(monkeypatch, editor, _file(tmp_path, make_header(length=100, size=150, name="OLD S1"), [3] * 100, "OLD S1.s1"))
+    editor._load_akai_sample_from_file()
+    assert asked == [] and [e["name"] for e in editor._test_fake.sent_entries] == ["OLD S1"]
+
+
+def test_an_s3_file_on_an_s1000_asks_first_and_writes_only_fields_its_block_holds(load_editor, tmp_path, monkeypatch):
+    from core import s1000_bridge
+
+    editor = load_editor
+    editor._is_s1000 = True
+    questions = []
+
+    def question(parent, title, text, *a, **k):
+        questions.append(text)
+        return QMessageBox.StandardButton.Yes
+
+    monkeypatch.setattr(QMessageBox, "question", question)
+    real_supports = s1000_bridge.supports
+    monkeypatch.setattr(s1000_bridge, "supports", lambda param: param.name != "LDWELL1" and real_supports(param))  # as if the block lacked one
+    _choose(monkeypatch, editor, _file(tmp_path, make_header(length=100, name="S3 FILE"), [3] * 100))
+    editor._load_akai_sample_from_file()
+    assert len(questions) == 1 and "S2000/S3000 sample" in questions[0] and "left out" in questions[0]
+    names = [n for n, _v in _header_writes(editor, "S3 FILE")]
+    assert "LOOPAT1" in names and "LDWELL1" not in names
+
+
+def test_declining_the_s1000_question_loads_nothing(load_editor, tmp_path, monkeypatch):
+    editor = load_editor
+    editor._is_s1000 = True
+    monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.StandardButton.No)
+    _choose(monkeypatch, editor, _file(tmp_path, make_header(length=100), [3] * 100))
+    editor._load_akai_sample_from_file()
+    assert editor._test_fake.sent_entries == []
+
+
+def test_loading_is_refused_during_a_dashboard_transfer(load_editor, tmp_path, monkeypatch):
+    editor = load_editor
+    editor._test_fake.busy = True
+    _choose(monkeypatch, editor, _file(tmp_path, make_header(length=100), [3] * 100))
+    editor._load_akai_sample_from_file()
+    assert editor._test_fake.sent_entries == [] and "transfer is already in progress" in editor.status_bar.currentMessage()
+
+
+def test_the_button_needs_no_sample_but_not_demo_mode(editor, monkeypatch):
+    monkeypatch.delenv("AKAISDS_DEMO_SAMPLER", raising=False)
+    editor._set_sample_edit_buttons_enabled(False)
+    assert editor.load_akai_button.isEnabled() and editor.load_akai_button.text() == "Load Akai File…"
+    monkeypatch.setenv("AKAISDS_DEMO_SAMPLER", "1")
+    editor._set_sample_edit_buttons_enabled(False)
+    assert not editor.load_akai_button.isEnabled()

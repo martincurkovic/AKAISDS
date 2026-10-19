@@ -179,6 +179,121 @@ def parse_file(data, allow_padding=False):
     return SampleFile(header=header, samples=_bytes_to_words(data[size : size + 2 * length]))
 
 
+# --- loading a file back (what is written to the sampler after the audio has been sent) --------------------------------------
+
+LOOP_COUNT = 4
+SAMPLE_RATE_VALID = 0x80  # SSRVLD: 128 = the rate field is valid
+#: SBANDW -> the rate the sampler's engine runs that bucket at (core/akai_sysex._NATIVE_RATES); the fallback for a header with no valid SSRATE
+_NATIVE_RATES = {0: 22050, 1: 44100}
+_SPTYPES = range(0, 4)  # normal looping, loop until release, no looping, play to sample end
+_PITCHES = range(21, 128)
+_LOOP_TUNES = range(-50, 51)
+
+
+def field_value(header, name):
+    """The decoded value of sample-header field `name` (the same decoding the editor's own reads use: STUNO and the loop lengths come back raw)."""
+    prm = p.lookup(name, "sample")
+    if len(header) < prm.end:
+        raise SampleFileError(f"this header is too short to have {name}")
+    return p.decode_field(prm, bytes(header[prm.offset : prm.end]))
+
+
+def sample_param(name):
+    """The `s3k.params` entry of a sample-header field (so a caller can ask whether a sampler's block holds it)."""
+    return p.lookup(name, "sample")
+
+
+def playback_rate(header):
+    """The sample's rate: SSRATE when the header says it is valid, else what its SBANDW bucket runs at (a header without a rate)."""
+    rate = int(field_value(header, "SSRATE"))
+    if field_value(header, "SSRVLD") & SAMPLE_RATE_VALID and rate > 0:
+        return rate
+    return _NATIVE_RATES.get(int(field_value(header, "SBANDW")), 44100)
+
+
+@dataclass
+class RestorePlan:
+    """What loading a sample file does AFTER the audio has been sent as an ordinary new sample (the sampler resets the header when audio arrives, so the
+    fields are written one by one; the file's header block is never sent as a whole)."""
+
+    rate: int
+    sptype: int
+    spitch: int
+    shlto: int
+    stuno: int  # raw, as the editor's cache holds it
+    sbandw: int
+    start: int
+    end: int
+    loop_start: int  # of loop 1, in whole frames (the fraction is kept in `writes`)
+    loop_end: int
+    #: (field name, value) in the order to write them; STUNO is left out because it has to be recomputed for the bandwidth bucket the sampler gives the new sample
+    writes: list = field(default_factory=list)
+    #: what was left out or changed, in words
+    notes: list = field(default_factory=list)
+
+
+def restore_plan(header, frames):
+    """Work out what to write back for a file whose audio is `frames` words long. Only fields the S1000's 141-byte block also has are ever planned, and
+    anything outside what the sampler could use (a start past the end, a loop outside the sample, a root note off the keyboard) is left at the sampler's
+    default with a note rather than written."""
+    validate_header(header)
+    notes = []
+    value = lambda name: int(field_value(header, name))  # noqa: E731
+    last = max(frames - 1, 0)
+
+    def checked(name, allowed):
+        v = field_value(header, name)
+        if v in allowed:
+            return v
+        notes.append(f"{name} {v} is out of range and was left at the sampler's default")
+        return None
+
+    sptype = checked("SPTYPE", _SPTYPES)
+    spitch = checked("SPITCH", _PITCHES)
+    shlto = checked("SHLTO", _LOOP_TUNES)
+    start, end = value("SSTART"), value("SMPEND")
+    if not 0 <= start <= end <= last:
+        notes.append(f"start {start} / end {end} don't fit a sample of {frames} words; the whole sample is used")
+        start, end = 0, last
+
+    writes = []
+    for name, v in (("SPTYPE", sptype), ("SPITCH", spitch), ("SHLTO", shlto)):
+        if v is not None:
+            writes.append((name, v))
+    writes += [("SSTART", start), ("SMPEND", end)]
+
+    loop_start = loop_end = 0
+    for n in range(1, LOOP_COUNT + 1):
+        at, length, dwell = value(f"LOOPAT{n}"), value(f"LLNGTH{n}"), value(f"LDWELL{n}")
+        fits = 0 <= at <= last and (length >> 16) <= at
+        if n == 1:
+            # loop 1 is always written (its own fields are what the editor shows); an unusable one becomes "no loop, as a fresh sample has it"
+            if not fits:
+                notes.append(f"loop 1 (end {at}, length {length / 65536:g}) doesn't fit the sample and was cleared")
+                at, length, dwell = frames, 0, 0
+            writes += [("LOOPAT1", at), ("LLNGTH1", length), ("LDWELL1", dwell)]
+            loop_end, loop_start = min(at, last), max(min(at, last) - (length >> 16), 0)
+        elif dwell != 0 and length > 0:
+            if fits:
+                writes += [(f"LOOPAT{n}", at), (f"LLNGTH{n}", length), (f"LDWELL{n}", dwell)]
+            else:
+                notes.append(f"loop {n} doesn't fit the sample and was left out")
+    return RestorePlan(
+        rate=playback_rate(header),
+        sptype=sptype if sptype is not None else 2,
+        spitch=spitch if spitch is not None else 60,
+        shlto=shlto if shlto is not None else 0,
+        stuno=value("STUNO"),
+        sbandw=value("SBANDW"),
+        start=start,
+        end=end,
+        loop_start=loop_start,
+        loop_end=loop_end,
+        writes=writes,
+        notes=notes,
+    )
+
+
 def safe_file_stem(name):
     """A file name stem from a sample name (Akai names allow characters some file systems don't)."""
     stem = "".join(c if c.isalnum() or c in "-_ #+." else "_" for c in name).strip()

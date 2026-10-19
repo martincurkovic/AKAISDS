@@ -480,14 +480,14 @@ _EDIT_SAMPLE_ROWS = (
         "More",
         "Duplicate and the Slice Editor add new samples (the original is not changed). The external app round trip opens "
         "the sample in your own audio editor and brings the saved version back.",
-        (("duplicate", "slice"), ("external_edit", "external_load"), ("save_akai",)),
+        (("duplicate", "slice"), ("external_edit", "external_load"), ("save_akai", "load_akai")),
     ),
 )
 # the Sample menu / right-click menu, in order: groups are separated
 _SAMPLE_MENU_GROUPS = (
     ("trim", "reverse", "fade", "normalize", "filter", "stretch", "reverb"),
     ("duplicate", "slice"),
-    ("external_edit", "external_load", "save_akai"),
+    ("external_edit", "external_load", "save_akai", "load_akai"),
     ("stage_undo", "stage_send", "stage_new", "stage_revert"),
     ("detect",),
 )
@@ -4302,6 +4302,126 @@ class ProgramEditorWindow(QMainWindow):
         )
         self.status_bar.showMessage(f'Saved "{pending["name"]}" ({len(samples)} frames) to {os.path.basename(path)}')
 
+    # -- load an Akai .s3 / .s1 sample file back onto the sampler ----------------------
+
+    def _load_akai_sample_from_file(self):
+        path, _filter = QFileDialog.getOpenFileName(
+            self,
+            "Load Akai Sample",
+            getattr(self, "_last_akai_sample_dir", "") or self._program_file_directory(),
+            "Akai samples (*.s1 *.s3);;All files (*)",
+        )
+        if not path:
+            return
+        self._load_akai_sample_path(path)
+
+    def _load_akai_sample_path(self, path):
+        """Make a NEW sample from an Akai sample file. The audio goes through the ordinary send; the file's header block is never sent as a whole (the
+        sampler resets it when audio arrives, and an S3000 block is not an S1000's). Instead the fields the sampler can hold are written back one by one
+        afterwards: root note, sample type, tuning, start/end, loop 1 and any other loop in use. See core/akai_sample_file.restore_plan."""
+        logger = debug_log.get_logger()
+        self._last_akai_sample_dir = os.path.dirname(path)
+        try:
+            with open(path, "rb") as handle:
+                data = handle.read()
+            try:
+                sample = akai_sample_file.parse_file(data)
+            except akai_sample_file.SampleFileError:
+                # a file padded to a block size (real files may be: see tools/s2000_sample_check.py): the audio is still read from where SLNGTH says
+                sample = akai_sample_file.parse_file(data, allow_padding=True)
+                logger.info(f"ProgramEditor: {os.path.basename(path)} is {len(data)} bytes, longer than header + audio: read as padded")
+            plan = akai_sample_file.restore_plan(sample.header, len(sample.samples))
+        except (OSError, akai_sample_file.SampleFileError) as e:
+            QMessageBox.warning(self, "Load Akai Sample", f"Couldn't read this file:\n\n{e}")
+            return
+        sampler_controller = getattr(self._main_window, "sampler_controller", None)
+        if sampler_controller is None:
+            self.status_bar.showMessage("Can't load a sample - no Transfer Dashboard connection available")
+            return
+        if sampler_controller.is_transfer_busy():
+            self.status_bar.showMessage("Can't load a sample - a transfer is already in progress on the Transfer Dashboard")
+            return
+        if self._is_s1000 and sample.family == "s2000_s3000":
+            answer = QMessageBox.question(
+                self,
+                "Load Akai Sample",
+                "This is an S2000/S3000 sample (.s3). An S1000 can't load that file itself, but its audio, name, root note, tuning, start and end and "
+                "loops can be set here; the parts of the header only an S2000/S3000 has are left out.\n\nLoad it?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.Yes,
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                return
+        existing_names = list(self._sample_list)
+        new_name = sample.name or "SAMPLE"
+        while True:
+            new_name = self._prompt_akai_name("Load Akai Sample", "Sample name on the sampler:", new_name)
+            if new_name is None:
+                return
+            if new_name not in existing_names:
+                break
+            # two resident samples sharing a name make every zone using it ambiguous - and on an S1000 the send would DELETE the other one
+            QMessageBox.warning(
+                self,
+                "Load Akai Sample",
+                f'"{new_name}" is already in use by a resident sample.\n\nTwo resident samples can\'t safely share a name - pick a different one.',
+            )
+        entry = {
+            "samples": sample.samples,
+            "framerate": plan.rate,
+            "sptype": plan.sptype,
+            "spitch": plan.spitch,
+            "shlto": plan.shlto,
+            "stuno": plan.stuno,
+            "sbandw": plan.sbandw,
+        }
+        markers = {"start": plan.start, "loop_start": plan.loop_start, "loop_end": plan.loop_end, "end": plan.end}
+        logger.info(
+            f"ProgramEditor: loading {os.path.basename(path)} as {new_name!r}: {len(sample.samples)} frames at {plan.rate} Hz, SBANDW {plan.sbandw}, "
+            f"STUNO {plan.stuno}, {len(plan.writes)} header fields to write back"
+            + (f"; left out: {'; '.join(plan.notes)}" if plan.notes else "")
+        )
+        self.waveform_view.set_loading(True)
+        self._set_hardware_busy_ui(True)
+        self.status_bar.showMessage(f'Loading "{new_name}" from {os.path.basename(path)} - this can take a while and will freeze the interface...')
+        QApplication.processEvents()
+        try:
+            self._perform_duplicate_sample_real(
+                entry,
+                sampler_controller,
+                None,
+                new_name,
+                samples=sample.samples,
+                markers=markers,
+                label="Load",
+                file_fields=plan.writes,
+            )
+        finally:
+            self._set_hardware_busy_ui(False)
+            self.waveform_view.set_loading(False)
+            self.sample_edit_progress.setVisible(False)
+        if plan.notes and new_name in self._sample_list:
+            self.status_bar.showMessage(f'Loaded "{new_name}" - left at the sampler\'s defaults: {"; ".join(plan.notes)}')
+
+    def _file_fields_with_tuning(self, file_fields, new_stuno):
+        """The header fields of a loaded file in write order, with STUNO (recomputed for the new sample's bandwidth bucket) after SHLTO. On an S1000 only
+        fields its block holds are kept: that is what "patching out the S3000-only parts" comes to, since nothing else is ever written."""
+        fields = []
+        for name, value in file_fields:
+            fields.append((name, value))
+            if name == "SHLTO":
+                fields.append(("STUNO", new_stuno))
+        if not any(name == "STUNO" for name, _value in fields):
+            fields.insert(0, ("STUNO", new_stuno))
+        if self._is_s1000:
+            kept = [f for f in fields if s1000_bridge_module.supports(akai_sample_file.sample_param(f[0]))]
+            if len(kept) != len(fields):
+                debug_log.get_logger().info(
+                    f"ProgramEditor: not written on an S1000: {[f[0] for f in fields if f not in kept]}"
+                )
+            fields = kept
+        return fields
+
     def _on_sample_header_export_failed(self, sample_index, error):
         pending = getattr(self, "_pending_akai_sample_export", None)
         if pending is None or pending["index"] != sample_index:
@@ -4900,7 +5020,11 @@ class ProgramEditorWindow(QMainWindow):
         samples=None,
         markers=None,
         label="Duplicate",
+        file_fields=None,
     ):
+        # current_name None / file_fields: a sample made from an Akai sample FILE (Load Akai File) rather than copied from a resident one - there is no
+        # source to keep the audio of, and `file_fields` ([(name, value)], see core/akai_sample_file.restore_plan) are the header fields to write
+        # instead of the markers-derived ones. STUNO is not in them: it is recomputed below for the bandwidth bucket the sampler gives the new sample.
         # samples/markers: send these (an EDITED version of the source - a
         # filter or time stretch result, with the markers that go with it)
         # instead of an exact copy. The source's own audio is never touched
@@ -4926,7 +5050,7 @@ class ProgramEditorWindow(QMainWindow):
 
             progress_connection = sampler_controller.transfer_progress.connect(
                 lambda current, total: self._on_sample_edit_progress(
-                    current, total, f'{label} "{current_name}"'
+                    current, total, f'{label} "{current_name}"' if current_name else f'{label} "{new_name}"'
                 )
             )
 
@@ -4976,11 +5100,12 @@ class ProgramEditorWindow(QMainWindow):
             # both samples' audio is in hand and unchanged on the sampler -
             # keep it across the reloads below (see _retain_sample_audio)
             self._retain_sample_audio(new_name, send_samples, entry["framerate"])
-            self._retain_sample_audio(
-                current_name,
-                self._sampler_audio(current_name, entry),
-                entry["framerate"],
-            )
+            if current_name is not None:
+                self._retain_sample_audio(
+                    current_name,
+                    self._sampler_audio(current_name, entry),
+                    entry["framerate"],
+                )
 
             # find the duplicate's index by name - nothing shifted
             # underneath it the way a replace-in-place delete does, but
@@ -5023,19 +5148,23 @@ class ProgramEditorWindow(QMainWindow):
             # read directly like the other three fields - it's always raw
             # now (see _on_sample_tune_changed's own comment on the bug
             # this used to be).
-            for param_name, value in (
-                ("SPTYPE", entry["sptype"]),
-                ("SPITCH", entry["spitch"]),
-                ("SHLTO", entry["shlto"]),
-                ("STUNO", new_stuno),
-                ("SSTART", markers["start"]),
-                ("SMPEND", markers["end"]),
-                ("LOOPAT1", markers["loop_end"]),
-                (
-                    "LLNGTH1",
-                    loop_length_frames * _LOOP_LENGTH_FIXED_POINT_SCALE,
-                ),
-            ):
+            if file_fields is None:
+                fields = (
+                    ("SPTYPE", entry["sptype"]),
+                    ("SPITCH", entry["spitch"]),
+                    ("SHLTO", entry["shlto"]),
+                    ("STUNO", new_stuno),
+                    ("SSTART", markers["start"]),
+                    ("SMPEND", markers["end"]),
+                    ("LOOPAT1", markers["loop_end"]),
+                    (
+                        "LLNGTH1",
+                        loop_length_frames * _LOOP_LENGTH_FIXED_POINT_SCALE,
+                    ),
+                )
+            else:
+                fields = self._file_fields_with_tuning(file_fields, new_stuno)
+            for param_name, value in fields:
                 self._write_knob_value(
                     param_name, "sample", value, keygroup_index=0, index=new_index
                 )
@@ -5048,7 +5177,7 @@ class ProgramEditorWindow(QMainWindow):
                 timeout_ms=20000,
             )
             self.status_bar.showMessage(
-                f'{label} complete: "{current_name}" -> "{new_name}"'
+                f'{label} complete: "{current_name}" -> "{new_name}"' if current_name is not None else f'{label} complete: "{new_name}"'
             )
             if which == 0:
                 final_samples = args[0]
@@ -6781,6 +6910,12 @@ class ProgramEditorWindow(QMainWindow):
             tt.SAVE_AKAI_SAMPLE_BUTTON,
             self._save_sample_as_akai_file,
         )
+        self.load_akai_button = make(
+            "load_akai",
+            "Load Akai File\u2026",
+            tt.LOAD_AKAI_SAMPLE_BUTTON,
+            self._load_akai_sample_from_file,
+        )
         self.external_edit_button = make(
             "external_edit",
             "Edit in External App\u2026",
@@ -7810,6 +7945,8 @@ class ProgramEditorWindow(QMainWindow):
         set_enabled("detect", enabled)
         # saving only reads (the sampler's header) and writes a file, so it works in demo mode too
         set_enabled("save_akai", enabled)
+        # loading makes a NEW sample from a file, so it needs no sample or audio - but, like Duplicate, no demo mode (the DemoBridge can't add one)
+        set_enabled("load_akai", not demo_mode)
         self._sample_edit_ready = enabled
         self._refresh_external_edit_buttons()
         self._refresh_staged_controls()

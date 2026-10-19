@@ -368,6 +368,10 @@ SAVE_AKAI_SAMPLE_BUTTON = (
     "Save this sample as an Akai sample file (.s3, or .s1 for an S1000): the sampler's own header - root note, tuning, start/end and all four loops - followed "
     "by the audio shown here. Only reads from the sampler. The file format is not yet confirmed on a real sampler."
 )
+LOAD_AKAI_SAMPLE_BUTTON = (
+    "Load an Akai sample file (.s3, or .s1) onto the sampler as a NEW sample (you choose its name): the audio, then its root note, tuning, start/end and loops "
+    "written back. An S1000 can load an .s3 this way too; the parts of the header only an S2000/S3000 has are left out. Not yet tried on a real sampler."
+)
 RECEIVE_FORMAT = (
     "What Receive Samples saves from an Akai sampler. The Akai sample (.s3, or .s1 for an S1000) is the sampler's own file: the header with the loops, "
     "tuning and root note, then the audio. A WAV has just the audio. If the Akai file can't be made, the WAV is saved instead."
