@@ -1,8 +1,8 @@
 """Scrolling a page never changes a control it passes over: a spin box, combo, slider or knob answers the mouse wheel only after the user CLICKED it.
 
-Until then a wheel tick is ignored by the control, so Qt hands it to the next widget up (the page's scroll area). The control is armed by a mouse press on it
-and disarmed when the cursor enters or leaves it or a press lands anywhere else; one control is armed at a time. An armed control shows an accent outline
-(`armed` dynamic property: the style sheet's `[armed="true"]` rules, and Knob's own paint).
+Until then a wheel tick is ignored by the control, so Qt hands it to the next widget up (the page's scroll area). A mouse press on a control arms it and it stays
+armed, with an accent outline, until a press lands anywhere else (Ableton's way); one control is armed at a time. The outline is the `armed` dynamic property:
+the style sheet's `[armed="true"]` rules, and Knob's own paint. Scrolling over an armed control changes it, so the outline is the cue that it will.
 
 One application-level filter, installed once at start-up (`install`), covers every control without touching the places that create them. The filter
 sees the wheel event before the control does and, for an unarmed control, offers it to the control's ancestors itself. Keyboard focus is NOT touched: typing into a spin
@@ -103,8 +103,8 @@ class WheelGuard(QObject):
                 # only the widget the click LANDED on decides: one that ignores the press hands it to each parent in turn, and those visits must not disarm
                 self._arm(guarded_control(watched))
             return False
-        if kind in (QEvent.Type.Enter, QEvent.Type.Leave) and watched is self.armed_control():
-            self._arm(None)  # a click only counts while the cursor stays on the control
+        if kind == QEvent.Type.Hide and watched is self.armed_control():
+            self._arm(None)  # (a tab switched away from, a window closed: it comes back unarmed)
         return False
 
 

@@ -138,23 +138,18 @@ def test_a_clicked_control_takes_the_wheel_and_the_page_stays_put(page, name):
 
 
 @pytest.mark.parametrize("name", CONTROLS)
-def test_the_cursor_leaving_disarms_it(page, name):
+def test_the_cursor_coming_and_going_does_not_disarm_it(page, name):
     control = page.controls[name]
     page.ensureWidgetVisible(control)
     click(control)
     leave(control)
-    assert page.guard.armed_control() is None and not control.property("armed")
-    before = value_of(control)
-    wheel(control, 120)
-    assert value_of(control) == before
-
-
-def test_entering_a_control_starts_unarmed_even_if_it_was_armed_before(page):
-    control = page.controls["spin"]
-    click(control)
-    assert page.guard.armed_control() is control
     enter(control)
-    assert page.guard.armed_control() is None
+    leave(control)
+    assert page.guard.armed_control() is control and control.property("armed") is True
+    tick = -120 if isinstance(control, QComboBox) else 120
+    before = value_of(control)
+    wheel(control, tick)
+    assert value_of(control) != before
 
 
 def test_one_control_is_armed_at_a_time_and_a_click_elsewhere_disarms(page):
@@ -203,3 +198,110 @@ def test_install_is_idempotent(qapp):
     first = wheel_guard.install(qapp)
     assert wheel_guard.install(qapp) is first
     wheel_guard.uninstall(qapp)
+
+
+# -- a combo's drop-down, and what else disarms ---------------------------------------------------------------------
+
+
+def test_a_combo_stays_armed_through_its_drop_down(page):
+    combo = page.controls["combo"]
+    click(combo)
+    combo.showPopup()
+    leave(combo)  # (the drop-down takes the cursor off the combo)
+    QApplication.processEvents()
+    combo.hidePopup()
+    enter(combo)  # (and Qt sends this once it is gone)
+    QApplication.processEvents()
+    assert page.guard.armed_control() is combo
+    before = combo.currentIndex()
+    wheel(combo, -120)
+    assert combo.currentIndex() != before
+
+
+def test_picking_an_item_in_the_drop_down_arms_the_combo(page):
+    combo = page.controls["combo"]
+    combo.showPopup()
+    QApplication.processEvents()
+    view = combo.view().viewport()
+    QTest.mouseClick(view, Qt.MouseButton.LeftButton, pos=view.rect().center())
+    QApplication.processEvents()
+    assert page.guard.armed_control() is combo
+
+
+def test_hiding_the_armed_control_disarms_it(page):
+    spin = page.controls["spin"]
+    click(spin)
+    assert page.guard.armed_control() is spin
+    spin.hide()
+    QApplication.processEvents()
+    assert page.guard.armed_control() is None and not spin.property("armed")
+    spin.show()
+    assert page.guard.armed_control() is None
+
+
+# -- the knob's outline: four square corner marks around the dial -----------------------------------------------------
+
+
+def test_the_armed_marks_are_four_square_corners_of_the_knob_rectangle():
+    from PySide6.QtCore import QRectF
+
+    from ui.knob import armed_corner_marks
+
+    lines = armed_corner_marks(QRectF(0, 0, 40, 40), length=6, inset=1)
+    assert len(lines) == 8
+    corners = {(round(line.x1()), round(line.y1())) for line in lines}
+    assert corners == {(1, 1), (39, 1), (1, 39), (39, 39)}
+    for line in lines:
+        assert line.dx() == 0 or line.dy() == 0  # (square: horizontal or vertical strokes only)
+        assert abs(line.dx()) + abs(line.dy()) == 6
+        # every stroke runs inward from its corner, so it stays inside the rectangle
+        for x, y in ((line.x1(), line.y1()), (line.x2(), line.y2())):
+            assert 0 <= x <= 40 and 0 <= y <= 40
+
+
+def test_a_tiny_knob_gets_shorter_marks_that_do_not_meet():
+    from PySide6.QtCore import QRectF
+
+    from ui.knob import armed_corner_marks
+
+    lines = armed_corner_marks(QRectF(0, 0, 12, 12), length=6, inset=0)
+    assert all(abs(line.dx()) + abs(line.dy()) <= 4 for line in lines)
+
+
+def accent_pixels(knob):
+    from PySide6.QtGui import QColor
+
+    from ui import theme
+
+    image = knob.grab().toImage()
+    accent = QColor(theme.current_palette()["accent"])
+    ratio = image.devicePixelRatio()
+
+    def is_accent(x, y):
+        pixel = QColor(image.pixelColor(int(x * ratio), int(y * ratio)))
+        return abs(pixel.red() - accent.red()) + abs(pixel.green() - accent.green()) + abs(pixel.blue() - accent.blue()) < 90
+
+    return is_accent
+
+
+def test_an_armed_knob_paints_corner_marks_and_no_ring(qapp):
+    knob = Knob()
+    knob.setRange(0, 100)
+    knob.setEnabled(True)
+    knob.setFixedSize(48, 48)
+    knob.show()
+    knob.setProperty("armed", True)
+    knob.update()
+    QApplication.processEvents()
+    is_accent = accent_pixels(knob)
+    assert is_accent(0, 4) and is_accent(4, 0)  # the top-left mark, both strokes
+    assert is_accent(47, 4) and is_accent(43, 0)  # the top-right
+    assert is_accent(0, 43) and is_accent(4, 47)  # the bottom-left
+    assert is_accent(47, 43) and is_accent(43, 47)  # the bottom-right
+    assert not is_accent(24, 0) and not is_accent(0, 24)  # the middle of an edge: no full outline
+    knob.setProperty("armed", False)
+    knob.update()
+    QApplication.processEvents()
+    assert not accent_pixels(knob)(0, 4)
+    knob.close()
+    knob.deleteLater()

@@ -2,7 +2,7 @@ import math
 import sys
 from PySide6.QtWidgets import QApplication, QDial, QLineEdit
 from PySide6.QtGui import QCursor, QPainter, QPen, QColor, QIntValidator
-from PySide6.QtCore import Qt, QPointF, QRectF
+from PySide6.QtCore import Qt, QLineF, QPointF, QRectF
 from ui import theme
 
 START_ANGLE_DEG = 240
@@ -68,6 +68,29 @@ def arc_start_and_span(fraction, origin_fraction=0.0):
     knob passes the fraction of its zero) to `fraction`. Angles run the way the knob's own arcs do: the span is negative going
     clockwise."""
     return START_ANGLE_DEG - SWEEP_DEG * origin_fraction, -SWEEP_DEG * (fraction - origin_fraction)
+
+
+_ARMED_MARK_WIDTH = 1.5
+_ARMED_MARK_LENGTH = 6.0
+
+
+def armed_corner_marks(rect, length=_ARMED_MARK_LENGTH, inset=_ARMED_MARK_WIDTH / 2):
+    """The eight line segments of the four square corner marks drawn around an armed knob: each corner gets one horizontal and one vertical
+    stroke `length` long, running inward from the corner of `rect` shrunk by `inset` (half the pen, so the stroke stays inside the widget).
+    A knob too small for the full length gets marks of a third of its smaller side."""
+    box = rect.adjusted(inset, inset, -inset, -inset)
+    length = min(length, min(box.width(), box.height()) / 3)
+    left, top, right, bottom = box.left(), box.top(), box.right(), box.bottom()
+    lines = []
+    for x, y, dx, dy in (
+        (left, top, 1, 1),
+        (right, top, -1, 1),
+        (left, bottom, 1, -1),
+        (right, bottom, -1, -1),
+    ):
+        lines.append(QLineF(x, y, x + dx * length, y))
+        lines.append(QLineF(x, y, x, y + dy * length))
+    return lines
 
 
 class Knob(QDial):
@@ -331,12 +354,14 @@ class Knob(QDial):
         # round cap at the value arc's current-value end would peek out past
         # both edges of the pointer right where they cross
         if enabled and self.property("armed"):
-            # clicked: the mouse wheel changes this knob now (ui/wheel_guard.py)
+            # clicked: the mouse wheel changes this knob now (ui/wheel_guard.py). Four square corner marks around the dial only, as Ableton
+            # selects a control (the name and value labels are other widgets and stay outside)
             armed_pen = QPen(QColor(palette["accent"]))
-            armed_pen.setWidthF(1.5)
+            armed_pen.setWidthF(_ARMED_MARK_WIDTH)
+            armed_pen.setCapStyle(Qt.PenCapStyle.FlatCap)
+            armed_pen.setJoinStyle(Qt.PenJoinStyle.MiterJoin)
             painter.setPen(armed_pen)
-            painter.setBrush(Qt.BrushStyle.NoBrush)
-            painter.drawEllipse(QRectF(self.rect()).adjusted(1, 1, -1, -1))
+            painter.drawLines(armed_corner_marks(QRectF(self.rect())))
         track_pen = QPen(
             QColor(palette["border_hover"] if enabled else palette["border_disabled"])
         )
