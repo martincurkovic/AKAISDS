@@ -1157,7 +1157,18 @@ class WaveformView(QWidget):
         painter.setPen(pen)
         painter.drawLine(QPointF(x, 0), QPointF(x, self.height()))
 
-    def _markers_within_hit_radius(self, x):
+    _BOUNDARY_MARKERS = ("start", "end")  # drawn with their handle at the TOP; the loop markers' handles are at the bottom
+
+    def _upper_half(self, y):
+        """True if height y is in the upper half of this DISPLAY: the half a boundary marker (start / end) is grabbed from where it overlaps a loop marker.
+        A stacked stereo pair is one display, so its top view is the upper half and its bottom view the lower, whatever y is within each."""
+        if self._stack_role == "top":
+            return True
+        if self._stack_role == "bottom":
+            return False
+        return y < self.height() / 2
+
+    def _markers_within_hit_radius(self, x, y=None):
         # every visible marker within _HIT_RADIUS_PX of x, closest first
         # (ties - genuinely equal distance, e.g. several markers pushed
         # onto the exact same frame - break in _MARKER_ORDER's own order,
@@ -1183,7 +1194,16 @@ class WaveformView(QWidget):
             if dist <= _HIT_RADIUS_PX:
                 candidates.append((dist, name))
         candidates.sort(key=lambda pair: pair[0])
-        return [name for _dist, name in candidates]
+        names = [name for _dist, name in candidates]
+        if y is not None:
+            # a boundary marker and a loop marker close enough to overlap: the HEIGHT decides which one is grabbed - the upper half takes the boundary
+            # marker (whose handle is at the top), the lower half the loop marker (handle at the bottom). Where only one kind is near, it can still be
+            # grabbed from anywhere along its line. (y None = no height test.) Click-to-cycle still separates markers of the SAME kind.
+            boundary = [n for n in names if n in self._BOUNDARY_MARKERS]
+            loop = [n for n in names if n not in self._BOUNDARY_MARKERS]
+            if boundary and loop:
+                names = boundary if self._upper_half(y) else loop
+        return names
 
     def mouseDoubleClickEvent(self, event):
         # diagnostic-only logging - see program_editor_window.py's
@@ -1241,7 +1261,7 @@ class WaveformView(QWidget):
             if self._frame_count == 0:
                 return
             x = event.position().x()
-            candidates = self._markers_within_hit_radius(x)
+            candidates = self._markers_within_hit_radius(x, event.position().y())
             if not candidates:
                 # empty space, no marker grabbed - click-to-preview territory
                 # (see preview_requested's own docstring). Deferred via
@@ -1291,7 +1311,7 @@ class WaveformView(QWidget):
                 # same hit radius a click would actually grab, same helper
                 # mousePressEvent uses, so hovering always agrees with what
                 # clicking would do.
-                candidates = self._markers_within_hit_radius(event.position().x())
+                candidates = self._markers_within_hit_radius(event.position().x(), event.position().y())
                 hovered = candidates[0] if candidates else None
                 if hovered != self._hover_marker:
                     self._hover_marker = hovered

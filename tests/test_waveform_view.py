@@ -422,19 +422,25 @@ def test_wheel_ctrl_zoom_still_accepts_either_axis(qapp):
 
 
 class _FakeXPos:
-    def __init__(self, x):
+    def __init__(self, x, y=0.0):
         self._x = x
+        self._y = y
 
     def x(self):
         return self._x
 
+    def y(self):
+        return self._y
+
 
 class _FakePressEvent:
-    def __init__(self, x):
+    # y defaults to 0 = the very top of the view: the upper half, where a boundary marker (start / end) wins over a loop marker
+    def __init__(self, x, y=0.0):
         self._x = x
+        self._y = y
 
     def position(self):
-        return _FakeXPos(self._x)
+        return _FakeXPos(self._x, self._y)
 
     def button(self):
         return Qt.MouseButton.LeftButton
@@ -456,17 +462,26 @@ def _stacked_waveform_view(frame_count=10000, stacked_frame=5000):
     return view
 
 
-def test_repeated_press_on_a_stack_cycles_through_every_marker(qapp):
+def _press_picks(view, x, y, count):
+    picks = []
+    for _ in range(count):
+        view.mousePressEvent(_FakePressEvent(x, y))
+        picks.append(view._dragging)
+        view.mouseReleaseEvent(_FakePressEvent(x, y))  # end the drag, same as a real click
+    return picks
+
+
+def test_repeated_press_on_the_upper_half_of_a_stack_cycles_the_boundary_markers(qapp):
     view = _stacked_waveform_view()
     x = view._x_for("start")  # all four are at the same x
+    # the upper half belongs to the boundary markers; a repeat click still separates two of the SAME kind
+    assert _press_picks(view, x, 10, 5) == ["start", "end", "start", "end", "start"]
 
-    picks = []
-    for _ in range(5):  # one full cycle plus one, to check it wraps
-        view.mousePressEvent(_FakePressEvent(x))
-        picks.append(view._dragging)
-        view.mouseReleaseEvent(_FakePressEvent(x))  # end the drag, same as a real click
 
-    assert picks == ["start", "loop_start", "loop_end", "end", "start"]
+def test_repeated_press_on_the_lower_half_of_a_stack_cycles_the_loop_markers(qapp):
+    view = _stacked_waveform_view()
+    x = view._x_for("start")
+    assert _press_picks(view, x, 170, 5) == ["loop_start", "loop_end", "loop_start", "loop_end", "loop_start"]
 
 
 def test_pressing_elsewhere_then_back_on_the_stack_restarts_the_cycle(qapp):
@@ -505,6 +520,92 @@ def test_cycling_only_covers_markers_actually_in_the_stack(qapp):
 
     assert {first, second} == {"loop_start", "loop_end"}
     assert first != second
+
+
+# --- WaveformView: overlapping markers are split by cursor HEIGHT ----------
+# A boundary marker (start / end, handle at the top) and a loop marker (handle
+# at the bottom) that overlap: the upper half of the view grabs the boundary
+# marker, the lower half the loop marker. Same rule as akaiutil-gui's marker
+# waveform. Where only one kind is near, it is grabbed from anywhere on its line.
+
+
+def _end_and_loop_end_overlap():
+    view = WaveformView()
+    view.resize(400, 180)
+    view.set_header(10000, start=0, loop_start=3000, loop_end=9999, end=9999)
+    return view
+
+
+def test_upper_half_grabs_the_end_marker_and_lower_half_the_loop_end(qapp):
+    view = _end_and_loop_end_overlap()
+    x = view._x_for("end")
+    view.mousePressEvent(_FakePressEvent(x, 20))
+    assert view._dragging == "end"
+    view.mouseReleaseEvent(_FakePressEvent(x, 20))
+    view.mousePressEvent(_FakePressEvent(x, 160))
+    assert view._dragging == "loop_end"
+
+
+def test_the_split_is_at_the_middle_of_the_view(qapp):
+    view = _end_and_loop_end_overlap()
+    x = view._x_for("end")
+    assert view._markers_within_hit_radius(x, 89) == ["end"]
+    assert view._markers_within_hit_radius(x, 90) == ["loop_end"]
+    assert view._markers_within_hit_radius(x) == ["loop_end", "end"] or set(view._markers_within_hit_radius(x)) == {"end", "loop_end"}  # (no y: no split)
+
+
+def test_markers_that_overlap_only_nearly_are_split_too(qapp):
+    view = _end_and_loop_end_overlap()
+    view.set_marker("loop_end", 9999 - 40)  # 40 frames = a few px apart at this zoom, both inside the hit radius of the cursor
+    x = (view._x_for("end") + view._x_for("loop_end")) / 2
+    assert set(view._markers_within_hit_radius(x)) == {"end", "loop_end"}
+    assert view._markers_within_hit_radius(x, 5) == ["end"] and view._markers_within_hit_radius(x, 175) == ["loop_end"]
+
+
+def test_a_lone_marker_is_grabbed_from_anywhere_along_its_line(qapp):
+    view = _end_and_loop_end_overlap()
+    x = view._x_for("loop_start")  # nothing else near it
+    for y in (2, 60, 120, 178):
+        assert view._markers_within_hit_radius(x, y) == ["loop_start"]
+    x = view._x_for("end")
+    view.set_loop_enabled(False)  # no loop markers on a one-shot: the boundary marker owns the whole line
+    for y in (2, 178):
+        assert view._markers_within_hit_radius(x, y) == ["end"]
+
+
+def test_hover_follows_the_cursor_between_the_halves(qapp):
+    view = _end_and_loop_end_overlap()
+    x = view._x_for("end")
+    view.mouseMoveEvent(_FakeMoveEvent(x, 20))
+    assert view._hover_marker == "end"
+    view.mouseMoveEvent(_FakeMoveEvent(x, 160))
+    assert view._hover_marker == "loop_end"
+    view.mouseMoveEvent(_FakeMoveEvent(x, 20))
+    assert view._hover_marker == "end"
+
+
+def test_dragging_the_one_grabbed_leaves_the_other_where_it_was(qapp):
+    view = _end_and_loop_end_overlap()
+    x = view._x_for("end")
+    view.mousePressEvent(_FakePressEvent(x, 160))
+    assert view._dragging == "loop_end"
+    view.mouseMoveEvent(_FakeMoveEvent(x - 50, 160))
+    assert view.markers()["end"] == 9999 and view.markers()["loop_end"] < 9999
+
+
+def test_in_a_stacked_pair_the_top_view_is_the_upper_half_and_the_bottom_view_the_lower(qapp):
+    top, bottom = WaveformView(), WaveformView()
+    for view in (top, bottom):
+        view.resize(400, 90)
+        view.set_header(10000, start=0, loop_start=3000, loop_end=9999, end=9999)
+    top.set_stack_position("top", 90, bottom)
+    bottom.set_stack_position("bottom", 90, top)
+    x = top._x_for("end")
+    for y in (2, 45, 88):  # wherever the cursor is inside each half
+        assert top._markers_within_hit_radius(x, y) == ["end"]
+        assert bottom._markers_within_hit_radius(x, y) == ["loop_end"]
+    top.set_stack_position(None)
+    assert top._markers_within_hit_radius(x, top.height() - 3) == ["loop_end"]  # a stand-alone view splits at its own middle again
 
 
 # --- WaveformView: hover feedback -------------------------------------------
@@ -587,7 +688,11 @@ def test_dragging_a_marker_away_and_pressing_the_stack_again_finds_the_rest(qapp
     view.set_marker("start", 1000)  # moved away, same as a completed drag
     view.mouseReleaseEvent(_FakePressEvent(stack_x))
 
-    view.mousePressEvent(_FakePressEvent(stack_x))
+    # the upper half still holds "end"; the lower half holds both loop markers
+    view.mousePressEvent(_FakePressEvent(stack_x, 10))
+    assert view._dragging == "end"
+    view.mouseReleaseEvent(_FakePressEvent(stack_x, 10))
+    view.mousePressEvent(_FakePressEvent(stack_x, 170))
     assert view._dragging == "loop_start"
 
 
