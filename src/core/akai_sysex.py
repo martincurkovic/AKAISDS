@@ -176,6 +176,8 @@ def parse_sdata_response(data_bytes):
         "detune": decode_tuning_offset(
             raw[20:22]
         ),  # STUNO - semitone offset, eg 0.5 = half semitone sharp
+        # the whole header block as the sampler sent it (loops, tuning, every byte this app does not model): what an Akai sample file (.s3) is made from
+        "raw_header": raw,
     }
 
 

@@ -1356,3 +1356,84 @@ def test_dropping_an_mp3_queues_it_like_a_wav_and_an_m4a_is_refused(dashboard, t
 
     assert _row_names(dashboard) == ["loop"]
     assert "unsupported" in dashboard.status_bar.currentMessage() or "Added 1" in dashboard.status_bar.currentMessage()
+
+
+# -- saving received samples as an Akai sample file --------------------------------------------------------------------------
+
+
+def test_the_receive_format_choice_shows_for_an_akai_sampler_only(dashboard):
+    dashboard.sampler_controller.set_device_type("akai_s2000_s3000")
+    dashboard._update_device_type_ui()
+    assert not dashboard.receive_format_combo.isHidden() and not dashboard.receive_format_label.isHidden()
+    for other in ("generic", "akai_s900_s950", "ensoniq_eps_asr", "yamaha_a4000"):
+        dashboard.sampler_controller.set_device_type(other)
+        dashboard._update_device_type_ui()
+        assert dashboard.receive_format_combo.isHidden(), other
+
+
+def test_the_receive_format_is_remembered_and_only_applies_to_an_akai_sampler(dashboard):
+    from core import app_config
+
+    dashboard.sampler_controller.set_device_type("akai_s2000_s3000")
+    dashboard.receive_format_combo.setCurrentIndex(dashboard.receive_format_combo.findData("both"))
+    dashboard._on_receive_format_chosen(0)
+    assert app_config.get_saved_receive_format() == "both" and dashboard._receive_format() == "both"
+    dashboard.sampler_controller.set_device_type("generic")
+    assert dashboard._receive_format() == "wav"  # (the combo still says both, but a generic receive has no Akai header)
+
+
+def test_an_unknown_saved_format_reads_as_wav():
+    from core import app_config
+
+    config = app_config.load_config()
+    config["receive_format"] = "mp3"
+    app_config.save_config(config)
+    assert app_config.get_saved_receive_format() == "wav"
+
+
+def test_the_combo_starts_on_the_saved_format(qapp):
+    from core import app_config
+
+    app_config.save_receive_format("s3")
+    midi_manager = MidiManager()
+    dash = TransferDashboard(SamplerController(midi_manager), midi_manager)
+    assert dash.receive_format_combo.currentData() == "s3"
+
+
+def test_unique_save_path_keeps_clear_of_every_file_the_receive_may_write(tmp_path):
+    (tmp_path / "kick.s3").write_bytes(b"x")
+    assert TransferDashboard._unique_save_path(str(tmp_path), "kick") == str(tmp_path / "kick.wav")  # a WAV-only receive: only .wav counts
+    taken = TransferDashboard._unique_save_path(str(tmp_path), "kick", extensions=(".wav", ".s3", ".s1"))
+    assert taken == str(tmp_path / "kick (2).wav")
+    (tmp_path / "kick (2).s1").write_bytes(b"x")
+    assert TransferDashboard._unique_save_path(str(tmp_path), "kick", extensions=(".wav", ".s3", ".s1")) == str(tmp_path / "kick (3).wav")
+    assert TransferDashboard._unique_save_path(str(tmp_path), "kick", {str(tmp_path / "other.wav")}) == str(tmp_path / "kick.wav")
+
+
+def test_receiving_hands_the_chosen_format_to_the_controller(dashboard, tmp_path, monkeypatch):
+    from PySide6.QtWidgets import QFileDialog
+
+    dashboard.sampler_controller.set_device_type("akai_s2000_s3000")
+    dashboard.on_sample_slots_updated([(0, "KICK"), (1, "SNARE")])
+    for i in range(dashboard.list_hardware.count()):
+        from PySide6.QtWidgets import QCheckBox
+
+        dashboard.list_hardware.itemWidget(dashboard.list_hardware.item(i)).findChild(QCheckBox).setChecked(True)
+    dashboard.receive_format_combo.setCurrentIndex(dashboard.receive_format_combo.findData("s3"))
+    (tmp_path / "KICK.s3").write_bytes(b"x")  # an existing Akai file: the receive must not overwrite it
+    monkeypatch.setattr(QFileDialog, "getExistingDirectory", lambda *a, **k: str(tmp_path))
+    seen = []
+    monkeypatch.setattr(dashboard.sampler_controller, "receive_samples", lambda requests: seen.append(requests))
+    dashboard.receive_selected_samples()
+    assert dashboard.sampler_controller.receive_format == "s3"
+    assert seen == [[(0, str(tmp_path / "KICK (2).wav")), (1, str(tmp_path / "SNARE.wav"))]]
+
+
+def test_the_receive_format_names_the_s1_extension_for_an_s1000(dashboard):
+    s3 = dashboard.receive_format_combo.findData("s3")
+    dashboard.sampler_controller.set_device_type("akai_s2000_s3000")
+    dashboard._update_device_type_ui()
+    assert dashboard.receive_format_combo.itemText(s3) == "Akai sample (.s3)"
+    dashboard.sampler_controller.set_device_type("akai_s1000")
+    dashboard._update_device_type_ui()
+    assert dashboard.receive_format_combo.itemText(s3) == "Akai sample (.s1)"

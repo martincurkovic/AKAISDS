@@ -46,7 +46,7 @@ def test_the_sample_menu_lists_every_action_in_groups(editor):
         "Load Audio", "-",
         "Trim to Markers", "Reverse", "Fade In/Out", "Normalise", "Filter…", "Stretch / Pitch…", "Reverb…", "-",
         "Duplicate", "Slice Editor…", "-",
-        "Edit in External App…", "Load Edited Audio", "-",
+        "Edit in External App…", "Load Edited Audio", "Save as Akai File…", "-",
         "Undo", "Send to Sampler", "Send as New Sample…", "Revert", "-",
         "Detect Root Note", "-",
         "Rename Sample...", "Delete Sample...",

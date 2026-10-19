@@ -1938,3 +1938,132 @@ def test_leaving_the_s950_family_restores_normal_behaviour(s950_controller):
     c.set_device_type("akai_s2000_s3000")
     c.refresh_sample_list()
     assert len(c.midi_manager.sent) == 1  # an RSTAT again
+
+
+# -----------------------------------------------------------------
+# RECEIVING - saving the Akai sample file (.s3) as well as / instead of a WAV
+# -----------------------------------------------------------------
+
+
+def _akai_receive_with_format(controller, save_path, samples, receive_format):
+    from core import akai_sysex, sds_encoder
+
+    controller.receive_format = receive_format
+    controller.receive_samples([(3, save_path)], channel=0)
+    sdata_msg = akai_sysex.build_sdata_message(
+        name="AKAI SAMP", sample_length=len(samples), sample_rate=44100, sample_number=3, channel=0
+    )
+    controller.on_sysex_received(list(sdata_msg[1:-1]))
+    received = []
+    controller.sample_received.connect(received.append)
+    for packet in sds_encoder.build_data_packets(samples, channel=0, bit_depth=16):
+        controller.on_sysex_received(list(packet[1:-1]))
+    return akai_sysex.parse_sdata_response(list(sdata_msg[1:-1])), received
+
+
+def test_a_receive_saves_only_a_wav_by_default(controller, tmp_path):
+    save_path = str(tmp_path / "plain.wav")
+    _akai_receive_with_format(controller, save_path, [1, -2, 3, -4, 5], controller.receive_format)
+    assert controller.receive_format == "wav"
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["plain.wav"]
+
+
+def test_a_receive_can_save_the_akai_sample_file_instead_of_a_wav(controller, tmp_path):
+    from core import akai_sample_file
+
+    samples = [10, -10, 20, -20, 30, -32768, 32767]
+    statuses = _statuses(controller)
+    info, received = _akai_receive_with_format(controller, str(tmp_path / "kick.wav"), samples, "s3")
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["kick.s3"]  # no WAV
+    sample = akai_sample_file.parse_file((tmp_path / "kick.s3").read_bytes())
+    assert sample.samples == samples and sample.name == "AKAI SAMP" and sample.sample_rate == 44100
+    # the header is the one the sampler sent (its addresses zeroed), not a rebuilt one
+    assert sample.header == akai_sample_file.normalized_header(info["raw_header"])
+    assert received == [str(tmp_path / "kick.s3")]
+    assert any("kick.s3" in s for s in statuses)
+
+
+def test_a_receive_can_save_both(controller, tmp_path):
+    from core import akai_sample_file, sds_encoder
+
+    samples = [1, 2, 3, 4, 5]
+    statuses = _statuses(controller)
+    _info, received = _akai_receive_with_format(controller, str(tmp_path / "both.wav"), samples, "both")
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["both.s3", "both.wav"]
+    assert akai_sample_file.parse_file((tmp_path / "both.s3").read_bytes()).samples == samples
+    assert list(sds_encoder.read_wav_samples(str(tmp_path / "both.wav"))[0]) == samples
+    assert received == [str(tmp_path / "both.wav")]  # the WAV is the one reported
+    assert any("and both.s3" in s for s in statuses)
+
+
+def test_a_receive_without_the_akai_header_falls_back_to_the_wav_and_says_so(controller, tmp_path):
+    from core import sds_encoder
+
+    samples = list(range(-45, 45))
+    statuses = _statuses(controller)
+    controller.receive_format = "s3"
+    controller.receive_sample_generic(sample_number=1, save_path=str(tmp_path / "generic.wav"), channel=0)
+    controller.on_sysex_received(
+        list(sds_encoder.build_dump_header(samples, framerate=44100, sample_number=1, channel=0, bit_depth=16)[1:-1])
+    )
+    for packet in sds_encoder.build_data_packets(samples, channel=0, bit_depth=16):
+        controller.on_sysex_received(list(packet[1:-1]))
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["generic.wav"]  # a receive never ends with nothing
+    assert any("no Akai sample file" in s for s in statuses)
+
+
+def test_an_unwritable_akai_file_falls_back_to_the_wav(controller, tmp_path, monkeypatch):
+    import builtins
+
+    real_open = builtins.open
+
+    def refuse_s3(path, mode="r", *args, **kwargs):
+        if str(path).endswith(".s3"):
+            raise OSError("disk full")
+        return real_open(path, mode, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "open", refuse_s3)
+    statuses = _statuses(controller)
+    _akai_receive_with_format(controller, str(tmp_path / "full.wav"), [1, 2, 3], "s3")
+    monkeypatch.undo()
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["full.wav"]
+    assert any("disk full" in s for s in statuses)
+
+
+def test_an_s1000_sized_header_saves_an_s1_file(controller, tmp_path):
+    # The S1000 header block is 150 bytes in the format (the real unit's SDATA length is not confirmed); built here the way the controller receives it,
+    # nibbled after the sample number
+    from core import akai_sample_file, akai_sysex, sds_encoder
+
+    block = bytearray(150)
+    block[0] = 3
+    block[3:15] = akai_sysex.encode_name("S1000 KICK")
+    block[26:30] = (5).to_bytes(4, "little")
+    block[138:140] = (44100).to_bytes(2, "little")
+    message = [0x47, 0, 0x0B, 0x48, 3, 0] + akai_sysex.to_nibble_pairs(bytes(block))
+    controller.receive_format = "s3"
+    controller.receive_samples([(3, str(tmp_path / "kick.wav"))], channel=0)
+    controller.on_sysex_received(message)
+    samples = [10, -10, 20, -20, 30]
+    for packet in sds_encoder.build_data_packets(samples, channel=0, bit_depth=16):
+        controller.on_sysex_received(list(packet[1:-1]))
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["kick.s1"]
+    sample = akai_sample_file.parse_file((tmp_path / "kick.s1").read_bytes())
+    assert sample.extension == ".s1" and sample.samples == samples and sample.name == "S1000 KICK"
+
+
+def test_a_header_of_an_unknown_length_falls_back_to_the_wav_with_the_reason(controller, tmp_path):
+    from core import akai_sysex, sds_encoder
+
+    block = bytearray(141)  # (what the editor models of an S1000 sample, not a size the file format has)
+    block[3:15] = akai_sysex.encode_name("ODD")
+    block[26:30] = (3).to_bytes(4, "little")
+    block[138:140] = (44100).to_bytes(2, "little")
+    statuses = _statuses(controller)
+    controller.receive_format = "s3"
+    controller.receive_samples([(3, str(tmp_path / "odd.wav"))], channel=0)
+    controller.on_sysex_received([0x47, 0, 0x0B, 0x48, 3, 0] + akai_sysex.to_nibble_pairs(bytes(block)))
+    for packet in sds_encoder.build_data_packets([1, 2, 3], channel=0, bit_depth=16):
+        controller.on_sysex_received(list(packet[1:-1]))
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["odd.wav"]
+    assert any("141-byte sample header" in s for s in statuses)

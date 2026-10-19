@@ -2,6 +2,7 @@ import os
 import tempfile
 from PySide6.QtWidgets import (
     QCheckBox,
+    QComboBox,
     QFileDialog,
     QHBoxLayout,
     QInputDialog,
@@ -292,8 +293,22 @@ class TransferDashboard(QWidget):
         self.btn_receive.clicked.connect(self.on_receive_clicked)
         self.btn_cancel.clicked.connect(self.cancel_transfer)
 
+        # what a receive saves from an Akai sampler (hidden for every other type, which can only give a WAV): see _sync_receive_format_ui
+        self.receive_format_label = QLabel("Save received as:")
+        self.receive_format_combo = QComboBox()
+        self.receive_format_combo.addItem("WAV", app_config.RECEIVE_FORMAT_WAV)
+        self.receive_format_combo.addItem("Akai sample (.s3)", app_config.RECEIVE_FORMAT_S3)
+        self.receive_format_combo.addItem("WAV and Akai sample", app_config.RECEIVE_FORMAT_BOTH)
+        self.receive_format_combo.setToolTip(tooltips.RECEIVE_FORMAT)
+        self.receive_format_combo.setCurrentIndex(
+            max(0, self.receive_format_combo.findData(app_config.get_saved_receive_format()))
+        )
+        self.receive_format_combo.activated.connect(self._on_receive_format_chosen)
+
         # Add stretch spacer to push both control columns cleanly to the bottom of the window
         action_layout.addStretch()
+        action_layout.addWidget(self.receive_format_label)
+        action_layout.addWidget(self.receive_format_combo)
         action_layout.addWidget(self.btn_cancel)
         action_layout.addWidget(self.btn_receive)
         action_layout.addWidget(self.btn_send)
@@ -687,7 +702,26 @@ class TransferDashboard(QWidget):
                 tooltips.OPEN_EDITOR_NEEDS_AKAI_DEVICE_TYPE
             )
 
+    def _sync_receive_format_ui(self):
+        """The Akai sample file needs the sampler's own header block, which only an Akai-mode receive gets: the choice is shown for those only."""
+        akai = self.sampler_controller.device_type == sampler_models.FAMILY_AKAI
+        self.receive_format_label.setVisible(akai)
+        self.receive_format_combo.setVisible(akai)
+        # the file's name is .s1 on an S1000 (150-byte header) and .s3 on an S2000/S3000
+        extension = ".s1" if sampler_models.is_s1000(self.sampler_controller.sampler_model) else ".s3"
+        self.receive_format_combo.setItemText(self.receive_format_combo.findData(app_config.RECEIVE_FORMAT_S3), f"Akai sample ({extension})")
+
+    def _on_receive_format_chosen(self, _index):
+        app_config.save_receive_format(self.receive_format_combo.currentData())
+
+    def _receive_format(self):
+        """What the next receive saves: the combo's choice for an Akai sampler, a WAV for anything else."""
+        if self.sampler_controller.device_type != sampler_models.FAMILY_AKAI:
+            return app_config.RECEIVE_FORMAT_WAV
+        return self.receive_format_combo.currentData()
+
     def _update_device_type_ui(self):
+        self._sync_receive_format_ui()
         is_generic = self.sampler_controller.device_type == "generic"  # True or False
         is_s950 = self.sampler_controller.device_type == sampler_models.FAMILY_S950
         is_ensoniq = self.sampler_controller.device_type == sampler_models.FAMILY_ENSONIQ
@@ -1366,14 +1400,22 @@ class TransferDashboard(QWidget):
         if not save_dir:
             return
 
+        receive_format = self._receive_format()
+        # every file this receive may write must be free, not just the WAV: the Akai file is .s3 (S2000/S3000) or .s1 (S1000), told apart only once the sampler's header arrives
+        extensions = {
+            app_config.RECEIVE_FORMAT_WAV: (".wav",),
+            app_config.RECEIVE_FORMAT_S3: (".wav", ".s3", ".s1"),
+            app_config.RECEIVE_FORMAT_BOTH: (".wav", ".s3", ".s1"),
+        }[receive_format]
         requests = []
         claimed_paths = set()
         for sample_number, name in selected:
             safe_name = self._sanitize_filename(name) or f"sample_{sample_number}"
-            save_path = self._unique_save_path(save_dir, safe_name, claimed_paths)
+            save_path = self._unique_save_path(save_dir, safe_name, claimed_paths, extensions)
             claimed_paths.add(save_path)
             requests.append((sample_number, save_path))
 
+        self.sampler_controller.receive_format = receive_format
         self.sampler_controller.receive_samples(requests)
 
         # a receive is now running - disable Send/Receive so the user cant double click them
@@ -1409,14 +1451,18 @@ class TransferDashboard(QWidget):
         return name.replace("/", "-").replace("\\", "-")
 
     @staticmethod
-    def _unique_save_path(save_dir, base_name, claimed_paths=()):
-        # build a save path that doesnt collide with any other existing files
-        path = os.path.join(save_dir, f"{base_name}.wav")
+    def _unique_save_path(save_dir, base_name, claimed_paths=(), extensions=(".wav",)):
+        # build a save path that doesnt collide with any other existing files. The path is always the .wav one (the controller swaps the extension for
+        # an Akai sample file); `extensions` are every file the receive may write next to it, none of which may already exist
+        def taken(stem):
+            return any(os.path.exists(stem + extension) for extension in extensions)
+
+        stem = os.path.join(save_dir, base_name)
         counter = 2
-        while os.path.exists(path) or path in claimed_paths:
-            path = os.path.join(save_dir, f"{base_name} ({counter}).wav")
+        while taken(stem) or stem + ".wav" in claimed_paths:
+            stem = os.path.join(save_dir, f"{base_name} ({counter})")
             counter += 1
-        return path
+        return stem + ".wav"
 
     def on_receive_progress(self, received, total):
         percent = int((received / total) * 100) if total else 0

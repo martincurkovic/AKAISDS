@@ -1,5 +1,5 @@
 from PySide6.QtCore import QObject, Signal, QTimer
-from core import akai_sysex, sds_encoder, midi_identity, debug_log, sampler_models, sysex_trace
+from core import akai_sample_file, akai_sysex, sds_encoder, midi_identity, debug_log, sampler_models, sysex_trace
 import os
 import time
 
@@ -60,6 +60,9 @@ class SamplerController(QObject):
         # global SysEx device ID/channel (0-127) - NOT THE SAME AS MIDI CHANNELS (1-16)!!!
         # defaults to 0, otherwise it can be set manually for a daisy-chained setup
         self.channel = 0
+        #: what a receive saves: "wav", "s3" (the Akai sample file, header and all) or "both". "s3" needs an Akai-mode receive (the sampler's own header
+        #: block); any other receive saves the WAV whatever this says
+        self.receive_format = "wav"
         # device_type is the PROTOCOL FAMILY ("akai"/"generic"/"s950"/"ensoniq") every
         # transfer path below branches on; sampler_model is the full Settings choice
         # (core/sampler_models.py) - only the Program Editor cares about the
@@ -1784,28 +1787,55 @@ class SamplerController(QObject):
             : info["sample_length"]
         ]  # trim any padding words past the real length (ie, trailing zeroes)
 
-        sds_encoder.write_wav_file(
-            self._receive_save_path,
-            samples,
-            info["sample_rate"],
-            info["bit_depth"],
-        )
+        saved_path, note = self._save_received_sample(info, samples)
 
         debug_log.get_logger().info(
             f"SamplerController: receive finished slot={self._receive_sample_number} "
             f"packets={len(self._receive_packets)}/{self._receive_expected_packets} "
-            f"checksum_errors={self._receive_checksum_errors} samples={len(samples)}"
+            f"checksum_errors={self._receive_checksum_errors} samples={len(samples)} saved={saved_path!r}"
         )
-        self.status_changed.emit(
-            f"Saved sample {info['sample_number']} to {self._receive_save_path}"
-        )
-        self.sample_received.emit(self._receive_save_path)
+        self.status_changed.emit(f"Saved sample {info['sample_number']} to {saved_path}{note}")
+        self.sample_received.emit(saved_path)
 
         self._receiving = False
         self._receive_header_info = None
         self._receive_packets = []
 
         QTimer.singleShot(300, self._receive_next_sample)
+
+    def _save_received_sample(self, info, samples):
+        """Write a finished receive as `receive_format` says. Returns (the path to report, a note for the status line - '' when all went as asked).
+
+        The Akai sample file (`core/akai_sample_file.py`) is the sampler's own header block plus the audio. It is next to the WAV path (same name, the
+        extension swapped). If it can't be made - not an Akai-mode receive, an incomplete sample, a disk error - the WAV is written instead, so a receive
+        that asked for ONLY the Akai file never ends with nothing."""
+        wav_path = self._receive_save_path
+        wanted = self.receive_format
+        log = debug_log.get_logger()
+        written = []
+        problem = None
+        if wanted in ("s3", "both"):
+            raw = info.get("raw_header")
+            if raw is None:
+                problem = "this receive has no Akai sample header"
+            else:
+                try:
+                    data = akai_sample_file.build_file(raw, samples)
+                    path = os.path.splitext(wav_path)[0] + akai_sample_file.HEADER_SIZES[len(raw)]
+                    with open(path, "wb") as handle:
+                        handle.write(data)
+                    written.append(path)
+                except (akai_sample_file.SampleFileError, OSError) as e:
+                    problem = str(e)
+            if problem:
+                log.warning(f"SamplerController: couldn't save the Akai sample file for slot {self._receive_sample_number}: {problem}")
+        if wanted in ("wav", "both") or not written:
+            sds_encoder.write_wav_file(wav_path, samples, info["sample_rate"], info["bit_depth"])
+            written.insert(0, wav_path)
+        note = f" (no Akai sample file: {problem})" if problem else ""
+        if len(written) == 2:
+            note = f" and {os.path.basename(written[1])}"
+        return written[0], note
 
     def cancel_transfer(self):
         # abort whatever is currently happening and communicate the cancel to the hardware

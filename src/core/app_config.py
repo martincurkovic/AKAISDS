@@ -313,6 +313,22 @@ def save_slice_detection(mode):
     save_config(config)
 
 
+RECEIVE_FORMAT_WAV, RECEIVE_FORMAT_S3, RECEIVE_FORMAT_BOTH = "wav", "s3", "both"
+RECEIVE_FORMAT_VALUES = (RECEIVE_FORMAT_WAV, RECEIVE_FORMAT_S3, RECEIVE_FORMAT_BOTH)
+
+
+def get_saved_receive_format():
+    # what the Dashboard's Receive saves for an Akai sampler: a WAV, the Akai sample file (.s3, header and all) or both; anything unrecognised is a WAV
+    value = load_config().get("receive_format", RECEIVE_FORMAT_WAV)
+    return value if value in RECEIVE_FORMAT_VALUES else RECEIVE_FORMAT_WAV
+
+
+def save_receive_format(value):
+    config = load_config()
+    config["receive_format"] = value if value in RECEIVE_FORMAT_VALUES else RECEIVE_FORMAT_WAV
+    save_config(config)
+
+
 def get_memory_bar_compact():
     # the Samples tab's memory bar, double-clicked down to a thin line without text (ui/memory_bar.py)
     return load_config().get("memory_bar_compact", False) is True

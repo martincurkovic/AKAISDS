@@ -53,7 +53,7 @@ from PySide6.QtWidgets import (
     QProgressBar,
 )
 from s3k.messages import AKAI_CHARSET, NAME_LENGTH
-from core import akai_multi_file, akai_program_file
+from core import akai_multi_file, akai_program_file, akai_sample_file
 from core import app_config
 from core import dropped_files
 from core import external_edit
@@ -480,14 +480,14 @@ _EDIT_SAMPLE_ROWS = (
         "More",
         "Duplicate and the Slice Editor add new samples (the original is not changed). The external app round trip opens "
         "the sample in your own audio editor and brings the saved version back.",
-        (("duplicate", "slice"), ("external_edit", "external_load")),
+        (("duplicate", "slice"), ("external_edit", "external_load"), ("save_akai",)),
     ),
 )
 # the Sample menu / right-click menu, in order: groups are separated
 _SAMPLE_MENU_GROUPS = (
     ("trim", "reverse", "fade", "normalize", "filter", "stretch", "reverb"),
     ("duplicate", "slice"),
-    ("external_edit", "external_load"),
+    ("external_edit", "external_load", "save_akai"),
     ("stage_undo", "stage_send", "stage_new", "stage_revert"),
     ("detect",),
 )
@@ -721,6 +721,8 @@ class ProgramEditorWindow(QMainWindow):
         )
         self._worker.program_exported.connect(self._on_program_exported)
         self._worker.program_export_failed.connect(self._on_program_export_failed)
+        self._worker.sample_header_exported.connect(self._on_sample_header_exported)
+        self._worker.sample_header_export_failed.connect(self._on_sample_header_export_failed)
         self._worker.multi_exported.connect(self._on_multi_exported)
         self._worker.multi_export_failed.connect(self._on_multi_export_failed)
         self._worker.program_imported.connect(self._on_program_imported)
@@ -4236,6 +4238,78 @@ class ProgramEditorWindow(QMainWindow):
         self.status_bar.showMessage(f"Couldn't read program: {error}")
         QMessageBox.warning(self, "Save Program", f"Couldn't read the program:\n\n{error}")
 
+    # -- save a sample as an Akai .s3 / .s1 file ----------------------------------
+
+    def _save_sample_as_akai_file(self):
+        sample_index = self.sample_list_widget.currentRow()
+        entry = self._sample_waveform_cache.get(sample_index)
+        if sample_index < 0 or entry is None or entry["samples"] is None or not self.waveform_view.has_waveform():
+            return
+        if getattr(self, "_pending_akai_sample_export", None) is not None:
+            return
+        name = self._sample_name_at_row(sample_index)
+        staged = name in self._staged_edits
+        # the audio and markers AS SHOWN (a working copy included); the header comes from the sampler
+        self._pending_akai_sample_export = {
+            "index": sample_index,
+            "name": name,
+            "samples": entry["samples"],
+            "markers": dict(self.waveform_view.markers_with_loop_in_range()),
+            "staged": staged,
+        }
+        self.status_bar.showMessage(f'Reading the header of "{name}" from the sampler…')
+        self._worker.submit_export_sample_header(sample_index)
+
+    def _on_sample_header_exported(self, sample_index, header):
+        pending = getattr(self, "_pending_akai_sample_export", None)
+        if pending is None or pending["index"] != sample_index:
+            return
+        self._pending_akai_sample_export = None
+        samples, markers = pending["samples"], pending["markers"]
+        # An untouched sample goes out with the sampler's header EXACTLY as read. A working copy (or audio whose length differs from the header's)
+        # is no longer what that header describes, so its length and markers are filled in from what is shown; every other byte stays the sampler's.
+        if pending["staged"] or akai_sample_file.SampleFile(header=header).length != len(samples):
+            header = akai_sample_file.with_markers(
+                header, len(samples), markers["start"], markers["end"], markers["loop_start"], markers["loop_end"]
+            )
+        try:
+            data = akai_sample_file.build_file(header, samples)
+        except akai_sample_file.SampleFileError as e:
+            QMessageBox.warning(self, "Save as Akai File", f"Couldn't make the file:\n\n{e}")
+            self.status_bar.showMessage(f"Couldn't save the Akai file: {e}")
+            return
+        extension = akai_sample_file.HEADER_SIZES[len(header)]
+        default_path = os.path.join(
+            getattr(self, "_last_akai_sample_dir", "") or self._program_file_directory(),
+            akai_sample_file.safe_file_stem(pending["name"]) + extension,
+        )
+        path, _filter = QFileDialog.getSaveFileName(
+            self, "Save as Akai File", default_path, f"Akai sample (*{extension});;All files (*)"
+        )
+        if not path:
+            self.status_bar.showMessage("Save cancelled")
+            return
+        try:
+            with open(path, "wb") as handle:
+                handle.write(data)
+        except OSError as e:
+            QMessageBox.warning(self, "Save as Akai File", f"Couldn't save the file:\n\n{e}")
+            self.status_bar.showMessage(f"Couldn't save the Akai file: {e}")
+            return
+        self._last_akai_sample_dir = os.path.dirname(path)
+        debug_log.get_logger().info(
+            f"ProgramEditor: saved sample {pending['name']!r} ({len(samples)} frames, {'working copy, markers from the editor' if pending['staged'] else 'header as the sampler has it'}) to {path}"
+        )
+        self.status_bar.showMessage(f'Saved "{pending["name"]}" ({len(samples)} frames) to {os.path.basename(path)}')
+
+    def _on_sample_header_export_failed(self, sample_index, error):
+        pending = getattr(self, "_pending_akai_sample_export", None)
+        if pending is None or pending["index"] != sample_index:
+            return
+        self._pending_akai_sample_export = None
+        self.status_bar.showMessage(f"Couldn't read the sample header: {error}")
+        QMessageBox.warning(self, "Save as Akai File", f"Couldn't read the sample's header:\n\n{error}")
+
     # -- save the multi as an Akai .m3 file ---------------------------------------
 
     def _sync_save_multi_enabled(self, busy):
@@ -6701,6 +6775,12 @@ class ProgramEditorWindow(QMainWindow):
         self.slice_editor_button = make(
             "slice", "Slice Editor\u2026", tt.SLICE_EDITOR_BUTTON, self._open_slice_editor
         )
+        self.save_akai_button = make(
+            "save_akai",
+            "Save as Akai File\u2026",
+            tt.SAVE_AKAI_SAMPLE_BUTTON,
+            self._save_sample_as_akai_file,
+        )
         self.external_edit_button = make(
             "external_edit",
             "Edit in External App\u2026",
@@ -7728,6 +7808,8 @@ class ProgramEditorWindow(QMainWindow):
         # Duplicate/Export) never needs actual hardware, so no demo_mode
         # restriction here
         set_enabled("detect", enabled)
+        # saving only reads (the sampler's header) and writes a file, so it works in demo mode too
+        set_enabled("save_akai", enabled)
         self._sample_edit_ready = enabled
         self._refresh_external_edit_buttons()
         self._refresh_staged_controls()

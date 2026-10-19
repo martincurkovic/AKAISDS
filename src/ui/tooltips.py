@@ -364,6 +364,14 @@ TIME_STRETCH_GRAIN = (
     "Tones can warble whatever you pick. Double-click to reset."
 )
 TIME_STRETCH_PREVIEW_BUTTON = "Play the result through your computer's speakers - doesn't write anything to the sampler. Click again (or press Space) to stop it."
+SAVE_AKAI_SAMPLE_BUTTON = (
+    "Save this sample as an Akai sample file (.s3, or .s1 for an S1000): the sampler's own header - root note, tuning, start/end and all four loops - followed "
+    "by the audio shown here. Only reads from the sampler. The file format is not yet confirmed on a real sampler."
+)
+RECEIVE_FORMAT = (
+    "What Receive Samples saves from an Akai sampler. The Akai sample (.s3, or .s1 for an S1000) is the sampler's own file: the header with the loops, "
+    "tuning and root note, then the audio. A WAV has just the audio. If the Akai file can't be made, the WAV is saved instead."
+)
 SAVE_MULTI_BUTTON = (
     "Save the sampler's multi (its name, effects and all 16 parts) as an Akai multi file. Only reads from the sampler. "
     "Programs and samples are not inside it, and the file format is not yet confirmed on a real sampler."

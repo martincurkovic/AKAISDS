@@ -14,7 +14,7 @@ from PySide6.QtCore import QThread, Signal
 import s3k.messages as m
 from s3k.messages import NAME_LENGTH
 import s3k.params as p
-from core import akai_multi_file, akai_program_file
+from core import akai_multi_file, akai_program_file, akai_sample_file
 from core.global_settings import BLOCK_SETTINGS, GLOBAL_SETTINGS, MDATA_BLOCK_LENGTH
 from core.reply_matching import make_reply_tolerant
 from core.s1000_bridge import S1000Bridge
@@ -635,6 +635,9 @@ class BridgeWorker(QThread):
     # Save Multi (core/akai_multi_file.py): the resident multi's raw header and 16 part blocks, read-only
     multi_exported = Signal(object)  # akai_multi_file.MultiFile
     multi_export_failed = Signal(str)  # error
+    # Save as Akai File (core/akai_sample_file.py): one sample's raw header block, read-only
+    sample_header_exported = Signal(int, object)  # sample_index, the header block (bytes)
+    sample_header_export_failed = Signal(int, str)  # sample_index, error
     # an S1000 keygroup delete done by rebuilding the program: the program MOVED
     # (the rebuilt copy is last in the list)
     program_rebuilt = Signal(int, int, int)  # old program_index, deleted keygroup_index, new program_index
@@ -793,6 +796,9 @@ class BridgeWorker(QThread):
 
     def submit_export_multi(self):
         self._submit(("export_multi",))
+
+    def submit_export_sample_header(self, sample_index):
+        self._submit(("export_sample_header", sample_index))
 
     def submit_import_program(self, program_file, new_name):
         self._submit(("import_program", program_file, new_name))
@@ -1798,6 +1804,17 @@ class BridgeWorker(QThread):
 
     def _read_multi_file(self):
         return akai_multi_file.read_from_bridge(self._bridge)
+
+    def _handle_export_sample_header(self, sample_index):
+        try:
+            # 192 is an S2000/S3000 block; an S1000 adapter clips the read to its real (150-byte) block, so the same call serves both
+            header = bytes(self._bridge.get_header_bytes("sample", sample_index, 0, akai_sample_file.S3000_HEADER_SIZE))
+            akai_sample_file.validate_header(header)
+        except Exception as e:
+            debug_log.get_logger().error("export sample header %d failed: %s", sample_index, e, exc_info=True)
+            self.sample_header_export_failed.emit(sample_index, str(e))
+            return
+        self.sample_header_exported.emit(sample_index, header)
 
     def _handle_export_multi(self):
         try:

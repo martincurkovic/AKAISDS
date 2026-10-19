@@ -119,10 +119,13 @@ def test_both_body_rows_start_their_buttons_at_the_same_x_and_the_groups_are_div
     try:
         x = lambda w: w.mapTo(editor, QPoint(0, 0)).x()  # noqa: E731
         assert x(editor.trim_sample_button) == x(editor.duplicate_sample_button)
-        # a rule between the two groups of the second row: after Slice Editor, before Edit in External App
-        dividers = [w for w in editor.findChildren(type(editor._staged_banner)) if w.objectName() == "groupDivider"]
-        assert len(dividers) == 1
+        # a rule between the groups of the second row: after Slice Editor, before Edit in External App; and after Load Edited Audio, before Save as Akai File
+        dividers = sorted(
+            (w for w in editor.findChildren(type(editor._staged_banner)) if w.objectName() == "groupDivider"), key=x
+        )
+        assert len(dividers) == 2
         assert x(editor.slice_editor_button) < x(dividers[0]) < x(editor.external_edit_button)
+        assert x(editor.external_load_button) < x(dividers[1]) < x(editor.save_akai_button)
     finally:
         editor.hide()
 
