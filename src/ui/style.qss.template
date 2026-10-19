@@ -417,6 +417,15 @@ QComboBox:hover, QSpinBox:hover, QDoubleSpinBox:hover {
     border-color: ${border_hover};
 }
 
+/* clicked, so the mouse wheel changes it now (ui/wheel_guard.py; a knob paints its own outline) */
+QComboBox[armed="true"], QSpinBox[armed="true"], QDoubleSpinBox[armed="true"] {
+    border-color: ${accent};
+}
+
+QSlider[armed="true"]::handle:horizontal {
+    border-color: ${accent};
+}
+
 /* base rule above sets an explicit background/border/color, which
    otherwise wins over Fusion's own built-in disabled greying (that only
    kicks in when nothing more specific already set those properties) - so

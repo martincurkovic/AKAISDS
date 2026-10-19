@@ -30,7 +30,7 @@ from core import sampler_models
 from core import demo_timing
 from core.demo_s950 import FakeS950
 from core.midi_manager import MidiManager
-from ui import theme
+from ui import theme, wheel_guard
 from ui.dashboard import TransferDashboard
 
 
@@ -56,6 +56,7 @@ class _FakePort:
 def main(smoke=False, instant=False):
     app = QApplication(sys.argv)
     theme.apply_to_app(app)
+    wheel_guard.install(app)
 
     fake = FakeS950()
     midi_manager = MidiManager()

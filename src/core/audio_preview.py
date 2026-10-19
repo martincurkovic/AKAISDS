@@ -153,6 +153,26 @@ def resolve_output_device():
     return None
 
 
+class _PlaybackState:
+    """What a playback generator shares with the player. A plain object on purpose: the generators run on miniaudio's audio thread and are kept alive by the
+    device, so one that held the player itself (a QObject with a QTimer) would tie it into a reference cycle with its own device - and a cycle is collected
+    whenever the garbage collector next runs, which can be on the audio thread, where a QObject cannot stop its timers ("Timers cannot be stopped from another
+    thread", then a crash in the GUI thread's timer list later)."""
+
+    __slots__ = ("current_frame", "finished", "live_loop_start", "live_loop_end", "live_loop_tune_cents")
+
+    def __init__(self):
+        self.current_frame = 0
+        self.finished = False
+        self.live_loop_start = 0
+        self.live_loop_end = 0
+        self.live_loop_tune_cents = 0
+
+
+def _state_attribute(name):
+    return property(lambda player: getattr(player._state, name), lambda player, value: setattr(player._state, name, value))
+
+
 class SlicePreviewPlayer(QObject):
     """Plays one mono 16-bit PCM region at a time out the user's chosen audio
     output device (Settings > Audio Preview), via a miniaudio.PlaybackDevice.
@@ -184,10 +204,18 @@ class SlicePreviewPlayer(QObject):
     position_changed = Signal(int)
     finished = Signal()
 
+    # read and written by the generators through self._state (see _PlaybackState); the player and its tests use them as plain attributes
+    _current_frame = _state_attribute("current_frame")
+    _finished = _state_attribute("finished")
+    _live_loop_start = _state_attribute("live_loop_start")
+    _live_loop_end = _state_attribute("live_loop_end")
+    _live_loop_tune_cents = _state_attribute("live_loop_tune_cents")
+
     def __init__(self, parent=None):
         super().__init__(parent)
         _LIVE_PLAYERS.add(self)
         self._device = None
+        self._state = _PlaybackState()
         self._current_frame = 0
         # set True by a generator right before it ends, for any reason
         # (ran off the end, or an internal error - see each generator's own
@@ -300,6 +328,8 @@ class SlicePreviewPlayer(QObject):
         if device is None:
             return
 
+        state = self._state  # (not self: see _PlaybackState)
+
         def generator():
             try:
                 required_frames = yield b""
@@ -308,7 +338,7 @@ class SlicePreviewPlayer(QObject):
                     end = pos + required_frames * bytes_per_frame
                     out = pcm_bytes[pos:end]
                     pos += len(out)
-                    self._current_frame = start_frame + pos // bytes_per_frame
+                    state.current_frame = start_frame + pos // bytes_per_frame
                     if len(out) < required_frames * bytes_per_frame:
                         # the true final chunk, shorter than what was
                         # asked for - miniaudio.PlaybackDevice._data_
@@ -342,7 +372,7 @@ class SlicePreviewPlayer(QObject):
                     exc_info=True,
                 )
             finally:
-                self._finished = True
+                state.finished = True
 
         self._start(device, generator, start_frame)
 
@@ -438,6 +468,8 @@ class SlicePreviewPlayer(QObject):
         if device is None:
             return
 
+        state = self._state  # (not self in the closures below: see _PlaybackState)
+
         def _loop_region_bytes(lo, hi, cents):
             region = _resample_region_for_cents(samples, lo, hi, cents)
             right_region = None if right_samples is None else _resample_region_for_cents(right_samples, lo, hi, cents)
@@ -466,12 +498,12 @@ class SlicePreviewPlayer(QObject):
             looped_frames = 0
             cur_loop_start = loop_start_frame
             cur_loop_end = loop_end_frame
-            cur_loop_cents = self._live_loop_tune_cents
+            cur_loop_cents = state.live_loop_tune_cents
             loop_bytes = _loop_region_bytes(cur_loop_start, cur_loop_end, cur_loop_cents)
             while loop_frame_budget is None or looped_frames < loop_frame_budget:
-                live_start = self._live_loop_start
-                live_end = self._live_loop_end
-                live_cents = self._live_loop_tune_cents
+                live_start = state.live_loop_start
+                live_end = state.live_loop_end
+                live_cents = state.live_loop_tune_cents
                 if live_end > live_start and (live_start, live_end, live_cents) != (
                     cur_loop_start,
                     cur_loop_end,
@@ -544,7 +576,7 @@ class SlicePreviewPlayer(QObject):
                         take_n = min(len(seg_bytes) - seg_pos, need - len(out))
                         out += seg_bytes[seg_pos : seg_pos + take_n]
                         seg_pos += take_n
-                        self._current_frame = (
+                        state.current_frame = (
                             seg_start_frame + seg_pos // bytes_per_frame
                         )
                         if seg_pos >= len(seg_bytes):
@@ -581,7 +613,7 @@ class SlicePreviewPlayer(QObject):
                     exc_info=True,
                 )
             finally:
-                self._finished = True
+                state.finished = True
 
         self._start(device, generator, start_frame)
 

@@ -4,7 +4,7 @@ import sys
 import mido
 from PySide6.QtWidgets import QApplication
 from core import debug_log, diagnostics
-from ui import diagnostics_ui, theme
+from ui import diagnostics_ui, theme, wheel_guard
 from ui._version import APP_VERSION
 from ui.main_window import ApplicationWindow
 
@@ -34,6 +34,7 @@ if __name__ == "__main__":
     app = QApplication(sys.argv)
     diagnostics_ui.install_dialog_logging()
     theme.apply_to_app(app)
+    wheel_guard.install(app)  # scrolling a page never changes a control; only a clicked one answers the wheel
 
     window = ApplicationWindow()
     window.show()

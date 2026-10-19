@@ -27,7 +27,7 @@ from controller.sampler_controller import SamplerController
 from core import sampler_models
 from core.demo_asrx import FakeASRX
 from core.midi_manager import MidiManager
-from ui import theme
+from ui import theme, wheel_guard
 from ui.dashboard import TransferDashboard
 
 
@@ -52,6 +52,7 @@ class _FakePort:
 def main(smoke=False):
     app = QApplication(sys.argv)
     theme.apply_to_app(app)
+    wheel_guard.install(app)
 
     fake = FakeASRX()
     midi_manager = MidiManager()

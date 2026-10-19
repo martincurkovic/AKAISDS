@@ -94,7 +94,7 @@ from ui.slice_editor_window import SliceEditorWindow
 from ui.filter_sample_dialog import FilterSampleDialog
 from ui.time_stretch_dialog import TimeStretchDialog
 from core.audio_preview import SlicePreviewPlayer
-from ui import theme
+from ui import theme, wheel_guard
 from ui.about_dialog import AboutDialog
 from ui.quickstart_dialog import show_quickstart_dialog
 from ui.update_helper import UpdateCheckRunner
@@ -10403,6 +10403,7 @@ if __name__ == "__main__":
         os.environ["AKAISDS_DEMO_INSTANT"] = "1"  # no paced sample loads/replaces (see core/demo_timing.py)
     app = QApplication(sys.argv)
     theme.apply_to_app(app)
+    wheel_guard.install(app)
     window = ProgramEditorWindow(_StandaloneHost(), bridge=DemoBridge())
     window.show()
     sys.exit(app.exec())

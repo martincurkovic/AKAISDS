@@ -2,7 +2,7 @@ import math
 import sys
 from PySide6.QtWidgets import QApplication, QDial, QLineEdit
 from PySide6.QtGui import QCursor, QPainter, QPen, QColor, QIntValidator
-from PySide6.QtCore import Qt, QPointF
+from PySide6.QtCore import Qt, QPointF, QRectF
 from ui import theme
 
 START_ANGLE_DEG = 240
@@ -330,6 +330,13 @@ class Knob(QDial):
         # line now that the pointer reaches all the way to the ring: the
         # round cap at the value arc's current-value end would peek out past
         # both edges of the pointer right where they cross
+        if enabled and self.property("armed"):
+            # clicked: the mouse wheel changes this knob now (ui/wheel_guard.py)
+            armed_pen = QPen(QColor(palette["accent"]))
+            armed_pen.setWidthF(1.5)
+            painter.setPen(armed_pen)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawEllipse(QRectF(self.rect()).adjusted(1, 1, -1, -1))
         track_pen = QPen(
             QColor(palette["border_hover"] if enabled else palette["border_disabled"])
         )
