@@ -268,6 +268,34 @@ def test_send_control_change_sends_correct_message(manager):
     assert sent.value == 100
 
 
+def test_send_channel_message_sends_a_note_and_a_control_change(manager):
+    mgr, _fake_mido = manager
+    mgr.open_output("Fake Out A")
+    mgr.send_channel_message([0x93, 60, 100])
+    sent = mgr.output_port.sent[-1]
+    assert (sent.type, sent.channel, sent.note, sent.velocity) == ("note_on", 3, 60, 100)
+    mgr.send_channel_message([0x83, 60, 0])
+    assert mgr.output_port.sent[-1].type == "note_off"
+    mgr.send_channel_message([0xB0, 123, 0])
+    sent = mgr.output_port.sent[-1]
+    assert (sent.type, sent.control, sent.value) == ("control_change", 123, 0)
+
+
+def test_send_channel_message_refuses_anything_else(manager):
+    mgr, _fake_mido = manager
+    mgr.open_output("Fake Out A")
+    for bad in ([0xF0, 1, 2], [0x90, 60], [0x90, 200, 1], [0xE0, 0, 64]):
+        with pytest.raises(ValueError):
+            mgr.send_channel_message(bad)
+    assert mgr.output_port.sent == []
+
+
+def test_send_channel_message_without_output_port_raises(manager):
+    mgr, _fake_mido = manager
+    with pytest.raises(RuntimeError):
+        mgr.send_channel_message([0x90, 60, 100])
+
+
 def test_on_message_sysex_emits_sysex_received(manager):
     mgr, _fake_mido = manager
     received = []
@@ -419,6 +447,18 @@ def test_shared_transport_send_control_change_frames_correctly(shared_manager):
 def test_shared_transport_send_control_change_without_output_raises(shared_manager):
     with pytest.raises(RuntimeError):
         shared_manager.send_control_change(0, 1, 127)
+
+
+def test_shared_transport_send_channel_message_goes_out_as_given(shared_manager):
+    mgr = shared_manager
+    mgr.open_output("Shared Out A")
+    mgr.send_channel_message(bytes([0x92, 60, 100]))
+    assert mgr.raw_output.sent == [[0x92, 60, 100]]
+
+
+def test_shared_transport_send_channel_message_without_output_raises(shared_manager):
+    with pytest.raises(RuntimeError):
+        shared_manager.send_channel_message([0x90, 60, 100])
 
 
 def test_shared_transport_on_raw_message_strips_sox_and_eox(shared_manager):

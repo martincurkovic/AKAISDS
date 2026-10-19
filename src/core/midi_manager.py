@@ -180,6 +180,29 @@ class MidiManager(QObject):
             )
             raise
 
+    #: the channel messages send_channel_message takes (what the on-screen keyboard sends): status high nibble -> (mido type, its two data fields)
+    _CHANNEL_MESSAGES = {
+        0x80: ("note_off", ("note", "velocity")),
+        0x90: ("note_on", ("note", "velocity")),
+        0xB0: ("control_change", ("control", "value")),
+    }
+
+    def send_channel_message(self, message):
+        """One note on / note off / control change (3 bytes) on the open output. Never SysEx."""
+        message = list(message)
+        kind = self._CHANNEL_MESSAGES.get(message[0] & 0xF0) if len(message) == 3 else None
+        if kind is None or any(b > 0x7F for b in message[1:]):
+            raise ValueError(f"not a note or control change message: {bytes(message).hex(' ')}")
+        if shared_transport_enabled():
+            if self.raw_output is None:
+                raise RuntimeError("No MIDI output port is open")
+            self.raw_output.send_message(message)
+            return
+        if self.output_port is None:
+            raise RuntimeError("No MIDI output port is open")
+        name, (first, second) = kind
+        self.output_port.send(mido.Message(name, channel=message[0] & 0x0F, **{first: message[1], second: message[2]}))
+
     def send_control_change(self, channel, control, value):
         if shared_transport_enabled():
             if self.raw_output is None:

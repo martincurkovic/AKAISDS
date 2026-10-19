@@ -652,3 +652,72 @@ def test_the_s950_editors_signed_knobs_draw_their_arc_from_zero_too(win):
     assert signed and unsigned  # the editor has both kinds
     assert all(0.0 < k._origin_fraction() < 1.0 for k in signed)
     assert all(k._origin_fraction() == 0.0 for k in unsigned)
+
+
+# --- the on-screen keyboard (View > Audition Keyboard, Cmd/Ctrl+K; NOT tried on a real S900/S950) ----------------
+
+
+def test_the_keyboard_starts_closed_and_cmd_k_toggles_it(win):
+    bar = win.audition_bar
+    assert not bar.is_open() and not win.audition_action.isChecked()
+    assert win.audition_action.shortcut().toString() == "Ctrl+K"
+    win.audition_action.trigger()
+    assert bar.is_open() and win.audition_action.isChecked()
+    win.audition_action.trigger()
+    assert not bar.is_open()
+
+
+def test_a_key_press_goes_out_as_plain_notes_and_never_as_sysex(win):
+    _wait_listed(win)
+    assert wait_until(lambda: win.audition_bar.body.isEnabled())
+    win.audition_bar.set_open(True)
+    sysex_before = list(win.rig.midi.sent)
+    win.audition_bar.keyboard._press(60)
+    win.audition_bar.keyboard._release(60)
+    assert win.rig.midi.channel_sent == [bytes([0x90, 60, 100]), bytes([0x80, 60, 0])]
+    assert win.rig.midi.sent == sysex_before
+
+
+def test_the_keyboard_is_off_while_a_write_or_transfer_is_on_the_wire(win):
+    _wait_listed(win)
+    assert wait_until(lambda: win.audition_bar.body.isEnabled())
+    win._writing = True
+    win._update_buttons()
+    assert not win.audition_bar.body.isEnabled() and "busy" in win.audition_bar.note.text()
+    win.audition_bar.keyboard._press(60)
+    assert win.rig.midi.channel_sent == []
+    win._writing = False
+    win._update_buttons()
+    assert win.audition_bar.body.isEnabled()
+
+
+def test_a_failed_note_is_reported_not_raised(win):
+    _wait_listed(win)
+    assert wait_until(lambda: win.audition_bar.body.isEnabled())
+    win.audition_bar.set_open(True)
+    win.rig.midi.fail_sends = True
+    win.audition_bar.keyboard._press(60)
+    assert "Couldn't play the note" in win.status_bar.currentMessage()
+
+
+def test_closing_the_editor_gives_the_computer_keyboard_back(win):
+    win.audition_bar.set_open(True)
+    win._working = None
+    win.close()
+    assert not win.audition_bar.is_open()
+
+
+def test_the_demo_flag_on_the_midi_manager_makes_the_bar_say_so(qapp, monkeypatch, tmp_path):
+    rig = _build(qapp, monkeypatch, FakeS950())
+    rig.midi.is_demo = True
+    window = S950ProgramEditorWindow(_Main(), rig.controller)
+    try:
+        window._busy_timer.stop()
+        window.audition_bar.set_available(True)
+        assert "Demo" in window.audition_bar.note.text()
+    finally:
+        rig.engine.cancel()
+        window._working = None
+        window.close()
+        window.deleteLater()
+        QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete.value)

@@ -42,10 +42,16 @@ class _Midi(QObject):
         self.input_name = input_name
         self.output_name = "Fake Out"
         self.sent = []
+        self.channel_sent = []  # notes from the editor's keyboard
         self.fail_sends = False
         #: when True replies arrive ONE message per event-loop turn instead of a whole conversation inside one call, so a
         #: transfer is really in flight for a while (the way it is at MIDI speed) - used to test cancelling mid-stream
         self.paced = False
+
+    def send_channel_message(self, message):
+        if self.fail_sends:
+            raise RuntimeError("port closed")
+        self.channel_sent.append(bytes(message))
 
     def send_sysex(self, data):
         if self.fail_sends:

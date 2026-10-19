@@ -8,6 +8,7 @@ in front (a dialog, the Slice Editor) or a drop-down is open. Cmd+K closes the b
 """
 
 from PySide6.QtCore import QEvent, Qt, Signal
+from PySide6.QtGui import QAction
 from PySide6.QtWidgets import QApplication, QComboBox, QHBoxLayout, QLabel, QPushButton, QSlider, QToolButton, QVBoxLayout, QWidget
 
 from core import audition
@@ -214,3 +215,19 @@ class AuditionBar(QWidget):
         self.keyboard.release_all()
         for message in audition.panic(self.channel()):
             self.midi_out.emit(message)
+
+
+def add_audition_action(window, view_menu, bar):
+    """The View > Audition Keyboard item (Cmd/Ctrl+K) for `bar`, kept in step with it. Returns the action.
+
+    For a window that sends the notes itself (the S900/S950 editor): it puts the bar in its layout, connects `bar.midi_out`, keeps `bar.set_available(...)` true only while a
+    note is safe to send, and calls `bar.set_open(False)` when it closes.
+    """
+    action = QAction("Audition Keyboard", window)
+    action.setCheckable(True)
+    action.setShortcut("Ctrl+K")  # (Cmd+K on a Mac)
+    action.setToolTip("Show or hide the keyboard along the bottom. Hidden, it plays nothing.")
+    action.triggered.connect(lambda checked: bar.set_open(checked, focus=checked))
+    bar.open_changed.connect(action.setChecked)
+    view_menu.addAction(action)
+    return action

@@ -51,6 +51,7 @@ from core.midi_notes import midi_note_to_name
 from core.s950_sysex import NAME_LENGTH
 from core.s950_program import Keygroup, Program
 from ui import theme, tooltips as tt
+from ui.audition_bar import AuditionBar, add_audition_action
 from ui.diagnostics_ui import add_open_log_folder_action
 from ui.editor_layout import (
     add_keygroup_row,
@@ -342,6 +343,11 @@ class S950ProgramEditorWindow(QMainWindow):
 
         main_layout = QVBoxLayout()
         main_layout.addWidget(self.main_tabs, stretch=1)
+        # the keyboard (View > Audition Keyboard, Cmd/Ctrl+K): always starts CLOSED, an open bar owns the computer keyboard. Its menu item is made in _build_menus
+        self.audition_bar = AuditionBar()
+        self.audition_bar.set_demo(bool(getattr(self._controller.midi_manager, "is_demo", False)))
+        self.audition_bar.midi_out.connect(self._send_audition_message)
+        main_layout.addWidget(self.audition_bar)
         main_layout.addLayout(bottom_row)
         container = QWidget()
         container.setLayout(main_layout)
@@ -702,6 +708,9 @@ class S950ProgramEditorWindow(QMainWindow):
         hardware_menu.addSeparator()
         add_open_log_folder_action(hardware_menu, self)
 
+        view_menu = self.menuBar().addMenu("&View")
+        self.audition_action = add_audition_action(self, view_menu, self.audition_bar)
+
         # mirrors the Dashboard's &Window menu (main_window.py) so Ctrl+T/Ctrl+E
         # work from either window
         window_menu = self.menuBar().addMenu("&Window")
@@ -727,6 +736,20 @@ class S950ProgramEditorWindow(QMainWindow):
             lambda: self.main_tabs.setCurrentIndex(self._samples_tab_index)
         )
         window_menu.addAction(samples_tab_action)
+
+    def _sync_audition_available(self, idle):
+        # off while anything is on the wire (a catalog read, a transfer, a write): a note must not land in the middle of a SysEx exchange.
+        # Off = nothing is routed, so a dead keyboard never swallows typing.
+        available = idle and not self._controller.is_transfer_busy()
+        self.audition_bar.set_available(available, "" if available else "The keyboard is off while the sampler is busy.")
+
+    def _send_audition_message(self, message):
+        # a plain channel message straight to the output, on the GUI thread (this editor has no worker). Nothing is read back.
+        try:
+            self._controller.midi_manager.send_channel_message(message)
+        except Exception as ex:
+            debug_log.get_logger().error(f"S950Editor: couldn't send MIDI message {bytes(message).hex()}", exc_info=True)
+            self.status_bar.showMessage(f"Couldn't play the note: {ex}", 5000)
 
     def _on_tab_changed(self, index):
         on_samples = index == self._samples_tab_index
@@ -771,6 +794,7 @@ class S950ProgramEditorWindow(QMainWindow):
             f"{n} unsaved change{'' if n == 1 else 's'}" if n else ""
         )
         self.detail_stack.setEnabled(not self._writing)
+        self._sync_audition_available(idle)
         self._dashboard_action.setEnabled(not busy and not self._writing)
         self._dashboard_action.setToolTip(tt.BUSY_BLOCKS_OTHER_WINDOWS if busy else "")
 
@@ -1309,6 +1333,7 @@ class S950ProgramEditorWindow(QMainWindow):
             event.ignore()
             return
         _log("closed")
+        self.audition_bar.set_open(False)  # lets go of every note and gives the computer keyboard back
         self._busy_timer.stop()
         if not self._connected:
             super().closeEvent(event)
