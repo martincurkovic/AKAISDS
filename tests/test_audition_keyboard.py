@@ -356,3 +356,47 @@ def test_a_note_does_not_light_the_loading_bar(win, qapp):
     qapp.processEvents()
     assert win.bridge_out.messages == [[0x90, 60, 100], [0x80, 60, 0]]
     assert busy == [] and not win._busy_show_timer.isActive()
+
+
+# -- locking the keyboard during a long job -----------------------------------------------------------------------------
+
+
+def test_a_locked_bar_closes_and_cannot_be_opened(bar):
+    opened, locks = [], []
+    bar.open_changed.connect(opened.append)
+    bar.locked_changed.connect(locks.append)
+    bar.set_available(True)
+    bar.set_open(True)
+    bar.set_locked(True, "busy")
+    assert not bar.is_open() and bar.is_locked() and not bar.toggle.isEnabled()
+    assert opened[-1] is False and locks == [True]  # (it was shown, then closed by the lock)
+    bar.set_open(True)  # (the shortcut, the View menu item, the bar's own button)
+    assert not bar.is_open()
+    bar.toggle.click()
+    assert not bar.is_open()
+    bar.set_locked(True, "busy")  # (cheap to repeat: no second signal)
+    assert locks == [True]
+
+
+def test_unlocking_leaves_the_bar_closed_and_lets_it_be_opened_again(bar):
+    bar.set_available(True)
+    bar.set_open(True)
+    bar.set_locked(True)
+    bar.set_locked(False)
+    assert not bar.is_open() and bar.toggle.isEnabled()
+    bar.set_open(True)
+    assert bar.is_open()
+
+
+def test_a_blocking_job_closes_the_keyboard_and_greys_out_its_menu_item(win):
+    win.audition_bar.set_open(True)
+    assert win.audition_bar.is_open() and win.audition_action.isEnabled()
+    win._set_hardware_busy_ui(True)
+    assert not win.audition_bar.is_open() and not win.audition_action.isEnabled()
+    win.audition_action.trigger()  # (Ctrl+K is a shortcut of the same action, which is disabled)
+    win.audition_bar.set_open(True, focus=True)
+    assert not win.audition_bar.is_open()
+    win._set_hardware_busy_ui(False)
+    assert win.audition_action.isEnabled() and not win.audition_bar.is_open()  # (not reopened for them)
+    win.audition_action.trigger()
+    assert win.audition_bar.is_open()

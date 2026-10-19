@@ -270,3 +270,43 @@ def test_a_held_space_does_not_flicker_the_preview(qapp):
     held = Event()
     held.repeating = True
     assert toggle.handle_key(held) and player.playing  # still playing: the repeat was swallowed, not toggled
+
+
+# -- Space with the focus on the dialog's first control ---------------------------------------------------------------
+
+
+def test_space_on_the_first_focused_control_toggles_the_preview_not_the_control(dialog_with_fake_player):
+    """A dialog opens with the focus on its first control (the Filter's highpass check box, the others' first combo): Space must not toggle that."""
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+    from PySide6.QtWidgets import QComboBox, QGroupBox
+
+    dialog, _turn, _release = dialog_with_fake_player
+    if hasattr(dialog, "hp_group"):
+        control = dialog.hp_group
+        before = control.isChecked()
+        QTest.keyClick(control, Qt.Key.Key_Space)
+        assert control.isChecked() == before
+    else:
+        control = dialog.findChildren(QComboBox)[0]
+        before = control.currentIndex()
+        QTest.keyClick(control, Qt.Key.Key_Space)
+        assert control.currentIndex() == before and not control.view().isVisible()
+    assert dialog.state["playing"] and dialog.preview_button.text() == "Stop"
+    QTest.keyClick(control, Qt.Key.Key_Space)
+    assert not dialog.state["playing"]
+
+
+def test_every_checkbox_group_box_and_combo_claims_space(dialog_with_fake_player):
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+    from PySide6.QtWidgets import QCheckBox, QComboBox, QGroupBox
+
+    dialog, _turn, _release = dialog_with_fake_player
+    for kind in (QComboBox, QCheckBox, QGroupBox):
+        for control in dialog.findChildren(kind):
+            if not control.isEnabled():
+                continue
+            QTest.keyClick(control, Qt.Key.Key_Space)
+            assert dialog.state["playing"], (kind.__name__, control)
+            dialog._preview_player.stop()

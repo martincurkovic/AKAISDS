@@ -111,6 +111,7 @@ from core import sampler_models
 from core import preview_pitch
 from core import sample_editing
 from core import reverb, time_stretch
+from core.ui_lag_probe import LagProbe
 from core import sds_encoder
 from core.midi_notes import midi_note_to_name
 from core.program_editor_bridge import (
@@ -2477,6 +2478,7 @@ class ProgramEditorWindow(QMainWindow):
             lambda checked: self.audition_bar.set_open(checked, focus=checked)
         )
         self.audition_bar.open_changed.connect(self.audition_action.setChecked)
+        self.audition_bar.locked_changed.connect(lambda locked: self.audition_action.setEnabled(not locked))
         view_menu.addAction(self.audition_action)
         self._sync_audition_available()
 
@@ -5792,10 +5794,10 @@ class ProgramEditorWindow(QMainWindow):
         sampler_controller = getattr(self._main_window, "sampler_controller", None)
         transfer = sampler_controller is not None and sampler_controller.is_transfer_busy()
         working = getattr(self, "_hardware_busy_ui", False)
-        self.audition_bar.set_available(
-            not (transfer or working),
-            "The keyboard is off while the sampler is busy." if (transfer or working) else "",
-        )
+        why = "The keyboard is off while the sampler is busy." if (transfer or working) else ""
+        self.audition_bar.set_available(not (transfer or working), why)
+        # Locked, not just greyed out: it closes and cannot be opened until the job is over (a sample load over SDS made even a disabled bar lag)
+        self.audition_bar.set_locked(bool(transfer or working), why)
 
     def closeEvent(self, event):
         # refuse to switch back to the Dashboard (whether via Ctrl+T, the
@@ -8374,6 +8376,9 @@ class ProgramEditorWindow(QMainWindow):
         flush_timer = QTimer(self)
         flush_timer.timeout.connect(self._flush_live_chunks)
         flush_timer.start(_LIVE_CHUNK_FLUSH_MS)
+        # how late the GUI thread's own heartbeat runs during the load, in the log afterwards (core/ui_lag_probe.py)
+        lag_probe = LagProbe(f"audio load of sample {sample_index}", self)
+        lag_probe.start()
         try:
             which, args = self._wait_for_any_signal(
                 [
@@ -8394,6 +8399,8 @@ class ProgramEditorWindow(QMainWindow):
             self.status_bar.showMessage("Couldn't receive sample audio from hardware")
             return None, None
         finally:
+            lag_probe.stop()
+            lag_probe.deleteLater()
             sampler_controller.receive_progress.disconnect(progress_connection)
             sampler_controller.sample_chunk_received.disconnect(chunk_connection)
             flush_timer.stop()

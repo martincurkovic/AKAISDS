@@ -211,7 +211,7 @@ class FilterSampleDialog(QDialog):
         self.hp_group.toggled.connect(self._update_ok_enabled)
         self.lp_group.toggled.connect(self._update_ok_enabled)
         self._update_ok_enabled()
-        self._preview_toggle.claim_space(*self.findChildren(LogKnob))
+        self._preview_toggle.claim_space_in(self)
 
     def _update_ok_enabled(self):
         # nothing to send if BOTH filters are bypassed - matches

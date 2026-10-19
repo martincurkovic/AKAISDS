@@ -60,11 +60,13 @@ class AuditionBar(QWidget):
     open_changed = Signal(
         bool
     )  # the bar was shown or hidden (the View menu item follows)
+    locked_changed = Signal(bool)  # the bar can no longer / can again be opened (the View menu item follows)
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self._sounding = {}  # note -> the channel it was started on (so a note-off follows its note-on even if the channel box changes)
         self._available = False
+        self._locked = False
         self._availability = None  # the last (available, why) set_available was given
         self._demo = False
         outer = QVBoxLayout(self)
@@ -171,7 +173,10 @@ class AuditionBar(QWidget):
         return not self.body.isHidden()
 
     def set_open(self, opened, *, focus=False):
-        """Show or hide the keyboard. Hiding it lets go of every note and gives the computer keyboard back; `focus` (the shortcut) also gives the piano the focus."""
+        """Show or hide the keyboard. Hiding it lets go of every note and gives the computer keyboard back; `focus` (the shortcut) also gives the piano the focus.
+        A locked bar (see `set_locked`) cannot be opened."""
+        if opened and self._locked:
+            return
         changed = opened != self.is_open()
         self.body.setVisible(opened)
         self.toggle.setArrowType(
@@ -190,6 +195,21 @@ class AuditionBar(QWidget):
         self._update_routing()
         if changed:
             self.open_changed.emit(opened)
+
+    def is_locked(self):
+        return self._locked
+
+    def set_locked(self, locked, why=""):
+        """Lock the bar: closed, and it cannot be opened (the toggle, Cmd+K and the View menu item are off) until it is unlocked. For a long blocking job
+        (a sample load over SDS): even a greyed-out bar lagged the load. Not remembered: unlocking leaves it closed. Cheap to call repeatedly."""
+        if locked == self._locked:
+            return
+        self._locked = locked
+        if locked:
+            self.set_open(False)
+        self.toggle.setEnabled(not locked)
+        self.toggle.setToolTip(why if locked and why else HELP)
+        self.locked_changed.emit(locked)
 
     # -- owning the computer keyboard ------------------------------------------------------------------------------------
 
@@ -295,5 +315,6 @@ def add_audition_action(window, view_menu, bar):
     )
     action.triggered.connect(lambda checked: bar.set_open(checked, focus=checked))
     bar.open_changed.connect(action.setChecked)
+    bar.locked_changed.connect(lambda locked: action.setEnabled(not locked))
     view_menu.addAction(action)
     return action

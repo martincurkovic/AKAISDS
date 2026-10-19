@@ -121,7 +121,7 @@ class ReverbDialog(QDialog):
         self.preset_combo.activated.connect(self._on_preset_chosen)
         for knob in self._knobs():
             knob.valueChanged.connect(self._on_changed)
-        self._preview_toggle.claim_space(*self._knobs())
+        self._preview_toggle.claim_space_in(self)
         self._refresh()
         self.setFixedWidth(self.sizeHint().width())
 

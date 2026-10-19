@@ -1,4 +1,7 @@
 from PySide6.QtCore import QEvent, QObject, Qt
+from PySide6.QtWidgets import QCheckBox, QComboBox, QGroupBox
+
+from ui.knob import Knob
 
 
 class PreviewToggle(QObject):
@@ -9,10 +12,11 @@ class PreviewToggle(QObject):
     `player` is a `core.audio_preview.SlicePreviewPlayer`; `start` renders the result and plays it. The button follows the player's `finished`
     signal, which fires however playback ends (it ran out, Stop, the dialog closing).
 
-    The Space bar does the same as the button: the dialog's `keyPressEvent` offers each key to `handle_key` first. A key only gets that far when the
-    focused widget did not use it, so Space on a focused OK / Cancel button, a combo or a check box still does what it always did. A knob does not
-    use Space either, but the check box of a group box around it (the Filter dialog's) would take it on the way up and flip the filter's bypass,
-    so the knobs are registered with `claim_space`, which hands Space to the preview before it travels any further."""
+    The Space bar does the same as the button, whichever control has the focus. A dialog opens with the focus on its first control (a check box, a
+    combo box), and those use Space themselves (toggle, open the list), so the controls are registered with `claim_space_in`, which hands Space to the
+    preview before they see it. Push buttons are NOT claimed: on a focused OK or Cancel, Space presses it (as does the Preview button's own, which is
+    the same toggle). An open combo's drop-down list is a window of its own and keeps its keys. The dialog's `keyPressEvent` also offers keys to
+    `handle_key`, for a Space that lands on the dialog itself."""
 
     def __init__(self, button, player, start, parent=None):
         super().__init__(parent or button)
@@ -42,10 +46,17 @@ class PreviewToggle(QObject):
         event.accept()
         return True
 
+    #: the kinds of control that take the focus and would use a Space themselves (or, for a knob, pass it up to a checkable group box that would)
+    _SPACE_CLAIMED = (Knob, QComboBox, QCheckBox, QGroupBox)
+
     def claim_space(self, *widgets):
-        """Space pressed on any of `widgets` (the dialog's knobs) is for the preview, not for whatever is around them."""
+        """Space pressed on any of `widgets` is for the preview, not for the widget."""
         for widget in widgets:
             widget.installEventFilter(self)
+
+    def claim_space_in(self, dialog):
+        """`claim_space` for every knob, combo box, check box and group box in `dialog` (see the class docstring)."""
+        self.claim_space(*(w for kind in self._SPACE_CLAIMED for w in dialog.findChildren(kind)))
 
     def eventFilter(self, watched, event):
         kind = event.type()

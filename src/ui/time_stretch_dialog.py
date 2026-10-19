@@ -150,7 +150,7 @@ class TimeStretchDialog(QDialog):
         self.mode_combo.currentIndexChanged.connect(self._on_changed)
         for knob in (self.length_knob, self.semitones_knob, self.cents_knob, self.grain_knob):
             knob.valueChanged.connect(self._on_changed)
-        self._preview_toggle.claim_space(self.length_knob, self.semitones_knob, self.cents_knob, self.grain_knob)
+        self._preview_toggle.claim_space_in(self)
         self._refresh()
         self.setFixedWidth(self.sizeHint().width())
         # the warning wraps to a different number of lines per mode: reserve the taller of the two, so switching modes moves nothing
