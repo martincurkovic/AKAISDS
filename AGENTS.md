@@ -20,7 +20,7 @@ and plans: `dev_docs/`.
 
 ## House rules
 
-- Don't commit, branch, tag or push unless asked. The owner handles git. Ask before anything outward-facing.
+- **Never commit, branch, tag or push unless asked.** The owner handles git: a commit is where the human checks the code. Agents may `git add` the files they changed, and should suggest a single-sentence commit message. Say when a good point to commit has been reached (a feature or fix is done and tested), but leave the commit to the owner. Ask before anything outward-facing.
 - Never edit the pinned `s3k`/`s3ked` dependency. Wrap or override it here.
 - Real hardware: read "Real-hardware safety" first. Back up before writing. Close other MIDI software.
 - Keep user-facing text short (a line or two). Detail goes in the log.
