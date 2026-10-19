@@ -11,6 +11,7 @@ S1000-family unit) tests, and nothing below is called working until they have ru
 | Multi file codec (4096 bytes: 1024-byte header + 16 x 192-byte parts) | `src/core/akai_multi_file.py` | built, tested, **format not checked against a file the sampler wrote** |
 | Save Multi (read only) | Multi tab "Save to File...", File > Save Multi to File...; `BridgeWorker.submit_export_multi`; `akai_multi_file.read_from_bridge` | built, tested against fakes. Never run on the S2000 |
 | Read-only check tool | `tools/s2000_multi_check.py` (`show`, `save`, `compare REAL.m3`, `diff A B`, `plan FILE`) | built, tested offline. Never run on the S2000 |
+| Write check (WRITES five panel-visible part fields) | `tools/s2000_multi_write_check.py` (`plan`, `run --yes`, `restore BACKUP.m3 --yes`), tests `tests/test_multi_write_check.py` | built 2026-10-19, tested against a fake. **Never run on the S2000** |
 | Load dry run (what a load WOULD write) | `akai_multi_file.plan_load`, tool command `plan` | built 2026-10-19, tested offline. Writes nothing anywhere |
 | **Load Multi** | nothing | **not started on purpose**: see "Why there is no Load yet" |
 | Backup All (every program + the one multi, zipped) | nothing | only discussed (see "Ideas not started") |
@@ -55,14 +56,20 @@ that gap before any loader exists.
 
 ## Next steps for the agent
 
-### A. A write check for the unmeasured fields (WRITES: owner runs it, throwaway multi, app closed)
+### A. The write check (BUILT 2026-10-19; the owner runs it, throwaway multi, app closed)
 
-Model it on `tools/s2000_mdata_write_check.py` (read it first: backup, one write, read-back must match, restore, stop on the first surprise). One field on ONE part at a time,
-in this order (least to most surprising): `PRIORT`, `PLAYLO`/`PLAYHI`, `TRANSPOSE`, `PTUNOCM`, `VOSCL`, `PFXCHAN`, `PFXSLEV`, `OUTPUT`. For each: read it, write a different value through
-`bridge.set_parameter` (the same per-parameter path the Multi tab uses, NOT a whole-block `MULTIDATA` write), read it back, compare, write the original back, read again, compare.
-Print PASS/FAIL per field with the values, and ask the owner to say whether the panel shows the change (add a prompt, or print the panel page to look at). Save the whole multi to a
-`.m3` first (`akai_multi_file.build_file`) in `~/.akaisds/multi_backups/` as the safety net. Never write FX1-FX4 above byte 204 (the tool should refuse). Never write the pointer
-bytes or `+0x6D`. Record results in the table below and in `AGENTS.md`'s Multi section.
+`tools/s2000_multi_write_check.py`. Tests only the fields a base S2000 can show: `PRIORT`, `PLAYLO`, `PLAYHI`, `TRANSPOSE`, `PTUNOCM` (`OUTPUT`/`VOSCL`/`PFXCHAN`/`PFXSLEV`/`FX1-4` need the
+multi-output board / FX card, so a read-back would prove nothing visible; they stay UNPROVEN until a unit with the cards runs this tool extended with them). Per field, on ONE part
+(default 16, unassigned): read the part, write one field through `set_parameter` (per parameter, never a whole-block write), read back (the field has the new value and no other
+byte moved except pointers/`+0x6D`), pause `--hold` s so the owner can look at the panel, write the original back, read and demand the part is as it was; finally the whole multi must
+equal the backup. The whole multi is saved to `~/.akaisds/multi_backups/` first (no backup, no write). It stops at the first surprise (refused write, write that doesn't stick, side
+effect on another byte, restore that doesn't match) after putting the value back, also on Ctrl-C; results go to `write_check_<timestamp>.json` there. Only the five names can be written
+(`write_field` refuses anything else, tested). `restore BACKUP.m3 --part N --yes` puts the five fields back after a crash.
+
+Owner's steps: close the app and any DAW; sampler on a normal page (not mid-edit); `uv run python tools/s2000_multi_write_check.py plan`, then
+`uv run python tools/s2000_multi_write_check.py run --yes` (add `--part 3 --hold 10` to use a part that has a program, so the panel page is more telling) while watching that part's
+multi page. Send the whole output and what the panel showed during each LOOK line. Then record the result in the table below and move the passing fields from UNPROVEN to
+"measured" in `LOADABLE_PART_FIELDS` (and the planner tests).
 
 ### B. Load Multi
 
@@ -149,4 +156,4 @@ Only after A (and ideally after the owner's compare run). Design, following how 
 | 2026-10-19 | program values (keygroup range, zone tune) read back | correct (range 70-127, zone 1 tune +5.1992 st = panel 05.20) |
 | | `s2000_multi_check.py compare REAL.m3` | |
 | | `s2000_multi_check.py plan REAL.m3` | |
-| | write check (A), per field | |
+| | write check (A) `run --yes`, per field (PRIORT, PLAYLO, PLAYHI, TRANSPOSE, PTUNOCM) | |
