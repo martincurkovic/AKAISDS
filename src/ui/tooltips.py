@@ -380,6 +380,11 @@ SAVE_MULTI_BUTTON = (
     "Save the sampler's multi (its name, effects and all 16 parts) as an Akai multi file. Only reads from the sampler. "
     "Programs and samples are not inside it, and the file format is not yet confirmed on a real sampler."
 )
+LOAD_MULTI_BUTTON = (
+    "Load a multi file onto the sampler: its name, effects and each part's channel, level, pan, priority, play range, transpose and tune. "
+    "Programs are assigned if they are on the sampler. The current multi is saved first, and you confirm before anything is written."
+)
+LOAD_MULTI_DEMO_MODE = "Loading a multi isn't available in demo mode."
 REVERB_BUTTON = "Bake a reverb into the sample"
 REVERB_PRESET = "A starting point for the four knobs. Moving a knob afterwards switches this back to Custom."
 REVERB_DECAY = "How long the tail takes to fall 60 dB, from 0.1 s to 5 s. A longer decay makes a longer sample. Double-click to reset."

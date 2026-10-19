@@ -473,6 +473,12 @@ _PROGRAM_LEVEL_FIELDS = [
 PROGRAM_BACKUP_DIR = Path.home() / ".akaisds" / "program_backups"
 # the sampler's whole-block misc data, saved once per session before the first block write (core/global_settings.py)
 MDATA_BACKUP_DIR = Path.home() / ".akaisds" / "mdata_backups"
+# the whole resident multi (.m3), saved before Load Multi writes anything (tools/s2000_multi_write_check.py uses the same folder)
+MULTI_BACKUP_DIR = Path.home() / ".akaisds" / "multi_backups"
+# pauses around Load Multi's per-field writes (via the `_sleep` hook): the sampler needs a moment before a read-back shows a write, and a Program Change a moment to apply.
+# Measured: tools/s2000_multi_write_check.py read back correctly 0.5 s after each write (2026-10-19).
+MULTI_LOAD_SETTLE_S = 0.5
+MULTI_LOAD_PROGRAM_CHANGE_S = 0.4
 
 # Spacing around a whole-block misc write. MEASURED (2026-10-10, the user's S2000): a block write sent 3 ms after the RMDATA read was ACKED ("OK") and then NEVER applied -
 # every later read of the block, even 5 s on, still held the old bytes - while the standalone check (tools/s2000_mdata_write_check.py), which has seconds before the write
@@ -635,6 +641,10 @@ class BridgeWorker(QThread):
     # Save Multi (core/akai_multi_file.py): the resident multi's raw header and 16 part blocks, read-only
     multi_exported = Signal(object)  # akai_multi_file.MultiFile
     multi_export_failed = Signal(str)  # error
+    # Load Multi: first a read-only plan (so the window can ask), then the load itself
+    multi_plan_ready = Signal(object, object, object, object)  # MultiFile, LoadPlan, [Assignment], [sentences]
+    multi_imported = Signal(object)  # akai_multi_file.LoadResult
+    multi_import_failed = Signal(str, str)  # error, backup path ("" if none was made)
     # Save as Akai File (core/akai_sample_file.py): one sample's raw header block, read-only
     sample_header_exported = Signal(int, object)  # sample_index, the header block (bytes)
     sample_header_export_failed = Signal(int, str)  # sample_index, error
@@ -799,6 +809,12 @@ class BridgeWorker(QThread):
 
     def submit_export_sample_header(self, sample_index):
         self._submit(("export_sample_header", sample_index))
+
+    def submit_plan_multi(self, multi_file):
+        self._submit(("plan_multi", multi_file))
+
+    def submit_import_multi(self, multi_file):
+        self._submit(("import_multi", multi_file))
 
     def submit_import_program(self, program_file, new_name):
         self._submit(("import_program", program_file, new_name))
@@ -1090,51 +1106,58 @@ class BridgeWorker(QThread):
             self.change_sent.emit(part_index, program_name)
             return
         try:
-            if not self._programs_renumbered:
-                # see the comment on _programs_renumbered in __init__ - this
-                # is what actually fixes "picking the Nth program always
-                # sends the Program Change for the 1st": every program gets
-                # its own distinct number before the first change is sent
-                renumber = getattr(self._bridge, "renumber_programs", None)
-                if renumber is not None:
-                    # not one of LoggingBridge's wrapped methods (its
-                    # existence has to stay tellable-apart from a demo
-                    # bridge that simply lacks it - see the comment on
-                    # LoggingBridge._WRAPPED_METHODS), so it gets its own
-                    # explicit START/FAILED logging here instead. A failed
-                    # renumber silently breaks every Program Change sent
-                    # afterward (every program can go back to colliding on
-                    # PRGNUM==0 - see this method's own docstring above),
-                    # so this needs to be visible on its own, not just
-                    # inferred from the Program Change itself failing.
-                    thread_name = threading.current_thread().name
-                    logger = debug_log.get_logger()
-                    logger.debug(f"[{thread_name}] START renumber_programs()")
-                    try:
-                        renumber()
-                    except Exception:
-                        logger.error(
-                            f"[{thread_name}] FAILED renumber_programs()",
-                            exc_info=True,
-                        )
-                        raise
-                    logger.debug(f"[{thread_name}] END renumber_programs()")
-                self._programs_renumbered = True
-            # get_parameter applies PRGNUM's display_offset (the panel's
-            # 1-based numbering, since s3ked's params table declared it -
-            # see AGENTS.md's "PRGNUM and Program Change" section) - a MIDI
-            # Program Change needs the raw 0-based wire value, so the
-            # offset is subtracted back out here rather than assumed away.
-            prgnum_param = p.lookup("PRGNUM", "program")
-            program_number = (
-                self._bridge.get_parameter(prgnum_param, program_index)
-                - prgnum_param.display_offset
-            )
-            out.send_message([0xC0 | (channel & 0x0F), program_number & 0x7F])
+            self._send_program_change(program_index, channel)
         except Exception as e:
             self.change_send_failed.emit(part_index, str(e))
             return
         self.change_sent.emit(part_index, program_name)
+
+    def _send_program_change(self, program_index, channel):
+        """The Program Change itself (see _handle_program_change): renumbers the programs once per session, reads the program's PRGNUM and sends it on `channel`. Raises on failure."""
+        out = getattr(self._bridge, "out", None)
+        if out is None:
+            raise DeviceError("not available on this connection")
+        if not self._programs_renumbered:
+            # see the comment on _programs_renumbered in __init__ - this
+            # is what actually fixes "picking the Nth program always
+            # sends the Program Change for the 1st": every program gets
+            # its own distinct number before the first change is sent
+            renumber = getattr(self._bridge, "renumber_programs", None)
+            if renumber is not None:
+                # not one of LoggingBridge's wrapped methods (its
+                # existence has to stay tellable-apart from a demo
+                # bridge that simply lacks it - see the comment on
+                # LoggingBridge._WRAPPED_METHODS), so it gets its own
+                # explicit START/FAILED logging here instead. A failed
+                # renumber silently breaks every Program Change sent
+                # afterward (every program can go back to colliding on
+                # PRGNUM==0 - see this method's own docstring above),
+                # so this needs to be visible on its own, not just
+                # inferred from the Program Change itself failing.
+                thread_name = threading.current_thread().name
+                logger = debug_log.get_logger()
+                logger.debug(f"[{thread_name}] START renumber_programs()")
+                try:
+                    renumber()
+                except Exception:
+                    logger.error(
+                        f"[{thread_name}] FAILED renumber_programs()",
+                        exc_info=True,
+                    )
+                    raise
+                logger.debug(f"[{thread_name}] END renumber_programs()")
+            self._programs_renumbered = True
+        # get_parameter applies PRGNUM's display_offset (the panel's
+        # 1-based numbering, since s3ked's params table declared it -
+        # see AGENTS.md's "PRGNUM and Program Change" section) - a MIDI
+        # Program Change needs the raw 0-based wire value, so the
+        # offset is subtracted back out here rather than assumed away.
+        prgnum_param = p.lookup("PRGNUM", "program")
+        program_number = (
+            self._bridge.get_parameter(prgnum_param, program_index)
+            - prgnum_param.display_offset
+        )
+        out.send_message([0xC0 | (channel & 0x0F), program_number & 0x7F])
 
     def _handle_midi(self, message):
         # A keyboard note or Panic (ui/audition_bar.py): a plain channel message on the bridge's own open port, nothing read back. The demo bridge has no port: silently nothing.
@@ -1824,6 +1847,107 @@ class BridgeWorker(QThread):
             self.multi_export_failed.emit(str(e))
             return
         self.multi_exported.emit(multi_file)
+
+    # -- Load Multi (core/akai_multi_file.py: plan_load, program_assignments) ---------------------------------------------------------
+    # Writes ONLY the planned fields whose write has been checked on a unit (akai_multi_file.LOAD_EVIDENCE), one set_parameter each (never a whole-block MULTIDATA write),
+    # after the whole multi is saved to MULTI_BACKUP_DIR (no backup, no write), then reads the multi back and compares every written field. A write that fails puts the
+    # fields already written back. Programs are bound by Program Changes on the parts' channels afterwards (nothing in SysEx assigns one). Never writes a pointer,
+    # "last note played", FX above 204 (plan_load clamps) or a name; see AGENTS.md, "Multi files".
+
+    multi_import_blocked = False  # set when a load's read-back disagreed or a rollback failed: no more loads this session
+
+    def _plan_multi_load(self, multi_file):
+        current = self._read_multi_file()
+        names = list(self._bridge.program_list())
+        plan = akai_multi_file.plan_load(current, multi_file, names)
+        assignments, notes = akai_multi_file.program_assignments(plan, current, multi_file, names)
+        return current, plan, assignments, notes
+
+    def _handle_plan_multi(self, multi_file):
+        try:
+            _current, plan, assignments, notes = self._plan_multi_load(multi_file)
+        except Exception as e:
+            debug_log.get_logger().error("plan multi load failed: %s", e, exc_info=True)
+            self.multi_import_failed.emit(str(e), "")
+            return
+        self.multi_plan_ready.emit(multi_file, plan, assignments, notes)
+
+    def _save_multi_backup(self, multi):
+        MULTI_BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+        path = MULTI_BACKUP_DIR / f"{akai_multi_file.safe_file_stem(multi.name)}-before-load-{stamp}{akai_multi_file.EXTENSION}"
+        path.write_bytes(akai_multi_file.build_file(multi.header, multi.parts, multi.extra_header))
+        return path
+
+    def _write_multi_change(self, change, value):
+        if change.scope == "multi":
+            region, index = "multi", 0
+        else:
+            region, index = "multipart", int(change.scope.split()[1]) - 1
+        self._bridge.set_parameter(_lookup_for_write(change.name, region), index, value)
+
+    def _handle_import_multi(self, multi_file):
+        logger = debug_log.get_logger()
+        backup = ""
+        written = []
+        try:
+            if self.multi_import_blocked:
+                raise DeviceError(
+                    "multi loading is disabled for this session after an earlier load did not read back as written - "
+                    "check the multi on the sampler, then restart the editor"
+                )
+            current, plan, assignments, notes = self._plan_multi_load(multi_file)
+            todo = akai_multi_file.writable_changes(plan)
+            skipped = akai_multi_file.skipped_changes(plan)
+            backup = str(self._save_multi_backup(current))  # before the first write
+            logger.info(
+                f"BridgeWorker: loading multi {multi_file.name!r} over {current.name!r}: {len(todo)} field(s), {len(assignments)} program(s), "
+                f"{len(skipped)} unchecked field(s) left alone; backup {backup}"
+            )
+            try:
+                for change in todo:
+                    self._write_multi_change(change, change.new)
+                    written.append(change)
+                    logger.info(f"BridgeWorker: multi load wrote {change.scope} {change.name} = {change.new!r} (was {change.current!r})")
+            except Exception:
+                # put back what was already written (newest first); the backup file is the safety net if even that fails
+                failed = []
+                for change in reversed(written):
+                    try:
+                        self._write_multi_change(change, change.current)
+                    except Exception:
+                        failed.append(f"{change.scope} {change.name}")
+                        logger.error(f"BridgeWorker: multi load rollback of {change.scope} {change.name} FAILED", exc_info=True)
+                if failed:
+                    self.multi_import_blocked = True
+                    raise DeviceError("a write failed and these could not be put back: " + ", ".join(failed) + ". The multi was saved first (see the backup)")
+                raise
+            _sleep(MULTI_LOAD_SETTLE_S)
+            after = self._read_multi_file()
+            mismatches = akai_multi_file.verify_changes(after, todo)
+            for assignment in assignments:
+                self._send_program_change(assignment.program_index, assignment.channel)
+                logger.info(f"BridgeWorker: multi load sent Program Change for part {assignment.part} ({assignment.name!r}) on channel {assignment.channel + 1}")
+                _sleep(MULTI_LOAD_PROGRAM_CHANGE_S)
+            if assignments:
+                _sleep(MULTI_LOAD_SETTLE_S)
+                after = self._read_multi_file()
+                for assignment in assignments:
+                    held = after.part_name(assignment.part - 1).rstrip()
+                    if held != assignment.name.rstrip():
+                        mismatches.append(f"part {assignment.part}: asked for program {assignment.name!r}, the sampler shows {held!r}")
+            if mismatches:
+                self.multi_import_blocked = True
+                logger.warning("BridgeWorker: multi load read back differently: %s", "; ".join(mismatches))
+        except Exception as e:
+            logger.error("import multi failed: %s", e, exc_info=True)
+            self.multi_import_failed.emit(str(e), backup)
+            return
+        self.multi_imported.emit(
+            akai_multi_file.LoadResult(
+                backup=backup, written=todo, skipped=skipped, assigned=assignments, not_assigned=notes, mismatches=mismatches
+            )
+        )
 
     def _handle_export_program(self, program_index):
         try:

@@ -725,6 +725,9 @@ class ProgramEditorWindow(QMainWindow):
         self._worker.sample_header_export_failed.connect(self._on_sample_header_export_failed)
         self._worker.multi_exported.connect(self._on_multi_exported)
         self._worker.multi_export_failed.connect(self._on_multi_export_failed)
+        self._worker.multi_plan_ready.connect(self._on_multi_plan_ready)
+        self._worker.multi_imported.connect(self._on_multi_imported)
+        self._worker.multi_import_failed.connect(self._on_multi_import_failed)
         self._worker.program_imported.connect(self._on_program_imported)
         self._worker.program_import_failed.connect(self._on_program_import_failed)
         self._worker.keygroup_created.connect(self._on_keygroup_created)
@@ -2372,6 +2375,7 @@ class ProgramEditorWindow(QMainWindow):
         self._import_audio_action.triggered.connect(self._import_audio)
         file_menu = self.menuBar().addMenu("&File")
         file_menu.addAction(self._import_audio_action)
+        file_menu.addAction(self._load_multi_action)
         file_menu.addAction(self._save_multi_action)
         self._build_sample_menu()
 
@@ -2848,6 +2852,8 @@ class ProgramEditorWindow(QMainWindow):
                 menu.removeAction(self._global_tab_action)
             if menu is not None and self._save_multi_action in menu.actions():
                 menu.removeAction(self._save_multi_action)  # (the multi file is an S2000/S3000 thing)
+            if menu is not None and self._load_multi_action in menu.actions():
+                menu.removeAction(self._load_multi_action)
         # nor the S2000/S3000's global settings (see _request_global_settings)
         self.main_tabs.setTabVisible(self._global_tab_index, False)
         self.setWindowTitle("AKAISDS - Program Editor (Akai S1000, experimental)")
@@ -4438,6 +4444,14 @@ class ProgramEditorWindow(QMainWindow):
         enabled = not busy and not self._is_s1000
         self._save_multi_action.setEnabled(enabled)
         self.save_multi_button.setEnabled(enabled)
+        # loading WRITES, which the demo bridge can't take; also off while a load is already running
+        demo_mode = bool(os.environ.get("AKAISDS_DEMO_SAMPLER"))
+        can_load = enabled and not demo_mode and not getattr(self, "_pending_multi_load", False)
+        self._load_multi_action.setEnabled(can_load)
+        self.load_multi_button.setEnabled(can_load)
+        tip = tt.LOAD_MULTI_DEMO_MODE if demo_mode else tt.LOAD_MULTI_BUTTON
+        self._load_multi_action.setToolTip(tip)
+        self.load_multi_button.setToolTip(tip)
 
     def _save_multi_to_file(self):
         if getattr(self, "_pending_multi_export", False):
@@ -4484,6 +4498,107 @@ class ProgramEditorWindow(QMainWindow):
         self._pending_multi_export = False
         self.status_bar.showMessage(f"Couldn't read the multi: {error}")
         QMessageBox.warning(self, "Save Multi", f"Couldn't read the multi:\n\n{error}")
+
+    # -- Load Multi -------------------------------------------------------------------------------------------------------------
+
+    def _load_multi_from_file(self):
+        if getattr(self, "_pending_multi_load", False) or not self._load_multi_action.isEnabled():
+            return
+        path, _filter = QFileDialog.getOpenFileName(
+            self,
+            "Load Multi",
+            getattr(self, "_last_multi_file_dir", "") or self._program_file_directory(),
+            f"Akai multi (*{akai_multi_file.EXTENSION} *{akai_multi_file.EXTENSION.upper()});;All files (*)",
+        )
+        if not path:
+            return
+        self._last_multi_file_dir = os.path.dirname(path)
+        try:
+            with open(path, "rb") as handle:
+                multi_file = akai_multi_file.parse_file(handle.read())
+        except (OSError, akai_multi_file.MultiFileError) as e:
+            QMessageBox.warning(self, "Load Multi", f"Couldn't read this file:\n\n{e}")
+            return
+        self._pending_multi_load = True
+        self._sync_save_multi_enabled(False)
+        debug_log.get_logger().info(f"ProgramEditor: load multi {path} ({multi_file.name!r}): reading the sampler for a plan")
+        self.status_bar.showMessage("Comparing the file with the sampler…")
+        self._worker.submit_plan_multi(multi_file)
+
+    def _finish_multi_load_request(self):
+        self._pending_multi_load = False
+        self._sync_save_multi_enabled(getattr(self, "_hardware_busy_ui", False))
+
+    def _on_multi_plan_ready(self, multi_file, plan, assignments, notes):
+        if not getattr(self, "_pending_multi_load", False):
+            return
+        todo = akai_multi_file.writable_changes(plan)
+        skipped = akai_multi_file.skipped_changes(plan)
+        detail = []
+        for change in todo:
+            line = f"{change.scope} {change.name}: {akai_multi_file.format_value(change.name, change.current)} -> {akai_multi_file.format_value(change.name, change.new)}"
+            detail.append(line + (f"  ({change.note})" if change.note else ""))
+        for a in assignments:
+            detail.append(f"part {a.part}: program {a.name!r} (Program Change on channel {a.channel + 1})")
+        if notes or skipped or plan.not_loaded:
+            detail.append("")
+            detail.append("Not loaded:")
+            detail.extend(notes)
+            detail.extend(f"{c.scope} {c.name}: not checked on a unit yet" for c in skipped)
+            detail.extend(plan.not_loaded)
+        if not todo and not assignments:
+            self._finish_multi_load_request()
+            box = QMessageBox(QMessageBox.Icon.Information, "Load Multi", "The sampler already matches this file.", QMessageBox.StandardButton.Ok, self)
+            if detail:
+                box.setDetailedText("\n".join(detail))
+            box.exec()
+            self.status_bar.showMessage("Nothing to load")
+            return
+        parts = len({c.scope for c in todo if c.scope != "multi"})
+        box = QMessageBox(QMessageBox.Icon.Question, "Load Multi", f'Load multi "{multi_file.name}" onto the sampler?', QMessageBox.StandardButton.NoButton, self)
+        box.setInformativeText(f"{len(todo)} setting(s) on {parts} part(s) change and {len(assignments)} program(s) are assigned. The current multi is saved first.")
+        box.setDetailedText("\n".join(detail))
+        yes = box.addButton("Load", QMessageBox.ButtonRole.AcceptRole)
+        no = box.addButton(QMessageBox.StandardButton.Cancel)
+        box.setDefaultButton(no)
+        box.exec()
+        if box.clickedButton() is not yes:
+            self._finish_multi_load_request()
+            self.status_bar.showMessage("Load cancelled")
+            return
+        debug_log.get_logger().info(f"ProgramEditor: load multi {multi_file.name!r} confirmed ({len(todo)} fields, {len(assignments)} programs)")
+        self.status_bar.showMessage(f'Loading multi "{multi_file.name}"…')
+        self._worker.submit_import_multi(multi_file)
+
+    def _on_multi_imported(self, result):
+        if not getattr(self, "_pending_multi_load", False):
+            return
+        self._finish_multi_load_request()
+        self._refresh_multi_parts()
+        message = f"Loaded multi: {len(result.written)} settings, {len(result.assigned)} programs"
+        debug_log.get_logger().info(f"ProgramEditor: {message}; backup {result.backup}; read-back problems: {result.mismatches}; not assigned: {result.not_assigned}")
+        self.status_bar.showMessage(message)
+        if result.mismatches:
+            QMessageBox.warning(
+                self,
+                "Load Multi",
+                "The multi was loaded, but not everything reads back as written:\n\n" + "\n".join(result.mismatches) + f"\n\nThe previous multi is saved at\n{result.backup}",
+            )
+        elif result.not_assigned or result.skipped:
+            box = QMessageBox(QMessageBox.Icon.Information, "Load Multi", f"{message}. Some things were left out.", QMessageBox.StandardButton.Ok, self)
+            box.setDetailedText("\n".join(result.not_assigned + [f"{c.scope} {c.name}: not checked on a unit yet" for c in result.skipped]))
+            box.exec()
+
+    def _on_multi_import_failed(self, error, backup):
+        if not getattr(self, "_pending_multi_load", False):
+            return
+        self._finish_multi_load_request()
+        self.status_bar.showMessage(f"Couldn't load the multi: {error}")
+        text = f"Couldn't load the multi:\n\n{error}"
+        if backup:
+            text += f"\n\nThe previous multi is saved at\n{backup}"
+        QMessageBox.warning(self, "Load Multi", text)
+        self._refresh_multi_parts()
 
     def _load_program_from_file(self):
         path, _filter = QFileDialog.getOpenFileName(
@@ -7104,12 +7219,20 @@ class ProgramEditorWindow(QMainWindow):
         self.save_multi_button = QPushButton("Save to File...")
         self.save_multi_button.setToolTip(tt.SAVE_MULTI_BUTTON)
         self.save_multi_button.clicked.connect(self._save_multi_action.trigger)
+        # Load Multi from File: asks first, saves the resident multi, writes the fields whose writes were checked on a unit, assigns resident programs (core/akai_multi_file.py)
+        self._load_multi_action = QAction("Load Multi from File...", self)
+        self._load_multi_action.setToolTip(tt.LOAD_MULTI_BUTTON)
+        self._load_multi_action.triggered.connect(self._load_multi_from_file)
+        self.load_multi_button = QPushButton("Load from File...")
+        self.load_multi_button.setToolTip(tt.LOAD_MULTI_BUTTON)
+        self.load_multi_button.clicked.connect(self._load_multi_action.trigger)
         name_row = QHBoxLayout()
         name_row.setSpacing(10)
         name_label = QLabel("<b>Multi Name</b>")
         name_row.addWidget(name_label)
         name_row.addWidget(self.multi_name_edit)
         name_row.addStretch()
+        name_row.addWidget(self.load_multi_button)
         name_row.addWidget(self.save_multi_button)
         layout.addLayout(name_row)
         layout.addSpacing(6)

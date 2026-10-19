@@ -335,6 +335,100 @@ def plan_load(current, target, resident_programs=None):
     return plan
 
 
+#: the evidence levels a load WRITES. "unproven" fields (OUTPUT, VOSCL, PFXCHAN, PFXSLEV: they need an output board / FX card to see anything, so no write of
+#: them has ever been checked) are left alone and listed as not loaded.
+LOAD_EVIDENCE = ("proven", "measured")
+
+
+def writable_changes(plan):
+    """The planned field writes a load actually makes."""
+    return [c for c in plan.changes if c.evidence in LOAD_EVIDENCE]
+
+
+def skipped_changes(plan):
+    """The planned field writes a load leaves alone because no write of them has been checked on a unit."""
+    return [c for c in plan.changes if c.evidence not in LOAD_EVIDENCE]
+
+
+@dataclass
+class Assignment:
+    """A Program Change to send: part `part` (1-16) takes program `program_index` (a position in the sampler's program list), addressed to MIDI channel `channel` (0-15)."""
+
+    part: int
+    name: str
+    program_index: int
+    channel: int
+
+
+def _final_channel(plan, current, part_index):
+    """The channel a part ends up on: the planned PMCHAN write if there is one, else what it holds now (raw, 255 = OMNI)."""
+    scope = f"part {part_index + 1}"
+    for change in writable_changes(plan):
+        if change.scope == scope and change.name == "PMCHAN":
+            return int(change.new)
+    return int(_decode("multipart", "PMCHAN", current.parts[part_index]))
+
+
+def program_assignments(plan, current, target, resident_names):
+    """Which parts can be given their program, and why the others cannot. -> (list of Assignment, list of sentences).
+
+    A part is bound by a MIDI Program Change on ITS channel (nothing in SysEx assigns one), so a Program Change reaches every part on that channel. A part is skipped when
+    it is on OMNI, when another part on the same channel is to hold a different program, when the program is not resident, or when its name matches several programs."""
+    names = [n.rstrip() for n in resident_names]
+    channels = [_final_channel(plan, current, i) for i in range(PART_COUNT)]
+    wanted = [target.part_name(i) or current.part_name(i) for i in range(PART_COUNT)]
+    assignments, notes, done_channels = [], [], set()
+    for binding in plan.bindings:
+        index = binding.part - 1
+        if binding.state == "not resident":
+            notes.append(f"part {binding.part}: program {binding.new!r} is not on the sampler")
+            continue
+        if binding.state != "resident":
+            continue  # same as now, blank in the file, or no program list: nothing to send
+        channel = channels[index]
+        if channel == OMNI:
+            notes.append(f"part {binding.part}: on OMNI, so a Program Change can't be addressed to it ({binding.new!r} not assigned)")
+            continue
+        clash = [i + 1 for i in range(PART_COUNT) if i != index and channels[i] == channel and wanted[i].rstrip() != wanted[index].rstrip()]
+        if clash:
+            notes.append(f"part {binding.part}: shares channel {channel + 1} with part {clash[0]}, which should hold a different program ({binding.new!r} not assigned)")
+            continue
+        matches = [i for i, n in enumerate(names) if n == binding.new.rstrip()]
+        if len(matches) != 1:
+            notes.append(f"part {binding.part}: {len(matches)} programs are named {binding.new!r} ({binding.new!r} not assigned)")
+            continue
+        if channel in done_channels:
+            continue  # another part on this channel already asked for this same program
+        done_channels.add(channel)
+        assignments.append(Assignment(binding.part, binding.new, matches[0], channel))
+    return assignments, notes
+
+
+@dataclass
+class LoadResult:
+    backup: str  # the .m3 the multi was saved to before anything was written
+    written: list = field(default_factory=list)  # Change
+    skipped: list = field(default_factory=list)  # Change (unproven)
+    assigned: list = field(default_factory=list)  # Assignment
+    not_assigned: list = field(default_factory=list)  # sentences
+    mismatches: list = field(default_factory=list)  # sentences: something read back differently from what was written
+
+
+def verify_changes(after, changes):
+    """Sentences for every written change whose value does not read back as written (an empty list = all as written)."""
+    problems = []
+    for change in changes:
+        if change.scope == "multi":
+            region, block = "multi", after.header
+        else:
+            index = int(change.scope.split()[1]) - 1
+            region, block = "multipart", after.parts[index]
+        got = _decode(region, change.name, block)
+        if _differs(got, change.new):
+            problems.append(f"{change.scope} {change.name}: wrote {format_value(change.name, change.new)}, the sampler holds {format_value(change.name, got)}")
+    return problems
+
+
 def _modelled_part_offsets():
     """Every part-record offset that is one of the loadable fields or the program name."""
     offsets = set()

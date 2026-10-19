@@ -13,7 +13,7 @@ S1000-family unit) tests, and nothing below is called working until they have ru
 | Read-only check tool | `tools/s2000_multi_check.py` (`show`, `save`, `compare REAL.m3`, `diff A B`, `plan FILE`) | built, tested offline. Never run on the S2000 |
 | Write check (WRITES five panel-visible part fields) | `tools/s2000_multi_write_check.py` (`plan`, `run --yes`, `restore BACKUP.m3 --yes`), tests `tests/test_multi_write_check.py` | built and run 2026-10-19: all five fields live on the owner's S2000 |
 | Load dry run (what a load WOULD write) | `akai_multi_file.plan_load`, tool command `plan` | built 2026-10-19, tested offline. Writes nothing anywhere |
-| **Load Multi** | nothing | **not started on purpose**: see "Why there is no Load yet" |
+| **Load Multi** | Multi tab "Load from File...", File menu; `BridgeWorker` jobs `plan_multi` / `import_multi`; `akai_multi_file.program_assignments`, `writable_changes`, `LoadResult`; tests `tests/test_load_multi.py` | built 2026-10-19 after the write check passed. **Run headlessly on the S2000 2026-10-19 (clean read-back); the Multi tab button not yet clicked.** Test file: `~/Desktop/multi_test_ours/LOADTEST.M3` (8 field changes + PROG A onto part 5) |
 | Backup All (every program + the one multi, zipped) | nothing | only discussed (see "Ideas not started") |
 
 Tests: `tests/test_akai_multi_file.py` (codec, comparison, worker read, Multi tab button, tool, planner). The whole suite passed (3458 tests) with the dry run in.
@@ -71,7 +71,7 @@ Owner's steps: close the app and any DAW; sampler on a normal page (not mid-edit
 multi page. Send the whole output and what the panel showed during each LOOK line. Then record the result in the table below and move the passing fields from UNPROVEN to
 "measured" in `LOADABLE_PART_FIELDS` (and the planner tests).
 
-### B. Load Multi
+### B. Load Multi (BUILT 2026-10-19; the design below is what was built, minus: only proven/measured fields are written, and a Program Change skips parts that share a channel)
 
 Only after A (and ideally after the owner's compare run). Design, following how Load Program is built (`core/akai_program_file.py`, `BridgeWorker.submit_import_program`, the
 `ProgramEditorWindow._load_program_*` flow):
@@ -158,3 +158,4 @@ Only after A (and ideally after the owner's compare run). Design, following how 
 | 2026-10-19 | `plan` of the real file | not run (the sampler didn't answer); the file equals the resident multi, so it would be 0 changes |
 | 2026-10-19 | write check (A) `run --yes`, part 16 (no program) then part 1 (TEST PROGRAM), 10 s holds, panel on the multi-NAME page | 5 of 5 PASS on the wire both times (acked, read back equal, nothing else moved, restored exactly). The panel showed nothing, but it was on the page that shows only the multi name, which doesn't display these fields: **not a fair test** |
 | 2026-10-19 | write check on part 1, each field with the panel on its OWN page, 20-30 s holds (TRANSPOSE; PRIORT; PLAYLO + PLAYHI; PTUNOCM) | **All five confirmed live by the owner on the panel**: transpose 0 -> +07, voice priority NORM -> HIGH, low note C0 -> C2, high note G8 -> C6, cents tune 0 -> +25; each restored exactly and the whole multi equalled its backup. All five are now `"measured"` in `LOADABLE_PART_FIELDS`. Still UNPROVEN: OUTPUT, VOSCL, PFXCHAN, PFXSLEV (need the output board / FX card) |
+| 2026-10-19 | Load Multi, the real worker jobs run headlessly against the S2000 (`LOADTEST.M3` over 'OURS'; the Multi tab button itself not clicked yet) | plan = 8 field writes + PROG A onto part 5; **loaded: 8 fields written, read back as written, part 5 reads PROG A afterwards, 0 mismatches**, backup `~/.akaisds/multi_backups/OURS-before-load-20261019-202731.m3`. Panel check pending (owner) |
