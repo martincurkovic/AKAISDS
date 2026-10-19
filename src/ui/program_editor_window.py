@@ -92,6 +92,7 @@ from ui.waveform_view import WaveformView
 from ui.loop_preview_view import LoopJoinPreview, LoopPreviewZoomControls
 from ui.slice_editor_window import SliceEditorWindow
 from ui.filter_sample_dialog import FilterSampleDialog
+from ui.reverb_dialog import ReverbDialog
 from ui.time_stretch_dialog import TimeStretchDialog
 from core.audio_preview import SlicePreviewPlayer
 from ui import theme, wheel_guard
@@ -109,7 +110,7 @@ from core import s1000_bridge as s1000_bridge_module
 from core import sampler_models
 from core import preview_pitch
 from core import sample_editing
-from core import time_stretch
+from core import reverb, time_stretch
 from core import sds_encoder
 from core.midi_notes import midi_note_to_name
 from core.program_editor_bridge import (
@@ -472,7 +473,7 @@ _EDIT_SAMPLE_ROWS = (
     (
         "Edit audio",
         "These change the sample here. Nothing reaches the sampler until you click Send to Sampler.",
-        (("trim", "reverse", "fade", "normalize", "filter", "stretch"),),
+        (("trim", "reverse", "fade", "normalize", "filter", "stretch", "reverb"),),
     ),
     (
         "More",
@@ -483,7 +484,7 @@ _EDIT_SAMPLE_ROWS = (
 )
 # the Sample menu / right-click menu, in order: groups are separated
 _SAMPLE_MENU_GROUPS = (
-    ("trim", "reverse", "fade", "normalize", "filter", "stretch"),
+    ("trim", "reverse", "fade", "normalize", "filter", "stretch", "reverb"),
     ("duplicate", "slice"),
     ("external_edit", "external_load"),
     ("stage_undo", "stage_send", "stage_new", "stage_revert"),
@@ -6621,6 +6622,12 @@ class ProgramEditorWindow(QMainWindow):
             tt.TIME_STRETCH_BUTTON,
             self._confirm_time_stretch,
         )
+        self.reverb_button = make(
+            "reverb",
+            "Reverb\u2026",
+            tt.REVERB_BUTTON,
+            self._confirm_reverb,
+        )
         self.duplicate_sample_button = make(
             "duplicate",
             "Duplicate",
@@ -7629,7 +7636,7 @@ class ProgramEditorWindow(QMainWindow):
         # mouseDoubleClickEvent uses to decide whether a double-click should
         # even try loading audio again
         set_enabled = self._set_sample_control_enabled
-        for key in ("trim", "reverse", "fade", "normalize", "filter", "stretch"):
+        for key in ("trim", "reverse", "fade", "normalize", "filter", "stretch", "reverb"):
             set_enabled(key, enabled)
         # Duplicate Sample re-sends the loaded audio under a new name AND is
         # unavailable in demo mode (DemoBridge has no add-sample primitive,
@@ -9074,6 +9081,35 @@ class ProgramEditorWindow(QMainWindow):
         self._apply_sample_edit(
             sample_index, time_stretch.transform_for(kind, **options), label
         )
+
+    def _confirm_reverb(self):
+        # same shape as _confirm_time_stretch: a dialog with a Preview, then the edit goes to the working copy (or out as a new sample)
+        sample_index = self.sample_list_widget.currentRow()
+        if sample_index < 0 or not self.waveform_view.has_waveform():
+            return
+        entry = self._sample_waveform_cache.get(sample_index)
+        if entry is None or entry["samples"] is None:
+            return
+        sample_name = self._sample_name_at_row(sample_index)
+        dialog = ReverbDialog(
+            self,
+            sample_name,
+            entry["samples"],
+            entry["framerate"],
+            pitch_shift_semitones=self._preview_pitch_shift_semitones(entry),
+            allow_new_sample=self._can_send_edit_as_new_sample(),
+            applies_to_working_copy=True,
+        )
+        if not dialog.exec():
+            return
+        transform = reverb.transform_for(**dialog.options())
+        if dialog.send_as_new():
+            self._send_edit_as_new_sample(sample_index, entry, transform, "Reverb", " REV")
+            return
+        debug_log.get_logger().info(
+            f"Reverb: {sample_name!r} {dialog.summary()} ({len(entry['samples'])} frames at {entry['framerate']} Hz)"
+        )
+        self._apply_sample_edit(sample_index, transform, "Reverb")
 
     def _edit_in_external_app(self):
         sample_index = self.sample_list_widget.currentRow()

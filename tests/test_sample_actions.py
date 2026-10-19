@@ -16,7 +16,7 @@ from test_program_editor_window import (  # noqa: F401
     qapp,
 )
 
-_EDIT_KEYS = ["trim", "reverse", "fade", "normalize", "filter", "stretch"]
+_EDIT_KEYS = ["trim", "reverse", "fade", "normalize", "filter", "stretch", "reverb"]
 
 
 def _go_to_samples(editor, qapp):
@@ -44,7 +44,7 @@ def test_the_sample_menu_lists_every_action_in_groups(editor):
     menu = next(a.menu() for a in editor.menuBar().actions() if a.menu() is editor._sample_menu)
     assert _texts(menu.actions()) == [
         "Load Audio", "-",
-        "Trim to Markers", "Reverse", "Fade In/Out", "Normalise", "Filter…", "Stretch / Pitch…", "-",
+        "Trim to Markers", "Reverse", "Fade In/Out", "Normalise", "Filter…", "Stretch / Pitch…", "Reverb…", "-",
         "Duplicate", "Slice Editor…", "-",
         "Edit in External App…", "Load Edited Audio", "-",
         "Undo", "Send to Sampler", "Send as New Sample…", "Revert", "-",

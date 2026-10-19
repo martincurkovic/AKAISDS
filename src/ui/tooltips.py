@@ -31,12 +31,8 @@ PLACEHOLDER = "PLACEHOLDER - write this tooltip by hand"
 OPEN_EDITOR_NEEDS_MIDI_PORTS = (
     "Select both a MIDI Input and MIDI Output in Settings first"
 )
-OPEN_EDITOR_NEEDS_AKAI_DEVICE_TYPE = (
-    'Set Sampler Type to Akai S1000, Akai S2000/S3000, Akai S900/S950 or Yamaha A4000/A5000 in Settings first'
-)
-OPEN_EDITOR_YAMAHA = (
-    "Opens the Yamaha A4000/A5000 program editor (experimental - edits go straight to the sampler's memory)"
-)
+OPEN_EDITOR_NEEDS_AKAI_DEVICE_TYPE = "Set Sampler Type to Akai S1000, Akai S2000/S3000, Akai S900/S950 or Yamaha A4000/A5000 in Settings first"
+OPEN_EDITOR_YAMAHA = "Opens the Yamaha A4000/A5000 program editor (experimental - edits go straight to the sampler's memory)"
 # Yamaha A4000/A5000 (see controller/yamaha_session.py): every answer comes back on the MIDI input
 YAMAHA_NEEDS_MIDI_INPUT = (
     "The Yamaha A4000/A5000 answers on your MIDI input, so the editor needs\n"
@@ -59,9 +55,7 @@ YAMAHA_NO_SAMPLE_INFO = (
     "Sample details and renaming aren't available here for the Yamaha A4000/A5000 -\n"
     "use the Program Editor's Samples tab."
 )
-OPEN_EDITOR_S950 = (
-    "Opens the Akai S900/S950 program editor (experimental - writes are untested on hardware)"
-)
+OPEN_EDITOR_S950 = "Opens the Akai S900/S950 program editor (experimental - writes are untested on hardware)"
 # Akai S900/S950 (see controller/s950_transfers.py): it answers on the MIDI
 # input, so sending/receiving/browsing all need one; and it has no delete
 # opcode at all
@@ -70,8 +64,7 @@ S950_NEEDS_MIDI_INPUT = (
     "and browsing samples needs one - select it in Settings."
 )
 S950_CANT_DELETE = (
-    "The Akai S900/S950 can't delete samples over MIDI -\n"
-    "use its front panel."
+    "The Akai S900/S950 can't delete samples over MIDI -\nuse its front panel."
 )
 # shown on both btn_open_editor and btn_settings (and mirrored onto their
 # menu actions - see TransferDashboard._sync_menu_actions) while a transfer
@@ -97,7 +90,9 @@ ENSONIQ_NEEDS_MIDI_INPUT = (
     "and sending samples needs one - select it in Settings."
 )
 ENSONIQ_NO_EDITOR = "There is no editor for the Ensoniq EPS/ASR - only listing, receiving and sending samples."
-ENSONIQ_CANT_DELETE = "Deleting and renaming samples isn't available for the Ensoniq EPS/ASR."
+ENSONIQ_CANT_DELETE = (
+    "Deleting and renaming samples isn't available for the Ensoniq EPS/ASR."
+)
 
 SAMPLER_TYPE = (
     "Akai S1000 and Akai S2000/S3000 unlock browsing/renaming/\n"
@@ -229,7 +224,9 @@ SLICE_DETECTION_MODE = (
     "SuperFlux: finds hits by how the sound changes (better on drum loops), "
     "but needs a moment to analyse - markers update when you pause."
 )
-SLICE_DETECTION_SUPERFLUX_UNAVAILABLE = "SuperFlux isn't available - the VelociLoops library didn't load."
+SLICE_DETECTION_SUPERFLUX_UNAVAILABLE = (
+    "SuperFlux isn't available - the VelociLoops library didn't load."
+)
 TRANSIENT_SENSITIVITY_SLIDER = (
     "Live transient detection - replaces the current slice markers as you "
     "drag. 0% is off; higher sensitivity detects more, quieter transients."
@@ -354,23 +351,27 @@ LOAD_AUDIO_ACTION = (
     "Load this sample's audio from the sampler (the same as double-clicking the waveform). "
     "Every edit needs it."
 )
-TIME_STRETCH_BUTTON = (
-    "Time Stretch makes the sample longer or shorter without changing its pitch; "
-    "Pitch Shift changes the pitch without changing its length "
-    "(Akai-style granular, with a preview). Stays here until you click Send to Sampler."
-)
+TIME_STRETCH_BUTTON = "Akai-style Time Stretch"
 TIME_STRETCH_MODE = "Time Stretch keeps the pitch and changes the length. Pitch Shift keeps the length and changes the pitch."
 TIME_STRETCH_LENGTH = "The new length as a percentage of the old one: 200% is twice as long, 50% half. Double-click to reset."
-PITCH_SHIFT_SEMITONES = "How far to shift the pitch, in semitones (12 = an octave). Double-click to reset."
+PITCH_SHIFT_SEMITONES = (
+    "How far to shift the pitch, in semitones (12 = an octave). Double-click to reset."
+)
 PITCH_SHIFT_CENTS = "Fine pitch, in hundredths of a semitone. Double-click to reset."
 TIME_STRETCH_GRAIN = (
     "The size of the pieces the audio is cut into. Short grains suit drums and loops; "
     "longer ones (60-100 ms) keep the pitch of a sustained tone closer, but can sound less tight. "
     "Tones can warble whatever you pick. Double-click to reset."
 )
-TIME_STRETCH_PREVIEW_BUTTON = (
-    "Play the result through your computer's speakers - doesn't write anything to the sampler."
+TIME_STRETCH_PREVIEW_BUTTON = "Play the result through your computer's speakers - doesn't write anything to the sampler."
+REVERB_BUTTON = "Bake a reverb into the sample"
+REVERB_PRESET = "A starting point for the four knobs. Moving a knob afterwards switches this back to Custom."
+REVERB_DECAY = "How long the tail takes to fall 60 dB, from 0.1 s to 5 s. A longer decay makes a longer sample. Double-click to reset."
+REVERB_SIZE = (
+    "The size of the room: the delay lengths, from x0.4 to x2.0. Double-click to reset."
 )
+REVERB_DAMPING = "How quickly the tail loses treble: none, then five steps up to dark. Double-click to reset."
+REVERB_MIX = "Dry against reverb: 0 is the sample as it is, 100 is only the reverb. Double-click to reset."
 FILTER_SAMPLE_BUTTON = (
     "Apply a highpass or lowpass filter to the whole sample (with a preview). "
     "Stays here until you click Send to Sampler."
@@ -520,7 +521,7 @@ VELOCITY_START_KNOB = (
 
 # --- Global tab (core/global_settings.py) - settings of the whole sampler ----------------
 EXTERNAL_CONTROLLER_COMBO = (
-    "Which controller the \"External\" modulation source follows. This is a "
+    'Which controller the "External" modulation source follows. This is a '
     "setting of the whole sampler (its Global page), not of this program."
 )
 GLOBAL_TOOLTIPS = {
@@ -639,7 +640,9 @@ S1000_CONTROLLER_TOOLTIPS = {
     "O_REL2": "How much note-off (release) velocity changes Envelope 2's (filter) release time.",
     "K_DAR2": "How much the note's position on the keyboard changes Envelope 2's (filter) decay and release times.",
 }
-S1000_LOUDNESS_VELOCITY_NOTE = "Velocity > Loudness is the Velocity knob in Volume, Pan & Velocity above."
+S1000_LOUDNESS_VELOCITY_NOTE = (
+    "Velocity > Loudness is the Velocity knob in Volume, Pan & Velocity above."
+)
 S1000_PAN_LFO_RATE = "Speed of the Pan LFO - the S1000's automatic left/right panning."
 S1000_PAN_LFO_DEPTH = "How far the Pan LFO swings the sound left and right."
 S1000_PAN_LFO_DELAY = "How long after a note starts before the Pan LFO fades in."
@@ -647,15 +650,26 @@ S1000_PAN_LFO_DELAY = "How long after a note starts before the Pan LFO fades in.
 
 # --- Yamaha A4000/A5000 Samples tab: edits make a NEW sample (the unit can't delete or overwrite one over MIDI) -----------------------------
 _YAMAHA_COPY_NOTE = " Stays here until you click Send as New Sample. Needs the audio loaded (double-click the waveform)."
-YAMAHA_TRIM_SAMPLE_BUTTON = "Trim the sample down to the Start/End markers." + _YAMAHA_COPY_NOTE
-YAMAHA_REVERSE_SAMPLE_BUTTON = "Reverse the sample so it plays backwards." + _YAMAHA_COPY_NOTE
-YAMAHA_FADE_SAMPLE_BUTTON = "Fade in up to the Start marker and out from the End marker." + _YAMAHA_COPY_NOTE
-YAMAHA_NORMALISE_SAMPLE_BUTTON = "Gain the sample up so its loudest point hits maximum amplitude (one gain for both channels of a stereo sample)." + _YAMAHA_COPY_NOTE
+YAMAHA_TRIM_SAMPLE_BUTTON = (
+    "Trim the sample down to the Start/End markers." + _YAMAHA_COPY_NOTE
+)
+YAMAHA_REVERSE_SAMPLE_BUTTON = (
+    "Reverse the sample so it plays backwards." + _YAMAHA_COPY_NOTE
+)
+YAMAHA_FADE_SAMPLE_BUTTON = (
+    "Fade in up to the Start marker and out from the End marker." + _YAMAHA_COPY_NOTE
+)
+YAMAHA_NORMALISE_SAMPLE_BUTTON = (
+    "Gain the sample up so its loudest point hits maximum amplitude (one gain for both channels of a stereo sample)."
+    + _YAMAHA_COPY_NOTE
+)
 YAMAHA_TIME_STRETCH_BUTTON = (
     "Change the sample's length without its pitch (Time Stretch) or its pitch without its length (Pitch Shift), "
     "Akai-style, with a preview." + _YAMAHA_COPY_NOTE
 )
-YAMAHA_FILTER_SAMPLE_BUTTON = "Apply a highpass and/or lowpass filter (with a preview)." + _YAMAHA_COPY_NOTE
+YAMAHA_FILTER_SAMPLE_BUTTON = (
+    "Apply a highpass and/or lowpass filter (with a preview)." + _YAMAHA_COPY_NOTE
+)
 YAMAHA_SLICE_EDITOR_BUTTON = (
     "Chop the sample into slices and send each one to the sampler as a new sample (ReCycle-style). "
     "Needs the audio loaded (double-click the waveform)."
@@ -669,6 +683,4 @@ YAMAHA_EXTERNAL_LOAD_BUTTON = (
     "Bring the version you saved in the editor into the app. It is not on the unit until you click Send as New Sample. "
     "Enabled once the file has been saved."
 )
-YAMAHA_STAGE_SEND_BUTTON = (
-    "Send the edited version to the unit as a NEW sample. The A4000 can't overwrite a sample over MIDI, so the original stays."
-)
+YAMAHA_STAGE_SEND_BUTTON = "Send the edited version to the unit as a NEW sample. The A4000 can't overwrite a sample over MIDI, so the original stays."

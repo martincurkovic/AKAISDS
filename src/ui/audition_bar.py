@@ -9,29 +9,57 @@ in front (a dialog, the Slice Editor) or a drop-down is open. Cmd+K closes the b
 
 from PySide6.QtCore import QEvent, Qt, Signal
 from PySide6.QtGui import QAction
-from PySide6.QtWidgets import QApplication, QComboBox, QHBoxLayout, QLabel, QPushButton, QSlider, QToolButton, QVBoxLayout, QWidget
+from PySide6.QtWidgets import (
+    QApplication,
+    QComboBox,
+    QHBoxLayout,
+    QLabel,
+    QPushButton,
+    QSlider,
+    QToolButton,
+    QVBoxLayout,
+    QWidget,
+)
 
 from core import audition
 from core.midi_notes import midi_note_to_name
 from ui.keyboard import TYPING_KEYS, PianoKeyboard, ScrollableKeyboard
 
 HELP = (
-    "Play the sampler from the keyboard below. Nothing here is stored on it.\n"
-    "While it is open the computer keyboard plays it: A W S E D F T G Y H U J K O L P ; are the notes, Z and X change the octave, C and V the velocity. "
-    "Shortcuts such as Cmd+K (show or hide) still work."
+    "Play the sampler from the keyboard below.\n"
+    "While open, the computer keyboard keys A-L play notes, Z and X change the octave, C and V the velocity. "
+    "Cmd+K to show or hide keyboard."
 )
 
 #: keys that keep working while the bar owns the keyboard: moving around, confirming, cancelling
 _PASS_THROUGH = {
-    Qt.Key.Key_Tab, Qt.Key.Key_Backtab, Qt.Key.Key_Escape, Qt.Key.Key_Return, Qt.Key.Key_Enter, Qt.Key.Key_Up, Qt.Key.Key_Down, Qt.Key.Key_Left, Qt.Key.Key_Right,
-    Qt.Key.Key_PageUp, Qt.Key.Key_PageDown, Qt.Key.Key_Home, Qt.Key.Key_End, Qt.Key.Key_Space,
+    Qt.Key.Key_Tab,
+    Qt.Key.Key_Backtab,
+    Qt.Key.Key_Escape,
+    Qt.Key.Key_Return,
+    Qt.Key.Key_Enter,
+    Qt.Key.Key_Up,
+    Qt.Key.Key_Down,
+    Qt.Key.Key_Left,
+    Qt.Key.Key_Right,
+    Qt.Key.Key_PageUp,
+    Qt.Key.Key_PageDown,
+    Qt.Key.Key_Home,
+    Qt.Key.Key_End,
+    Qt.Key.Key_Space,
 }
-_SHORTCUT_MODIFIERS = Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.MetaModifier | Qt.KeyboardModifier.AltModifier  # (Control is Cmd on a Mac)
+_SHORTCUT_MODIFIERS = (
+    Qt.KeyboardModifier.ControlModifier
+    | Qt.KeyboardModifier.MetaModifier
+    | Qt.KeyboardModifier.AltModifier
+)  # (Control is Cmd on a Mac)
 
 
 class AuditionBar(QWidget):
     midi_out = Signal(object)  # one complete channel message (bytes)
-    open_changed = Signal(bool)  # the bar was shown or hidden (the View menu item follows)
+    open_changed = Signal(
+        bool
+    )  # the bar was shown or hidden (the View menu item follows)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -54,7 +82,9 @@ class AuditionBar(QWidget):
         self.note.setObjectName("mutedLabel")
         self.note.setWordWrap(True)
         head = QHBoxLayout()
-        head.addWidget(self.toggle, 0, Qt.AlignmentFlag.AlignLeft)  # (left: with the note line hidden the button would otherwise be stretched across the row)
+        head.addWidget(
+            self.toggle, 0, Qt.AlignmentFlag.AlignLeft
+        )  # (left: with the note line hidden the button would otherwise be stretched across the row)
         head.addWidget(self.note, 1)
         outer.addLayout(head)
 
@@ -74,18 +104,30 @@ class AuditionBar(QWidget):
         self.velocity.setValue(audition.DEFAULT_VELOCITY)
         self.velocity.setMaximumWidth(140)
         self.velocity_label = QLabel()
-        self.velocity.valueChanged.connect(lambda v: self.velocity_label.setText(str(v)))
+        self.velocity.valueChanged.connect(
+            lambda v: self.velocity_label.setText(str(v))
+        )
         self.velocity_label.setText(str(self.velocity.value()))
         self.velocity_label.setMinimumWidth(26)
         self.typing_label = QLabel()
         self.typing_label.setObjectName("mutedLabel")
-        self.playing_label = QLabel()  # the notes held right now (mouse or computer keys)
+        self.playing_label = (
+            QLabel()
+        )  # the notes held right now (mouse or computer keys)
         self.playing_label.setMinimumWidth(150)
         self.playing_label.setToolTip("The notes being played")
         self.panic_button = QPushButton("Panic")
-        self.panic_button.setToolTip("Silence the channel: hold pedal up, All Sound Off, All Notes Off.")
+        self.panic_button.setToolTip(
+            "Silence the channel: hold pedal up, All Sound Off, All Notes Off."
+        )
         self.panic_button.clicked.connect(self.panic)
-        for widget in (QLabel("Channel"), self.channel_combo, QLabel("Velocity"), self.velocity, self.velocity_label):
+        for widget in (
+            QLabel("Channel"),
+            self.channel_combo,
+            QLabel("Velocity"),
+            self.velocity,
+            self.velocity_label,
+        ):
             row.addWidget(widget)
         row.addSpacing(12)
         row.addWidget(self.typing_label)
@@ -101,10 +143,14 @@ class AuditionBar(QWidget):
         self.keyboard.typing_base_changed.connect(lambda _n: self._show_typing())
         self.keyboard.held_changed.connect(self._show_playing)
         self.keyboard.velocity_step.connect(self.step_velocity)
-        self.keyboard_scroll = ScrollableKeyboard(self.keyboard)  # (scrolls sideways when the window is too narrow for the keys)
+        self.keyboard_scroll = ScrollableKeyboard(
+            self.keyboard
+        )  # (scrolls sideways when the window is too narrow for the keys)
         body.addWidget(self.keyboard_scroll)
         self._show_typing()
-        self.set_open(False)  # always starts closed: an open bar takes over the computer keyboard
+        self.set_open(
+            False
+        )  # always starts closed: an open bar takes over the computer keyboard
         self.set_available(False)
 
     def _idle_note(self):
@@ -128,7 +174,9 @@ class AuditionBar(QWidget):
         """Show or hide the keyboard. Hiding it lets go of every note and gives the computer keyboard back; `focus` (the shortcut) also gives the piano the focus."""
         changed = opened != self.is_open()
         self.body.setVisible(opened)
-        self.toggle.setArrowType(Qt.ArrowType.DownArrow if opened else Qt.ArrowType.RightArrow)
+        self.toggle.setArrowType(
+            Qt.ArrowType.DownArrow if opened else Qt.ArrowType.RightArrow
+        )
         app = QApplication.instance()
         if opened:
             if app is not None:
@@ -157,18 +205,28 @@ class AuditionBar(QWidget):
 
     def eventFilter(self, watched, event):
         kind = event.type()
-        if kind not in (QEvent.Type.KeyPress, QEvent.Type.KeyRelease) or watched is self.keyboard or not self.routing_keys():
+        if (
+            kind not in (QEvent.Type.KeyPress, QEvent.Type.KeyRelease)
+            or watched is self.keyboard
+            or not self.routing_keys()
+        ):
             return False
         if QApplication.activePopupWidget() is not None or not self._window_in_front():
             return False  # a drop-down, a dialog or another window of the app: typing there works as usual
         key = event.key()
-        if event.modifiers() & _SHORTCUT_MODIFIERS or key in _PASS_THROUGH or Qt.Key.Key_F1 <= key <= Qt.Key.Key_F35:
+        if (
+            event.modifiers() & _SHORTCUT_MODIFIERS
+            or key in _PASS_THROUGH
+            or Qt.Key.Key_F1 <= key <= Qt.Key.Key_F35
+        ):
             return False
         if kind == QEvent.Type.KeyPress:
             self.keyboard.keyPressEvent(event)
         else:
             self.keyboard.keyReleaseEvent(event)
-        return True  # every other key belongs to the piano, whether or not it plays a note
+        return (
+            True  # every other key belongs to the piano, whether or not it plays a note
+        )
 
     def set_available(self, available, why=""):
         """Off while a long job runs: the keys let go of everything first. Cheap to call repeatedly (the window's busy timer does)."""
@@ -190,7 +248,9 @@ class AuditionBar(QWidget):
 
     def _show_typing(self):
         base = self.keyboard.typing_base
-        self.typing_label.setText(f"Octave: {midi_note_to_name(base)} to {midi_note_to_name(base + len(TYPING_KEYS) - 1)}")
+        self.typing_label.setText(
+            f"Octave: {midi_note_to_name(base)} to {midi_note_to_name(base + len(TYPING_KEYS) - 1)}"
+        )
 
     def step_velocity(self, direction):
         """Louder (+) or quieter (-): the next multiple of 10, or 1 / 127 at the ends (the C and V keys); the new value is shown in the read-out."""
@@ -198,13 +258,17 @@ class AuditionBar(QWidget):
         self.playing_label.setText(f"Velocity {self.velocity.value()}")
 
     def _show_playing(self, notes):
-        self.playing_label.setText("   ".join(midi_note_to_name(n) for n in notes) if notes else "")
+        self.playing_label.setText(
+            "   ".join(midi_note_to_name(n) for n in notes) if notes else ""
+        )
 
     def _note_on(self, note):
         if not self._available:
             return
         self._sounding[note] = self.channel()
-        self.midi_out.emit(audition.note_on(self._sounding[note], note, self.velocity.value()))
+        self.midi_out.emit(
+            audition.note_on(self._sounding[note], note, self.velocity.value())
+        )
 
     def _note_off(self, note):
         channel = self._sounding.pop(note, None)
@@ -226,7 +290,9 @@ def add_audition_action(window, view_menu, bar):
     action = QAction("Audition Keyboard", window)
     action.setCheckable(True)
     action.setShortcut("Ctrl+K")  # (Cmd+K on a Mac)
-    action.setToolTip("Show or hide the keyboard along the bottom. Hidden, it plays nothing.")
+    action.setToolTip(
+        "Show or hide the keyboard along the bottom. Hidden, it plays nothing."
+    )
     action.triggered.connect(lambda checked: bar.set_open(checked, focus=checked))
     bar.open_changed.connect(action.setChecked)
     view_menu.addAction(action)
