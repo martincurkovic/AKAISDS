@@ -14,7 +14,7 @@ from PySide6.QtCore import QThread, Signal
 import s3k.messages as m
 from s3k.messages import NAME_LENGTH
 import s3k.params as p
-from core import akai_program_file
+from core import akai_multi_file, akai_program_file
 from core.global_settings import BLOCK_SETTINGS, GLOBAL_SETTINGS, MDATA_BLOCK_LENGTH
 from core.reply_matching import make_reply_tolerant
 from core.s1000_bridge import S1000Bridge
@@ -632,6 +632,9 @@ class BridgeWorker(QThread):
     # duplicate flow uses
     program_exported = Signal(int, object)  # program_index, akai_program_file.ProgramFile
     program_export_failed = Signal(int, str)  # program_index, error
+    # Save Multi (core/akai_multi_file.py): the resident multi's raw header and 16 part blocks, read-only
+    multi_exported = Signal(object)  # akai_multi_file.MultiFile
+    multi_export_failed = Signal(str)  # error
     # an S1000 keygroup delete done by rebuilding the program: the program MOVED
     # (the rebuilt copy is last in the list)
     program_rebuilt = Signal(int, int, int)  # old program_index, deleted keygroup_index, new program_index
@@ -787,6 +790,9 @@ class BridgeWorker(QThread):
 
     def submit_export_program(self, program_index):
         self._submit(("export_program", program_index))
+
+    def submit_export_multi(self):
+        self._submit(("export_multi",))
 
     def submit_import_program(self, program_file, new_name):
         self._submit(("import_program", program_file, new_name))
@@ -1789,6 +1795,18 @@ class BridgeWorker(QThread):
             program=program,
             keygroups=keygroups,
         )
+
+    def _read_multi_file(self):
+        return akai_multi_file.read_from_bridge(self._bridge)
+
+    def _handle_export_multi(self):
+        try:
+            multi_file = self._read_multi_file()
+        except Exception as e:
+            debug_log.get_logger().error("export multi failed: %s", e, exc_info=True)
+            self.multi_export_failed.emit(str(e))
+            return
+        self.multi_exported.emit(multi_file)
 
     def _handle_export_program(self, program_index):
         try:

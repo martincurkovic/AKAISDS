@@ -53,7 +53,7 @@ from PySide6.QtWidgets import (
     QProgressBar,
 )
 from s3k.messages import AKAI_CHARSET, NAME_LENGTH
-from core import akai_program_file
+from core import akai_multi_file, akai_program_file
 from core import app_config
 from core import dropped_files
 from core import external_edit
@@ -721,6 +721,8 @@ class ProgramEditorWindow(QMainWindow):
         )
         self._worker.program_exported.connect(self._on_program_exported)
         self._worker.program_export_failed.connect(self._on_program_export_failed)
+        self._worker.multi_exported.connect(self._on_multi_exported)
+        self._worker.multi_export_failed.connect(self._on_multi_export_failed)
         self._worker.program_imported.connect(self._on_program_imported)
         self._worker.program_import_failed.connect(self._on_program_import_failed)
         self._worker.keygroup_created.connect(self._on_keygroup_created)
@@ -2368,6 +2370,7 @@ class ProgramEditorWindow(QMainWindow):
         self._import_audio_action.triggered.connect(self._import_audio)
         file_menu = self.menuBar().addMenu("&File")
         file_menu.addAction(self._import_audio_action)
+        file_menu.addAction(self._save_multi_action)
         self._build_sample_menu()
 
         self._refresh_action = QAction("Refresh from Hardware", self)
@@ -2841,6 +2844,8 @@ class ProgramEditorWindow(QMainWindow):
             if menu is not None and self._multi_tab_action in menu.actions():
                 menu.removeAction(self._multi_tab_action)
                 menu.removeAction(self._global_tab_action)
+            if menu is not None and self._save_multi_action in menu.actions():
+                menu.removeAction(self._save_multi_action)  # (the multi file is an S2000/S3000 thing)
         # nor the S2000/S3000's global settings (see _request_global_settings)
         self.main_tabs.setTabVisible(self._global_tab_index, False)
         self.setWindowTitle("AKAISDS - Program Editor (Akai S1000, experimental)")
@@ -3479,6 +3484,7 @@ class ProgramEditorWindow(QMainWindow):
         self.refresh_button.setEnabled(not busy)
         self._refresh_action.setEnabled(not busy)
         self._import_audio_action.setEnabled(not busy)
+        self._sync_save_multi_enabled(busy)
         # the Sample menu too: its actions would reach the sampler mid-operation.
         # (_sync_window_menu_busy_state's timer must not re-enable it meanwhile)
         self._hardware_busy_ui = bool(busy)
@@ -4229,6 +4235,61 @@ class ProgramEditorWindow(QMainWindow):
         self._pending_program_export = None
         self.status_bar.showMessage(f"Couldn't read program: {error}")
         QMessageBox.warning(self, "Save Program", f"Couldn't read the program:\n\n{error}")
+
+    # -- save the multi as an Akai .m3 file ---------------------------------------
+
+    def _sync_save_multi_enabled(self, busy):
+        # off while a blocking job or a Dashboard transfer owns the wire (a BridgeWorker request mid-SDS-handshake is the race the other actions are gated
+        # against), and on an S1000 (it has no multi)
+        enabled = not busy and not self._is_s1000
+        self._save_multi_action.setEnabled(enabled)
+        self.save_multi_button.setEnabled(enabled)
+
+    def _save_multi_to_file(self):
+        if getattr(self, "_pending_multi_export", False):
+            return
+        self._pending_multi_export = True
+        self.status_bar.showMessage("Reading the multi from the sampler…")
+        self._worker.submit_export_multi()
+
+    def _on_multi_exported(self, multi_file):
+        if not getattr(self, "_pending_multi_export", False):
+            return
+        self._pending_multi_export = False
+        default_path = os.path.join(
+            getattr(self, "_last_multi_file_dir", "") or self._program_file_directory(),
+            akai_multi_file.safe_file_stem(multi_file.name) + akai_multi_file.EXTENSION,
+        )
+        path, _filter = QFileDialog.getSaveFileName(
+            self,
+            "Save Multi",
+            default_path,
+            f"Akai multi (*{akai_multi_file.EXTENSION});;All files (*)",
+        )
+        if not path:
+            self.status_bar.showMessage("Save cancelled")
+            return
+        try:
+            data = akai_multi_file.build_file(multi_file.header, multi_file.parts)
+            with open(path, "wb") as handle:
+                handle.write(data)
+        except (OSError, akai_multi_file.MultiFileError) as e:
+            QMessageBox.warning(self, "Save Multi", f"Couldn't save the multi:\n\n{e}")
+            self.status_bar.showMessage(f"Couldn't save multi: {e}")
+            return
+        self._last_multi_file_dir = os.path.dirname(path)
+        used = sum(1 for index in range(akai_multi_file.PART_COUNT) if multi_file.part_name(index))
+        debug_log.get_logger().info(
+            f"ProgramEditor: saved multi {multi_file.name!r} ({used} of {akai_multi_file.PART_COUNT} parts with a program) to {path}"
+        )
+        self.status_bar.showMessage(f'Saved multi "{multi_file.name}" ({used} parts with a program) to {os.path.basename(path)}')
+
+    def _on_multi_export_failed(self, error):
+        if not getattr(self, "_pending_multi_export", False):
+            return
+        self._pending_multi_export = False
+        self.status_bar.showMessage(f"Couldn't read the multi: {error}")
+        QMessageBox.warning(self, "Save Multi", f"Couldn't read the multi:\n\n{error}")
 
     def _load_program_from_file(self):
         path, _filter = QFileDialog.getOpenFileName(
@@ -5777,6 +5838,7 @@ class ProgramEditorWindow(QMainWindow):
         self._sample_menu.setEnabled(
             not (busy or getattr(self, "_hardware_busy_ui", False))
         )
+        self._sync_save_multi_enabled(busy or getattr(self, "_hardware_busy_ui", False))
         # same reasoning as dashboard.py's own btn_settings guard - Settings
         # can reopen the shared ports out from under an in-flight transfer.
         # None when shared_transport_enabled() was false at construction
@@ -6820,12 +6882,20 @@ class ProgramEditorWindow(QMainWindow):
         # same "commit once, on Enter/focus-loss" reasoning as
         # program_name_edit - see the comment where that one is wired
         self.multi_name_edit.editingFinished.connect(self._commit_multi_name)
+        # Save Multi to File: reads the resident multi (read only) and writes a 4096-byte .m3 (core/akai_multi_file.py). Also in the File menu.
+        self._save_multi_action = QAction("Save Multi to File...", self)
+        self._save_multi_action.setToolTip(tt.SAVE_MULTI_BUTTON)
+        self._save_multi_action.triggered.connect(self._save_multi_to_file)
+        self.save_multi_button = QPushButton("Save to File...")
+        self.save_multi_button.setToolTip(tt.SAVE_MULTI_BUTTON)
+        self.save_multi_button.clicked.connect(self._save_multi_action.trigger)
         name_row = QHBoxLayout()
         name_row.setSpacing(10)
         name_label = QLabel("<b>Multi Name</b>")
         name_row.addWidget(name_label)
         name_row.addWidget(self.multi_name_edit)
         name_row.addStretch()
+        name_row.addWidget(self.save_multi_button)
         layout.addLayout(name_row)
         layout.addSpacing(6)
 

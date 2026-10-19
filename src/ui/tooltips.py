@@ -364,6 +364,10 @@ TIME_STRETCH_GRAIN = (
     "Tones can warble whatever you pick. Double-click to reset."
 )
 TIME_STRETCH_PREVIEW_BUTTON = "Play the result through your computer's speakers - doesn't write anything to the sampler. Click again (or press Space) to stop it."
+SAVE_MULTI_BUTTON = (
+    "Save the sampler's multi (its name, effects and all 16 parts) as an Akai multi file. Only reads from the sampler. "
+    "Programs and samples are not inside it, and the file format is not yet confirmed on a real sampler."
+)
 REVERB_BUTTON = "Bake a reverb into the sample"
 REVERB_PRESET = "A starting point for the four knobs. Moving a knob afterwards switches this back to Custom."
 REVERB_DECAY = "How long the tail takes to fall 60 dB, from 0.1 s to 5 s. A longer decay makes a longer sample. Double-click to reset."
