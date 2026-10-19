@@ -51,6 +51,7 @@ from core import yamaha_params as yp
 from core import yamaha_sysex as ysx
 from core.midi_notes import midi_note_to_name
 from ui import theme, tooltips as tt
+from ui.audition_bar import AuditionBar, add_audition_action
 from ui.diagnostics_ui import add_open_log_folder_action
 from ui.yamaha_assign_dialog import AssignDialog
 from ui.yamaha_restore_dialog import RestoreDialog
@@ -305,8 +306,17 @@ class YamahaProgramEditorWindow(QMainWindow):
         bottom.addWidget(self._loading_progress)  # beside Refresh, like the S3000 editor's
         bottom.addStretch()
         bottom.addWidget(close_button)
+        # the keyboard (View > Audition Keyboard, Cmd/Ctrl+K): always starts CLOSED, an open bar owns the computer keyboard. Its menu item is made in _build_menus.
+        # Notes go straight out on the GUI thread (no worker here), only while nothing is on the unit's wire: see _sync_audition_available
+        self.audition_bar = AuditionBar()
+        self.audition_bar.set_demo(bool(getattr(self._controller.midi_manager, "is_demo", False)))
+        self.audition_bar.midi_out.connect(self._send_audition_message)
+        self._audition_timer = QTimer(self)
+        self._audition_timer.timeout.connect(self._sync_audition_available)
+        self._audition_timer.start(150)
         layout = QVBoxLayout()
         layout.addWidget(self.main_tabs, stretch=1)
+        layout.addWidget(self.audition_bar)
         layout.addLayout(bottom)
         container = QWidget()
         container.setLayout(layout)
@@ -495,6 +505,9 @@ class YamahaProgramEditorWindow(QMainWindow):
         self._sample_menu = self.menuBar().addMenu("&Sample")
         for action in self.samples_tab.sample_menu_actions():
             self._sample_menu.addAction(action)
+
+        view = self.menuBar().addMenu("&View")
+        self.audition_action = add_audition_action(self, view, self.audition_bar)
 
         hardware = self.menuBar().addMenu("&Hardware")
         self._refresh_action = QAction("Refresh from Hardware", self)
@@ -1227,6 +1240,8 @@ class YamahaProgramEditorWindow(QMainWindow):
                 event.ignore()
                 return
         _log("closed")
+        self._audition_timer.stop()
+        self.audition_bar.set_open(False)  # lets go of every note and gives the computer keyboard back
         self._writer.close()
         self._scan_generation += 1
         self._session.cancel()
@@ -1247,6 +1262,21 @@ class YamahaProgramEditorWindow(QMainWindow):
                 pass
         self._main_window.show()
         super().closeEvent(event)
+
+    def _sync_audition_available(self):
+        # Off while anything is on the unit's wire: a conversation (the session, which also covers a drain after a cancelled wave), a restore or
+        # assignment, an audio load or an edit's send, or a transfer. A note must not land inside any of them. Off = nothing is routed, so a
+        # dead keyboard never swallows typing. (Not is_transfer_busy() alone: the session must never wait on that, but a keyboard can.)
+        available = self._session.idle and not self._is_busy() and not self._controller.is_transfer_busy()
+        self.audition_bar.set_available(available, "" if available else "The keyboard is off while the sampler is busy.")
+
+    def _send_audition_message(self, message):
+        # a plain channel message straight to the output (nothing is read back, so the session never hears of it)
+        try:
+            self._controller.midi_manager.send_channel_message(message)
+        except Exception as ex:
+            debug_log.get_logger().error(f"YamahaEditor: couldn't send MIDI message {bytes(message).hex()}", exc_info=True)
+            self.status_bar.showMessage(f"Couldn't play the note: {ex}", 5000)
 
     def _stop_busy_indicator(self):
         for timer in (self._busy_show_timer, self._busy_hide_timer):

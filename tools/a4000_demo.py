@@ -118,6 +118,7 @@ def main(smoke=False, editor=False, instant=False):
     midi_manager.raw_output = _FakePort(fake, midi_manager)
     midi_manager.input_name = "Demo A4000 (in)"
     midi_manager.output_name = "Demo A4000 (out)"
+    midi_manager.is_demo = True  # the editor's keyboard says the simulated unit makes no sound
 
     controller = SamplerController(midi_manager)
     controller.set_device_type(sampler_models.YAMAHA_A4000)

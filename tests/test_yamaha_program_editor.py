@@ -74,8 +74,9 @@ class _Main(QMainWindow):
     pass
 
 
-def build_window(qapp, fake):  # noqa: F811
+def build_window(qapp, fake, demo=False):  # noqa: F811
     midi = _Midi(fake)
+    midi.is_demo = demo
     controller = SamplerController(midi)
     controller.set_device_type("yamaha_a4000")
     session = controller.yamaha_session()
@@ -932,3 +933,76 @@ def test_the_buttons_follow_the_selection(assign_ui):
     win.assigned_list.setCurrentRow(1)
     win._update_assign_buttons()
     assert win.remove_assigned_button.isEnabled()
+
+
+# --- the on-screen keyboard (View > Audition Keyboard, Cmd/Ctrl+K; NOT tried on a unit yet) ---------------------
+
+
+def _keyboard_ready(win):
+    assert wait_until(lambda: win.audition_bar.body.isEnabled())
+
+
+def test_the_keyboard_starts_closed_and_cmd_k_toggles_it(win):
+    bar = win.audition_bar
+    assert not bar.is_open() and not win.audition_action.isChecked()
+    assert win.audition_action.shortcut().toString() == "Ctrl+K"
+    win.audition_action.trigger()
+    assert bar.is_open() and win.audition_action.isChecked()
+    win.audition_action.trigger()
+    assert not bar.is_open()
+
+
+def test_a_key_press_goes_out_as_plain_notes_and_never_as_sysex(win):
+    _keyboard_ready(win)
+    win.audition_bar.set_open(True)
+    sysex_before = list(win.midi.sent)
+    win.audition_bar.keyboard._press(60)
+    win.audition_bar.keyboard._release(60)
+    assert win.midi.channel_sent == [bytes([0x90, 60, 100]), bytes([0x80, 60, 0])]
+    assert win.midi.sent == sysex_before
+
+
+def test_the_keyboard_is_off_while_a_long_operation_or_a_transfer_runs(win, monkeypatch):
+    _keyboard_ready(win)
+    win._linking = True
+    win._sync_audition_available()
+    assert not win.audition_bar.body.isEnabled() and "busy" in win.audition_bar.note.text()
+    win.audition_bar.keyboard._press(60)
+    assert win.midi.channel_sent == []
+    win._linking = False
+    monkeypatch.setattr(win._controller, "is_transfer_busy", lambda: True)
+    win._sync_audition_available()
+    assert not win.audition_bar.body.isEnabled()
+    monkeypatch.undo()
+    win._sync_audition_available()
+    assert win.audition_bar.body.isEnabled()
+
+
+def test_the_keyboard_is_off_while_the_session_has_a_conversation_going(win, monkeypatch):
+    _keyboard_ready(win)
+    monkeypatch.setattr(type(win._session), "idle", property(lambda self: False))
+    win._sync_audition_available()
+    assert not win.audition_bar.body.isEnabled()
+
+
+def test_a_failed_note_is_reported_not_raised(win):
+    _keyboard_ready(win)
+    win.audition_bar.set_open(True)
+    win.midi.fail_sends = True
+    win.audition_bar.keyboard._press(60)
+    assert "Couldn't play the note" in win.status_bar.currentMessage()
+
+
+def test_closing_the_editor_gives_the_computer_keyboard_back(win):
+    win.audition_bar.set_open(True)
+    win.close()
+    assert not win.audition_bar.is_open() and not win._audition_timer.isActive()
+
+
+def test_the_demo_flag_on_the_midi_manager_makes_the_bar_say_so(qapp, fake):
+    window = build_window(qapp, fake, demo=True)
+    try:
+        window.audition_bar.set_available(True)
+        assert "Demo" in window.audition_bar.note.text()
+    finally:
+        dispose(window)
