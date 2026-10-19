@@ -4318,7 +4318,7 @@ def test_open_slice_editor_does_nothing_while_a_transfer_is_busy(editor, qapp):
 # --- Filter Sample (Samples tab) --------------------------------------------
 # a real FilterSampleDialog.exec() would hang an offscreen test (same
 # reasoning as the Slice Editor's own modal dialog above) - the dialog
-# itself (default values, Preview retriggering, accept/reject stopping the
+# itself (default values, the Preview / Stop button, accept/reject stopping the
 # preview player) is covered instead in tests/test_filter_sample_dialog.py.
 # Here, _confirm_filter_sample's own wiring is what's under test: does it
 # open the dialog with the right sample data, and does an accepted dialog

@@ -1,4 +1,4 @@
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
@@ -17,11 +17,10 @@ from core import preview_pitch, time_stretch
 from core.audio_preview import SlicePreviewPlayer
 from ui import tooltips
 from ui.knob import Knob, LogKnob
+from ui.preview_toggle import PreviewToggle
 
 #: the same size the Filter dialog's knobs use
 _KNOB_SIZE = 56
-#: a changed knob re-renders and restarts a playing preview once it has been left alone this long
-_RETRIGGER_MS = 350
 #: the gap between knob columns
 _COLUMN_SPACING = 12
 
@@ -65,8 +64,8 @@ class TimeStretchDialog(QDialog):
     Both are the same granular engine: Time Stretch changes the length and keeps the pitch (Length knob), Pitch Shift changes the
     pitch and keeps the length (Semitones + Cents). Grain size is shared. The knobs are the Filter dialog's (ui/knob.py): Length
     and Grain are LogKnobs (100 % sits in the middle of 25-400 %), a double-click resets one. A Preview plays the result through the
-    computer's speakers - nothing is sent anywhere - and a changed knob restarts a preview that is already playing, once it has
-    settled. `samples` is the (left) channel to preview, played shifted by `pitch_shift_semitones` (the sample's Tune / Root Note, so it sounds as it will on the sampler); the caller runs the edit from `edit()`."""
+    computer's speakers - nothing is sent anywhere - while it plays the button reads Stop; a knob moved meanwhile does not
+    restart it (ui/preview_toggle.py). `samples` is the (left) channel to preview, played shifted by `pitch_shift_semitones` (the sample's Tune / Root Note, so it sounds as it will on the sampler); the caller runs the edit from `edit()`."""
 
     def __init__(self, parent, sample_name, samples, framerate, pitch_shift_semitones=0, allow_new_sample=False, applies_to_working_copy=False, send_name="Send to Sampler"):
         super().__init__(parent)
@@ -122,7 +121,7 @@ class TimeStretchDialog(QDialog):
         self.result_label.setAlignment(Qt.AlignmentFlag.AlignHCenter)
         self.preview_button = QPushButton("Preview")
         self.preview_button.setToolTip(tooltips.TIME_STRETCH_PREVIEW_BUTTON)
-        self.preview_button.clicked.connect(self._preview)
+        self._preview_toggle = PreviewToggle(self.preview_button, self._preview_player, self._preview, self)
         self.warning_label = QLabel()
         self.warning_label.setWordWrap(True)
 
@@ -148,10 +147,6 @@ class TimeStretchDialog(QDialog):
         layout.addWidget(self.warning_label)
         layout.addWidget(self._button_box)
 
-        self._retrigger = QTimer(self)
-        self._retrigger.setSingleShot(True)
-        self._retrigger.setInterval(_RETRIGGER_MS)
-        self._retrigger.timeout.connect(self._preview)
         self.mode_combo.currentIndexChanged.connect(self._on_changed)
         for knob in (self.length_knob, self.semitones_knob, self.cents_knob, self.grain_knob):
             knob.valueChanged.connect(self._on_changed)
@@ -233,7 +228,7 @@ class TimeStretchDialog(QDialog):
         self._button_box.button(QDialogButtonBox.StandardButton.Ok).setEnabled(can_send)
         if self.new_sample_button is not None:
             self.new_sample_button.setEnabled(can_send)
-        self.preview_button.setEnabled(not too_long)
+        self._preview_toggle.set_available(not too_long)
 
     def _result_text(self, frames):
         """'N frames, x.xx s' - and, when the sample's Tune / Root Note make the preview play faster or slower than its recorded rate,
@@ -245,9 +240,7 @@ class TimeStretchDialog(QDialog):
         return text
 
     def _on_changed(self, *_args):
-        self._refresh()
-        if self._preview_player.is_playing():
-            self._retrigger.start()
+        self._refresh()  # (a preview that is playing plays out; see PreviewToggle)
 
     def _preview(self):
         if self._out_frames() > time_stretch.MAX_OUTPUT_FRAMES:
@@ -271,12 +264,10 @@ class TimeStretchDialog(QDialog):
         self.accept()
 
     def accept(self):
-        self._retrigger.stop()
         self._preview_player.stop()
         super().accept()
 
     def reject(self):
         # also Esc / the window's X (QDialog's closeEvent calls reject)
-        self._retrigger.stop()
         self._preview_player.stop()
         super().reject()

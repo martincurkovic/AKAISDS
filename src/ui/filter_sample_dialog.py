@@ -14,6 +14,7 @@ from PySide6.QtCore import Qt
 from core import sample_editing
 from core.audio_preview import SlicePreviewPlayer
 from ui.knob import LogKnob
+from ui.preview_toggle import PreviewToggle
 from ui import tooltips
 
 # dB/octave -> cascaded biquad stage count - each stage is a fixed 12dB/
@@ -85,24 +86,12 @@ class FilterSampleDialog(QDialog):
     Preview always plays the WHOLE buffer run through whichever filters
     are currently enabled, at their current settings - never just
     [start, end] (filter_samples has no [start, end]-relative behaviour
-    at all, see its own docstring). Changing any control WHILE a preview
-    is already playing re-filters and restarts it automatically, so the
-    cutoff/slope/bypass combination can be dialled in by ear without
-    repeated Preview clicks - same spirit as the loop-point live preview
-    already built for the main waveform, though (like the original
-    single-filter version of this dialog) this always reprocesses the
-    whole buffer from the top rather than truly live mid-stream, since a
-    filter has no cheap way to swap coefficients mid-buffer the way
-    swapping loop bounds is - there's no getting around a restart
-    somewhere. The knobs wire this to sliderReleased, not valueChanged
-    (see the knob-wiring loop below) - valueChanged fires on every single
-    mouse-move tick of a drag, and re-filtering the whole buffer on every
-    one of those (a real, reported bug) made the knob itself visibly lag
-    while turning AND fired off a new restarted preview many times over
-    during one drag, not just once. sliderReleased fires only once, right
-    when the user actually settles on a value - the knob stays perfectly
-    responsive while turning, and the preview restarts exactly once
-    instead of stuttering through a restart per tick.
+    at all, see its own docstring). The button reads Stop while a preview
+    plays and stops it; changing a control meanwhile does NOT restart the
+    preview (it plays out, and the next click uses the settings as they
+    are then - see ui/preview_toggle.py). It used to re-filter and
+    restart on every committed change; that was dropped as more annoying
+    than useful.
 
     Owns its own SlicePreviewPlayer (same pattern SliceEditorWindow
     already established) rather than reusing the Samples tab's own
@@ -180,7 +169,7 @@ class FilterSampleDialog(QDialog):
 
         self.preview_button = QPushButton("Preview")
         self.preview_button.setToolTip(tooltips.FILTER_PREVIEW_BUTTON)
-        self.preview_button.clicked.connect(self._preview)
+        self._preview_toggle = PreviewToggle(self.preview_button, self._preview_player, self._preview, self)
 
         if applies_to_working_copy:
             # the Program Editor: OK edits the sample HERE (its working copy); nothing reaches the sampler yet
@@ -219,15 +208,6 @@ class FilterSampleDialog(QDialog):
         layout.addWidget(warning_label)
         layout.addWidget(self._button_box)
 
-        for signal in (
-            self.hp_group.toggled,
-            self.hp_knob.sliderReleased,
-            self.hp_slope_combo.currentIndexChanged,
-            self.lp_group.toggled,
-            self.lp_knob.sliderReleased,
-            self.lp_slope_combo.currentIndexChanged,
-        ):
-            signal.connect(self._maybe_retrigger_preview)
         self.hp_group.toggled.connect(self._update_ok_enabled)
         self.lp_group.toggled.connect(self._update_ok_enabled)
         self._update_ok_enabled()
@@ -291,15 +271,6 @@ class FilterSampleDialog(QDialog):
             self._framerate,
             pitch_shift_semitones=self._pitch_shift_semitones,
         )
-
-    def _maybe_retrigger_preview(self, *_args):
-        if self._preview_player.is_playing() and (
-            self.highpass_enabled() or self.lowpass_enabled()
-        ):
-            self._preview()
-        elif self._preview_player.is_playing():
-            # both just got bypassed mid-preview - nothing left to play
-            self._preview_player.stop()
 
     def accept(self):
         self._preview_player.stop()

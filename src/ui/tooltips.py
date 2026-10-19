@@ -177,7 +177,7 @@ CLOSE_SEARCH_BAR = "Close (Esc)"
 FILTER_PREVIEW_BUTTON = (
     "Play the filtered result through your computer's own speakers - "
     "doesn't write anything to the sampler, just lets you audition the "
-    "settings first."
+    "settings first. Click again to stop it."
 )
 
 # =============================================================================
@@ -363,7 +363,7 @@ TIME_STRETCH_GRAIN = (
     "longer ones (60-100 ms) keep the pitch of a sustained tone closer, but can sound less tight. "
     "Tones can warble whatever you pick. Double-click to reset."
 )
-TIME_STRETCH_PREVIEW_BUTTON = "Play the result through your computer's speakers - doesn't write anything to the sampler."
+TIME_STRETCH_PREVIEW_BUTTON = "Play the result through your computer's speakers - doesn't write anything to the sampler. Click again to stop it."
 REVERB_BUTTON = "Bake a reverb into the sample"
 REVERB_PRESET = "A starting point for the four knobs. Moving a knob afterwards switches this back to Custom."
 REVERB_DECAY = "How long the tail takes to fall 60 dB, from 0.1 s to 5 s. A longer decay makes a longer sample. Double-click to reset."

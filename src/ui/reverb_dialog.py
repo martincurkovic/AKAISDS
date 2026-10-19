@@ -1,4 +1,4 @@
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
@@ -16,7 +16,8 @@ from core import preview_pitch, reverb
 from core.audio_preview import SlicePreviewPlayer
 from ui import tooltips
 from ui.knob import Knob
-from ui.time_stretch_dialog import _COLUMN_SPACING, _RETRIGGER_MS, _knob_column, _make_knob
+from ui.preview_toggle import PreviewToggle
+from ui.time_stretch_dialog import _COLUMN_SPACING, _knob_column, _make_knob
 
 _CUSTOM = "Custom"
 
@@ -43,8 +44,8 @@ class ReverbDialog(QDialog):
     """Reverb for the Samples tab (core/reverb.py): four knobs and a Preview that plays the result through the computer's speakers.
 
     Same shape as the Time Stretch dialog (and its knobs, which are the Filter dialog's): OK applies it to the sample HERE (the Program Editor's
-    working copy) and nothing reaches the sampler yet; "Send as New Sample" sends the result now and keeps the original. A changed knob restarts
-    a preview that is already playing, once it has settled. `samples` is the channel to preview, played shifted by `pitch_shift_semitones` (the
+    working copy) and nothing reaches the sampler yet; "Send as New Sample" sends the result now and keeps the original. Preview becomes Stop
+    while it plays; a knob moved meanwhile does not restart it (ui/preview_toggle.py). `samples` is the channel to preview, played shifted by `pitch_shift_semitones` (the
     sample's Tune / Root Note, so it sounds as it will on the sampler); the caller runs the edit from `options()`."""
 
     def __init__(self, parent, sample_name, samples, framerate, pitch_shift_semitones=0, allow_new_sample=False, applies_to_working_copy=False, send_name="Send to Sampler"):
@@ -93,7 +94,7 @@ class ReverbDialog(QDialog):
         self.result_label.setAlignment(Qt.AlignmentFlag.AlignHCenter)
         self.preview_button = QPushButton("Preview")
         self.preview_button.setToolTip(tooltips.TIME_STRETCH_PREVIEW_BUTTON)
-        self.preview_button.clicked.connect(self._preview)
+        self._preview_toggle = PreviewToggle(self.preview_button, self._preview_player, self._preview, self)
         self.warning_label = QLabel()
         self.warning_label.setWordWrap(True)
 
@@ -117,10 +118,6 @@ class ReverbDialog(QDialog):
         layout.addWidget(self.warning_label)
         layout.addWidget(self._button_box)
 
-        self._retrigger = QTimer(self)
-        self._retrigger.setSingleShot(True)
-        self._retrigger.setInterval(_RETRIGGER_MS)
-        self._retrigger.timeout.connect(self._preview)
         self.preset_combo.activated.connect(self._on_preset_chosen)
         for knob in self._knobs():
             knob.valueChanged.connect(self._on_changed)
@@ -171,7 +168,7 @@ class ReverbDialog(QDialog):
         self._button_box.button(QDialogButtonBox.StandardButton.Ok).setEnabled(can_send)
         if self.new_sample_button is not None:
             self.new_sample_button.setEnabled(can_send)
-        self.preview_button.setEnabled(not too_long)
+        self._preview_toggle.set_available(not too_long)
 
     def _result_text(self, longest):
         """What the length will be at most: the tail stops early once it has died away, so the result is often shorter."""
@@ -198,9 +195,7 @@ class ReverbDialog(QDialog):
 
     def _on_changed(self, *_args):
         self.preset_combo.setCurrentIndex(self._matching_preset_index())
-        self._refresh()
-        if self._preview_player.is_playing():
-            self._retrigger.start()
+        self._refresh()  # (a preview that is playing plays out; see PreviewToggle)
 
     def _preview(self):
         if self._longest_result() > reverb.MAX_OUTPUT_FRAMES or not reverb.changes_anything(self.mix_knob.value()):
@@ -221,12 +216,10 @@ class ReverbDialog(QDialog):
         self.accept()
 
     def accept(self):
-        self._retrigger.stop()
         self._preview_player.stop()
         super().accept()
 
     def reject(self):
         # also Esc / the window's X (QDialog's closeEvent calls reject)
-        self._retrigger.stop()
         self._preview_player.stop()
         super().reject()
