@@ -1,8 +1,9 @@
-# tests for ui/s950_samples_tab.py - the read-only Samples tab of the S900/S950 editor.
+# tests for ui/s950_samples_tab.py - the Samples tab of the S900/S950 editor (read-only apart from the replay mode and direction).
 #
 # The real tab and the real SamplerController/S950Transfers run against core/demo_s950.FakeS950
 # over the same fake MidiManager test_s950_transfers.py uses (offscreen Qt, shrunk waits).
 
+import dataclasses
 import os
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -150,8 +151,8 @@ def test_selecting_a_sample_shows_its_parameters(tab):
     v = tab._values
     assert v["rate"].text() == "22,050 Hz"
     assert v["length"].text() == st.format_length(4000, 22050)
-    assert v["replay"].text() == "One-shot"
-    assert v["direction"].text() == "Forward"
+    assert tab.replay_combo.currentText() == "One-shot"
+    assert tab.direction_combo.currentText() == "Forward"
     assert "unverified" in v["pitch"].text()
     assert tab.waveform_view.has_header() and not tab.waveform_view.has_waveform()
     assert tab.waveform_view.frame_count() == 4000
@@ -300,3 +301,138 @@ def test_the_hint_changes_once_the_audio_is_loaded(tab):
     tab.waveform_view.load_requested.emit()
     _wait_audio(tab, 1)
     assert "can't be edited" in tab.waveform_hint.text()
+
+
+# --- writing the replay mode and direction --------------------------------------------------------
+# (the Write / Revert buttons live in the window's bottom bar: the tab offers write() / revert() / can_write() and state_changed)
+
+
+@pytest.fixture
+def wtab(tab, tmp_path, monkeypatch):
+    tab.rig.engine.backup_dir = tmp_path / "backups"
+    tab.statuses = []
+    tab.status_message.connect(tab.statuses.append)
+    _catalog(tab)
+    tab.set_active(True)
+    tab.sample_list_widget.setCurrentRow(1)  # SNARE, one-shot, forward
+    assert wait_until(lambda: tab._values["name"].text() == "SNARE")
+    monkeypatch.setattr(tab, "_confirm_first_write", lambda: True)
+    return tab
+
+
+def test_the_combos_show_the_samples_values_and_start_with_nothing_to_write(wtab):
+    assert (wtab.replay_combo.currentData(), wtab.direction_combo.currentData()) == (s.REPLAY_ONE_SHOT, s.PLAY_FORWARD)
+    assert wtab.replay_combo.isEnabled() and wtab.direction_combo.isEnabled()
+    assert not wtab.can_write() and wtab.pending_changes() == 0
+
+
+def test_before_a_selection_nothing_can_be_changed(tab):
+    assert not tab.replay_combo.isEnabled() and not tab.direction_combo.isEnabled() and not tab.can_write()
+    assert tab.replay_combo.currentIndex() == -1
+
+
+def test_choosing_a_different_value_enables_write_and_revert_without_sending_anything(wtab):
+    sent = len(wtab.rig.midi.sent)
+    wtab.replay_combo.setCurrentIndex(wtab.replay_combo.findData(s.REPLAY_LOOP))
+    assert wtab.can_write() and wtab.pending_changes() == 1
+    assert len(wtab.rig.midi.sent) == sent and wtab.rig.fake.sprm_writes == 0  # staged, not written
+    wtab.revert()
+    assert wtab.replay_combo.currentData() == s.REPLAY_ONE_SHOT and not wtab.can_write()
+
+
+def test_write_sends_only_what_changed_and_shows_what_the_sampler_holds(wtab):
+    wtab.direction_combo.setCurrentIndex(wtab.direction_combo.findData(s.PLAY_REVERSED))
+    wtab.write()
+    assert wait_until(lambda: wtab.rig.fake.sprm_writes == 1 and not wtab._writing)
+    stored = wtab.rig.fake.samples[1]["params"]
+    assert stored.reversed == s.PLAY_REVERSED and stored.replay_mode == s.REPLAY_ONE_SHOT
+    assert wtab._params[1].reversed == s.PLAY_REVERSED  # the read-back replaced the tab's copy
+    assert wtab.direction_combo.currentData() == s.PLAY_REVERSED and not wtab.can_write()
+    assert any("verified" in message for message in wtab.statuses)
+
+
+def test_a_loop_mode_turns_the_loop_markers_on_after_the_write(wtab):
+    wtab.waveform_view.set_loop_enabled(False)
+    assert wtab.waveform_view._loop_enabled is False
+    wtab.replay_combo.setCurrentIndex(wtab.replay_combo.findData(s.REPLAY_LOOP))
+    wtab.write()
+    assert wait_until(lambda: wtab.rig.fake.sprm_writes == 1 and not wtab._writing)
+    assert wtab.waveform_view._loop_enabled is True
+
+
+def test_the_controls_are_locked_while_a_write_is_on_the_wire(wtab):
+    wtab.replay_combo.setCurrentIndex(wtab.replay_combo.findData(s.REPLAY_LOOP))
+    wtab.write()
+    assert wtab._writing and wtab.is_writing() and not wtab.replay_combo.isEnabled() and not wtab.can_write()
+    assert wait_until(lambda: not wtab._writing)
+    assert wtab.replay_combo.isEnabled()
+
+
+def test_a_declined_first_write_warning_sends_nothing(wtab, monkeypatch):
+    monkeypatch.setattr(wtab, "_confirm_first_write", lambda: False)
+    wtab.replay_combo.setCurrentIndex(wtab.replay_combo.findData(s.REPLAY_LOOP))
+    wtab.write()
+    assert not wtab._writing and wtab.rig.fake.sprm_writes == 0
+    assert wtab.can_write()  # still staged
+
+
+def test_the_first_write_warning_is_remembered(tab, monkeypatch):
+    from PySide6.QtWidgets import QMessageBox
+
+    from core import app_config
+
+    asked = []
+    monkeypatch.setattr(QMessageBox, "warning", lambda *a, **k: asked.append(a[2]) or QMessageBox.StandardButton.Ok)
+    app_config.save_s950_sample_write_warning_acknowledged(False)
+    try:
+        assert tab._confirm_first_write() is True and len(asked) == 1 and "ENT" in asked[0]
+        assert app_config.get_s950_sample_write_warning_acknowledged() is True
+        assert tab._confirm_first_write() is True and len(asked) == 1  # not asked again
+    finally:
+        app_config.save_s950_sample_write_warning_acknowledged(False)
+
+
+def test_declining_the_warning_is_not_remembered(tab, monkeypatch):
+    from PySide6.QtWidgets import QMessageBox
+
+    from core import app_config
+
+    monkeypatch.setattr(QMessageBox, "warning", lambda *a, **k: QMessageBox.StandardButton.Cancel)
+    app_config.save_s950_sample_write_warning_acknowledged(False)
+    assert tab._confirm_first_write() is False
+    assert app_config.get_s950_sample_write_warning_acknowledged() is False
+
+
+def test_a_failed_write_puts_the_combos_back_to_the_sampler_values(wtab):
+    wtab.rig.fake._sprm = lambda slot, payload: None  # nothing is stored
+    wtab.replay_combo.setCurrentIndex(wtab.replay_combo.findData(s.REPLAY_ALTERNATING))
+    wtab.write()
+    assert wait_until(lambda: not wtab._writing)
+    assert wtab.replay_combo.currentData() == s.REPLAY_ONE_SHOT  # what the sampler reports
+    assert any("different values" in message for message in wtab.statuses)
+
+
+def test_a_byte_the_app_does_not_know_is_shown_and_is_not_a_change(wtab):
+    wtab.rig.fake.samples[2]["params"] = dataclasses.replace(wtab.rig.fake.samples[2]["params"], replay_mode=ord("Q"))
+    wtab.sample_list_widget.setCurrentRow(2)
+    assert wait_until(lambda: wtab._params.get(2) is not None)
+    assert "Unknown" in wtab.replay_combo.currentText()
+    assert not wtab.can_write()  # showing it is not changing it
+
+
+def test_a_write_is_refused_while_another_operation_owns_the_wire(wtab):
+    wtab.replay_combo.setCurrentIndex(wtab.replay_combo.findData(s.REPLAY_LOOP))
+    wtab.rig.engine.refresh_catalog()
+    wtab.write()
+    assert not wtab._writing and wtab.rig.fake.sprm_writes == 0
+    assert any("already in progress" in message for message in wtab.statuses)
+
+
+def test_the_tab_says_when_the_staged_edit_changes(wtab):
+    fired = []
+    wtab.state_changed.connect(lambda: fired.append(wtab.pending_changes()))
+    wtab.replay_combo.setCurrentIndex(wtab.replay_combo.findData(s.REPLAY_LOOP))
+    wtab.direction_combo.setCurrentIndex(wtab.direction_combo.findData(s.PLAY_REVERSED))
+    assert fired[-1] == 2
+    wtab.revert()
+    assert fired[-1] == 0

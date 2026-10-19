@@ -314,16 +314,26 @@ class S950ProgramEditorWindow(QMainWindow):
         self.restore_button.clicked.connect(self._restore_previous)
         self.write_button = QPushButton("Write to Sampler")
         self.write_button.clicked.connect(self._write)
+        # the Samples tab's own staged edit (replay mode / direction): these sit where the program buttons do, and only one set shows at a time
+        self.sample_dirty_label = QLabel()
+        self.sample_dirty_label.setObjectName("mutedLabel")
+        self.sample_revert_button = QPushButton("Revert")
+        self.sample_revert_button.setToolTip(tt.S950_SAMPLE_REVERT)
+        self.sample_write_button = QPushButton("Write to Sampler")
+        self.sample_write_button.setToolTip(tt.S950_SAMPLE_WRITE)
         close_button = QPushButton("Close")
         close_button.clicked.connect(self.close)
 
         bottom_row = QHBoxLayout()
         bottom_row.addWidget(self.refresh_button)
         bottom_row.addWidget(self.dirty_label)
+        bottom_row.addWidget(self.sample_dirty_label)
         bottom_row.addStretch()
         bottom_row.addWidget(self.discard_button)
         bottom_row.addWidget(self.restore_button)
         bottom_row.addWidget(self.write_button)
+        bottom_row.addWidget(self.sample_revert_button)
+        bottom_row.addWidget(self.sample_write_button)
         bottom_row.addSpacing(12)
         bottom_row.addWidget(close_button)
 
@@ -331,6 +341,11 @@ class S950ProgramEditorWindow(QMainWindow):
         programs_tab_page = QWidget()
         programs_tab_page.setLayout(content_layout)
         self.samples_tab = S950SamplesTab(self._controller)
+        self.sample_revert_button.clicked.connect(self.samples_tab.revert)
+        self.sample_write_button.clicked.connect(self.samples_tab.write)
+        self.samples_tab.state_changed.connect(self._sync_sample_buttons)
+        for widget in (self.sample_dirty_label, self.sample_revert_button, self.sample_write_button):
+            widget.setVisible(False)  # (shown on the Samples tab only)
         self.samples_tab.status_message.connect(
             lambda message: self.status_bar.showMessage(message, 8000)
         )
@@ -356,7 +371,8 @@ class S950ProgramEditorWindow(QMainWindow):
         self.status_bar = QStatusBar()
         self.status_bar.setSizeGripEnabled(False)
         self.setStatusBar(self.status_bar)
-        experimental = QLabel("Experimental - writes are untested on real hardware")
+        experimental = QLabel("Experimental")
+        experimental.setToolTip("Writing to an S900/S950 was written without a unit to test against. Every write saves a backup first and is read back.")
         experimental.setObjectName("mutedLabel")
         self.status_bar.addPermanentWidget(experimental)
 
@@ -762,7 +778,20 @@ class S950ProgramEditorWindow(QMainWindow):
             self.write_button,
         ):
             widget.setVisible(not on_samples)
+        for widget in (self.sample_dirty_label, self.sample_revert_button, self.sample_write_button):
+            widget.setVisible(on_samples)
+        self._sync_sample_buttons()
         self.samples_tab.set_active(on_samples)
+
+    def _sync_sample_buttons(self):
+        """Enable the Samples tab's Write / Revert like the program ones: something staged and the wire free."""
+        tab = self.samples_tab
+        idle = self._controller.is_s950_idle() and not self._writing
+        staged = tab.can_write()
+        self.sample_write_button.setEnabled(staged and idle)
+        self.sample_revert_button.setEnabled(staged)
+        n = tab.pending_changes()
+        self.sample_dirty_label.setText(f"{n} unsaved change{'' if n == 1 else 's'}" if n else "")
 
     # -- state ----------------------------------------------------------------------------------
 
@@ -794,6 +823,7 @@ class S950ProgramEditorWindow(QMainWindow):
             f"{n} unsaved change{'' if n == 1 else 's'}" if n else ""
         )
         self.detail_stack.setEnabled(not self._writing)
+        self._sync_sample_buttons()
         self._sync_audition_available(idle)
         self._dashboard_action.setEnabled(not busy and not self._writing)
         self._dashboard_action.setToolTip(tt.BUSY_BLOCKS_OTHER_WINDOWS if busy else "")

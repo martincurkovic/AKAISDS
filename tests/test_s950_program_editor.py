@@ -15,6 +15,7 @@ from PySide6.QtCore import QCoreApplication, QEvent, Qt
 from PySide6.QtWidgets import QMainWindow
 
 from core import s950_program as prog
+from core import s950_sysex as s
 from core.demo_s950 import FakeS950
 from PySide6.QtWidgets import QLabel, QMessageBox
 
@@ -171,6 +172,75 @@ def test_the_program_write_buttons_only_show_on_the_programs_tab(win):
     win.main_tabs.setCurrentIndex(0)
     for w in (win.write_button, win.discard_button, win.restore_button):
         assert not w.isHidden()
+
+
+def test_the_sample_write_buttons_only_show_on_the_samples_tab(win):
+    win.main_tabs.setCurrentIndex(0)
+    for w in (win.sample_write_button, win.sample_revert_button, win.sample_dirty_label):
+        assert w.isHidden()
+    win.main_tabs.setCurrentIndex(win._samples_tab_index)
+    for w in (win.sample_write_button, win.sample_revert_button):
+        assert not w.isHidden()
+    for w in (win.write_button, win.discard_button, win.restore_button):
+        assert w.isHidden()  # one set at a time
+
+
+def test_the_sample_buttons_sit_left_of_close_in_the_bottom_bar(win):
+    from PySide6.QtCore import QPoint
+    from PySide6.QtWidgets import QPushButton
+
+    win.show()
+    win.main_tabs.setCurrentIndex(win._samples_tab_index)
+    QCoreApplication.processEvents()
+    close = next(b for b in win.findChildren(QPushButton) if b.text() == "Close")
+    x = lambda w: w.mapTo(win, QPoint(0, 0)).x()  # noqa: E731
+    assert x(win.refresh_button) < x(win.sample_revert_button) < x(win.sample_write_button) < x(close)
+    assert abs(win.sample_write_button.mapTo(win, QPoint(0, 0)).y() - close.mapTo(win, QPoint(0, 0)).y()) <= 2  # the same row
+
+
+def test_the_sample_buttons_follow_the_staged_edit_and_write_it(win, monkeypatch):
+    win.main_tabs.setCurrentIndex(win._samples_tab_index)
+    tab = win.samples_tab
+    assert wait_until(lambda: tab.sample_list_widget.count() == 3)
+    tab.sample_list_widget.setCurrentRow(1)
+    assert wait_until(lambda: tab._params.get(1) is not None)
+    win._update_buttons()
+    assert not win.sample_write_button.isEnabled() and not win.sample_revert_button.isEnabled() and win.sample_dirty_label.text() == ""
+    tab.replay_combo.setCurrentIndex(tab.replay_combo.findData(s.REPLAY_LOOP))
+    assert win.sample_write_button.isEnabled() and win.sample_revert_button.isEnabled()
+    assert win.sample_dirty_label.text() == "1 unsaved change"
+    monkeypatch.setattr(tab, "_confirm_first_write", lambda: True)
+    win.sample_write_button.click()
+    assert wait_until(lambda: win.rig.fake.sprm_writes == 1 and not tab.is_writing())
+    assert win.rig.fake.samples[1]["params"].replay_mode == s.REPLAY_LOOP
+    assert not win.sample_write_button.isEnabled() and win.sample_dirty_label.text() == ""
+
+
+def test_the_revert_button_puts_the_combos_back(win):
+    win.main_tabs.setCurrentIndex(win._samples_tab_index)
+    tab = win.samples_tab
+    assert wait_until(lambda: tab.sample_list_widget.count() == 3)
+    tab.sample_list_widget.setCurrentRow(0)
+    assert wait_until(lambda: tab._params.get(0) is not None)
+    tab.direction_combo.setCurrentIndex(tab.direction_combo.findData(s.PLAY_REVERSED))
+    assert win.sample_revert_button.isEnabled()
+    win.sample_revert_button.click()
+    assert tab.direction_combo.currentData() == s.PLAY_FORWARD and not win.sample_revert_button.isEnabled()
+    assert win.rig.fake.sprm_writes == 0
+
+
+def test_a_sample_write_in_flight_blocks_closing_the_window(win, monkeypatch):
+    win.main_tabs.setCurrentIndex(win._samples_tab_index)
+    tab = win.samples_tab
+    assert wait_until(lambda: tab.sample_list_widget.count() == 3)
+    tab.sample_list_widget.setCurrentRow(1)
+    assert wait_until(lambda: tab._params.get(1) is not None)
+    tab.replay_combo.setCurrentIndex(tab.replay_combo.findData(s.REPLAY_LOOP))
+    monkeypatch.setattr(tab, "_confirm_first_write", lambda: True)
+    win.sample_write_button.click()
+    assert tab.is_writing() and win._controller.is_transfer_busy()
+    assert win.close() is False  # refused: a MIDI operation is in flight on the shared connection
+    assert wait_until(lambda: not tab.is_writing())
 
 
 def test_unsaved_program_edits_survive_a_visit_to_the_samples_tab(win):

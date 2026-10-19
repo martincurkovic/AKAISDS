@@ -59,7 +59,7 @@ OS-version differences are unknown. It is one Sampler Type; expect S900-specific
 
 ## Not built (each needs a tester's answer first)
 
-Sample editing (SPRM start/end/loop semantics are inferred, plus the edit-buffer caveat); creating/duplicating/deleting programs;
+Editing a sample's start/end/loop length/pitch (SPRM semantics are inferred, plus the edit-buffer caveat; s950tools' GUI and this app disagree on where a loop sits, see AGENTS.md; replay mode and direction CAN be written since 2026-10-19, `tests/s950_test_plan.md` E); creating/duplicating/deleting programs;
 adding/removing keygroups (changes the message length); rewriting programs when a sample is renamed; the keygroup "Options" bits (shown,
 never written).
 

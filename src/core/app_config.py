@@ -177,6 +177,18 @@ def save_s950_program_write_warning_acknowledged(acknowledged=True):
     save_config(config)
 
 
+def get_s950_sample_write_warning_acknowledged():
+    # the one-time "writing S900/S950 sample settings is experimental" warning, shown
+    # before the first sample-parameter write (ui/s950_samples_tab.py)
+    return bool(load_config().get("s950_sample_write_warning_acknowledged", False))
+
+
+def save_s950_sample_write_warning_acknowledged(acknowledged=True):
+    config = load_config()
+    config["s950_sample_write_warning_acknowledged"] = bool(acknowledged)
+    save_config(config)
+
+
 # default as of the shared MIDI transport (core/midi_transport.py) becoming
 # the default connection mode - see core/midi_manager.py's own
 # shared_transport_enabled(). Manual-edit-only by design: there's

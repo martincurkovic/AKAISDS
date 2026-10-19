@@ -1,8 +1,8 @@
-"""The Samples tab of the Akai S900/S950 program editor - READ-ONLY.
+"""The Samples tab of the Akai S900/S950 program editor.
 
 Laid out like the S1000/S2000/S3000 editor's Samples tab (a sample list with durations on the
 left, a waveform card and a details card on the right, built from the same
-`ui/editor_layout.py` pieces and the same `WaveformView`), but it only shows:
+`ui/editor_layout.py` pieces and the same `WaveformView`). It shows:
 
  - the sample list, with each sample's duration (read lazily, one SPRM at a time, only while
    the tab is on screen),
@@ -12,12 +12,18 @@ left, a waveform card and a details card on the right, built from the same
    editor blocks the whole window for this; the S950's engine is event-driven, so nothing here
    needs to).
 
-Nothing is written to the unit. Editing is deliberately not offered: how the SPRM start/end/loop
-fields behave is only inferred from s950tools (and its notes warn that some SPRM changes only
-take effect once the sample is re-selected on the unit), so a loop editor here would be a guess
-with real hardware writes behind it. Rename a sample from the Transfer Dashboard.
+What can be WRITTEN is the replay mode (one-shot / loop / alternating) and the direction
+(forward / reversed), as a staged edit like the program editor's: change the combos, then press
+"Write to Sampler" in the WINDOW's bottom bar (the tab has no buttons of its own: it offers
+`write()` / `revert()` / `can_write()` and says when that changes with `state_changed`); the
+engine reads the sample fresh, saves a backup, changes only those two
+fields, writes and reads back (`S950Transfers.write_sample_params`). Start, end, loop length and
+pitch stay read-only: how those SPRM fields behave is only inferred (s950tools' own GUI and
+this tab even disagree about where a loop sits, see AGENTS.md), so a marker editor would be a
+guess with real hardware writes behind it. s950tools also found that some SPRM changes (the
+reverse flag for certain) only take effect once the sample is re-selected (ENT) on the unit.
+Rename a sample from the Transfer Dashboard.
 """
-
 import os
 import tempfile
 
@@ -25,17 +31,19 @@ from functools import partial
 
 from PySide6.QtCore import QObject, Qt, QTimer, Signal
 from PySide6.QtWidgets import (
+    QComboBox,
     QGridLayout,
     QHBoxLayout,
     QLabel,
     QListWidget,
     QListWidgetItem,
+    QMessageBox,
     QPushButton,
     QVBoxLayout,
     QWidget,
 )
 
-from core import debug_log, s950_sysex as s, sds_encoder
+from core import app_config, debug_log, s950_sysex as s, sds_encoder
 from ui import tooltips as tt
 from ui.editor_layout import (
     build_list_column,
@@ -57,6 +65,7 @@ _REPLAY_MODE_LABELS = {
     s.REPLAY_ALTERNATING: "Alternating loop",
 }
 _LOOPING_MODES = (s.REPLAY_LOOP, s.REPLAY_ALTERNATING)
+_DIRECTION_LABELS = {s.PLAY_FORWARD: "Forward", s.PLAY_REVERSED: "Reversed"}
 _LOAD_HINT = "Double-click the waveform to load the sample's audio."
 
 
@@ -100,6 +109,8 @@ def sample_markers(params):
 class S950SamplesTab(QWidget):
     #: a short message for the host window's status bar
     status_message = Signal(str)
+    #: the staged edit (or whether a write is on the wire) changed: the host window refreshes its Write / Revert buttons
+    state_changed = Signal()
 
     _RETRY_MS = 150
     _AUDIO_RETRIES = 40  # x _RETRY_MS: how long a load waits for the wire to go idle
@@ -120,10 +131,12 @@ class S950SamplesTab(QWidget):
         self._wave_path = None
         self._audio_slot = None
         self._audio_samples = None
+        self._writing = False  # a replay-mode / direction write is on the wire
         self._build()
 
         c = self._controller
         self._connected = True
+        c.s950_sample_written.connect(self._on_sample_written)
         c.sample_slots_updated.connect(self._on_catalog)
         c.s950_sample_params_received.connect(self._on_params)
         c.sample_received.connect(self._on_audio_file)
@@ -205,6 +218,19 @@ class S950SamplesTab(QWidget):
         ):
             label = QLabel(text)
             label.setObjectName("mutedLabel")
+            if key in ("replay", "direction"):
+                # the two things this tab can write: staged in a combo, applied by "Write to Sampler"
+                value = QComboBox()
+                labels = _REPLAY_MODE_LABELS if key == "replay" else _DIRECTION_LABELS
+                for byte, text_ in labels.items():
+                    value.addItem(text_, byte)
+                value.setFixedWidth(160)
+                value.setToolTip(tt.S950_REPLAY_MODE if key == "replay" else tt.S950_DIRECTION)
+                value.currentIndexChanged.connect(self._sync_state)
+                setattr(self, "replay_combo" if key == "replay" else "direction_combo", value)
+                grid.addWidget(label, r, 0, Qt.AlignmentFlag.AlignVCenter)
+                grid.addWidget(value, r, 1, Qt.AlignmentFlag.AlignLeft)
+                continue
             value = QLabel("-")
             value.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
             grid.addWidget(label, r, 0, Qt.AlignmentFlag.AlignTop)
@@ -212,8 +238,8 @@ class S950SamplesTab(QWidget):
             self._values[key] = value
         grid.setColumnStretch(1, 1)
         note = QLabel(
-            "Read-only. Rename a sample from the Transfer Dashboard. What start, end and loop "
-            "mean, and the pitch units, are inferred and not verified on a unit."
+            "Replay mode and direction can be written (experimental). Start, end, loop and pitch are "
+            "shown as read; what they mean is not verified on a unit."
         )
         note.setObjectName("mutedLabel")
         note.setWordWrap(True)
@@ -260,6 +286,7 @@ class S950SamplesTab(QWidget):
         c = self._controller
         for signal, slot in (
             (c.sample_slots_updated, self._on_catalog),
+            (c.s950_sample_written, self._on_sample_written),
             (c.s950_sample_params_received, self._on_params),
             (c.sample_received, self._on_audio_file),
             (c.receive_finished, self._on_receive_finished),
@@ -376,8 +403,7 @@ class S950SamplesTab(QWidget):
         v["name"].setText(params.name.strip() or "(unnamed)")
         v["length"].setText(format_length(params.total_words, params.sample_rate_hz))
         v["rate"].setText(f"{params.sample_rate_hz:,} Hz" if params.sample_rate_hz else "-")
-        v["replay"].setText(format_replay_mode(params.replay_mode))
-        v["direction"].setText("Reversed" if params.reversed == s.PLAY_REVERSED else "Forward")
+        self._set_combos(params)
         v["start"].setText(f"{params.start:,}")
         v["end"].setText(f"{params.end:,}")
         v["loop_length"].setText(f"{params.loop_length:,}")
@@ -400,6 +426,104 @@ class S950SamplesTab(QWidget):
     def _clear_values(self):
         for label in self._values.values():
             label.setText("-")
+        self._set_combos(None)
+
+    # -- writing the replay mode and direction ------------------------------------------------------
+
+    def _set_combos(self, params):
+        """Show the sampler's replay mode and direction in the combos (no write is triggered); None = nothing to show."""
+        for combo, value in ((self.replay_combo, params and params.replay_mode), (self.direction_combo, params and params.reversed)):
+            combo.blockSignals(True)
+            index = combo.findData(value) if params is not None else -1
+            if params is not None and index < 0:
+                combo.addItem(f"Unknown ({value})", value)  # a byte this app doesn't know: shown, never written by itself
+                index = combo.findData(value)
+            combo.setCurrentIndex(index)
+            combo.blockSignals(False)
+        self._sync_state()
+
+    def _changes(self):
+        """{field: byte} for each combo that differs from what the sampler holds, for the selected sample."""
+        params = self._params.get(self._slot)
+        if params is None:
+            return {}
+        changes = {}
+        if self.replay_combo.currentData() != params.replay_mode:
+            changes["replay_mode"] = self.replay_combo.currentData()
+        if self.direction_combo.currentData() != params.reversed:
+            changes["reversed"] = self.direction_combo.currentData()
+        return changes
+
+    def _sync_state(self, *_args):
+        known = self._params.get(self._slot) is not None
+        for combo in (self.replay_combo, self.direction_combo):
+            combo.setEnabled(known and not self._writing)
+        self.state_changed.emit()
+
+    def pending_changes(self):
+        """How many of the two fields the user has staged a different value for."""
+        return len(self._changes())
+
+    def can_write(self):
+        return self.pending_changes() > 0 and not self._writing
+
+    def is_writing(self):
+        return self._writing
+
+    def revert(self):
+        """Put the combos back to what the sampler holds."""
+        self._show_sample()
+
+    def _confirm_first_write(self):
+        if app_config.get_s950_sample_write_warning_acknowledged():
+            return True
+        answer = QMessageBox.warning(
+            self,
+            "Akai S900/S950 - experimental",
+            "Writing a sample's settings to the Akai S900/S950 is experimental.\n\n"
+            "It was written from s950tools' notes without an S900/S950 to test against. Before every "
+            "write the sample's settings are saved to ~/.akaisds/s950_backups as a .syx file, and "
+            "afterwards they are read back and compared. The S950 may only follow a changed direction "
+            "once you press ENT on the sample.\n\n"
+            "Try a scratch sample first, and please report problems along with ~/.akaisds/akaisds.log.",
+            QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Cancel,
+        )
+        if answer != QMessageBox.StandardButton.Ok:
+            return False
+        app_config.save_s950_sample_write_warning_acknowledged(True)
+        return True
+
+    def write(self):
+        """Write the staged replay mode / direction (after the one-time warning, and only if the wire is free)."""
+        slot, changes = self._slot, self._changes()
+        if slot is None or not changes or self._writing:
+            return
+        log = debug_log.get_logger()
+        if not self._controller.is_s950_idle():
+            self.status_message.emit("A MIDI operation is already in progress - try again in a moment")
+            return
+        if not self._confirm_first_write():
+            log.info("S950Samples: write cancelled at the experimental warning")
+            return
+        log.info(f"S950Samples: write requested for sample {slot}: {changes}")
+        self._writing = True
+        self._sync_state()
+        self.status_message.emit(f"Writing sample {slot}'s settings...")
+        self._controller.write_s950_sample_params(slot, changes)
+
+    def _on_sample_written(self, slot, verified, held, message):
+        if not self._writing:
+            return
+        self._writing = False
+        debug_log.get_logger().info(f"S950Samples: sample {slot} write result: verified={verified}, state returned={held is not None}: {message}")
+        if held is not None:
+            self._params[slot] = held  # what the sampler holds now is the truth, whether or not it is what was sent
+        if slot == self._slot:
+            self._show_sample()
+        else:
+            self._sync_state()
+        self.status_message.emit(message)
 
     # -- loading audio ------------------------------------------------------------------------------
 

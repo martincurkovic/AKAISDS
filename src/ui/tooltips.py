@@ -384,6 +384,10 @@ LOAD_MULTI_BUTTON = (
     "Load a multi file onto the sampler: its name, effects and each part's channel, level, pan, priority, play range, transpose and tune. "
     "Programs are assigned if they are on the sampler. The current multi is saved first, and you confirm before anything is written."
 )
+S950_REPLAY_MODE = "How the sample plays: once, looping, or looping back and forth. Written with Write to Sampler."
+S950_DIRECTION = "Play the sample forward or reversed. The S950 may need ENT pressed on the sample before it follows."
+S950_SAMPLE_WRITE = "Write the changed replay mode / direction to the sampler. The sample's settings are saved first and read back afterwards."
+S950_SAMPLE_REVERT = "Put the replay mode and direction back to what the sampler holds."
 LOAD_MULTI_DEMO_MODE = "Loading a multi isn't available in demo mode."
 REVERB_BUTTON = "Bake a reverb into the sample"
 REVERB_PRESET = "A starting point for the four knobs. Moving a knob afterwards switches this back to Custom."

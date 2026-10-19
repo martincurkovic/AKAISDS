@@ -27,6 +27,9 @@ class SamplerController(QObject):
     # means "written, but the sampler shows something different" (the Program is what it
     # reports); False with None means nothing usable came back / nothing was written.
     s950_program_written = Signal(int, bool, object, str)
+    # write_s950_sample_params()'s outcome, same shape: (slot, verified, SampleParams the
+    # sampler holds now | None, message)
+    s950_sample_written = Signal(int, bool, object, str)
     status_changed = Signal(str)
     transfer_progress = Signal(int, int)  # (packets sent so far, total packets)
     unit_progress = Signal(float)
@@ -367,6 +370,14 @@ class SamplerController(QObject):
         if not self._is_s950():
             return
         self._s950.write_program(slot, baseline, edited)
+
+    def write_s950_sample_params(self, slot, changes):
+        # S900/S950 only: write the given sample parameter fields (a dict of SampleParams
+        # attribute -> value, today only replay_mode and reversed) onto the sample in
+        # `slot` - see S950Transfers.write_sample_params
+        if not self._is_s950():
+            return
+        self._s950.write_sample_params(slot, changes)
 
     def _yamaha_not_supported(self, what):
         # the Yamaha has no known delete/rename opcode, and the Akai commands below would be misread by it
