@@ -121,6 +121,7 @@ class ReverbDialog(QDialog):
         self.preset_combo.activated.connect(self._on_preset_chosen)
         for knob in self._knobs():
             knob.valueChanged.connect(self._on_changed)
+        self._preview_toggle.claim_space(*self._knobs())
         self._refresh()
         self.setFixedWidth(self.sizeHint().width())
 
@@ -214,6 +215,10 @@ class ReverbDialog(QDialog):
     def _accept_as_new(self):
         self._as_new = True
         self.accept()
+
+    def keyPressEvent(self, event):
+        if not self._preview_toggle.handle_key(event):
+            super().keyPressEvent(event)
 
     def accept(self):
         self._preview_player.stop()

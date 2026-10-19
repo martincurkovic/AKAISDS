@@ -171,3 +171,102 @@ def test_closing_a_dialog_stops_its_preview(dialog_with_fake_player):
     dialog.preview_button.click()
     dialog.reject()
     assert not dialog.state["playing"]
+
+
+# -- the Space bar ----------------------------------------------------------------------------------------------------
+
+
+def test_space_toggles_the_preview_from_the_dialog(dialog_with_fake_player):
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+
+    dialog, _turn, _release = dialog_with_fake_player
+    QTest.keyClick(dialog, Qt.Key.Key_Space)
+    assert dialog.state["playing"] and dialog.preview_button.text() == "Stop"
+    QTest.keyClick(dialog, Qt.Key.Key_Space)
+    assert not dialog.state["playing"] and dialog.preview_button.text() == "Preview"
+    assert dialog.state["plays"] == 1
+
+
+def test_space_on_a_focused_knob_toggles_the_preview(dialog_with_fake_player):
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+
+    dialog, _turn, _release = dialog_with_fake_player
+    knob = next(k for k in dialog.findChildren(__import__("ui.knob", fromlist=["Knob"]).Knob) if k.isEnabled() and k.isVisibleTo(dialog))
+    QTest.keyClick(knob, Qt.Key.Key_Space)  # (the knob does not use Space, so it goes on up to the dialog)
+    assert dialog.state["playing"]
+    if hasattr(dialog, "lp_group"):
+        assert dialog.lp_group.isChecked()  # the check box of the group around the knob did not take the Space and flip the filter's bypass
+    QTest.keyClick(knob, Qt.Key.Key_Space)
+    assert not dialog.state["playing"]
+
+
+def test_space_on_a_focused_ok_button_still_presses_ok(dialog_with_fake_player):
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+    from PySide6.QtWidgets import QDialog, QDialogButtonBox
+
+    dialog, turn_knob, _release = dialog_with_fake_player
+    turn_knob()  # (Time Stretch has nothing to apply at 100 %: OK is off until something is changed)
+    ok = dialog._button_box.button(QDialogButtonBox.StandardButton.Ok)
+    assert ok.isEnabled()
+    QTest.keyClick(ok, Qt.Key.Key_Space)
+    assert dialog.result() == QDialog.DialogCode.Accepted
+    assert dialog.state["plays"] == 0  # the preview was not started by it
+
+
+def test_other_keys_and_modified_space_do_nothing(dialog_with_fake_player):
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+
+    dialog, _turn, _release = dialog_with_fake_player
+    QTest.keyClick(dialog, Qt.Key.Key_P)
+    QTest.keyClick(dialog, Qt.Key.Key_Space, Qt.KeyboardModifier.ControlModifier)
+    assert dialog.state["plays"] == 0
+
+
+def test_space_does_nothing_while_a_preview_may_not_start(qapp):
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+
+    button, player = QPushButton("Preview"), FakePlayer()
+    toggle = PreviewToggle(button, player, lambda: player.play())
+    toggle.set_available(False)
+
+    class Event:
+        def key(self):
+            return Qt.Key.Key_Space
+
+        def modifiers(self):
+            return Qt.KeyboardModifier.NoModifier
+
+    assert toggle.handle_key(Event()) is False and player.plays == 0
+
+
+def test_a_held_space_does_not_flicker_the_preview(qapp):
+    from PySide6.QtCore import Qt
+
+    button, player, toggle = make_toggle()
+
+    class Event:
+        repeating = False
+        accepted = False
+
+        def key(self):
+            return Qt.Key.Key_Space
+
+        def modifiers(self):
+            return Qt.KeyboardModifier.NoModifier
+
+        def isAutoRepeat(self):
+            return self.repeating
+
+        def accept(self):
+            self.accepted = True
+
+    first = Event()
+    assert toggle.handle_key(first) and player.playing and first.accepted
+    held = Event()
+    held.repeating = True
+    assert toggle.handle_key(held) and player.playing  # still playing: the repeat was swallowed, not toggled

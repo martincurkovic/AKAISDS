@@ -211,6 +211,7 @@ class FilterSampleDialog(QDialog):
         self.hp_group.toggled.connect(self._update_ok_enabled)
         self.lp_group.toggled.connect(self._update_ok_enabled)
         self._update_ok_enabled()
+        self._preview_toggle.claim_space(*self.findChildren(LogKnob))
 
     def _update_ok_enabled(self):
         # nothing to send if BOTH filters are bypassed - matches
@@ -271,6 +272,10 @@ class FilterSampleDialog(QDialog):
             self._framerate,
             pitch_shift_semitones=self._pitch_shift_semitones,
         )
+
+    def keyPressEvent(self, event):
+        if not self._preview_toggle.handle_key(event):
+            super().keyPressEvent(event)
 
     def accept(self):
         self._preview_player.stop()
