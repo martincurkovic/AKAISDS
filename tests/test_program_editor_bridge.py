@@ -1227,7 +1227,7 @@ def test_worker_create_jobs_are_never_coalesced():
 
 class _MultiPartsFakeBridge:
     def __init__(self, parts=None, error=None, multi_name="DEMO MULTI"):
-        # parts: list of (name, channel, level, pan) tuples, one per part,
+        # parts: list of (name, channel, level, pan, priority, low, high, transpose, tune) tuples, one per part,
         # in order
         self._parts = parts
         self._error = error
@@ -1237,8 +1237,11 @@ class _MultiPartsFakeBridge:
         if self._error:
             raise self._error
         assert region == "multipart"
-        name, channel, level, pan = self._parts[index]
-        return {"PRNAME": name, "PMCHAN": channel, "STEREO": level, "PANPOS": pan}
+        name, channel, level, pan, priority, low, high, transpose, tune = self._parts[index]
+        return {
+            "PRNAME": name, "PMCHAN": channel, "STEREO": level, "PANPOS": pan,
+            "PRIORT": priority, "PLAYLO": low, "PLAYHI": high, "TRANSPOSE": transpose, "PTUNOCM": tune,
+        }
 
     def get_parameter(self, param, _index, **kwargs):
         if self._error:
@@ -1248,7 +1251,7 @@ class _MultiPartsFakeBridge:
 
 
 def test_worker_reads_all_sixteen_parts_in_order():
-    parts = [(f"Program {i}", i, 99, 0) for i in range(MULTI_PART_COUNT)]
+    parts = [(f"Program {i}", i, 99, 0, i % 4, 24 + i, 127 - i, i - 8, 2 * i - 16) for i in range(MULTI_PART_COUNT)]
     worker = BridgeWorker(_MultiPartsFakeBridge(parts=parts))
     loaded = []
     worker.parts_loaded.connect(loaded.append)
@@ -1261,8 +1264,8 @@ def test_worker_reads_all_sixteen_parts_in_order():
 
 def test_worker_strips_padded_program_names():
     # PRNAME is a fixed-width, space-padded text field on real hardware
-    parts = [("BASS ROUND   ", 0, 99, 0)] + [
-        ("X", i, 99, 0) for i in range(1, MULTI_PART_COUNT)
+    parts = [("BASS ROUND   ", 0, 99, 0, 1, 24, 127, 0, 0)] + [
+        ("X", i, 99, 0, 1, 24, 127, 0, 0) for i in range(1, MULTI_PART_COUNT)
     ]
     worker = BridgeWorker(_MultiPartsFakeBridge(parts=parts))
     loaded = []
@@ -1271,11 +1274,11 @@ def test_worker_strips_padded_program_names():
     worker.submit_multi_parts()
     worker.process_pending()
 
-    assert loaded[0][0] == ("BASS ROUND", 0, 99, 0)
+    assert loaded[0][0] == ("BASS ROUND", 0, 99, 0, 1, 24, 127, 0, 0)
 
 
 def test_worker_emits_multi_name_loaded_alongside_parts():
-    parts = [(f"Program {i}", i, 99, 0) for i in range(MULTI_PART_COUNT)]
+    parts = [(f"Program {i}", i, 99, 0, i % 4, 24 + i, 127 - i, i - 8, 2 * i - 16) for i in range(MULTI_PART_COUNT)]
     worker = BridgeWorker(
         _MultiPartsFakeBridge(parts=parts, multi_name="MY MULTI   ")  # padded
     )

@@ -561,7 +561,7 @@ class BridgeWorker(QThread):
     sample_length_loaded = Signal(int, int, int)
     sample_length_load_failed = Signal(int, str)
 
-    parts_loaded = Signal(list)  # [(program_name, channel, level, pan), ...] per part
+    parts_loaded = Signal(list)  # [(program_name, channel, level, pan, priority, low_note, high_note, transpose, tune), ...] per part
     parts_load_failed = Signal(str)
 
     # the multi file header's own name (MULTINAME, region "multi") - read
@@ -1078,6 +1078,11 @@ class BridgeWorker(QThread):
                     header["PMCHAN"],
                     header["STEREO"],
                     header["PANPOS"],
+                    header["PRIORT"],
+                    header["PLAYLO"],
+                    header["PLAYHI"],
+                    header["TRANSPOSE"],
+                    header["PTUNOCM"],
                 ))
         except Exception as e:
             self.parts_load_failed.emit(str(e))

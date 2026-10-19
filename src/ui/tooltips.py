@@ -571,6 +571,13 @@ MULTI_PART_LEVEL_KNOB = (
 MULTI_PART_PAN_KNOB = (
     "This part's own stereo position, independent of the program's own."
 )
+MULTI_PART_PRIORITY = (
+    "Which of this part's voices are stolen first when the sampler runs out of voices: Low goes first, Hold is kept the longest."
+)
+MULTI_PART_LOW_NOTE = "The lowest note this part plays. Notes below it are ignored by this part."
+MULTI_PART_HIGH_NOTE = "The highest note this part plays. Notes above it are ignored by this part."
+MULTI_PART_TRANSPOSE_KNOB = "Shifts this part's incoming MIDI notes by up to 50 semitones. Double-click to reset to 0."
+MULTI_PART_TUNE_KNOB = "Tunes this part in cents (hundredths of a semitone), -50 to +50. Double-click to reset to 0."
 
 # --- Keygroup tab: Zone 1-4 tabs - new ---------------------------------------
 ZONE_TAB = (

@@ -3408,7 +3408,7 @@ class ProgramEditorWindow(QMainWindow):
         # back to hardware (see _on_multi_part_program_changed/
         # _on_multi_part_channel_changed), and an unblocked call here would
         # schedule a write that just echoes the just-loaded value back
-        for part_index, (program_name, channel, level, pan) in enumerate(parts):
+        for part_index, (program_name, channel, level, pan, priority, low_note, high_note, transpose, tune) in enumerate(parts):
             program_combo = self._multi_program_combos[part_index]
             program_combo.blockSignals(True)
             match = program_combo.findText(program_name) if program_name else -1
@@ -3431,6 +3431,24 @@ class ProgramEditorWindow(QMainWindow):
             pan_knob.setValue(pan)
             pan_knob.blockSignals(False)
             self._multi_pan_value_labels[part_index].setText(str(pan))
+
+            priority_combo = self._multi_priority_combos[part_index]
+            priority_combo.blockSignals(True)
+            priority_combo.setCurrentIndex(max(0, priority_combo.findData(priority)))
+            priority_combo.blockSignals(False)
+            # (a range can arrive with Low above High only if the sampler holds one; show it as it is rather than push it)
+            for spin, value in ((self._multi_low_spins[part_index], low_note), (self._multi_high_spins[part_index], high_note)):
+                spin.blockSignals(True)
+                spin.setValue(value)
+                spin.blockSignals(False)
+            for knob, label, value in (
+                (self._multi_transpose_knobs[part_index], self._multi_transpose_value_labels[part_index], transpose),
+                (self._multi_tune_knobs[part_index], self._multi_tune_value_labels[part_index], tune),
+            ):
+                knob.blockSignals(True)
+                knob.setValue(value)
+                knob.blockSignals(False)
+                label.setText(self._signed(value))
 
         if self._multi_refresh_in_progress:
             self._multi_refresh_in_progress = False
@@ -7201,6 +7219,14 @@ class ProgramEditorWindow(QMainWindow):
         self._multi_pan_knobs = []
         self._multi_level_value_labels = []
         self._multi_pan_value_labels = []
+        # per-part priority, play range (low/high note), transpose and tune: written the same debounced way as level and pan
+        self._multi_priority_combos = []
+        self._multi_low_spins = []
+        self._multi_high_spins = []
+        self._multi_transpose_knobs = []
+        self._multi_transpose_value_labels = []
+        self._multi_tune_knobs = []
+        self._multi_tune_value_labels = []
 
         page = QWidget()
         layout = QVBoxLayout(page)
@@ -7250,11 +7276,24 @@ class ProgramEditorWindow(QMainWindow):
         level_header.setFixedWidth(60)
         pan_header = QLabel("<b>Pan</b>")
         pan_header.setFixedWidth(60)
+        range_header = QLabel("<b>Key range</b>")
+        range_header.setFixedWidth(self._MULTI_RANGE_WIDTH)
+        priority_header = QLabel("<b>Priority</b>")
+        priority_header.setFixedWidth(self._MULTI_PRIORITY_WIDTH)
+        transpose_header = QLabel("<b>Semi</b>")
+        transpose_header.setFixedWidth(60)
+        tune_header = QLabel("<b>Cents</b>")
+        tune_header.setFixedWidth(60)
+        # Part | Program | Level | Pan | Channel | Key range | Semi | Cents | Priority (the knobs sit apart from the channel / range controls)
         header_row.addWidget(part_header)
         header_row.addWidget(program_header, stretch=1)
-        header_row.addWidget(channel_header)
         header_row.addWidget(level_header)
         header_row.addWidget(pan_header)
+        header_row.addWidget(channel_header)
+        header_row.addWidget(range_header)
+        header_row.addWidget(transpose_header)
+        header_row.addWidget(tune_header)
+        header_row.addWidget(priority_header)
         layout.addLayout(header_row)
 
         for part_index in range(MULTI_PART_COUNT):
@@ -7289,12 +7328,38 @@ class ProgramEditorWindow(QMainWindow):
             )
             pan_knob.setToolTip(tt.MULTI_PART_PAN_KNOB)
 
+            low_spin, high_spin, range_widget = self._build_multi_part_range()
+            priority_combo = QComboBox()
+            for label, raw in self._MULTI_PRIORITIES:
+                priority_combo.addItem(label, raw)
+            priority_combo.setFixedWidth(self._MULTI_PRIORITY_WIDTH)
+            priority_combo.setToolTip(tt.MULTI_PART_PRIORITY)
+            priority_combo.setCurrentIndex(priority_combo.findData(1))  # Norm, the sampler's default
+            transpose_knob, transpose_label, transpose_widget = self._build_multi_part_knob(-50, 50, default=0)
+            transpose_knob.setToolTip(tt.MULTI_PART_TRANSPOSE_KNOB)
+            transpose_label.setText(self._signed(0))
+            tune_knob, tune_label, tune_widget = self._build_multi_part_knob(-50, 50, default=0)
+            tune_knob.setToolTip(tt.MULTI_PART_TUNE_KNOB)
+            tune_label.setText(self._signed(0))
+
             row.addWidget(part_label)
             row.addWidget(program_combo, stretch=1)
-            row.addWidget(channel_combo)
             row.addWidget(level_widget)
             row.addWidget(pan_widget)
+            row.addWidget(channel_combo)
+            row.addWidget(range_widget)
+            row.addWidget(transpose_widget)
+            row.addWidget(tune_widget)
+            row.addWidget(priority_combo)
             layout.addLayout(row)
+
+            self._multi_priority_combos.append(priority_combo)
+            self._multi_low_spins.append(low_spin)
+            self._multi_high_spins.append(high_spin)
+            self._multi_transpose_knobs.append(transpose_knob)
+            self._multi_transpose_value_labels.append(transpose_label)
+            self._multi_tune_knobs.append(tune_knob)
+            self._multi_tune_value_labels.append(tune_label)
 
             self._multi_program_combos.append(program_combo)
             self._multi_channel_combos.append(channel_combo)
@@ -7342,11 +7407,88 @@ class ProgramEditorWindow(QMainWindow):
                 lambda z=part_index: self._flush_write(f"multipart_pan_{z}")
             )
 
+            priority_combo.currentIndexChanged.connect(
+                lambda _, z=part_index: self._schedule_write(
+                    "PRIORT",
+                    "multipart",
+                    self._multi_priority_combos[z].currentData(),
+                    index=z,
+                    debounce_key=f"multipart_priority_{z}",
+                )
+            )
+            low_spin.valueChanged.connect(lambda v, z=part_index: self._on_multi_part_range_changed(z, "low"))
+            high_spin.valueChanged.connect(lambda v, z=part_index: self._on_multi_part_range_changed(z, "high"))
+            # typed notes are applied on Enter / leaving the box, not per keystroke
+            low_spin.editingFinished.connect(lambda z=part_index: self._flush_write(f"multipart_playlo_{z}"))
+            high_spin.editingFinished.connect(lambda z=part_index: self._flush_write(f"multipart_playhi_{z}"))
+            for knob, label, field, key in (
+                (transpose_knob, transpose_label, "TRANSPOSE", "transpose"),
+                (tune_knob, tune_label, "PTUNOCM", "tune"),
+            ):
+                knob.valueChanged.connect(lambda v, lbl=label: lbl.setText(self._signed(v)))
+                knob.valueChanged.connect(
+                    lambda v, z=part_index, field=field, key=key: self._schedule_write(
+                        field, "multipart", v, index=z, debounce_key=f"multipart_{key}_{z}"
+                    )
+                )
+                knob.sliderReleased.connect(lambda z=part_index, key=key: self._flush_write(f"multipart_{key}_{z}"))
+
         layout.addStretch()
         # same wrap as the Programs tab's pages - see _build_samples_tab's own
         # comment on why (an explicit window setMinimumSize means a layout
         # can be squeezed below its own minimum instead of forcing a scroll)
         return self._build_scroll_area(page)
+
+    # Priority is raw 0-3 on the wire; widths keep the header labels above the controls
+    _MULTI_PRIORITIES = (("Low", 0), ("Norm", 1), ("High", 2), ("Hold", 3))
+    _MULTI_PRIORITY_WIDTH = 70
+    _MULTI_RANGE_WIDTH = 150
+
+    @staticmethod
+    def _signed(value):
+        """+7 / -15 / 0, the readout beside the transpose and tune knobs."""
+        return f"{value:+d}" if value else "0"
+
+    def _build_multi_part_range(self):
+        """Low and High note spin boxes (note names, 21-127) for one part's play range, in one fixed-width container."""
+        low = NoteSpinBox()
+        high = NoteSpinBox()
+        for spin, tip, value in ((low, tt.MULTI_PART_LOW_NOTE, 24), (high, tt.MULTI_PART_HIGH_NOTE, 127)):
+            spin.setRange(21, 127)
+            spin.setValue(value)
+            spin.setFixedWidth(68)
+            spin.setToolTip(tip)
+            spin.setKeyboardTracking(False)
+        widget = QWidget()
+        widget.setObjectName("transparentContainer")
+        widget.setFixedWidth(self._MULTI_RANGE_WIDTH)
+        row = QHBoxLayout(widget)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(4)
+        row.addWidget(low)
+        row.addWidget(QLabel("-"))
+        row.addWidget(high)
+        row.addStretch()
+        return low, high, widget
+
+    def _on_multi_part_range_changed(self, part_index, which):
+        """A play-range edit. Low can't pass High (and the other way round): the other end is pushed along, as the key range does on the Keygroup tab. The pushed end is written
+        first, so the sampler never holds a range with Low above High."""
+        low, high = self._multi_low_spins[part_index], self._multi_high_spins[part_index]
+        if which == "low" and low.value() > high.value():
+            high.blockSignals(True)
+            high.setValue(low.value())
+            high.blockSignals(False)
+            self._schedule_write("PLAYHI", "multipart", high.value(), index=part_index, debounce_key=f"multipart_playhi_{part_index}")
+            self._flush_write(f"multipart_playhi_{part_index}")
+        elif which == "high" and high.value() < low.value():
+            low.blockSignals(True)
+            low.setValue(high.value())
+            low.blockSignals(False)
+            self._schedule_write("PLAYLO", "multipart", low.value(), index=part_index, debounce_key=f"multipart_playlo_{part_index}")
+            self._flush_write(f"multipart_playlo_{part_index}")
+        spin, field = (low, "PLAYLO") if which == "low" else (high, "PLAYHI")
+        self._schedule_write(field, "multipart", spin.value(), index=part_index, debounce_key=f"multipart_{field.lower()}_{part_index}")
 
     def _on_multi_part_channel_changed(self, part_index):
         channel = self._multi_channel_combos[part_index].currentData()

@@ -35,6 +35,7 @@ class FakeBridge:
         self.multipart_channels = list(range(MULTI_PART_COUNT))
         self.multipart_levels = [60 + i for i in range(MULTI_PART_COUNT)]
         self.multipart_pans = [i - 8 for i in range(MULTI_PART_COUNT)]
+        self.multipart_extra = {}
         self.multi_name = "DEMO MULTI"
         self.set_parameter_calls = []
         # sample header (Samples tab / loop points) - distinct values, real
@@ -170,6 +171,12 @@ class FakeBridge:
                 "PMCHAN": self.multipart_channels[index],
                 "STEREO": self.multipart_levels[index],
                 "PANPOS": self.multipart_pans[index],
+                # the per-part priority / play range / transpose / tune (a write is kept in multipart_extra)
+                "PRIORT": self.multipart_extra.get(("PRIORT", index), index % 4),
+                "PLAYLO": self.multipart_extra.get(("PLAYLO", index), 24 + index),
+                "PLAYHI": self.multipart_extra.get(("PLAYHI", index), 127 - index),
+                "TRANSPOSE": self.multipart_extra.get(("TRANSPOSE", index), index - 8),
+                "PTUNOCM": self.multipart_extra.get(("PTUNOCM", index), 2 * index - 16),
             }
         raise AssertionError(f"unexpected region {region!r}")
 
@@ -193,6 +200,8 @@ class FakeBridge:
             self.multipart_levels[program_index] = value
         if param.name == "PANPOS":
             self.multipart_pans[program_index] = value
+        if param.name in ("PRIORT", "PLAYLO", "PLAYHI", "TRANSPOSE", "PTUNOCM"):
+            self.multipart_extra[(param.name, program_index)] = value
 
     def get_parameter(self, param, program_index, keygroup=0, **kwargs):
         if param.region == "sample":
