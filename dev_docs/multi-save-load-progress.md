@@ -11,7 +11,7 @@ S1000-family unit) tests, and nothing below is called working until they have ru
 | Multi file codec (4096 bytes: 1024-byte header + 16 x 192-byte parts) | `src/core/akai_multi_file.py` | built, tested, **format not checked against a file the sampler wrote** |
 | Save Multi (read only) | Multi tab "Save to File...", File > Save Multi to File...; `BridgeWorker.submit_export_multi`; `akai_multi_file.read_from_bridge` | built, tested against fakes. Never run on the S2000 |
 | Read-only check tool | `tools/s2000_multi_check.py` (`show`, `save`, `compare REAL.m3`, `diff A B`, `plan FILE`) | built, tested offline. Never run on the S2000 |
-| Write check (WRITES five panel-visible part fields) | `tools/s2000_multi_write_check.py` (`plan`, `run --yes`, `restore BACKUP.m3 --yes`), tests `tests/test_multi_write_check.py` | built 2026-10-19, tested against a fake. **Never run on the S2000** |
+| Write check (WRITES five panel-visible part fields) | `tools/s2000_multi_write_check.py` (`plan`, `run --yes`, `restore BACKUP.m3 --yes`), tests `tests/test_multi_write_check.py` | built and run 2026-10-19: all five fields live on the owner's S2000 |
 | Load dry run (what a load WOULD write) | `akai_multi_file.plan_load`, tool command `plan` | built 2026-10-19, tested offline. Writes nothing anywhere |
 | **Load Multi** | nothing | **not started on purpose**: see "Why there is no Load yet" |
 | Backup All (every program + the one multi, zipped) | nothing | only discussed (see "Ideas not started") |
@@ -154,6 +154,7 @@ Only after A (and ideally after the owner's compare run). Design, following how 
 | 2026-10-19 | panel changes read back (part 2 level/pan, part 3 channel) | decoded and positioned correctly |
 | 2026-10-19 | panel changes on part 4 (priority, play range, transpose, tune) read back | all four decoded and positioned correctly |
 | 2026-10-19 | program values (keygroup range, zone tune) read back | correct (range 70-127, zone 1 tune +5.1992 st = panel 05.20) |
-| | `s2000_multi_check.py compare REAL.m3` | |
-| | `s2000_multi_check.py plan REAL.m3` | |
-| | write check (A) `run --yes`, per field (PRIORT, PLAYLO, PLAYHI, TRANSPOSE, PTUNOCM) | |
+| 2026-10-19 | `diff` of our `.m3` (built from a SysEx read of the resident multi) against the sampler's own `TEST MULTI.M3` (saved to an SD card, pulled off it; `compare` itself got no reply from the sampler when run, so this was offline) | **Identical in 4088 of 4096 bytes: header, the 992 bytes after it, and every setting of all 16 parts match.** The 8 that differ are the end link (+0xBE-BF) of the 4 assigned parts: the sampler writes its own link minus 12 (`00 60`, `54 60`, `6C 60`, `84 60`), we write `FF FF`. Link pointers, last note, byte 0 (01) and the empty parts' `FF FF` match. Open: does a sampler load our `FF FF` variant correctly? (`~/Desktop/multi_test_ours/OURS.M3`, the owner to try) |
+| 2026-10-19 | `plan` of the real file | not run (the sampler didn't answer); the file equals the resident multi, so it would be 0 changes |
+| 2026-10-19 | write check (A) `run --yes`, part 16 (no program) then part 1 (TEST PROGRAM), 10 s holds, panel on the multi-NAME page | 5 of 5 PASS on the wire both times (acked, read back equal, nothing else moved, restored exactly). The panel showed nothing, but it was on the page that shows only the multi name, which doesn't display these fields: **not a fair test** |
+| 2026-10-19 | write check on part 1, each field with the panel on its OWN page, 20-30 s holds (TRANSPOSE; PRIORT; PLAYLO + PLAYHI; PTUNOCM) | **All five confirmed live by the owner on the panel**: transpose 0 -> +07, voice priority NORM -> HIGH, low note C0 -> C2, high note G8 -> C6, cents tune 0 -> +25; each restored exactly and the whole multi equalled its backup. All five are now `"measured"` in `LOADABLE_PART_FIELDS`. Still UNPROVEN: OUTPUT, VOSCL, PFXCHAN, PFXSLEV (need the output board / FX card) |

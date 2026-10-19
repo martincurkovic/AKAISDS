@@ -405,12 +405,12 @@ def test_identical_multis_plan_no_changes():
 def test_a_changed_field_is_planned_with_how_sure_we_are_it_is_safe():
     def parts(blocks):
         blocks[2][16] = 9  # PMCHAN
-        blocks[2][18] = 3  # PRIORT: nobody has written this from the app
+        blocks[2][18] = 3  # PRIORT
         blocks[3][114] = 40  # PFXSLEV
 
     plan = amf.plan_load(*two_multis(edit_parts=parts))
     assert by_name(plan, "part 3", "PMCHAN").evidence == "proven" and by_name(plan, "part 3", "PMCHAN").new == 9
-    assert by_name(plan, "part 3", "PRIORT").evidence == "unproven"
+    assert by_name(plan, "part 3", "PRIORT").evidence == "measured"  # write-checked on the owner's S2000, 2026-10-19
     assert by_name(plan, "part 4", "PFXSLEV").evidence == "unproven" and by_name(plan, "part 4", "PFXSLEV").new == 40
     assert len(plan.changes) == 3
 
@@ -518,6 +518,7 @@ def test_the_tool_prints_a_dry_run_offline(tmp_path, capsys):
     def parts(blocks):
         blocks[2][16] = 9
         blocks[2][18] = 3
+        blocks[2][22] = 1  # OUTPUT: needs the output board, never written from here
         blocks[0][3:15] = bytes(range(10, 22))
 
     current, target = two_multis(edit_header=header, edit_parts=parts)
@@ -527,6 +528,6 @@ def test_the_tool_prints_a_dry_run_offline(tmp_path, capsys):
     assert tool.main(["plan", str(b), "--against", str(a), "--programs", "SOMETHING ELSE"]) == 0
     out = capsys.readouterr().out
     assert "would change" in out and "part 3 PMCHAN" in out and "[proven]" in out
-    assert "part 3 PRIORT" in out and "UNPROVEN" in out and "multi FX1" in out and "crashes" in out
+    assert "part 3 PRIORT" in out and "[measured]" in out and "part 3 OUTPUT" in out and "UNPROVEN" in out and "multi FX1" in out and "crashes" in out
     assert "[not resident]" in out and "Nothing was written: this is a dry run." in out
     assert "have never been tried from this app" in out

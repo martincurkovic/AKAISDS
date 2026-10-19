@@ -106,7 +106,7 @@ def print_plan(plan, file_label):
     print(f"\nLoading {file_label} would change {len(plan.changes)} field(s); {plan.unchanged} loadable field(s) already match.")
     if plan.changes:
         width = max(len(f"{c.scope} {c.name}") for c in plan.changes)
-        print("\n  evidence: proven = the Multi tab writes it today; measured = s3ked measured the write; UNPROVEN = nobody has written it from here")
+        print("\n  evidence: proven = the Multi tab writes it today; measured = a write was checked on a unit; UNPROVEN = nobody has written it from here")
         for c in plan.changes:
             tag = "UNPROVEN" if c.evidence == "unproven" else c.evidence
             line = f"  {c.scope + ' ' + c.name:<{width}}  {amf.format_value(c.name, c.current)} -> {amf.format_value(c.name, c.new)}   [{tag}]"

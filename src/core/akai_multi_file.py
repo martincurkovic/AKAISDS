@@ -214,7 +214,8 @@ def compare(a, b):
 # whole-block MULTIDATA write) and nothing else. See dev_docs/multi-save-load-progress.md.
 
 #: (field, how much evidence there is that WRITING it from this app is safe). "proven": the Multi tab writes it today and it works on the owner's unit.
-#: "measured": s3ked measured the write on hardware (the range matters: see FX_MAX). "unproven": no measurement of writing it exists.
+#: "measured": a write was checked on hardware (FX: s3ked; the range matters, see FX_MAX. PRIORT, PLAYLO, PLAYHI, TRANSPOSE, PTUNOCM: tools/s2000_multi_write_check.py on the
+#: owner's S2000, 2026-10-19, with the panel on each field's own page). "unproven": no measurement of writing it exists.
 LOADABLE_HEADER_FIELDS = (
     ("MULTINAME", "proven"),
     ("FX1", "measured"),
@@ -226,15 +227,15 @@ LOADABLE_PART_FIELDS = (
     ("PMCHAN", "proven"),
     ("STEREO", "proven"),  # the panel's "Lev"
     ("PANPOS", "proven"),
-    ("PRIORT", "unproven"),
-    ("PLAYLO", "unproven"),
-    ("PLAYHI", "unproven"),
+    ("PRIORT", "measured"),
+    ("PLAYLO", "measured"),
+    ("PLAYHI", "measured"),
     ("OUTPUT", "unproven"),
     ("VOSCL", "unproven"),
-    ("TRANSPOSE", "unproven"),
+    ("TRANSPOSE", "measured"),
     ("PFXCHAN", "unproven"),
     ("PFXSLEV", "unproven"),
-    ("PTUNOCM", "unproven"),
+    ("PTUNOCM", "measured"),
 )
 OMNI = 255
 
