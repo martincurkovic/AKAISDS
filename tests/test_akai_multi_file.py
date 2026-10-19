@@ -325,3 +325,161 @@ def test_the_check_tool_shows_diffs_and_compares_files_offline(tmp_path, capsys)
     out = capsys.readouterr().out
     assert "1 DIFFERENCE(S)" in out and "part 1" in out and "PMCHAN" in out
     assert tool.main([]) == 2
+
+
+# -- the dry run of a Load ------------------------------------------------------------------------------------------------
+
+
+def two_multis(edit_header=None, edit_parts=None):
+    header, parts = make_blocks()
+    current = amf.parse_file(amf.build_file(header, parts))
+    new_header = bytearray(header)
+    new_parts = [bytearray(p) for p in parts]
+    if edit_header:
+        edit_header(new_header)
+    if edit_parts:
+        edit_parts(new_parts)
+    target = amf.parse_file(amf.build_file(bytes(new_header), [bytes(p) for p in new_parts]))
+    return current, target
+
+
+def by_name(plan, scope, name):
+    return next((c for c in plan.changes if c.scope == scope and c.name == name), None)
+
+
+def test_identical_multis_plan_no_changes():
+    current, target = two_multis()
+    plan = amf.plan_load(current, target)
+    assert plan.changes == [] and plan.not_loaded == []
+    assert plan.unchanged == len(amf.LOADABLE_HEADER_FIELDS) + 16 * len(amf.LOADABLE_PART_FIELDS)
+    assert all(b.state == "same" for b in plan.bindings) and len(plan.bindings) == 16
+
+
+def test_a_changed_field_is_planned_with_how_sure_we_are_it_is_safe():
+    def parts(blocks):
+        blocks[2][16] = 9  # PMCHAN
+        blocks[2][18] = 3  # PRIORT: nobody has written this from the app
+        blocks[3][114] = 40  # PFXSLEV
+
+    plan = amf.plan_load(*two_multis(edit_parts=parts))
+    assert by_name(plan, "part 3", "PMCHAN").evidence == "proven" and by_name(plan, "part 3", "PMCHAN").new == 9
+    assert by_name(plan, "part 3", "PRIORT").evidence == "unproven"
+    assert by_name(plan, "part 4", "PFXSLEV").evidence == "unproven" and by_name(plan, "part 4", "PFXSLEV").new == 40
+    assert len(plan.changes) == 3
+
+
+def test_the_multi_name_is_proven_and_the_effects_were_measured():
+    def header(block):
+        block[3:15] = bytes(range(20, 32))
+        block[16] = 7
+
+    plan = amf.plan_load(*two_multis(edit_header=header))
+    assert by_name(plan, "multi", "MULTINAME").evidence == "proven"
+    assert by_name(plan, "multi", "FX1").evidence == "measured"
+
+
+def test_an_effect_byte_above_204_is_clamped_in_the_plan_and_says_why():
+    plan = amf.plan_load(*two_multis(edit_header=lambda h: h.__setitem__(slice(16, 18), bytes([250, 205]))))
+    fx1, fx2 = by_name(plan, "multi", "FX1"), by_name(plan, "multi", "FX2")
+    for change in (fx1, fx2):
+        assert change.new == 205  # the display value of byte 204 (s3k shows an effect index one higher than its byte)
+        assert "above 204" in change.note and "crashes" in change.note
+    assert "250" in fx1.note and "205" in fx2.note.split("byte is ")[1]
+
+
+def test_an_effect_byte_that_is_clamped_to_what_the_sampler_already_has_changes_nothing():
+    current, target = two_multis(edit_header=lambda h: h.__setitem__(19, 250))  # FX4: the current one is already 204
+    assert by_name(amf.plan_load(current, target), "multi", "FX4") is None
+
+
+def test_a_channel_the_panel_would_clamp_is_stored_as_16():
+    plan = amf.plan_load(*two_multis(edit_parts=lambda b: b[4].__setitem__(16, 22)))
+    change = by_name(plan, "part 5", "PMCHAN")
+    assert change.new == 15 and "channel 16" in change.note
+
+
+def test_omni_is_kept_as_omni():
+    current, target = two_multis(edit_parts=lambda b: b[0].__setitem__(16, 255))
+    change = by_name(amf.plan_load(current, target), "part 1", "PMCHAN")
+    assert change.new == 255 and change.note == "" and amf.format_value("PMCHAN", change.new) == "OMNI"
+
+
+def test_programs_are_reported_as_bindings_by_state():
+    def parts(blocks):
+        blocks[0][3:15] = bytes([10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21])  # a program name (part 1)
+        blocks[1][3:15] = bytes([10] * 12)  # a blank name (part 2)
+
+    current, target = two_multis(edit_parts=parts)
+    wanted = target.part_name(0)
+    assert wanted and target.part_name(1) == ""
+    unknown = amf.plan_load(current, target)
+    assert unknown.bindings[0].state == "unknown"
+    resident = amf.plan_load(current, target, [wanted, "OTHER"])
+    assert resident.bindings[0].state == "resident"
+    missing = amf.plan_load(current, target, ["OTHER"])
+    assert missing.bindings[0].state == "not resident"
+    assert missing.bindings[1].state == "blank in file"
+    assert missing.bindings[2].state == "same"
+
+
+def test_what_a_load_would_not_touch_is_listed():
+    def header(block):
+        block[20] = 5  # the effects file name
+
+    def parts(blocks):
+        blocks[1][0x47] = 9  # a byte the app has no field for
+        blocks[1][1] = 0xEE  # a pointer: ignored silently
+
+    current, target = two_multis(edit_header=header, edit_parts=parts)
+    data = bytearray(amf.build_file(target.header, target.parts))
+    data[0x100] = 1  # beyond the 32 header bytes
+    target = amf.parse_file(bytes(data))
+    lines = amf.plan_load(current, target).not_loaded
+    assert any("effects file name" in line for line in lines)
+    assert any("beyond the first 32" in line for line in lines)
+    assert any("1 part byte(s)" in line for line in lines)
+
+
+def test_a_plan_writes_nothing_and_does_not_touch_its_inputs():
+    current, target = two_multis(edit_parts=lambda b: b[0].__setitem__(16, 9))
+    before = (current.header, list(current.parts), target.header, list(target.parts))
+    amf.plan_load(current, target, ["X"])
+    assert before == (current.header, list(current.parts), target.header, list(target.parts))
+
+
+def test_every_loadable_field_exists_and_none_is_a_pointer():
+    for region, fields in (("multi", amf.LOADABLE_HEADER_FIELDS), ("multipart", amf.LOADABLE_PART_FIELDS)):
+        for name, evidence in fields:
+            prm = amf.p.lookup(name, region)
+            assert evidence in ("proven", "measured", "unproven")
+            if region == "multipart":
+                assert not set(range(prm.offset, prm.offset + prm.size)) & amf.IGNORED_PART_OFFSETS, name
+
+
+def test_the_tool_prints_a_dry_run_offline(tmp_path, capsys):
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "s2000_multi_check", os.path.join(os.path.dirname(__file__), "..", "tools", "s2000_multi_check.py")
+    )
+    tool = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(tool)
+
+    def header(block):
+        block[16:18] = bytes([250, 3])
+
+    def parts(blocks):
+        blocks[2][16] = 9
+        blocks[2][18] = 3
+        blocks[0][3:15] = bytes(range(10, 22))
+
+    current, target = two_multis(edit_header=header, edit_parts=parts)
+    a, b = tmp_path / "current.m3", tmp_path / "wanted.m3"
+    a.write_bytes(amf.build_file(current.header, current.parts))
+    b.write_bytes(amf.build_file(target.header, target.parts))
+    assert tool.main(["plan", str(b), "--against", str(a), "--programs", "SOMETHING ELSE"]) == 0
+    out = capsys.readouterr().out
+    assert "would change" in out and "part 3 PMCHAN" in out and "[proven]" in out
+    assert "part 3 PRIORT" in out and "UNPROVEN" in out and "multi FX1" in out and "crashes" in out
+    assert "[not resident]" in out and "Nothing was written: this is a dry run." in out
+    assert "have never been tried from this app" in out

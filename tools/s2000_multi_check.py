@@ -11,6 +11,10 @@ It settles the open questions in dev_docs/s3000-multi-file-format.md: does the f
                                                                       # read the resident multi, build the file Save Multi WOULD write, and diff it
                                                                       # against REAL.m3 (a multi the sampler saved to disk and akaiutil extracted)
     uv run python tools/s2000_multi_check.py diff A.m3 B.m3           # offline: the same diff between two files
+    uv run python tools/s2000_multi_check.py plan FILE.m3             # DRY RUN of a Load (there is none yet): read the resident multi and the program names, and
+                                                                      # say what loading FILE.m3 would change, field by field, and how sure we are each write is safe
+    uv run python tools/s2000_multi_check.py plan FILE.m3 --against CURRENT.m3 [--programs "KICK,SNARE"]
+                                                                      # the same, offline, against another file (and a list of resident program names)
 
 Procedure for `compare`, at the sampler:
   1. Set up a multi with DISTINCTIVE values: a different program, channel, level and pan on every part you can, and, if you use them, priority, play range,
@@ -76,11 +80,78 @@ def report(lines, a_label, b_label):
     return 1
 
 
+def read_program_names():
+    """The resident program names (RPLIST, read only), or None if they can't be read."""
+    from core import app_config, midi_manager as mm
+    from core import program_editor_bridge as peb
+
+    midi = mm.MidiManager()
+    in_name, out_name = app_config.get_saved_ports()
+    midi.open_input(in_name)
+    midi.open_output(out_name)
+    bridge = peb.connect(midi, "akai_s2000_s3000")
+    try:
+        return list(bridge.program_list())
+    except Exception as e:  # noqa: BLE001 - a plan without the program list is still useful
+        print(f"couldn't read the program list ({e}); programs are reported as unknown")
+        return None
+
+
+def print_plan(plan, file_label):
+    print(f"\nLoading {file_label} would change {len(plan.changes)} field(s); {plan.unchanged} loadable field(s) already match.")
+    if plan.changes:
+        width = max(len(f"{c.scope} {c.name}") for c in plan.changes)
+        print("\n  evidence: proven = the Multi tab writes it today; measured = s3ked measured the write; UNPROVEN = nobody has written it from here")
+        for c in plan.changes:
+            tag = "UNPROVEN" if c.evidence == "unproven" else c.evidence
+            line = f"  {c.scope + ' ' + c.name:<{width}}  {amf.format_value(c.name, c.current)} -> {amf.format_value(c.name, c.new)}   [{tag}]"
+            print(line + (f"  ({c.note})" if c.note else ""))
+    print("\nPrograms (a part is bound by a Program Change on its channel, by name; a load can't unassign a part):")
+    for b in plan.bindings:
+        if b.state == "same" and not b.new:
+            continue
+        print(f"  part {b.part:2}: {b.current!r:16} -> {b.new!r:16} [{b.state}]")
+    if plan.not_loaded:
+        print("\nNot loaded:")
+        for line in plan.not_loaded:
+            print(f"  {line}")
+    unproven = sum(1 for c in plan.changes if c.evidence == "unproven")
+    if unproven:
+        print(f"\n{unproven} of these writes have never been tried from this app (UNPROVEN). Nothing was written: this is a dry run.")
+    else:
+        print("\nNothing was written: this is a dry run.")
+
+
+def run_plan(rest):
+    against, programs = None, None
+    if "--against" in rest:
+        at = rest.index("--against")
+        against = rest[at + 1]
+        rest = rest[:at] + rest[at + 2 :]
+    if "--programs" in rest:
+        at = rest.index("--programs")
+        programs = [name.strip() for name in rest[at + 1].split(",") if name.strip()]
+        rest = rest[:at] + rest[at + 2 :]
+    target = load(rest[0])
+    if against:
+        current = load(against)
+        label = f"{rest[0]} over {against}"
+    else:
+        current = read_resident()
+        programs = read_program_names() if programs is None else programs
+        label = f"{rest[0]} over the resident multi {current.name!r}"
+    print(summary("the file", target))
+    print_plan(amf.plan_load(current, target, programs), label)
+    return 0
+
+
 def main(argv):
-    if len(argv) < 2 or argv[0] not in ("show", "save", "compare", "diff"):
+    if len(argv) < 2 or argv[0] not in ("show", "save", "compare", "diff", "plan"):
         print(__doc__)
         return 2
     command, rest = argv[0], argv[1:]
+    if command == "plan":
+        return run_plan(rest)
     if command == "show":
         print(summary(rest[0], load(rest[0])))
         return 0

@@ -192,3 +192,153 @@ def compare(a, b):
             if a.parts[index][offset] != b.parts[index][offset]:
                 lines.append(f"part {index + 1} {describe_part_offset(offset)}: {a.parts[index][offset]} vs {b.parts[index][offset]}")
     return lines
+
+
+# --- a dry run of a Load (what WOULD change on the sampler; nothing is written anywhere) ------------------------------------
+#
+# There is no Load Multi yet. This is its first half: given the multi now on the sampler and a multi file, say field by field what a load would write, how sure
+# we are that each write is safe, and what would be clamped or left alone. A real loader would write exactly these fields (one SysEx write per field, never a
+# whole-block MULTIDATA write) and nothing else. See dev_docs/multi-save-load-progress.md.
+
+#: (field, how much evidence there is that WRITING it from this app is safe). "proven": the Multi tab writes it today and it works on the owner's unit.
+#: "measured": s3ked measured the write on hardware (the range matters: see FX_MAX). "unproven": no measurement of writing it exists.
+LOADABLE_HEADER_FIELDS = (
+    ("MULTINAME", "proven"),
+    ("FX1", "measured"),
+    ("FX2", "measured"),
+    ("FX3", "measured"),
+    ("FX4", "measured"),
+)
+LOADABLE_PART_FIELDS = (
+    ("PMCHAN", "proven"),
+    ("STEREO", "proven"),  # the panel's "Lev"
+    ("PANPOS", "proven"),
+    ("PRIORT", "unproven"),
+    ("PLAYLO", "unproven"),
+    ("PLAYHI", "unproven"),
+    ("OUTPUT", "unproven"),
+    ("VOSCL", "unproven"),
+    ("TRANSPOSE", "unproven"),
+    ("PFXCHAN", "unproven"),
+    ("PFXSLEV", "unproven"),
+    ("PTUNOCM", "unproven"),
+)
+OMNI = 255
+
+
+@dataclass
+class Change:
+    scope: str  # "multi" or "part 3"
+    name: str
+    current: object
+    new: object  # what would be written (after any clamping)
+    evidence: str  # "proven" | "measured" | "unproven"
+    note: str = ""
+
+
+@dataclass
+class Binding:
+    """A part's program: not a field write (a part is bound to a program by a MIDI Program Change on its channel, by the program's name)."""
+
+    part: int  # 1-16
+    current: str
+    new: str
+    state: str  # "same" | "blank in file" | "resident" | "not resident" | "unknown" (no program list was given)
+
+
+@dataclass
+class LoadPlan:
+    changes: list = field(default_factory=list)
+    bindings: list = field(default_factory=list)
+    unchanged: int = 0  # loadable fields that already match
+    not_loaded: list = field(default_factory=list)  # things in the file a load would not touch, in words
+
+
+def _differs(a, b):
+    return a != b
+
+
+def _clamp_channel(raw):
+    """The panel shows a stored channel above 15 (but not 255 = OMNI) as 16, so a load stores 15 for it rather than a value the panel only clamps."""
+    value = int(raw)
+    if value == OMNI or 0 <= value <= 15:
+        return value, ""
+    return 15, f"the file has {value}, which the panel shows as channel 16"
+
+
+def plan_load(current, target, resident_programs=None):
+    """What loading `target` (a MultiFile) over `current` (the multi on the sampler) would write. `resident_programs` is the sampler's program names, if known."""
+    plan = LoadPlan()
+    resident = None if resident_programs is None else {name.rstrip() for name in resident_programs}  # (as part_name: a name may start with a space)
+
+    def consider(scope, region, name, evidence, current_block, target_block):
+        have = _decode(region, name, current_block)
+        want = _decode(region, name, target_block)
+        note = ""
+        if name in ("FX1", "FX2", "FX3", "FX4"):
+            # judged on the BYTE (s3k shows an effect index one higher than the byte: display_offset 1), because the byte is what crashes the sampler above 204
+            prm = _field(region, name)
+            raw = target_block[prm.offset]
+            if raw > FX_MAX:
+                want = p.decode_field(prm, bytes([FX_MAX]))
+                note = f"the file's byte is {raw}; above {FX_MAX} the sampler crashes, so {FX_MAX} would be written (shown as {want})"
+        elif name == "PMCHAN":
+            want, note = _clamp_channel(want)
+        if _differs(have, want):
+            plan.changes.append(Change(scope, name, have, want, evidence, note))
+        else:
+            plan.unchanged += 1
+
+    for name, evidence in LOADABLE_HEADER_FIELDS:
+        consider("multi", "multi", name, evidence, current.header, target.header)
+    for index in range(PART_COUNT):
+        for name, evidence in LOADABLE_PART_FIELDS:
+            consider(f"part {index + 1}", "multipart", name, evidence, current.parts[index], target.parts[index])
+        have, want = current.part_name(index), target.part_name(index)
+        if have == want:
+            state = "same"
+        elif not want:
+            state = "blank in file"
+        elif resident is None:
+            state = "unknown"
+        else:
+            state = "resident" if want in resident else "not resident"
+        plan.bindings.append(Binding(index + 1, have, want, state))
+
+    if _decode("multi", "FXFILENAME", current.header) != _decode("multi", "FXFILENAME", target.header):
+        plan.not_loaded.append("the effects file name (never seen non-zero; not written)")
+    if any(target.extra_header):
+        plan.not_loaded.append(f"{sum(1 for b in target.extra_header if b)} non-zero header byte(s) beyond the first 32 (unknown meaning; SysEx cannot write them)")
+    modelled = _modelled_part_offsets()
+    other = sum(
+        1
+        for index in range(PART_COUNT)
+        for offset in range(PART_SIZE)
+        if offset not in modelled and offset not in IGNORED_PART_OFFSETS and current.parts[index][offset] != target.parts[index][offset]
+    )
+    if other:
+        plan.not_loaded.append(f"{other} part byte(s) the app has no field for differ (not written)")
+    return plan
+
+
+def _modelled_part_offsets():
+    """Every part-record offset that is one of the loadable fields or the program name."""
+    offsets = set()
+    for name, _evidence in LOADABLE_PART_FIELDS + (("PRNAME", ""),):
+        prm = _field("multipart", name)
+        offsets.update(range(prm.offset, prm.offset + prm.size))
+    return offsets
+
+
+def _channel_text(value):
+    value = int(value)
+    return "OMNI" if value == OMNI else f"{value + 1}"
+
+
+def format_value(name, value):
+    """A value as the panel would show it, for a plan's lines."""
+    if name == "PMCHAN":
+        return _channel_text(value)
+    if name == "PRNAME" or name == "MULTINAME":
+        return repr(str(value).rstrip())
+    return str(value)
