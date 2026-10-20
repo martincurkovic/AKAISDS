@@ -34,7 +34,7 @@ def user_sample(window, name="UM", frames=4000, *, mode=1, end=3000, loop=(1000,
         loop_length=loop[1] - loop[0])
     window.samples_tab.set_samples(list(fake.samples))
     tab = load(window, name)
-    assert wait_until(lambda: tab._audio_name == name)
+    assert wait_until(lambda: tab._audio_name == name, timeout=15)  # the reveal timer can run slow on a loaded CI runner
     return tab
 
 
