@@ -1128,6 +1128,10 @@ class SliceEditorWindow(QDialog):
         if reply != QMessageBox.StandardButton.Yes:
             return
 
+        debug_log.get_logger().info(
+            f"SliceEditor: export {slice_count} slice(s) as {names[0]!r}..{names[-1]!r}"
+            + (f", with program {program_name!r}" if create_program else "")
+        )
         bit_depth = self.bit_depth_combo.currentData()
         sample_rate = self.rate_combo.currentData()
         slices = sample_slicing.slice_samples(
@@ -1200,6 +1204,7 @@ class SliceEditorWindow(QDialog):
             self._on_export_busy(False)
             self.export_progress.setVisible(False)
 
+        debug_log.get_logger().info(f"SliceEditor: export {'done' if success else 'FAILED'}: {message}")
         self.status_bar.showMessage(message)
         if success:
             self._dirty = False  # this exact marker layout is now on the sampler

@@ -117,7 +117,7 @@ while Settings is up, unfreeze only after the bridge is swapped in. Every early 
 - **Unexpected SysEx is log-only on the Dashboard** (owner's decision; `_log_unexpected_sysex(..., quiet=True)`): DEBUG, capped, never `status_changed`. A data packet before any header, or an S1000 error REPLY, stays a WARNING.
 - Prefixes: `ProgramEditor:`, `S950Editor:`/`S950Transfers`, `YamahaEditor:`/`YamahaSession` (WARNING at the 10th unsolicited SysEx while idle), `SliceEditor:`, `ImportAudio:`, `superflux:`, `rx2:` (a WARNING when VelociLoops fails to load: first thing to check for "can't import / SuperFlux greyed out").
 - **`LagProbe:`** (`core/ui_lag_probe.py`): one INFO line after every Program Editor audio load (GUI heartbeat delay; `AKAISDS_PROFILE_LOAD=1` adds where the GUI thread was). Simulated 2026-10-19: ~0.3 ms GUI work per packet, worst heartbeat 35 ms, so per-packet work isn't what lags; **the cause on the owner's Mac was not found**; a worker-thread receive was judged not worth it.
-- Known gaps (not blocking): rename/duplicate of programs, keygroups and samples and the Dashboard's slice export have no intent line of their own (bridge calls and message boxes are logged).
+- Rename, duplicate and delete of programs, keygroups and samples log an intent line (`ProgramEditor: rename program 'A' -> 'B'`, ...), and so does the Slice Editor's export (`SliceEditor: export N slice(s) ...` and its result), for every window that opens it. Not logged: the S1000 gating state, Yamaha per-write old -> new values (the write coordinator logs the new one).
 
 ## Menus and shortcuts (`ui/standard_menus.py`, `ui/shortcuts_dialog.py`)
 

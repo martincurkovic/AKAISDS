@@ -4074,6 +4074,7 @@ class ProgramEditorWindow(QMainWindow):
         if self._is_s1000 and self._program_name_taken(program_index, new_name):
             self._warn_name_in_use("Program", new_name)
             return
+        debug_log.get_logger().info(f"ProgramEditor: rename program {current_name!r} -> {new_name!r}")
         self._program_name_on_sampler = new_name
         item.setText(new_name)
         self._update_multi_program_combo_names(program_index, new_name)
@@ -4119,6 +4120,7 @@ class ProgramEditorWindow(QMainWindow):
                 "behaviour) - pick a different name.",
             )
             return
+        debug_log.get_logger().info(f"ProgramEditor: duplicate program {current_name!r} as {new_name!r}")
         self.status_bar.showMessage(f'Duplicating program "{current_name}"…')
         self._worker.submit_create_program(source_index, new_name)
 
@@ -4138,6 +4140,7 @@ class ProgramEditorWindow(QMainWindow):
         )
         if answer != QMessageBox.StandardButton.Yes:
             return
+        debug_log.get_logger().info(f"ProgramEditor: duplicate keygroup {keygroup_index + 1} of program {program_index + 1}")
         self.status_bar.showMessage(f"Duplicating keygroup {keygroup_index + 1}…")
         self._worker.submit_create_keygroup(program_index, keygroup_index)
 
@@ -4811,6 +4814,7 @@ class ProgramEditorWindow(QMainWindow):
         )
         if answer != QMessageBox.StandardButton.Yes:
             return
+        debug_log.get_logger().info(f"ProgramEditor: delete program {program_name!r}")
         self.status_bar.showMessage(f'Deleting program "{program_name}"…')
         self._worker.submit_delete_program(program_index)
 
@@ -4885,6 +4889,7 @@ class ProgramEditorWindow(QMainWindow):
         )
         if answer != QMessageBox.StandardButton.Yes:
             return
+        debug_log.get_logger().info(f"ProgramEditor: delete keygroup {keygroup_index + 1} of program {program_index + 1}")
         self.status_bar.showMessage(f"Deleting keygroup {keygroup_index + 1}…")
         self._worker.submit_delete_keygroup(program_index, keygroup_index)
 
@@ -4965,6 +4970,7 @@ class ProgramEditorWindow(QMainWindow):
         ):
             self._warn_name_in_use("Sample", new_name)
             return
+        debug_log.get_logger().info(f"ProgramEditor: rename sample {current_name!r} -> {new_name!r}")
         self._sample_list[sample_index] = new_name
         # the audio keeps its cache entry (by index); a retained copy under
         # the old name must not attach to some other sample later
@@ -5008,6 +5014,7 @@ class ProgramEditorWindow(QMainWindow):
         )
         if answer != QMessageBox.StandardButton.Yes:
             return
+        debug_log.get_logger().info(f"ProgramEditor: delete sample {sample_name!r}")
         self._discard_staged(sample_name, restore_entry=False)
         self.status_bar.showMessage(f'Deleting sample "{sample_name}"…')
         self._worker.submit_delete_sample(sample_index)
@@ -5072,6 +5079,7 @@ class ProgramEditorWindow(QMainWindow):
             )
             return
 
+        debug_log.get_logger().info(f"ProgramEditor: duplicate sample {current_name!r} as {new_name!r}")
         self.waveform_view.set_loading(True)
         self._set_hardware_busy_ui(True)
         self.status_bar.showMessage(
