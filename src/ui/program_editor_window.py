@@ -9,12 +9,6 @@ import tempfile
 import time
 import wave
 
-if __name__ == "__main__":
-    # running this file directly (not through main.py) puts src/ui on
-    # sys.path, not src/ - so the ui./core. imports below would otherwise
-    # fail with "No module named 'ui'"
-    sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
-
 from PySide6.QtGui import (
     Qt,
     QAction,
@@ -58,7 +52,6 @@ from core import app_config
 from core import dropped_files
 from core import external_edit
 from ui.external_edit_tracker import ExternalEditTracker
-from ui.diagnostics_ui import add_open_log_folder_action
 from ui.knob import Knob
 from ui.program_list_widget import ProgramListWidget
 from ui.note_spinbox import NoteSpinBox
@@ -96,9 +89,14 @@ from ui.reverb_dialog import ReverbDialog
 from ui.time_stretch_dialog import TimeStretchDialog
 from core.audio_preview import SlicePreviewPlayer
 from ui import theme, wheel_guard
-from ui.about_dialog import AboutDialog
-from ui.quickstart_dialog import show_quickstart_dialog
-from ui.update_helper import UpdateCheckRunner
+from ui.shortcuts_dialog import (
+    audition_section,
+    dragging_section,
+    lists_section,
+    preview_dialogs_section,
+    slice_editor_section,
+)
+from ui.standard_menus import add_cancel_transfer_action, add_help_menu, build_zoom_actions
 from ui import tooltips as tt
 from core import debug_log, demo_timing, diagnostics
 from core.akai_sysex import baseline_semitones_for_bandwidth
@@ -2394,10 +2392,7 @@ class ProgramEditorWindow(QMainWindow):
         # slice_editor_window.py), this window is a plain top-level window
         # and keeps focus during the freeze, so an ordinary QAction on its
         # own menu bar reaches it fine.
-        cancel_action = QAction("Cancel Transfer", self)
-        cancel_action.setShortcut("Ctrl+.")
-        cancel_action.triggered.connect(self._cancel_hardware_transfer)
-        hardware_menu.addAction(cancel_action)
+        cancel_action = add_cancel_transfer_action(self, hardware_menu, self._cancel_hardware_transfer)
         # same "append the resolved, platform-native shortcut rather than
         # hardcoding one platform's symbol" fix-up the zoom buttons get
         # further down - see that block's own comment for why
@@ -2440,38 +2435,7 @@ class ProgramEditorWindow(QMainWindow):
             self._settings_action.triggered.connect(self._open_settings_dialog)
             hardware_menu.addAction(self._settings_action)
 
-        # zoom for the Samples tab's waveform view. "Ctrl+=" is the primary
-        # zoom-in binding (auto-translates to "Cmd+=" on macOS via Qt's own
-        # Ctrl->Cmd substitution, same as every other shortcut string in
-        # this file) rather than QKeySequence.StandardKey.ZoomIn's own
-        # platform-default primary binding, "Ctrl++" - on a US keyboard "+"
-        # needs Shift, so that default would actually require
-        # Ctrl+Shift+=. QKeySequence.keyBindings(...) is still appended
-        # after it (as secondary bindings) so a keyboard/platform that DOES
-        # have a dedicated "+" key, or a real "Zoom In" media key, keeps
-        # working too - just not shown in the tooltip, which only reflects
-        # the primary (first) binding. Zoom out keeps StandardKey.ZoomOut's
-        # own default ("Ctrl+-") unmodified since "-" needs no Shift on a US
-        # keyboard already. There's no standard key for "zoom to fit" so
-        # that one is a plain "Ctrl+0", matching the common browser/editor
-        # convention for "reset zoom". These act on self.waveform_view
-        # regardless of which tab is currently showing - harmless no-ops
-        # off the Samples tab, same as Ctrl+1/2/3 below being global rather
-        # than tab-scoped.
-        self.zoom_in_action = QAction("Zoom In", self)
-        self.zoom_in_action.setShortcuts(
-            [QKeySequence("Ctrl+=")]
-            + QKeySequence.keyBindings(QKeySequence.StandardKey.ZoomIn)
-        )
-        self.zoom_in_action.triggered.connect(self.waveform_view.zoom_in)
-        self.zoom_out_action = QAction("Zoom Out", self)
-        self.zoom_out_action.setShortcuts(
-            QKeySequence.keyBindings(QKeySequence.StandardKey.ZoomOut)
-        )
-        self.zoom_out_action.triggered.connect(self.waveform_view.zoom_out)
-        self.zoom_fit_action = QAction("Zoom to Fit", self)
-        self.zoom_fit_action.setShortcut("Ctrl+0")
-        self.zoom_fit_action.triggered.connect(self.waveform_view.reset_zoom)
+        self.zoom_in_action, self.zoom_out_action, self.zoom_fit_action = build_zoom_actions(self, lambda: self.waveform_view)
 
         view_menu = self.menuBar().addMenu("&View")
         view_menu.addAction(self.zoom_in_action)
@@ -2603,28 +2567,10 @@ class ProgramEditorWindow(QMainWindow):
         )
         window_menu.addAction(self._global_tab_action)
 
-        # Qt has no MenuRole for "check for updates" (only About/Preferences/
-        # Quit get auto-relocated into the native app menu on macOS - see
-        # QAction.MenuRole), so this stays a plain Help menu on every
-        # platform, same as main_window.py's own
-        help_menu = self.menuBar().addMenu("&Help")
-
-        quickstart_action = QAction("Quick Start Guide...", self)
-        quickstart_action.triggered.connect(lambda: show_quickstart_dialog(self))
-        help_menu.addAction(quickstart_action)
-        help_menu.addSeparator()
-        add_open_log_folder_action(help_menu, self)
-
-        about_action = QAction("About AKAISDS...", self)
-        about_action.setMenuRole(QAction.MenuRole.AboutRole)
-        about_action.triggered.connect(self._show_about_dialog)
-        help_menu.addAction(about_action)
-
-        check_for_updates_action = QAction("Check for Updates...", self)
-        check_for_updates_action.triggered.connect(self._check_for_updates_manual)
-        help_menu.addAction(check_for_updates_action)
-
-        self._update_runner = UpdateCheckRunner(self)
+        add_help_menu(
+            self,
+            [lists_section(), audition_section(), slice_editor_section(), preview_dialogs_section(), dragging_section()],
+        )
 
         # same idea as the dashboard's status bar (dashboard.py), but that's
         # a plain QWidget so it builds its own QStatusBar into its layout -
@@ -6259,13 +6205,6 @@ class ProgramEditorWindow(QMainWindow):
             pass  # already disconnected
         self._main_window.show()
         event.accept()
-
-    def _show_about_dialog(self):
-        dialog = AboutDialog(self)
-        dialog.exec()
-
-    def _check_for_updates_manual(self):
-        self._update_runner.start(manual=True)
 
     # --- modulation matrix helpers -------------------------------------
     # The assignable modulation matrix (MODS*/MODV* fields - see the
@@ -10955,51 +10894,3 @@ class ProgramEditorWindow(QMainWindow):
         self._schedule_write(
             "KGMUTE", "keygroup", raw, keygroup_index=self.keygroup_list.currentRow()
         )
-
-
-if __name__ == "__main__":
-    # standalone launch for UI work away from the hardware sampler - always
-    # against the demo bridge, never a real port. For the real thing, go
-    # through main.py, which wires the dashboard's "Program Editor" button to
-    # program_editor_bridge.connect() instead.
-    from PySide6.QtWidgets import QApplication
-    from s3ked.demo import DemoBridge
-    from ui import theme
-
-    class _StandaloneSamplerController:
-        # the only things _open_slice_editor/_export_slices actually need
-        # from a real SamplerController when there's no Transfer Dashboard
-        # around at all - just enough for the Slice Editor's own busy-check
-        # to pass and for its cancel_callback wiring to have something
-        # (never actually called - Export is disabled in demo mode, so
-        # SliceEditorWindow's own Cancel Transfer path is unreachable here)
-        # to bind to. send_file_queue is deliberately not stubbed - that
-        # one genuinely can't be reached this way.
-        def is_transfer_busy(self):
-            return False
-
-        def cancel_transfer(self):
-            pass
-
-    class _StandaloneHost:
-        # ProgramEditorWindow.closeEvent() calls main_window.show() to bring
-        # the dashboard back - there is none here, so close the app instead
-        def show(self):
-            QApplication.instance().quit()
-
-        sampler_controller = _StandaloneSamplerController()
-
-    # this script always constructs a DemoBridge two lines down regardless -
-    # setdefault so every demo_mode check elsewhere in this file (audio
-    # fetch path, Slice Editor Export gating, etc.) actually agrees with
-    # that, while still letting AKAISDS_DEMO_INSTANT be set alongside it on
-    # the command line the normal way
-    os.environ.setdefault("AKAISDS_DEMO_SAMPLER", "1")
-    if "--instant" in sys.argv:
-        os.environ["AKAISDS_DEMO_INSTANT"] = "1"  # no paced sample loads/replaces (see core/demo_timing.py)
-    app = QApplication(sys.argv)
-    theme.apply_to_app(app)
-    wheel_guard.install(app)
-    window = ProgramEditorWindow(_StandaloneHost(), bridge=DemoBridge())
-    window.show()
-    sys.exit(app.exec())

@@ -26,7 +26,7 @@
 
 ## Running Without a Sampler
 
-The app, the editors and the demo samplers can all be run from source without any hardware - see "Running the app without a sampler" in [CONTRIBUTING.md](CONTRIBUTING.md) (`uv run python tools/a4000_demo.py`, `tools/s950_demo.py`, `AKAISDS_DEMO_SAMPLER=1 uv run python src/main.py`, and `--instant` to skip the MIDI-speed emulation).
+The app, the editors and the demo samplers can all be run from source without any hardware - see "Running the app without a sampler" in [CONTRIBUTING.md](CONTRIBUTING.md) (`uv run python tools/demo.py list`, `AKAISDS_DEMO_SAMPLER=1 uv run python src/main.py`, and `--instant` to skip the MIDI-speed emulation).
 
 ## Running Tests
 

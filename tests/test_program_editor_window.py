@@ -5277,3 +5277,24 @@ def test_import_audio_opens_a_plain_stereo_file_with_no_markers(editor, monkeypa
     assert captured["name"] == "PAD" and captured["framerate"] == 44100
     assert len(captured["samples"]) == 4410 and captured["markers"] is None  # no cut points: one sample unless the user adds some
     assert len(captured["extra_channels"]) == 1 and captured["channel_suffixes"] == ("-L", "-R")
+
+
+def _menu(window, title):
+    return next(a.menu() for a in window.menuBar().actions() if a.text().replace("&", "") == title)
+
+
+def _texts(menu):
+    return [a.text() for a in menu.actions() if not a.isSeparator()]
+
+
+def test_help_menu_is_the_standard_one(editor):
+    assert _texts(_menu(editor, "Help")) == [
+        "Quick Start Guide...",
+        "Keyboard Shortcuts...",
+        "Open Log Folder",
+        "About AKAISDS...",
+        "Check for Updates...",
+    ]
+    assert "Open Log Folder" not in _texts(_menu(editor, "Hardware"))
+    assert "Cancel Transfer" in _texts(_menu(editor, "Hardware"))
+    assert [t for t in _texts(_menu(editor, "View")) if t.startswith("Zoom")] == ["Zoom In", "Zoom Out", "Zoom to Fit"]

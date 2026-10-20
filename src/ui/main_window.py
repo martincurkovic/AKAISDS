@@ -5,10 +5,8 @@ import sys
 import time
 from PySide6.QtGui import QAction, QKeySequence
 from ui.dashboard import TransferDashboard
-from ui.about_dialog import AboutDialog
-from ui.diagnostics_ui import add_open_log_folder_action
-from ui.quickstart_dialog import show_quickstart_dialog
-from ui.update_helper import UpdateCheckRunner
+from ui.shortcuts_dialog import slice_editor_section
+from ui.standard_menus import add_help_menu
 from core.midi_manager import MidiManager
 from core import app_config, debug_log, dropped_files, rx2, sds_encoder
 from controller.sampler_controller import SamplerController
@@ -54,7 +52,7 @@ class ApplicationWindow(QMainWindow):
         self.setStatusBar(self.dashboard_view.status_bar)
 
         # Settings menu action
-        file_menu = self.menuBar().addMenu("File")
+        file_menu = self.menuBar().addMenu("&File")
 
         open_files_action = QAction("Open Files...", self)
         open_files_action.setShortcut(QKeySequence.StandardKey.Open)
@@ -82,7 +80,7 @@ class ApplicationWindow(QMainWindow):
         settings_action.triggered.connect(self.dashboard_view.open_settings_dialog)
         file_menu.addAction(settings_action)
 
-        edit_menu = self.menuBar().addMenu("Edit")
+        edit_menu = self.menuBar().addMenu("&Edit")
 
         select_all_action = QAction("Select All", self)
         select_all_action.setShortcut("Ctrl+A")
@@ -105,7 +103,7 @@ class ApplicationWindow(QMainWindow):
         clear_queue_action.triggered.connect(self.dashboard_view.clear_local_queue)
         edit_menu.addAction(clear_queue_action)
 
-        transfer_menu = self.menuBar().addMenu("Transfer")
+        transfer_menu = self.menuBar().addMenu("&Transfer")
 
         refresh_action = QAction("Refresh Sample List", self)
         refresh_action.setShortcut("Ctrl+R")
@@ -156,26 +154,7 @@ class ApplicationWindow(QMainWindow):
         editor_action.triggered.connect(self.dashboard_view.open_program_editor)
         window_menu.addAction(editor_action)
 
-        # Qt has no MenuRole for "check for updates" (only About/Preferences/
-        # Quit get auto-relocated into the native "AKAISDS" app menu on
-        # macOS - see QAction.MenuRole), so this stays a plain Help menu on
-        # every platform rather than trying to fake native placement
-        help_menu = self.menuBar().addMenu("&Help")
-
-        quickstart_action = QAction("Quick Start Guide...", self)
-        quickstart_action.triggered.connect(lambda: show_quickstart_dialog(self))
-        help_menu.addAction(quickstart_action)
-        help_menu.addSeparator()
-        add_open_log_folder_action(help_menu, self)
-
-        about_action = QAction("About AKAISDS...", self)
-        about_action.setMenuRole(QAction.MenuRole.AboutRole)
-        about_action.triggered.connect(self._show_about_dialog)
-        help_menu.addAction(about_action)
-
-        check_for_updates_action = QAction("Check for Updates...", self)
-        check_for_updates_action.triggered.connect(self._check_for_updates_manual)
-        help_menu.addAction(check_for_updates_action)
+        add_help_menu(self, [slice_editor_section()])
 
         self.dashboard_view.register_menu_actions(
             {
@@ -200,8 +179,6 @@ class ApplicationWindow(QMainWindow):
             },
         )
 
-        self._update_runner = UpdateCheckRunner(self)
-
         # delay slightly so this doesn't compete with startup/port restore,
         # and only fire automatically if it's been a while since the last check
         if (
@@ -209,13 +186,6 @@ class ApplicationWindow(QMainWindow):
             > _UPDATE_CHECK_INTERVAL_SECONDS
         ):
             QTimer.singleShot(2000, lambda: self._update_runner.start(manual=False))
-
-    def _show_about_dialog(self):
-        dialog = AboutDialog(self)
-        dialog.exec()
-
-    def _check_for_updates_manual(self):
-        self._update_runner.start(manual=True)
 
     def _open_files_dialog(self):
         paths, _ = QFileDialog.getOpenFileNames(

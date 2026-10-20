@@ -775,3 +775,36 @@ def test_closing_the_editor_gives_the_computer_keyboard_back(win):
     win._working = None
     win.close()
     assert not win.audition_bar.is_open()
+
+
+def _menu(window, title):
+    return next(a.menu() for a in window.menuBar().actions() if a.text().replace("&", "") == title)
+
+
+def _texts(menu):
+    return [a.text() for a in menu.actions() if not a.isSeparator()]
+
+
+def test_help_menu_is_the_standard_one(win):
+    assert _texts(_menu(win, "Help")) == [
+        "Quick Start Guide...",
+        "Keyboard Shortcuts...",
+        "Open Log Folder",
+        "About AKAISDS...",
+        "Check for Updates...",
+    ]
+    assert "Open Log Folder" not in _texts(_menu(win, "Hardware"))
+    assert "Cancel Transfer" in _texts(_menu(win, "Hardware"))
+    assert [t for t in _texts(_menu(win, "View")) if t.startswith("Zoom")] == ["Zoom In", "Zoom Out", "Zoom to Fit"]
+
+
+def test_zoom_actions_follow_the_samples_tab(win):
+    zoom = [a for a in _menu(win, "View").actions() if a.text().startswith("Zoom")]
+    win.main_tabs.setCurrentIndex(0)
+    assert not any(a.isEnabled() for a in zoom)
+    win.main_tabs.setCurrentIndex(win._samples_tab_index)
+    assert all(a.isEnabled() for a in zoom)
+    zoomed = []
+    win.samples_tab.waveform_view.zoom_in = lambda *a: zoomed.append(True)
+    next(a for a in zoom if a.text() == "Zoom In").trigger()
+    assert zoomed == [True]

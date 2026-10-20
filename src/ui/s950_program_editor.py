@@ -52,7 +52,8 @@ from core.s950_sysex import NAME_LENGTH
 from core.s950_program import Keygroup, Program
 from ui import theme, tooltips as tt
 from ui.audition_bar import AuditionBar, add_audition_action
-from ui.diagnostics_ui import add_open_log_folder_action
+from ui.shortcuts_dialog import audition_section, dragging_section
+from ui.standard_menus import add_cancel_transfer_action, add_help_menu, build_zoom_actions
 from ui.editor_layout import (
     add_keygroup_row,
     build_centered_row,
@@ -721,9 +722,15 @@ class S950ProgramEditorWindow(QMainWindow):
         self._write_unchanged_action.triggered.connect(self._write_unchanged)
         hardware_menu.addAction(self._write_unchanged_action)
         hardware_menu.addSeparator()
-        add_open_log_folder_action(hardware_menu, self)
+        add_cancel_transfer_action(self, hardware_menu, self._controller.cancel_transfer)
 
         view_menu = self.menuBar().addMenu("&View")
+        # act on the Samples tab's waveform, which is built after the menus; only on while that tab shows (_on_tab_changed)
+        self._zoom_actions = build_zoom_actions(self, lambda: self.samples_tab.waveform_view)
+        for action in self._zoom_actions:
+            action.setEnabled(False)
+            view_menu.addAction(action)
+        view_menu.addSeparator()
         self.audition_action = add_audition_action(self, view_menu, self.audition_bar)
 
         # mirrors the Dashboard's &Window menu (main_window.py) so Ctrl+T/Ctrl+E
@@ -752,6 +759,8 @@ class S950ProgramEditorWindow(QMainWindow):
         )
         window_menu.addAction(samples_tab_action)
 
+        add_help_menu(self, [audition_section(), dragging_section()])
+
     def _sync_audition_available(self, idle):
         # off while anything is on the wire (a catalog read, a transfer, a write): a note must not land in the middle of a SysEx exchange.
         # Off = nothing is routed, so a dead keyboard never swallows typing.
@@ -769,6 +778,8 @@ class S950ProgramEditorWindow(QMainWindow):
     def _on_tab_changed(self, index):
         on_samples = index == self._samples_tab_index
         _log(f"tab: {'Samples' if on_samples else 'Programs'}")
+        for action in self._zoom_actions:
+            action.setEnabled(on_samples)
         # the program-writing buttons only mean something on the Programs tab
         for widget in (
             self.dirty_label,
@@ -1364,6 +1375,7 @@ class S950ProgramEditorWindow(QMainWindow):
         _log("closed")
         self.audition_bar.set_open(False)  # lets go of every note and gives the computer keyboard back
         self._busy_timer.stop()
+        self._update_runner.wait()
         if not self._connected:
             super().closeEvent(event)
             self._main_window.show()

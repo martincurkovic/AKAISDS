@@ -52,7 +52,8 @@ from core import yamaha_sysex as ysx
 from core.midi_notes import midi_note_to_name
 from ui import theme, tooltips as tt
 from ui.audition_bar import AuditionBar, add_audition_action
-from ui.diagnostics_ui import add_open_log_folder_action
+from ui.shortcuts_dialog import audition_section, dragging_section, preview_dialogs_section, slice_editor_section
+from ui.standard_menus import add_cancel_transfer_action, add_help_menu, build_zoom_actions
 from ui.yamaha_assign_dialog import AssignDialog
 from ui.yamaha_restore_dialog import RestoreDialog
 from ui.yamaha_writer import WriteCoordinator
@@ -506,6 +507,12 @@ class YamahaProgramEditorWindow(QMainWindow):
             self._sample_menu.addAction(action)
 
         view = self.menuBar().addMenu("&View")
+        # act on the Samples tab's waveform, which is built after the menus; only on while that tab shows (_on_tab_changed)
+        self._zoom_actions = build_zoom_actions(self, lambda: self.samples_tab.waveform_view)
+        for action in self._zoom_actions:
+            action.setEnabled(False)
+            view.addAction(action)
+        view.addSeparator()
         self.audition_action = add_audition_action(self, view, self.audition_bar)
 
         hardware = self.menuBar().addMenu("&Hardware")
@@ -531,7 +538,7 @@ class YamahaProgramEditorWindow(QMainWindow):
         backups.triggered.connect(self._open_backup_folder)
         hardware.addAction(backups)
         hardware.addSeparator()
-        add_open_log_folder_action(hardware, self)
+        add_cancel_transfer_action(self, hardware, self._cancel_long_operation)
 
         window = self.menuBar().addMenu("&Window")
         dashboard = QAction("Transfer Dashboard", self)
@@ -554,9 +561,13 @@ class YamahaProgramEditorWindow(QMainWindow):
         window.addAction(samples)
         self._tab_actions.append(samples)
 
+        add_help_menu(self, [audition_section(), slice_editor_section(), preview_dialogs_section(), dragging_section()])
+
     def _on_tab_changed(self, index):
         on_samples = index == self._samples_tab_index
         _log(f"tab: {'Samples' if on_samples else 'Programs'}")
+        for action in self._zoom_actions:
+            action.setEnabled(on_samples)
         self.samples_tab.set_active(on_samples)
         if not on_samples:
             self._recompute_ranges()  # a sample's key range may have been edited there
@@ -1240,6 +1251,7 @@ class YamahaProgramEditorWindow(QMainWindow):
                 return
         _log("closed")
         self._audition_timer.stop()
+        self._update_runner.wait()
         self.audition_bar.set_open(False)  # lets go of every note and gives the computer keyboard back
         self._writer.close()
         self._scan_generation += 1
