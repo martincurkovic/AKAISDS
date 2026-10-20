@@ -109,7 +109,7 @@ By default the editor opens up on the Programs page. It will take a second or tw
 
 This is not an extensive deep dive into the editing functions of an Akai sampler, it is assumed you are already familiar with the workflow of Akai samplers.
 
-**Keyboard shortcuts:** Command/Ctrl + 1, 2, 3 and 4 switch between the Multi, Programs, Samples and Global tabs. Command/Ctrl + T goes back to the Transfer Dashboard. Command/Ctrl + K opens the [Audition Keyboard](#audition-keyboard). Command/Ctrl + Shift + I is File > Import Audio.
+**Keyboard shortcuts:** Command/Ctrl + 1, 2, 3 and 4 switch between the Multi, Programs, Samples and Global tabs. Command/Ctrl + T goes back to the Transfer Dashboard. Command/Ctrl + K opens the [Audition Keyboard](#audition-keyboard). Command/Ctrl + Shift + I is File > Import Audio. **Help > Keyboard Shortcuts...** lists every shortcut for the window you are in.
 
 **Tidying the window:** every card has a small arrow beside its title. Click it to fold the card away (cards that sit side by side fold together). AKAISDS remembers which ones you folded. The sample memory bar on the Samples tab (and the Dashboard) shrinks to a thin strip if you double click it.
 
