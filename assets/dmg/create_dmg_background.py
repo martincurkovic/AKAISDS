@@ -30,15 +30,12 @@ FONT_PATH = "/System/Library/Fonts/Helvetica.ttc"
 WIDTH, HEIGHT = 660, 400
 APP_ICON_X, APPLICATIONS_ICON_X, ICON_Y = 170, 490, 210
 
-# the app's dark theme (DARK_PALETTE in src/ui/theme.py): bg, text and accent
-BACKGROUND = (0x1E, 0x1E, 0x24)
-TEXT_COLOR = (0xE4, 0xE4, 0xEA)
-ARROW_COLOR = (0x4A, 0x90, 0xD9)
-
-# Finder draws the icon names in near-black whatever the window looks like and a script can't change that, so each name
-# gets a light tag behind it (centred where Finder puts the name: 84pt below the icon's centre) to stay readable on the dark
-LABEL_PLATE = (0xE4, 0xE4, 0xEA)
-LABEL_Y, LABEL_HALF_WIDTH, LABEL_HALF_HEIGHT = 294, 62, 13
+# A mid-tone background, so it reads the same under Finder's light and dark appearance (Finder draws the icon names near-black
+# either way, so the background has to stay light enough for them). The arrow is the green of the knobs' value arc
+# (#3aa88a in src/ui/knob.py) taken a little deeper to stand out on it.
+BACKGROUND = (0xB4, 0xBA, 0xC8)
+TEXT_COLOR = (0x1E, 0x1E, 0x24)
+ARROW_COLOR = (0x1F, 0x8A, 0x6C)
 
 
 def draw_at(scale):
@@ -70,18 +67,6 @@ def draw_at(scale):
         ],
         fill=ARROW_COLOR,
     )
-
-    for x in (APP_ICON_X, APPLICATIONS_ICON_X):
-        draw.rounded_rectangle(
-            [
-                (x - LABEL_HALF_WIDTH) * scale,
-                (LABEL_Y - LABEL_HALF_HEIGHT) * scale,
-                (x + LABEL_HALF_WIDTH) * scale,
-                (LABEL_Y + LABEL_HALF_HEIGHT) * scale,
-            ],
-            radius=LABEL_HALF_HEIGHT * scale,
-            fill=LABEL_PLATE,
-        )
     return img
 
 
