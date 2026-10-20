@@ -17,7 +17,11 @@ dependencies = [
 ]
 
 [dependency-groups]
-dev = ["pytest>=9", "numpy>=2.5.1"]
+dev = [
+    "pytest>=9",
+    "numpy>=2.5.1",
+    "dmgbuild>=1.6.7",
+]
 
 [tool.pytest.ini_options]
 # a test stuck for this long dumps every thread's stack (pytest's faulthandler), instead of the run hanging silently: one full run deadlocked once (see TESTING.md)
