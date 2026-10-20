@@ -8,7 +8,7 @@
 [![Platforms: macOS, Windows, Linux](https://img.shields.io/badge/platforms-macOS%20%7C%20Windows%20%7C%20Linux-lightgrey)](#download--installation)
 [![License: GPLv3](https://img.shields.io/badge/license-GPLv3-blue)](LICENSE)
 
-A simple way to send and receive audio samples (WAV, AIFF, FLAC, MP3, Ogg) to an Akai S1000/S2000/S3000 series sampler over MIDI using the sample dump standard (MIDI SDS). Also supports generic MIDI SDS transmission for non-Akai samplers.
+A simple way to send and receive audio samples (WAV, AIFF, FLAC, MP3, Ogg, Opus) to an Akai S1000/S2000/S3000 series sampler over MIDI using the sample dump standard (MIDI SDS), plus an editor for its programs, keygroups, multis and samples. Also supports generic MIDI SDS transmission for non-Akai samplers.
 
 **Need help? Read the [Quick Start Guide](src/ui/help/quickstart.md).**
 
@@ -17,7 +17,12 @@ A simple way to send and receive audio samples (WAV, AIFF, FLAC, MP3, Ogg) to an
 ## Features
 
 - Akai-native sample browsing & management (list, rename, delete) as well as universal generic SDS support for non-Akai hardware
-- Program, Keygroup and Sample editor for Akai S1000 and S2000/S3000 series samplers
+- Program, Keygroup, Multi and Sample editor for Akai S1000 and S2000/S3000 series samplers, with draggable envelope graphs and collapsible cards
+- Sample editing on a working copy that stays on your computer until you send it: trim, reverse, fade, normalise, filter, time stretch / pitch shift and reverb, with Undo and Revert. Send it back to replace the sample, or as a new sample
+- Edit in External App: open a sample in your own audio editor and bring the saved result back
+- Audition Keyboard (Cmd/Ctrl+K): play your sampler from the on-screen piano or the computer keyboard (Akai, S900/S950 and Yamaha editors)
+- Per-part key range, transpose, tune and priority on the Multi tab, and save/load Multis as `.m3` files (S2000/S3000)
+- Save and load Akai sample files (`.s3`/`.s1`), and save received samples as Akai files
 - Experimental Yamaha A4000/A5000 editor support
 - Experimental Akai S900/S950 support: sample send/receive plus a program editor. It uses a different protocol from the other Akai models, was written without access to the hardware and has not been tested on a real unit yet, so back up your sampler first and please report what you find
 - Experimental Ensoniq ASR-X support: list, receive and send samples, written from the ASR-X's firmware (it has no MIDI Sample Dump Standard, so Generic SDS cannot work). It has never been tried on a real unit, so back up the sampler first and please report what you find (the log is `~/.akaisds/akaisds.log`)
@@ -52,6 +57,10 @@ See [Quick Start Guide](src/ui/help/quickstart.md) for a walkthrough of connecti
 ![Editor Multi Page](src/ui/help/screenshots/editor-multi-page.png)
 
 ![Sample Editor](src/ui/help/screenshots/editor-sample-page.png)
+
+![Sample editing on a working copy](src/ui/help/screenshots/editor-sample-edit.png)
+
+![Audition Keyboard](src/ui/help/screenshots/editor-audition-keyboard.png)
 
 ![Slice Editor](src/ui/help/screenshots/slice-editor-auto.png)
 
