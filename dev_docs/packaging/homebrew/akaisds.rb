@@ -15,7 +15,7 @@ cask "akaisds" do
     strategy :github_latest
   end
 
-  depends_on macos: :sequoia
+  depends_on macos: :sonoma
 
   app "AKAISDS.app"
 
