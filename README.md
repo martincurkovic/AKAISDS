@@ -18,15 +18,14 @@ A simple way to send and receive audio samples (WAV, AIFF, FLAC, MP3, Ogg, Opus)
 
 - Akai-native sample browsing & management (list, rename, delete) as well as universal generic SDS support for non-Akai hardware
 - Program, Keygroup, Multi and Sample editor for Akai S1000 and S2000/S3000 series samplers, with draggable envelope graphs and collapsible cards
-- Sample editing on a working copy that stays on your computer until you send it: trim, reverse, fade, normalise, filter, time stretch / pitch shift and reverb, with Undo and Revert. Send it back to replace the sample, or as a new sample
-- Edit in External App: open a sample in your own audio editor and bring the saved result back
-- Audition Keyboard (Cmd/Ctrl+K): play your sampler from the on-screen piano or the computer keyboard (Akai, S900/S950 and Yamaha editors)
+- Sample editing features: trim, reverse, fade, normalise, filter, time stretch / pitch shift and reverb, with Undo and Revert
+- Edit in External App: open a sample in your audio editor of choice and send it back to the sampler
+- Audition Keyboard (Cmd/Ctrl+K): play your sampler from the on-screen piano or the computer keyboard
 - Per-part key range, transpose, tune and priority on the Multi tab, and save/load Multis as `.m3` files (S2000/S3000)
 - Save and load Akai sample files (`.s3`/`.s1`), and save received samples as Akai files
 - Experimental Yamaha A4000/A5000 editor support
-- Experimental Akai S900/S950 support: sample send/receive plus a program editor. It uses a different protocol from the other Akai models, was written without access to the hardware and has not been tested on a real unit yet, so back up your sampler first and please report what you find
-- Experimental Ensoniq ASR-X support: list, receive and send samples, written from the ASR-X's firmware (it has no MIDI Sample Dump Standard, so Generic SDS cannot work). It has never been tried on a real unit, so back up the sampler first and please report what you find (the log is `~/.akaisds/akaisds.log`)
-- Experimental Ensoniq EPS / EPS-16+ / ASR-10 support: list, receive and send samples. It uses Ensoniq's own protocol, was written from Ensoniq's spec documents without access to the hardware and has never been tried on a real unit, so back up the sampler first and please report what you find
+- Experimental Akai S900/S950 support: sample send/receive plus a program editor
+- Experimental Ensoniq sampler support: list, receive and send samples, written from the ASR-X's firmware (it has no MIDI Sample Dump Standard, so Generic SDS cannot work). It has never been tried on a real unit, so back up the sampler first and please report what you find (the log can be found under `Help > Show log folder`)
 - ReCycle style sample slicing
   - Transient detection: a fast simple detector, or SuperFlux (high quality) for drum loops
   - Audio preview
@@ -34,13 +33,9 @@ A simple way to send and receive audio samples (WAV, AIFF, FLAC, MP3, Ogg, Opus)
 - Import ReCycle `.rx2` loops: each slice becomes a sample, optionally with a program built from them
 - File > Import Audio in the editors: open any audio file (or `.rx2`) in the Slice Editor to trim, slice and send it, optionally as a program
 - Drag program files (.p1/.p3) onto the Akai editor to load them, or drag a program out of the list to save it
-- WAV/AIFF/FLAC/MP3/Ogg Vorbis/Opus support (compressed files are decoded to PCM before sending)
-- Drag-and-drop support for adding samples
+- WAV/AIFF/FLAC/MP3/Ogg Vorbis/Opus support
 - Audio preview for samples
-- Batch transmission queue for sending and receiving samples
-- Light, dark, or follow-the-system theme (Settings > Appearance), switching live
-- Sampler memory status bar to display how much RAM is free (Akai sampler specific only)
-- Open-loop sending for one-way MIDI cable setups (no MIDI input selected)
+- Light and dark themes
 - Built in MIDI diagnostic tests
   - MIDI interface test to check if your interface can support MIDI SysEx traffic
   - Hardware connection test to check if your MIDI sampler is connected correctly
@@ -93,11 +88,11 @@ Unzip the download and drag AKAISDS to your applications folder. See the disclai
 
 Or install with [Homebrew](https://brew.sh): `brew install --cask martincurkovic/tap/akaisds`. Gatekeeper still applies on first launch.
 
-macOS 15+ support only for now. There are plans to backport AKAISDS to earlier macOS versions, but that work hasn't been started yet. 
+macOS 15+ support only for now. There are plans to backport AKAISDS to earlier macOS versions, but that work hasn't been started yet.
 
 #### Windows Instructions
 
-Unzip the download and run AKAISDS-Setup.exe to install. It should create a shortcut on your Desktop and in your Start Menu. I'm not much of a Windows user, so if you happen to know more about creating Windows installers, your contribution would be much appreciated - see [CONTRIBUTING](CONTRIBUTING.md). See the disclaimer section below for instructions about how to bypass Windows SmartScreen & Defender.
+Unzip the download and run AKAISDS-Setup.exe to install. It should create a shortcut on your Desktop and in your Start Menu. See the disclaimer section below for instructions about how to bypass Windows SmartScreen & Defender.
 
 #### Linux Instructions
 
@@ -127,11 +122,11 @@ Generic SDS mode has been implemented and tested via simulation but only has lim
 
 Note that some USB MIDI interfaces do not support MIDI SysEx messages. Please check your MIDI hardware supports SysEx transmission. AKAISDS contains a MIDI SysEx loopback test to assess MIDI interface compatibility. Otherwise please check the table below for a list of tested hardware. If you've tested your interface, please share your findings: the loopback test's results window has a **Share on GitHub** button that opens an issue with everything filled in (or add a row to the table below with a Pull Request).
 
-|Interface|macOS|Linux|Windows|Notes|
-|---|---|---|---|---|
-|   iCON MIDIPORT V1.01  |❌ |  ⚠️ |  ⚠️ |  Max SysEx 256 bytes |
-|  MIDIPLUS MIDI 2x2 |  ⚠️ |  ⚠️ |  ⚠️ |  Max SysEx 256 bytes |
-|   PreSonus Studio 26  |  ✅ |  ✅ |  ⚠️ (max 512 bytes) | Requires driver on Windows  |
+| Interface           | macOS | Linux | Windows           | Notes                      |
+| ------------------- | ----- | ----- | ----------------- | -------------------------- |
+| iCON MIDIPORT V1.01 | ❌     | ⚠️     | ⚠️                 | Max SysEx 256 bytes        |
+| MIDIPLUS MIDI 2x2   | ⚠️     | ⚠️     | ⚠️                 | Max SysEx 256 bytes        |
+| PreSonus Studio 26  | ✅     | ✅     | ⚠️ (max 512 bytes) | Requires driver on Windows |
 
 ## Reporting Problems
 

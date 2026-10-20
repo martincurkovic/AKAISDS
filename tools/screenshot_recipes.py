@@ -371,7 +371,8 @@ def _settings_dialog(ctx, tab: int):
     controller = SamplerController(mm)
     dialog = MidiSettingsDialog(mm, controller)
     ctx.show(dialog)
-    dialog.findChild(QTabWidget).setCurrentIndex(tab)
+    tabs = dialog.findChild(QTabWidget)
+    tabs.setCurrentIndex(tab)
     if tab == 1:  # what the Hardware Test shows once it has found a sampler
         dialog.id_results_label.setText(
             dialog._format_stat_result(
@@ -379,6 +380,12 @@ def _settings_dialog(ctx, tab: int):
             )
         )
     ctx.pump(settle=0.3)
+    # the pages scroll, and the dialog has outgrown its 560 px floor: grow it until the page fits, so no scroll bar is in the picture
+    scroll = tabs.currentWidget()
+    missing = scroll.widget().sizeHint().height() - scroll.viewport().height()
+    if missing > 0:
+        dialog.resize(dialog.width(), dialog.height() + missing + 2)
+        ctx.pump(settle=0.3)
     return dialog
 
 
@@ -427,7 +434,7 @@ def stray_midi_replies_dialog(ctx):
 
 
 # ============================================================================== the Yamaha A4000/A5000 editor (demo fake)
-def _yamaha_editor(ctx, size=(1150, 760)):
+def _yamaha_editor(ctx, size=(1150, 1180)):
     """The Yamaha editor on core.demo_a4000.FakeA4000 (the real session code over fake MIDI ports, as tools/a4000_demo.py does)."""
     import a4000_demo
     from controller.sampler_controller import SamplerController
@@ -452,10 +459,19 @@ def _yamaha_editor(ctx, size=(1150, 760)):
     return editor
 
 
+def _open_yamaha_keyboard(ctx, editor):
+    """View > Audition Keyboard open, once the editor is idle (the bar is only available then)."""
+    ctx.pump(lambda: editor._session.idle and not editor._is_busy(), timeout=20)
+    editor._sync_audition_available()
+    editor.audition_bar.set_open(True)
+    ctx.pump(settle=0.4)
+
+
 @shot("yamaha-programs-tab", "Yamaha A4000/A5000 editor, Programs tab: a program with its assigned samples")
 def yamaha_programs_tab(ctx):
     editor = _yamaha_editor(ctx)
     ctx.pump(lambda: editor._program_numbers and not editor._scanning, timeout=20, settle=0.5)
+    _open_yamaha_keyboard(ctx, editor)
     return editor
 
 
@@ -471,4 +487,5 @@ def yamaha_samples_tab(ctx):
     tab._load_audio()  # what double-clicking the waveform does
     ctx.pump(lambda: tab._audio_samples is not None and tab._loading_name is None, timeout=30, settle=0.6)
     ctx.on_cleanup(lambda: tab.refresh())  # (drops anything still in flight before the window goes)
+    _open_yamaha_keyboard(ctx, editor)
     return editor

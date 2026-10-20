@@ -64,8 +64,6 @@ WAV, AIFF, FLAC, MP3, Ogg Vorbis and Opus are all supported (compressed files ar
 
 You can set quality globally via the Transmission Settings button or individually via the Edit button next to each sample. Reducing quality will significantly reduce the transfer time (MIDI Sample Dumps are notoriously slowwwww 🐌).
 
-![Transmission Settings](screenshots/transmission-settings.png "Transmission Settings")
-
 ![Sample Settings](screenshots/sample-settings.png "Sample Settings")
 
 ![Sample Info](screenshots/sample-info.png)
@@ -80,7 +78,7 @@ If the sampler stops replying part way through a send (for example, its MIDI cab
 
 In the right hand list of *Currently Loaded Samples*, select which samples you would like to receive from the sampler. Then click the *Receive Samples* button, which will then ask where you want to save the samples. Transmission will commence once you have selected a location to save the received samples.
 
-With an Akai sampler selected, the **Save received as** menu next to the list chooses what is saved: a **WAV**, an **Akai sample** file (`.s3`, or `.s1` for an S1000) which keeps the sampler's own header (name, root note, tuning and loops), or both. Akai sample files are new and have not been checked against a real file from another tool yet, so keep the WAV too if the sample matters.
+With an Akai sampler selected, the **Save received as** menu next to the list chooses what is saved: a **WAV**, an **Akai sample** file (`.s3`, or `.s1` for an S1000) which keeps the sampler's own header (name, root note, tuning and loops), or both.
 
 **Approximate transfer times for a 5-second sample:**
 
@@ -101,13 +99,11 @@ These are theoretical best-case figures based on MIDI's fixed wire speed of 31,2
 
 ## Program & Keygroup Editor
 
-**IMPORTANT!** The editor function is relatively new and may have unexpected bugs. It is *strongly* recommended to back up your data before use.
-
 The editor is powered under the hood by *s3ked*. It offers control over the most commonly used functions in an Akai S2000 and S3000 series samplers. Not all functions have controls (yet). The intention was to keep the interface as easy to understand as possible at first glance.
 
-The editor also supports the Akai S1000 (experimental) - set the Sampler Type to *Akai S1000* in Settings first. An S1000 has no Multi tab, Global tab, modulation matrix, LFO2, portamento, mute groups or velocity start, so those controls are hidden. Its Envelope 2 is a plain ADSR, and its fixed controller routing (what velocity, key, pressure and the mod wheel do) is editable in the *Controllers* cards instead of a modulation matrix.
+The editor also supports the Akai S1000 - set the Sampler Type to *Akai S1000* in Settings first. An S1000 has no Multi tab, Global tab, modulation matrix, LFO2, portamento, mute groups or velocity start, so those controls are hidden. Its Envelope 2 is a plain ADSR, and its fixed controller routing (what velocity, key, pressure and the mod wheel do) is editable in the *Controllers* cards instead of a modulation matrix.
 
-With the Sampler Type set to *Akai S900/S950 (experimental)*, the Open Editor button opens a separate, smaller editor for the S900/S950: programs and keygroups can be edited and written back to the sampler in one go (the previous values are backed up first). On its Samples tab only the replay mode (O/L/A) and direction (N/R) can be changed, with the same backup and **Write to Sampler** step; everything else there is read-only. With *Yamaha A4000/A5000 (experimental)* it opens the [Yamaha editor](#yamaha-a4000a5000-editor-experimental).
+With the Sampler Type set to *Akai S900/S950 (experimental)*, the Open Editor button opens a separate, smaller editor for the S900/S950: programs and keygroups can be edited and written back to the sampler in one go (the previous values are backed up first). On its Samples tab only the replay mode (O/L/A) and direction (N/R) can be changed, with the same backup and **Write to Sampler** step; everything else there is read-only for now. With *Yamaha A4000/A5000 (experimental)* it opens the [Yamaha editor](#yamaha-a4000a5000-editor-experimental).
 
 By default the editor opens up on the Programs page. It will take a second or two to load, especially if you have lots of Programs and Keygroups on your Akai sampler.
 
@@ -153,9 +149,9 @@ The Multi tab is where you can assign Programs to various parts of a Multi. You 
 
 ![Multi Tab](screenshots/editor-multi-page.png)
 
-Each part also has a **Key range** (the lowest and highest note it plays), **Semi** and **Cents** (transpose and fine tune, +-50) and a note **Priority** (Low, Norm, High or Hold). Changes are sent as you make them. A Low note can't go above the High one: moving one end pushes the other along.
+Each part also has a **Key range** (the lowest and highest note it plays), **Semi** and **Cents** (transpose and fine tune, +-50) and a note **Priority** (Low, Norm, High or Hold). Changes are sent as you make them.
 
-**Save to File...** writes the Multi as an Akai `.m3` file. **Load from File...** reads one back into the sampler's current Multi: it shows what will change first, saves the current Multi to `~/.akaisds/multi_backups` before writing anything, checks the result afterwards, and assigns programs by name (a program the sampler doesn't have is skipped). Fields that couldn't be checked on hardware (output, effects) are not loaded. Both are S2000/S3000 only and experimental.
+**Save to File...** writes the Multi as an Akai `.m3` file. **Load from File...** reads one back into the sampler's current Multi: it shows what will change first, saves the current Multi to `~/.akaisds/multi_backups` before writing anything, checks the result afterwards, and assigns programs by name (a program the sampler doesn't have is skipped). Output assignment and effects are not loaded, as no hardware was available during development to test this.
 
 ### Samples Tab
 
@@ -186,17 +182,17 @@ The **Edit Sample** card holds the audio editing actions: **Trim to Markers**, *
 
 The working copy survives selecting other samples. AKAISDS asks before you close the window with unsent edits. Marker and loop changes on a sample with a working copy are kept on the computer too and go with the next send.
 
-**Filter...** (low/high pass), **Stretch / Pitch...** (change length or pitch independently, with a grain size setting) and **Reverb...** each open a dialog with a **Preview** button, which becomes **Stop** while it plays (press *Space* to toggle it). Moving a knob while a preview plays does not restart it. Previews play at the sample's root note and tune, so they sound as they will on the sampler. Their *Send as New Sample...* buttons skip the working copy and send straight away.
+**Filter...** (low/high pass), **Stretch / Pitch...** (change length or pitch independently, with a grain size setting - aka. Timestretch) and **Reverb...** each open a dialog with a **Preview** button, which becomes **Stop** while it plays (press *Space* to toggle it). Moving a knob while a preview plays does not restart it. Previews play at the sample's root note and tune, so they sound as they will on the sampler. Their *Send as New Sample...* buttons skip the working copy and send straight away.
 
 ![Reverb dialog](screenshots/reverb-dialog.png)
 
-**Reverb** is a copy of the reverb in the author's custom S2000 OS: *Decay*, *Size*, *Damping* and *Mix* (with four presets). It makes the sample longer by the length of the tail, up to five seconds. Stretch / Pitch is a port of an Akai-style grain time stretcher: great on drums and loops, but a sustained tone can warble. Neither has been compared by ear against a real sampler's own effect.
+**Reverb** has settings for *Decay*, *Size*, *Damping* and *Mix* (with four presets). It makes the sample longer by the length of the tail, up to five seconds. **Stretch / Pitch** is a port of an Akai-style grain time stretcher: great on drums and loops, but a sustained tone can warble.
 
 **Edit in External App...** exports the loaded audio to a WAV and opens it in your audio editor (choose one in Settings > External Audio Editor, or it uses your computer's default). When you save in the editor, **Load Edited Audio** brings the file back as the working copy; nothing is sent until you send it. Tick *Load automatically when the file is saved* in the same Settings section to skip that button.
 
 **Duplicate** sends a copy of the sample under a new name, leaving the original alone. **Save as Akai File...** saves the sample as `.s3` (or `.s1` on an S1000) and **Load Akai File...** makes a new sample from one, restoring its loops, root note and tuning. Both are new and untested against files from other tools.
 
-**File > Import Audio...** (Command/Ctrl + Shift + I) opens any audio file, or a ReCycle `.rx2` loop, in the Slice Editor without going through the Dashboard. An `.rx2` arrives with its slice points marked; stereo files stay stereo (each slice is sent as a left and a right sample, and the program puts them in two zones). Files over a minute ask first, and over 15 minutes are refused.
+**File > Import Audio...** (Command/Ctrl + Shift + I) opens any audio file, or a ReCycle `.rx2` loop, in the Slice Editor without going through the Dashboard. An `.rx2` arrives with its slice points marked; stereo files stay stereo (each slice is sent as a left and a right sample, and the program puts them in two zones).
 
 #### Slice Editor
 
@@ -210,7 +206,7 @@ Every slice is exported to the sampler as a new one-shot sample, and the origina
 
 ### Global Tab
 
-The Global tab holds settings of the *whole sampler* rather than one program - the ones you'd find on the sampler's own GLOBAL page. Changes are sent to the sampler as you make them. (S2000/S3000 only.)
+The Global tab holds settings of the *whole sampler* rather than one program - the ones you'd find on the sampler's own GLOBAL page. (S2000/S3000 only.)
 
 ![Global Tab](screenshots/editor-global-page.png "Global Tab")
 
