@@ -1,12 +1,14 @@
 """
 The pictures for tools/make_screenshots.py: one @shot function each. A recipe builds the window it shows (against the demo fakes,
-with invented sounds), brings it to the state the manual describes, and returns the widget (or QPixmap) to save.
+with invented sounds, and the owner's own break for the Slice Editor), brings it to the state the manual describes, and returns the widget (or QPixmap) to save.
 Everything here may be edited freely when the UI changes: that is the point of having it.
 """
 
 import math
+from pathlib import Path
 
 import screenshot_kit as kit  # noqa: F401  (first: keeps the isolated config/log folders in place)
+from core import app_config
 from screenshot_kit import noise_burst, shot, tone
 
 from PySide6.QtCore import QPoint, QRect, QSize, Qt
@@ -143,6 +145,28 @@ def editor_keygroup_page(ctx):
     editor.keygroup_list.setCurrentRow(0)
     editor._worker.wait_until_idle()
     ctx.pump(settle=0.5)
+    # envelope values that show the graphs' shapes (the demo's are all zero, which draws a sliver). Shown only: signals are blocked so nothing is sent.
+    def show(knob, label, value):
+        knob.blockSignals(True)
+        knob.setValue(value)
+        knob.blockSignals(False)
+        label.setText(str(knob.value()))
+
+    for knob, label, value in zip(
+        (editor.attack1_knob, editor.decay1_knob, editor.sustain1_knob, editor.release1_knob),
+        (editor.attack1_value_label, editor.decay1_value_label, editor.sustain1_value_label, editor.release1_value_label),
+        (22, 48, 62, 40),
+    ):
+        show(knob, label, value)
+    for knobs, labels, values in (
+        (editor._env2_rate_knobs, editor._env2_rate_value_labels, (65, 45, 40, 55)),
+        (editor._env2_level_knobs, editor._env2_level_value_labels, (99, 72, 48, 0)),
+    ):
+        for knob, label, value in zip(knobs, labels, values):
+            show(knob, label, value)
+    editor._on_env1_knob_changed()
+    editor._on_env2_knob_changed()
+    ctx.pump(settle=0.3)
     return editor
 
 
@@ -150,6 +174,11 @@ def editor_keygroup_page(ctx):
 def editor_multi_page(ctx):
     editor = _editor(ctx, 0, size=(1000, 790))
     editor._worker.wait_until_idle()
+    for knob, label in zip(editor._multi_level_knobs, editor._multi_level_value_labels):  # (full level, as a multi is usually set up; shown only, nothing is sent)
+        knob.blockSignals(True)
+        knob.setValue(99)
+        knob.blockSignals(False)
+        label.setText(str(knob.value()))
     ctx.pump(settle=0.4)
     return editor
 
@@ -164,6 +193,57 @@ def editor_sample_page(ctx):
     editor._worker.wait_until_idle()
     ctx.pump(lambda: editor.waveform_view.has_waveform(), timeout=20, settle=0.6)
     return editor
+
+
+def _sample_loaded(ctx, size):
+    """The Samples tab with the first sample's waveform loaded (as editor_sample_page leaves it)."""
+    editor = _editor(ctx, 2, size=size)
+    ctx.pump(lambda: editor.sample_list_widget.count() > 0, timeout=10)
+    editor.sample_list_widget.setCurrentRow(0)
+    ctx.pump(settle=0.3)
+    editor._load_sample_waveform()
+    editor._worker.wait_until_idle()
+    ctx.pump(lambda: editor.waveform_view.has_waveform(), timeout=20, settle=0.6)
+    return editor
+
+
+@shot("editor-sample-edit", "Program Editor, Samples tab with a working copy: Reverse and Reverb applied, nothing sent yet (amber strip, Undo, Send buttons)")
+def editor_sample_edit(ctx):
+    from core import reverb, sample_editing
+
+    editor = _sample_loaded(ctx, (1000, 920))
+    ctx.on_cleanup(editor._staged_edits.clear)  # (closing a window with unsent edits asks whether to discard them, which would block here)
+    row = editor.sample_list_widget.currentRow()
+    editor._apply_sample_edit(row, sample_editing.reverse_samples, "Reverse")
+    editor._apply_sample_edit(row, reverb.transform_for(decay=45, size=50, damping=2, mix=35, framerate=editor._sample_waveform_cache[row]["framerate"]), "Reverb")
+    editor._worker.wait_until_idle()
+    ctx.pump(settle=0.6)
+    return editor
+
+
+@shot("editor-audition-keyboard", "Program Editor with the Audition Keyboard open (View > Audition Keyboard) and a chord held")
+def editor_audition_keyboard(ctx):
+    editor = _editor(ctx, 1, size=(1000, 1150))
+    editor.program_list.setCurrentRow(0)
+    ctx.pump(lambda: editor.keygroup_list.count() > 0, timeout=10)
+    editor._worker.wait_until_idle()
+    bar = editor.audition_bar
+    bar.set_available(True, "")
+    bar.set_open(True)
+    ctx.pump(settle=0.3)
+    for note in (60, 64, 67):  # C3 major
+        bar.keyboard._press(note)
+    ctx.pump(settle=0.4)
+    return editor
+
+
+@shot("reverb-dialog", "The Reverb dialog (Samples tab > Reverb...): presets, four knobs, Preview")
+def reverb_dialog(ctx):
+    from ui.reverb_dialog import ReverbDialog
+
+    dialog = ReverbDialog(None, "BASS C1", tone(1.0, 110, 4), 44100, applies_to_working_copy=True, allow_new_sample=True)
+    ctx.on_cleanup(dialog.close)
+    return ctx.show(dialog)
 
 
 GLOBAL_VALUES = {
@@ -181,33 +261,18 @@ def editor_global_page(ctx):
 
 
 # ============================================================================== dialogs on the dashboard
-def _break_samples(rate=44100):
-    """Two seconds of an invented drum break: hits of different weight and length at uneven spacing, so the slicer has something to find."""
-    import random
+SLICE_SENSITIVITY = 40  # (SuperFlux, %): finds the loop's hits without extra markers
 
-    rng = random.Random(7)
-    out = [0.0] * int(2.0 * rate)
-    for start, level, decay, kind in [
-        (0.00, 1.0, 14, "kick"), (0.25, 0.8, 22, "snare"), (0.50, 0.9, 14, "kick"), (0.62, 0.5, 40, "hat"),
-        (0.75, 0.85, 22, "snare"), (1.00, 1.0, 14, "kick"), (1.12, 0.5, 40, "hat"), (1.25, 0.8, 22, "snare"),
-        (1.375, 0.6, 18, "kick"), (1.50, 0.9, 22, "snare"), (1.75, 0.5, 40, "hat"), (1.85, 0.7, 12, "snare"),
-    ]:
-        first = int(start * rate)
-        for i in range(min(int(0.3 * rate), len(out) - first)):
-            t = i / rate
-            body = math.sin(2 * math.pi * (60 + 120 * math.exp(-t * 30)) * t) if kind == "kick" else rng.random() * 2 - 1
-            out[first + i] += level * 0.8 * math.exp(-decay * t) * body
-    peak = max(abs(s) for s in out)
-    return [s / peak * 0.9 for s in out]
+BREAKBEAT = Path(__file__).resolve().parent / "screenshot_assets" / "breakbeat-128bpm.wav"  # the owner's own loop (MCS Vol.1 Breakbeat 05), stereo, one bar
 
 
-def _queued(ctx, name="super cool pad", samples=None):
-    """The dashboard with one file in the queue, returning (window, list item, its name field)."""
+def _queued(ctx, name="super cool pad", samples=None, path=None):
+    """The dashboard with one file in the queue (`path` to use a real file as it is, else invented `samples`), returning (window, list item, its name field)."""
     from PySide6.QtWidgets import QLineEdit
 
     window = _dashboard(ctx, queue=False, loaded=True)
     dash = window.dashboard_view
-    dash.on_files_dropped([ctx.wav(name.replace(" ", "_"), samples or tone(1.0, 262, 1.5))])
+    dash.on_files_dropped([str(path) if path else ctx.wav(name.replace(" ", "_"), samples or tone(1.0, 262, 1.5))])
     item = dash.list_local.item(0)
     field = dash.list_local.itemWidget(item).findChild(QLineEdit)
     field.setText(name)
@@ -259,7 +324,7 @@ def _slice_editor(ctx, setup):
     """The Slice Editor on a queued file (as opened from a queue row's Edit button), after `setup(dialog)`."""
     from ui import slice_editor_window as sew
 
-    window, item, field = _queued(ctx, name="break", samples=_break_samples())
+    window, item, field = _queued(ctx, name="break", path=BREAKBEAT)
     shown = _keep_modal_dialogs_open(ctx, sew.SliceEditorWindow)
     window.dashboard_view._open_slice_editor(item, field)
     dialog = shown[0]
@@ -283,7 +348,10 @@ def slice_editor_manual(ctx):
 @shot("slice-editor-auto", "The Slice Editor after the Sensitivity slider found the hits")
 def slice_editor_auto(ctx):
     def detect(dialog):
-        dialog.transient_sensitivity_slider.setValue(87)
+        # SuperFlux (the better detector) at a moderate sensitivity; it analyses on a worker thread, so wait for its result
+        dialog.detection_combo.setCurrentIndex(dialog.detection_combo.findData(app_config.SLICE_DETECTION_SUPERFLUX))
+        dialog.transient_sensitivity_slider.setValue(SLICE_SENSITIVITY)
+        ctx.pump(lambda: dialog._sf_future is None and dialog._sf_applied_id == dialog._sf_request_id, timeout=30, settle=0.3)
         dialog.name_edit.setText("CHOPPYBREAK")
 
     return _slice_editor(ctx, detect)
@@ -303,7 +371,8 @@ def _settings_dialog(ctx, tab: int):
     controller = SamplerController(mm)
     dialog = MidiSettingsDialog(mm, controller)
     ctx.show(dialog)
-    dialog.findChild(QTabWidget).setCurrentIndex(tab)
+    tabs = dialog.findChild(QTabWidget)
+    tabs.setCurrentIndex(tab)
     if tab == 1:  # what the Hardware Test shows once it has found a sampler
         dialog.id_results_label.setText(
             dialog._format_stat_result(
@@ -311,6 +380,12 @@ def _settings_dialog(ctx, tab: int):
             )
         )
     ctx.pump(settle=0.3)
+    # the pages scroll, and the dialog has outgrown its 560 px floor: grow it until the page fits, so no scroll bar is in the picture
+    scroll = tabs.currentWidget()
+    missing = scroll.widget().sizeHint().height() - scroll.viewport().height()
+    if missing > 0:
+        dialog.resize(dialog.width(), dialog.height() + missing + 2)
+        ctx.pump(settle=0.3)
     return dialog
 
 
@@ -359,7 +434,7 @@ def stray_midi_replies_dialog(ctx):
 
 
 # ============================================================================== the Yamaha A4000/A5000 editor (demo fake)
-def _yamaha_editor(ctx, size=(1150, 760)):
+def _yamaha_editor(ctx, size=(1150, 1180)):
     """The Yamaha editor on core.demo_a4000.FakeA4000 (the real session code over fake MIDI ports, as tools/a4000_demo.py does)."""
     import a4000_demo
     from controller.sampler_controller import SamplerController
@@ -384,10 +459,19 @@ def _yamaha_editor(ctx, size=(1150, 760)):
     return editor
 
 
+def _open_yamaha_keyboard(ctx, editor):
+    """View > Audition Keyboard open, once the editor is idle (the bar is only available then)."""
+    ctx.pump(lambda: editor._session.idle and not editor._is_busy(), timeout=20)
+    editor._sync_audition_available()
+    editor.audition_bar.set_open(True)
+    ctx.pump(settle=0.4)
+
+
 @shot("yamaha-programs-tab", "Yamaha A4000/A5000 editor, Programs tab: a program with its assigned samples")
 def yamaha_programs_tab(ctx):
     editor = _yamaha_editor(ctx)
     ctx.pump(lambda: editor._program_numbers and not editor._scanning, timeout=20, settle=0.5)
+    _open_yamaha_keyboard(ctx, editor)
     return editor
 
 
@@ -403,4 +487,5 @@ def yamaha_samples_tab(ctx):
     tab._load_audio()  # what double-clicking the waveform does
     ctx.pump(lambda: tab._audio_samples is not None and tab._loading_name is None, timeout=30, settle=0.6)
     ctx.on_cleanup(lambda: tab.refresh())  # (drops anything still in flight before the window goes)
+    _open_yamaha_keyboard(ctx, editor)
     return editor

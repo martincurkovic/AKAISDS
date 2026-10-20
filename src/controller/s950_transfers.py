@@ -35,6 +35,7 @@ that doesn't start with F0 - so on such a platform a big receive would time
 out. The timeout message says so, and every request/reply is logged.
 """
 
+import dataclasses
 import os
 import re
 import time
@@ -53,9 +54,23 @@ MIN_SAMPLE_RATE_HZ = round(1e9 / s.MAX_PERIOD_NS)  # 2 kHz - the dump header's l
 MAX_SAMPLE_RATE_HZ = round(1e9 / s.MIN_PERIOD_NS)  # not what the hardware plays
 MIDI_BYTES_PER_SECOND = 3125
 
-_BUSY_OPS = ("send", "receive", "info", "rename", "program", "program_write", "sample_read")
+_BUSY_OPS = ("send", "receive", "info", "rename", "program", "program_write", "sample_read", "sample_write")
+#: the SPRM fields write_sample_params may change (everything else in the block is written back exactly as read)
+SAMPLE_WRITE_FIELDS = ("replay_mode", "reversed")
 #: where the original of every program is saved before it is overwritten
 BACKUP_DIR = Path.home() / ".akaisds" / "s950_backups"
+#: the tail of a write's status message (the full path is in the log: the status bar has little room)
+BACKUP_NOTE = "Original saved in ~/.akaisds/s950_backups."
+
+
+def sample_write_problems(changes):
+    """What is wrong with a requested sample-settings change (an empty list = fine)."""
+    problems = []
+    if "replay_mode" in changes and changes["replay_mode"] not in (s.REPLAY_ONE_SHOT, s.REPLAY_LOOP, s.REPLAY_ALTERNATING):
+        problems.append("replay mode must be one-shot, loop or alternating")
+    if "reversed" in changes and changes["reversed"] not in (s.PLAY_FORWARD, s.PLAY_REVERSED):
+        problems.append("direction must be forward or reversed")
+    return problems
 
 
 def clamp_sample_rate(hz):
@@ -177,6 +192,7 @@ class S950Transfers(QObject):
         self._write_changes = []
         self._write_merged = None
         self._write_backup_path = None
+        self._sample_changes = {}
         self.backup_dir = BACKUP_DIR
 
         self._reply_timer = self._make_timer(self._on_reply_timeout)
@@ -322,6 +338,49 @@ class S950Transfers(QObject):
             f"program {slot} (before writing it)",
         )
 
+    def write_sample_params(self, slot, changes):
+        """Change the given SPRM fields of the sample in `slot`; reports on the controller's
+        `s950_sample_written`. `changes` maps a SampleParams attribute to its new value and
+        may hold only `SAMPLE_WRITE_FIELDS` (replay_mode, reversed).
+
+        The same care as write_program: read the sample's parameters fresh, refuse if they
+        can't be backed up, apply ONLY the requested fields to that fresh copy (every other
+        byte goes back exactly as read), send it, wait out the wire time and the NAK window,
+        read it back and compare. The unit doesn't answer an SPRM write, so the read-back is
+        the only evidence it landed. s950tools found that some fields (the reverse flag for
+        certain) sit in an "active edit buffer" the unit refreshes only when the sample is
+        re-selected on its front panel, so a verified write can still need ENT pressed there.
+        """
+        unknown = [k for k in changes if k not in SAMPLE_WRITE_FIELDS]
+        if unknown or not changes:
+            self._sample_write_refused(slot, "Not written: " + (f"can't change {', '.join(unknown)}" if unknown else "nothing to change"))
+            return
+        problems = sample_write_problems(changes)
+        if problems:
+            self._sample_write_refused(slot, "Not written: " + "; ".join(problems))
+            return
+        if not self._begin("sample_write", "Writing a sample's settings"):
+            self._c.s950_sample_written.emit(
+                slot, False, None, "Not written: another operation is in progress (or no MIDI input)"
+            )
+            return
+        self._program_slot = slot
+        self._sample_changes = dict(changes)
+        self._phase = "preread"
+        self._c.status_changed.emit(f"Writing sample {slot}'s settings...")
+        self._request(
+            s.FUNC_RSPRM,
+            slot,
+            s.FUNC_SPRM,
+            self._on_sample_write_preread,
+            f"sample {slot}'s parameters (before writing them)",
+        )
+
+    def _sample_write_refused(self, slot, message):
+        debug_log.get_logger().info(f"S950Transfers: {message}")
+        self._c.status_changed.emit(message)
+        self._c.s950_sample_written.emit(slot, False, None, message)
+
     def _write_refused(self, slot, message):
         debug_log.get_logger().info(f"S950Transfers: {message}")
         self._c.status_changed.emit(message)
@@ -413,6 +472,7 @@ class S950Transfers(QObject):
         self._write_changes = []
         self._write_merged = None
         self._write_backup_path = None
+        self._sample_changes = {}
         self._step_fn = None
 
     def _stop_timers(self):
@@ -494,6 +554,8 @@ class S950Transfers(QObject):
             self._c.s950_program_received.emit(program_slot, None)
         if op == "program_write":
             self._c.s950_program_written.emit(program_slot, False, None, message)
+        if op == "sample_write":
+            self._c.s950_sample_written.emit(program_slot, False, None, message)
         if op == "sample_read":
             self._c.s950_sample_params_received.emit(program_slot, None)
         if op == "send":
@@ -553,7 +615,7 @@ class S950Transfers(QObject):
         pending.callback(message)
 
     def _on_handshake(self, code):
-        if self._op in ("send", "program_write") and self._phase in ("draining", "naks"):
+        if self._op in ("send", "program_write", "sample_write") and self._phase in ("draining", "naks"):
             if code == s.CODE_NAKS:
                 self._naks += 1
             return
@@ -907,6 +969,107 @@ class S950Transfers(QObject):
         wire_ms = (len(data) + 2) * 1000 / MIDI_BYTES_PER_SECOND
         self._after(max(self.drain_floor_ms, wire_ms * self.drain_margin), self._after_write_drain)
 
+    # -- sample settings write -----------------------------------------------------------
+
+    def _on_sample_write_preread(self, message):
+        slot = self._program_slot
+        try:
+            current = s.SampleParams.from_payload(message.payload)
+        except ValueError as e:
+            self._fail(f"Not written: couldn't read sample {slot}'s parameters first ({e})")
+            return
+        merged = dataclasses.replace(current, **self._sample_changes)
+        if merged.to_payload() == current.to_payload():
+            # nothing to do: say so rather than send a write that changes nothing
+            self._reset()
+            text = f"Sample {slot} already holds these settings - nothing written"
+            self._c.status_changed.emit(text)
+            self._c.s950_sample_written.emit(slot, True, current, text)
+            return
+        try:
+            self._write_backup_path = self._save_sample_backup(slot, current.name, message)
+        except OSError as e:
+            self._fail(
+                f"Not written: couldn't save a backup of sample {slot}'s settings first ({e}) - "
+                "nothing was changed on the sampler"
+            )
+            return
+        self._write_merged = merged
+        data = s.build_akai_data(s.FUNC_SPRM, slot, merged.to_payload(), self._c.channel)
+        log = debug_log.get_logger()
+        log.info(
+            f"S950Transfers: writing sample {slot} {merged.name!r}'s settings: "
+            + ", ".join(f"{k} {getattr(current, k)!r} -> {v!r}" for k, v in self._sample_changes.items())
+            + f"; {len(data) + 2} bytes on the wire, backup {self._write_backup_path}"
+        )
+        self._naks = 0
+        self._phase = "draining"
+        if not self._send(data):
+            return
+        wire_ms = (len(data) + 2) * 1000 / MIDI_BYTES_PER_SECOND
+        self._after(max(self.drain_floor_ms, wire_ms * self.drain_margin), self._after_sample_write_drain)
+
+    def _save_sample_backup(self, slot, name, message):
+        # the complete SPRM message exactly as the unit sent it (a .syx any SysEx librarian can send back)
+        self.backup_dir.mkdir(parents=True, exist_ok=True)
+        safe = re.sub(r"[^A-Za-z0-9_-]+", "_", name.strip()) or "unnamed"
+        stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        path = self.backup_dir / f"sample{slot:02d}-{safe}-{stamp}.syx"
+        raw = s.build_akai_data(s.FUNC_SPRM, slot, message.payload, message.channel)
+        path.write_bytes(bytes([0xF0, *raw, 0xF7]))
+        return path
+
+    def _after_sample_write_drain(self):
+        self._phase = "naks"
+        self._after(self.nak_window_ms, self._after_sample_write_nak_window)
+
+    def _after_sample_write_nak_window(self):
+        if self._naks:
+            self._fail(
+                f"{self._naks} NAK(s) from the S900/S950 writing sample {self._program_slot}. {BACKUP_NOTE}"
+            )
+            return
+        self._phase = "verify"
+        self._after(self.sprm_settle_ms, self._read_back_sample)
+
+    def _read_back_sample(self):
+        self._request(
+            s.FUNC_RSPRM,
+            self._program_slot,
+            s.FUNC_SPRM,
+            self._on_sample_write_readback,
+            f"sample {self._program_slot}'s parameters (to check the write)",
+        )
+
+    def _on_sample_write_readback(self, message):
+        slot, sent, backup = self._program_slot, self._write_merged, self._write_backup_path
+        changes = dict(self._sample_changes)
+        try:
+            held = s.SampleParams.from_payload(message.payload)
+        except ValueError as e:
+            self._fail(
+                f"Sample {slot} sent, but its read-back is unreadable. {BACKUP_NOTE}"
+            )
+            debug_log.get_logger().warning(f"S950Transfers: sample {slot} read-back unreadable ({e}); backup {backup}")
+            return
+        log = debug_log.get_logger()
+        self._reset()
+        wrong = [k for k, v in changes.items() if getattr(held, k) != v]
+        if not wrong:
+            log.info(f"S950Transfers: sample {slot}'s settings written and verified")
+            log.info(f"S950Transfers: sample {slot} backup {backup}")
+            text = f"Sample {slot} written and verified. Press ENT on the S950 if it doesn't follow."
+            self._c.status_changed.emit(text)
+            self._c.s950_sample_written.emit(slot, True, held, text)
+            return
+        log.warning(
+            f"S950Transfers: sample {slot} read back DIFFERENT from what was sent: "
+            + "; ".join(f"{k} sent {changes[k]!r} got {getattr(held, k)!r}" for k in wrong)
+        )
+        text = f"Sample {slot} sent, but the sampler reports different values ({', '.join(wrong)}). {BACKUP_NOTE}"
+        self._c.status_changed.emit(text)
+        self._c.s950_sample_written.emit(slot, False, held, text)
+
     def _save_backup(self, slot, name, message):
         # the complete PRGM message exactly as the unit sent it, as a .syx file any
         # SysEx librarian can send straight back
@@ -925,9 +1088,7 @@ class S950Transfers(QObject):
     def _after_write_nak_window(self):
         if self._naks:
             self._fail(
-                f"{self._naks} NAK(s) from the S900/S950 while writing program "
-                f"{self._program_slot} - it may not have taken the whole program. "
-                f"The original is saved at {self._write_backup_path}"
+                f"{self._naks} NAK(s) from the S900/S950 writing program {self._program_slot}. {BACKUP_NOTE}"
             )
             return
         self._phase = "verify"
@@ -948,9 +1109,9 @@ class S950Transfers(QObject):
             held = s950_program.Program.from_payload(message.payload)
         except ValueError as e:
             self._fail(
-                f"Program {slot} was sent, but the read-back is unreadable ({e}). "
-                f"The original is saved at {backup}"
+                f"Program {slot} sent, but its read-back is unreadable. {BACKUP_NOTE}"
             )
+            debug_log.get_logger().warning(f"S950Transfers: program {slot} read-back unreadable ({e}); backup {backup}")
             return
         log = debug_log.get_logger()
         self._reset()
@@ -963,7 +1124,8 @@ class S950Transfers(QObject):
                     f"than were sent (sent {len(sent.to_payload())}, got {len(held.to_payload())})"
                 )
             log.info(f"S950Transfers: program {slot} written and verified")
-            text = f"Program {slot} written and verified. Original saved to {backup}"
+            log.info(f"S950Transfers: program {slot} backup {backup}")
+            text = f"Program {slot} written and verified."
             self._c.status_changed.emit(text)
             self._c.s950_program_written.emit(slot, True, held, text)
             return
@@ -977,11 +1139,8 @@ class S950Transfers(QObject):
             f"S950Transfers: program {slot} read back DIFFERENT from what was sent: "
             + "; ".join(differing)
         )
-        text = (
-            f"Program {slot} was sent, but the sampler now reports different values "
-            f"({'; '.join(differing[:3])}{'...' if len(differing) > 3 else ''}). "
-            f"Original saved to {backup}"
-        )
+        log.warning(f"S950Transfers: program {slot} backup {backup}")
+        text = f"Program {slot} sent, but the sampler reports different values ({'; '.join(differing[:2])}{'...' if len(differing) > 2 else ''}). {BACKUP_NOTE}"
         self._c.status_changed.emit(text)
         self._c.s950_program_written.emit(slot, False, held, text)
 

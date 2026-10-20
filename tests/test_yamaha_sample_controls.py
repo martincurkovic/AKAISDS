@@ -7,9 +7,10 @@ import os
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
-from PySide6.QtWidgets import QMessageBox
+from PySide6.QtWidgets import QFileDialog, QMessageBox
 
 from controller.yamaha_session import LinkResult
+from core import rx2
 from core import sample_editing as se
 from core import yamaha_markers as ym
 from core import yamaha_params as yp
@@ -136,7 +137,7 @@ def test_the_edit_buttons_need_the_audio_loaded(window):
     assert all(b.isEnabled() for b in tab.edit_buttons.values()) and tab.slice_button.isEnabled()
 
 
-def test_trim_makes_a_new_sample_from_the_marked_region_and_keeps_the_originals_settings(window):
+def test_trim_edits_the_working_copy_and_sending_it_makes_a_new_sample_that_keeps_the_originals_settings(window):
     tab = user_sample(window, mode=1, end=3500, loop=(1500, 2500))
     put(window.fake, "UM", original_key_l=64, original_key_r=64, fine_tune_l=-9, fine_tune_r=-9, coarse_tune=2)
     tab.reload_sample("UM")
@@ -144,20 +145,26 @@ def test_trim_makes_a_new_sample_from_the_marked_region_and_keeps_the_originals_
     release(tab, "start", 500)
     assert settled(window, ym.Markers(500, 1500, 2500, 3500))
     original_audio = list(window.fake.audio["UM"])
+    before = set(window.fake.samples)
     tab.edit_buttons["trim"].click()
+    # nothing reaches the unit: the working copy is the trimmed audio, shown at once
+    assert set(window.fake.samples) == before and not tab._edit_busy
+    assert tab._staged["UM"].channels[0] == original_audio[500:3500]
+    assert tab._audio_samples == original_audio[500:3500] and bool(tab._staged_banner.property("unsent"))
+    tab.send_edits_as_new_button.click()
     assert not tab.edit_buttons["trim"].isEnabled()  # locked while the copy is sent
-    data = new_sample(window, "UM TRIM")
+    data = new_sample(window, "UM EDIT")
     g = lambda key: yp.extract(yp.get("sample", key), data)  # noqa: E731
     # the unit's wave end is 3500 (exclusive), the start 500: 3000 frames
     assert (g("wave_start_address"), g("wave_length"), g("wave_end_address")) == (0, 3000, 3000)
     assert (g("original_key_l"), g("fine_tune_l"), g("coarse_tune"), g("loop_mode")) == (64, -9, 2, 1)
     # the loop moved with the trim (everything is 500 frames earlier)
     assert (g("loop_start_address"), g("loop_end_address")) == (1000, 2000)
-    assert window.fake._audio_for("UM TRIM") == original_audio[500:3500]
+    assert window.fake._audio_for("UM EDIT") == original_audio[500:3500]
     settle_edit(tab)
-    assert wait_until(lambda: tab._selected == "UM TRIM")  # the copy is selected afterwards
+    assert wait_until(lambda: tab._selected == "UM EDIT")  # the copy is selected afterwards
     assert list(window.fake.audio["UM"]) == original_audio  # the original is untouched
-
+    assert tab._staged == {}  # the work lives on as the new sample
 
 def test_trim_with_nothing_to_trim_says_so_and_sends_nothing(window):
     tab = user_sample(window, mode=4, end=4000)
@@ -168,34 +175,36 @@ def test_trim_with_nothing_to_trim_says_so_and_sends_nothing(window):
     assert any("Nothing to trim" in m for m in messages) and set(window.fake.samples) == before
 
 
-def test_reverse_makes_a_reversed_copy(window):
+def test_reverse_then_send_makes_a_reversed_copy(window):
     tab = user_sample(window, mode=4, end=4000)
     tab.edit_buttons["reverse"].click()
-    new_sample(window, "UM REV")
-    assert wait_until(lambda: window.fake.audio.get("UM REV") == list(reversed(window.fake.audio["UM"])) or True)
+    tab.send_edits_as_new_button.click()
+    new_sample(window, "UM EDIT")
+    assert wait_until(lambda: window.fake._audio_for("UM EDIT") == list(reversed(window.fake.audio["UM"])))
     settle_edit(tab)
 
-
-def test_an_edit_shows_its_send_progress_in_a_bar_that_goes_away_afterwards(window):
+def test_sending_the_working_copy_shows_its_progress_in_a_bar_that_goes_away_afterwards(window):
     tab = user_sample(window, mode=4, end=4000)
     shown = []  # (status text, the bar was showing, its value, its maximum) at every progress message
     tab.status_message.connect(lambda m: shown.append((m, not tab.edit_progress.isHidden(), tab.edit_progress.value(), tab.edit_progress.maximum())))
     assert tab.edit_progress.isHidden()
     tab.edit_buttons["reverse"].click()
-    new_sample(window, "UM REV")
+    assert tab.edit_progress.isHidden()  # editing the working copy sends nothing
+    tab.send_edits_as_new_button.click()
+    new_sample(window, "UM EDIT")
     settle_edit(tab)
-    progress = [x for x in shown if x[0].startswith('Reverse "UM" - ')]
+    progress = [x for x in shown if x[0].startswith('Send "UM" - ')]
     assert progress and all(visible and total > 0 and 0 <= value <= total for _m, visible, value, total in progress)
-    assert progress[-1][0].endswith("%") and tab.edit_progress.isHidden()  # hidden again once the edit is over
-
+    assert progress[-1][0].endswith("%") and tab.edit_progress.isHidden()  # hidden again once the send is over
 
 def test_a_stereo_sample_stays_stereo_through_an_edit(window):
     tab = user_sample(window, "ST", mode=4, end=4000, right=True)
     tab.edit_buttons["reverse"].click()
-    data = new_sample(window, "ST REV")
+    assert len(tab._staged["ST"].channels) == 2
+    tab.send_edits_as_new_button.click()
+    data = new_sample(window, "ST EDIT")
     assert yp.is_stereo(data)
     settle_edit(tab)
-
 
 def test_fade_is_refused_when_the_markers_cover_the_whole_sample(window):
     tab = user_sample(window, mode=4, end=4000)
@@ -208,9 +217,10 @@ def test_fade_is_refused_when_the_markers_cover_the_whole_sample(window):
 def test_normalise_gains_a_quiet_sample_up(window):
     tab = user_sample(window, mode=4, end=4000)
     tab.edit_buttons["normalise"].click()
-    new_sample(window, "UM NORM")
+    assert max(abs(v) for v in tab._staged["UM"].channels[0]) > max(abs(v) for v in window.fake.audio["UM"])
+    tab.send_edits_as_new_button.click()
+    new_sample(window, "UM EDIT")
     settle_edit(tab)
-
 
 def test_normalise_says_when_the_sample_is_silent(window):
     window.fake.add_sample("SIL", audio=[0] * 500)
@@ -223,56 +233,74 @@ def test_normalise_says_when_the_sample_is_silent(window):
     assert any("silent" in m for m in messages)
 
 
-def test_filter_runs_the_chosen_filter_and_makes_a_copy(window, monkeypatch):
-    class StubDialog:
-        def __init__(self, parent, name, samples, rate):
-            self.seen = (name, len(samples), rate)
+class _FilterStub:
+    send_new = False
 
-        def exec(self):
-            return True
+    def __init__(self, parent, name, samples, rate, pitch_shift_semitones=0, allow_new_sample=False,
+                 applies_to_working_copy=False, send_name=""):
+        self.seen = (name, len(samples), rate)
 
-        def highpass_enabled(self): return False
-        def highpass_cutoff_hz(self): return None
-        def highpass_slope_db_per_octave(self): return 12
-        def lowpass_enabled(self): return True
-        def lowpass_cutoff_hz(self): return 800
-        def lowpass_slope_db_per_octave(self): return 24
+    def exec(self):
+        return True
 
-    monkeypatch.setattr(edit_module, "FilterSampleDialog", StubDialog)
+    def send_as_new(self): return type(self).send_new
+    def highpass_enabled(self): return False
+    def highpass_cutoff_hz(self): return None
+    def highpass_slope_db_per_octave(self): return 12
+    def lowpass_enabled(self): return True
+    def lowpass_cutoff_hz(self): return 800
+    def lowpass_slope_db_per_octave(self): return 24
+
+
+def test_filter_ok_applies_to_the_working_copy_and_sending_it_makes_the_copy(window, monkeypatch):
+    monkeypatch.setattr(edit_module, "FilterSampleDialog", _FilterStub)
+    _FilterStub.send_new = False
     tab = user_sample(window, mode=4, end=4000)
+    before = set(window.fake.samples)
     tab.edit_buttons["filter"].click()
-    new_sample(window, "UM FILT")
+    assert set(window.fake.samples) == before and "UM" in tab._staged  # applied here, sent nowhere
+    tab.send_edits_as_new_button.click()
+    new_sample(window, "UM EDIT")
     settle_edit(tab)
 
 
-def test_a_cancelled_filter_dialog_sends_nothing(window, monkeypatch):
+def test_the_filter_dialogs_own_send_as_new_sample_makes_the_unit_copy_at_once(window, monkeypatch):
+    monkeypatch.setattr(edit_module, "FilterSampleDialog", _FilterStub)
+    _FilterStub.send_new = True
+    tab = user_sample(window, mode=4, end=4000)
+    tab.edit_buttons["filter"].click()
+    new_sample(window, "UM FILT")
+    assert tab._staged == {}
+    settle_edit(tab)
+
+def test_a_cancelled_filter_dialog_changes_nothing(window, monkeypatch):
     class Cancel:
-        def __init__(self, *a): pass
+        def __init__(self, *a, **k): pass
         def exec(self): return False
 
     monkeypatch.setattr(edit_module, "FilterSampleDialog", Cancel)
     tab = user_sample(window, mode=4, end=4000)
     before = set(window.fake.samples)
     tab.edit_buttons["filter"].click()
-    assert set(window.fake.samples) == before and not tab._edit_busy
+    assert set(window.fake.samples) == before and not tab._edit_busy and tab._staged == {}
 
-
-def test_declining_the_confirmation_sends_nothing(window, monkeypatch):
+def test_declining_the_send_confirmation_sends_nothing_and_keeps_the_working_copy(window, monkeypatch):
+    tab = user_sample(window, mode=4, end=4000)
+    tab.edit_buttons["reverse"].click()  # (no confirmation: it only changes the working copy)
+    assert "UM" in tab._staged
     monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.StandardButton.No)
-    tab = user_sample(window, mode=4, end=4000)
     before = set(window.fake.samples)
-    tab.edit_buttons["reverse"].click()
-    assert set(window.fake.samples) == before and not tab._edit_busy
+    tab.send_edits_as_new_button.click()
+    assert set(window.fake.samples) == before and not tab._edit_busy and "UM" in tab._staged
 
-
-def test_an_edit_whose_name_is_taken_gets_a_number(window):
+def test_a_send_whose_name_is_taken_gets_a_number(window):
     tab = user_sample(window, mode=4, end=4000)
-    window.fake.add_sample("UM REV", audio=[1] * 100)  # taken on the unit (the sender reads the unit's own list)
+    window.fake.add_sample("UM EDIT", audio=[1] * 100)  # taken on the unit (the sender reads the unit's own list)
     tab.edit_buttons["reverse"].click()
-    new_sample(window, "UM REV 2")
+    tab.send_edits_as_new_button.click()
+    new_sample(window, "UM EDIT 2")
     settle_edit(tab)
-    assert wait_until(lambda: tab._selected == "UM REV 2")
-
+    assert wait_until(lambda: tab._selected == "UM EDIT 2")
 
 # --- the Slice Editor --------------------------------------------------------------------------------------------------
 
@@ -299,6 +327,7 @@ class StubSlicer:
         )
         self.export_succeeded = self.result[0]
         return 1
+
 
 
 def test_the_slice_editor_exports_every_slice_as_a_new_sample(window, monkeypatch):
@@ -585,3 +614,104 @@ def test_a_unit_that_went_silent_without_making_the_link_gets_it_sent_again(wind
 
 def test_the_most_slices_a_program_takes_is_what_fits_on_the_keyboard():
     assert edit_module.MAX_PROGRAM_SLICES == 92 and edit_module.FIRST_SLICE_NOTE + edit_module.MAX_PROGRAM_SLICES - 1 == 127
+
+
+# --- File > Import RX2 Loop ---------------------------------------------------------------------------------------------
+
+RX2_STEREO = os.path.join(os.path.dirname(__file__), "fixtures", "rx2", "120Stereo.rx2")
+needs_rx2 = pytest.mark.skipif(not rx2.is_available(), reason="VelociLoops not built")
+
+
+def drive_rx2_import(window, monkeypatch, path=RX2_STEREO, *, into_program=False, program_row=0):
+    """Pick the file the way the menu action does, then drive the REAL dialog: its cut points are already placed, so just Export."""
+    shown = {}
+
+    def drive(self):
+        shown["markers"] = len(self.waveform.slice_markers())
+        shown["extra_channels"] = len(self._extra_channels or [])
+        shown["name"] = self.name_edit.text()
+        shown["dirty"] = self._dirty
+        if into_program:
+            self.create_program_checkbox.setChecked(True)
+            self.template_program_combo.setCurrentIndex(program_row)
+        self.export_button.click()
+        shown["succeeded"] = self.export_succeeded
+        return 1
+
+    monkeypatch.setattr(edit_module.SliceEditorWindow, "exec", drive)
+    monkeypatch.setattr(QFileDialog, "getOpenFileName", lambda *a, **k: (path, ""))
+    monkeypatch.setattr(QMessageBox, "information", lambda *a, **k: QMessageBox.StandardButton.Ok)
+    monkeypatch.setattr(QMessageBox, "warning", lambda *a, **k: QMessageBox.StandardButton.Ok)
+    return shown
+
+
+def test_the_menu_action_is_ctrl_shift_i_and_opens_the_import(window):
+    assert window._import_audio_action.shortcut().toString() == "Ctrl+Shift+I"
+    assert "File" in [a.text().replace("&", "") for a in window.menuBar().actions()]
+
+
+@needs_rx2
+def test_importing_an_rx2_sends_each_slice_as_a_stereo_sample(window, monkeypatch):
+    shown = drive_rx2_import(window, monkeypatch)
+    window._import_audio_action.trigger()  # needs no sample selected or loaded
+    tab = window.samples_tab
+    assert shown == {"markers": 9, "extra_channels": 1, "name": "120STEREO", "dirty": False, "succeeded": True}
+    names = sorted(n for n in window.fake.samples if n.startswith("120STEREO-"))
+    assert len(names) == 10
+    assert all(yp.is_stereo(window.fake.samples[n]) for n in names)
+    # the ten slices are the whole bar: 2 s at 44.1 kHz
+    frames = sum(yp.extract(yp.get("sample", "wave_length"), window.fake.samples[n]) for n in names)
+    assert frames == 2 * 44100
+    assert yp.extract(yp.get("sample", "original_key_l"), window.fake.samples[names[0]]) == 60
+    settle_edit(tab)
+    assert wait_until(lambda: all(n in tab.sample_names() for n in names))
+
+
+@needs_rx2
+def test_importing_an_rx2_can_fill_an_empty_program(window, monkeypatch):
+    shown = drive_rx2_import(window, monkeypatch, into_program=True, program_row=1)  # row 1 = program 003
+    window._import_audio_action.trigger()
+    assert shown["succeeded"] is True
+    names = sorted(n for n in window.fake.samples if n.startswith("120STEREO-"))
+    assert assigned_names(window, 3) == names
+    note = edit_module.FIRST_SLICE_NOTE + 3
+    data = window.fake.samples[names[3]]
+    assert yp.extract(yp.get("sample", "key_range_low"), data) == note
+    settle_edit(window.samples_tab)
+
+
+def test_a_file_that_is_not_an_rx2_says_so_and_opens_nothing(window, monkeypatch, tmp_path):
+    bad = tmp_path / "bad.rx2"
+    bad.write_bytes(b"not a rex file")
+    opened = []
+    monkeypatch.setattr(edit_module.SliceEditorWindow, "exec", lambda self: opened.append(1) or 0)
+    monkeypatch.setattr(QFileDialog, "getOpenFileName", lambda *a, **k: (str(bad), ""))
+    messages = []
+    window.samples_tab.status_message.connect(messages.append)
+    window._import_audio_action.trigger()
+    assert opened == [] and messages
+
+
+def test_a_busy_transfer_blocks_an_import(window, monkeypatch):
+    opened = []
+    monkeypatch.setattr(QFileDialog, "getOpenFileName", lambda *a, **k: opened.append(1) or ("", ""))
+    monkeypatch.setattr(window.controller, "is_transfer_busy", lambda: True)
+    messages = []
+    window.samples_tab.status_message.connect(messages.append)
+    window._import_audio_action.trigger()
+    assert opened == [] and any("already in progress" in m for m in messages)
+
+
+def test_importing_a_plain_audio_file_sends_it_as_one_stereo_sample(window, monkeypatch, tmp_path):
+    import numpy as np
+    import soundfile as sf
+
+    path = tmp_path / "pad.wav"
+    tone = np.sin(np.arange(4000) / 20.0).astype("float32") * 0.4
+    sf.write(str(path), np.stack([tone, -tone], axis=1), 44100)
+    shown = drive_rx2_import(window, monkeypatch, path=str(path))
+    window._import_audio_action.trigger()
+    # no cut points: the whole file, as one stereo sample named for the file
+    assert shown["markers"] == 0 and shown["extra_channels"] == 1 and shown["succeeded"] is True
+    assert yp.is_stereo(window.fake.samples["PAD"])
+    settle_edit(window.samples_tab)

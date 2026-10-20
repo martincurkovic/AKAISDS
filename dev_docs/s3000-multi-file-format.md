@@ -1,7 +1,9 @@
 # Akai S2000/S3000XL multi file format - research notes
 
-Written 2026-10-08, condensed 2026-10-10 while considering a "Save / Load Multi" feature. **No code exists for this**; it records what is
-known, from where, and what is still a guess. Nothing here has been run against the owner's S2000.
+Written 2026-10-08, condensed 2026-10-10 while considering a "Save / Load Multi" feature. **Status 2026-10-19: Save Multi exists** (`core/akai_multi_file.py`, the
+Multi tab's "Save to File..." and File > Save Multi to File...), written from what is below and **not yet checked against a multi the sampler itself saved**:
+run `tools/s2000_multi_check.py compare REAL.m3` (read-only; its docstring has the procedure) and record the result here. **Load Multi does not exist.** Nothing here
+has been run against the owner's S2000.
 
 ## Summary
 
@@ -86,3 +88,15 @@ settings - it says nothing about fully used multis, effects, or header bytes `0x
 3. **Questions for the real S2000:** save a multi with distinctive values on every part, extract it and diff against a SysEx read (settles
    header `0x20-0x3FF`, the pointers, `+0x01`/`+0x6D`); does writing every part over SysEx reproduce the file byte for byte (ignoring pointers and
    `+0x6D`); is `FXFILENAME` ever non-zero; does a hand-built 4096-byte file load from disk.
+
+## What Save Multi does (2026-10-19), and what it guesses
+
+`akai_multi_file.build_file(header, parts)`: the 32 wire bytes of the multi header at file offset 0, zeros to 0x3FF, then the 16 wire part blocks at `0x400 + n * 0xC0`, with three
+changes: each part's byte 0 is written as `01`, each part's end link (`+0xBE-BF`) as `FF FF`, and the header bytes beyond the first 32 are zero. The link pointer (`+0x01-02`)
+and "last note played" (`+0x6D`) stay as the sampler reported them. The read is `S3kBridge.get_header_bytes("multi", 0, 0, 32)` then `("multipart", n, 0, 192)` for n = 0..15, one
+request at a time, never above 15; sizes are checked, block identifiers are not.
+
+Guesses, each of which the check tool can settle: (1) **byte 0 of a part on the wire is unknown** (the DemoBridge sends 00; the real file has 01), so the file gets 01 as the one real
+file shows; (2) bytes 0-2 of the multi header are passed through as read, while the real file may want something else there; (3) the header beyond byte 32 is unreadable over SysEx, so
+a multi that holds anything there loses it in our file; (4) the link pointer as read is not what a disk file has (the sampler holds absolute addresses).
+`akai_multi_file.compare` ignores exactly the link pointer, last note and end link; everything else a real file differs on is printed with its field name.

@@ -7,14 +7,14 @@ import time
 from collections import deque
 from pathlib import Path
 
-from core import akai_sysex, app_config, debug_log, sampler_models
+from core import akai_sysex, app_config, debug_log, midi_identity, sampler_models
 from core import midi_manager as midi_manager_module
 from s3k.bridge import DeviceError, S3kBridge, ThrottledOut
 from PySide6.QtCore import QThread, Signal
 import s3k.messages as m
 from s3k.messages import NAME_LENGTH
 import s3k.params as p
-from core import akai_program_file
+from core import akai_multi_file, akai_program_file, akai_sample_file
 from core.global_settings import BLOCK_SETTINGS, GLOBAL_SETTINGS, MDATA_BLOCK_LENGTH
 from core.reply_matching import make_reply_tolerant
 from core.s1000_bridge import S1000Bridge
@@ -101,7 +101,7 @@ class LoggingBridge:
                         # FAILED logging as everything else on this
                         # connection rather than being invisible to
                         # ~/.akaisds/akaisds.log
-                        "get_header_bytes", "send_and_receive",
+                        "get_header_bytes", "send_and_receive", "status",
                         # delete_program/delete_keygroup/delete_sample were
                         # missing from this list entirely - a failed delete
                         # produced no trace at all in ~/.akaisds/akaisds.log,
@@ -174,7 +174,12 @@ for _name in LoggingBridge._WRAPPED_METHODS:
 del _name
 
 
-def connect(midi_manager=None, sampler_model=None):
+def connect(midi_manager=None, sampler_model=None, exclusive_channel=None):
+    # exclusive_channel is the SysEx device ID (None = the Settings value).
+    # S3kBridge defaults to 0, so without this a sampler on any other ID
+    # would answer the Dashboard (which honours the setting) and not the editor
+    if exclusive_channel is None:
+        exclusive_channel = app_config.get_saved_channel()
     # sampler_model is one of core/sampler_models.py's three selections
     # (None = the S2000/S3000 default). Only the S1000 differs here: it
     # doesn't implement the byte-addressable header SysEx S3kBridge's
@@ -221,13 +226,14 @@ def connect(midi_manager=None, sampler_model=None):
         # ports set but the flag off) this second check exists to catch.
         logger.info(
             "program_editor_bridge.connect(): shared transport "
-            f"({midi_manager.output_name!r})"
+            f"({midi_manager.output_name!r}, device ID {exclusive_channel})"
         )
         bridge = make_reply_tolerant(
             S3kBridge(
                 ThrottledOut(midi_manager.raw_output),
                 midi_manager.raw_input,
                 f"{midi_manager.output_name} (shared)",
+                exclusive_channel=exclusive_channel,
             ),
             logger,
         )
@@ -240,9 +246,13 @@ def connect(midi_manager=None, sampler_model=None):
         # than guess at during hardware testing
         _input_name, output_name = app_config.get_saved_ports()
         logger.info(
-            f"program_editor_bridge.connect(): standard connection ({output_name!r})"
+            f"program_editor_bridge.connect(): standard connection "
+            f"({output_name!r}, device ID {exclusive_channel})"
         )
-        bridge = make_reply_tolerant(S3kBridge.standard(output_name), logger)  # type: ignore
+        bridge = make_reply_tolerant(
+            S3kBridge.standard(output_name, exclusive_channel=exclusive_channel),  # type: ignore
+            logger,
+        )
     if s1000:
         logger.info("program_editor_bridge.connect(): S1000 block adapter")
         bridge = S1000Bridge(bridge)
@@ -463,6 +473,12 @@ _PROGRAM_LEVEL_FIELDS = [
 PROGRAM_BACKUP_DIR = Path.home() / ".akaisds" / "program_backups"
 # the sampler's whole-block misc data, saved once per session before the first block write (core/global_settings.py)
 MDATA_BACKUP_DIR = Path.home() / ".akaisds" / "mdata_backups"
+# the whole resident multi (.m3), saved before Load Multi writes anything (tools/s2000_multi_write_check.py uses the same folder)
+MULTI_BACKUP_DIR = Path.home() / ".akaisds" / "multi_backups"
+# pauses around Load Multi's per-field writes (via the `_sleep` hook): the sampler needs a moment before a read-back shows a write, and a Program Change a moment to apply.
+# Measured: tools/s2000_multi_write_check.py read back correctly 0.5 s after each write (2026-10-19).
+MULTI_LOAD_SETTLE_S = 0.5
+MULTI_LOAD_PROGRAM_CHANGE_S = 0.4
 
 # Spacing around a whole-block misc write. MEASURED (2026-10-10, the user's S2000): a block write sent 3 ms after the RMDATA read was ACKED ("OK") and then NEVER applied -
 # every later read of the block, even 5 s on, still held the old bytes - while the standalone check (tools/s2000_mdata_write_check.py), which has seconds before the write
@@ -507,7 +523,12 @@ class BridgeWorker(QThread):
         "multi_parts",
         "sample_detail",
         "global_settings",
+        "memory_status",
     }
+
+    # Jobs that go through the queue (so they never overlap a SysEx exchange on the wire) but are invisible to busy_changed: a note from the on-screen keyboard
+    # must not light the loading bar for a few milliseconds each time a key is pressed.
+    _SILENT_KINDS = {"midi"}
 
     programs_loaded = Signal(list)
     programs_load_failed = Signal(str)
@@ -540,7 +561,7 @@ class BridgeWorker(QThread):
     sample_length_loaded = Signal(int, int, int)
     sample_length_load_failed = Signal(int, str)
 
-    parts_loaded = Signal(list)  # [(program_name, channel, level, pan), ...] per part
+    parts_loaded = Signal(list)  # [(program_name, channel, level, pan, priority, low_note, high_note, transpose, tune), ...] per part
     parts_load_failed = Signal(str)
 
     # the multi file header's own name (MULTINAME, region "multi") - read
@@ -552,6 +573,7 @@ class BridgeWorker(QThread):
 
     change_sent = Signal(int, str)  # part_index, program_name (for the status bar)
     change_send_failed = Signal(int, str)
+    midi_send_failed = Signal(str)  # a keyboard note or Panic could not be sent
 
     # writer_key, param_name, new_value / error - writer_key is whatever
     # _active_writers used to be keyed by (param_name, or a per-part key for
@@ -572,6 +594,10 @@ class BridgeWorker(QThread):
     # can show (a missing key = that one couldn't be read).
     global_settings_loaded = Signal(dict)
     global_settings_load_failed = Signal(str)
+    # RSTAT: the sample memory and the OS version. Keys: max_num_samp_words, num_words_free, num_blocks_free (the names the
+    # Dashboard's memory_status_updated uses, so one bar widget shows either), plus max_blocks and version ("VV.vv")
+    memory_status_loaded = Signal(dict)
+    memory_status_load_failed = Signal(str)
     global_setting_written = Signal(str, int)  # key, value
     global_setting_write_failed = Signal(str, str)  # key, error
 
@@ -612,6 +638,16 @@ class BridgeWorker(QThread):
     # duplicate flow uses
     program_exported = Signal(int, object)  # program_index, akai_program_file.ProgramFile
     program_export_failed = Signal(int, str)  # program_index, error
+    # Save Multi (core/akai_multi_file.py): the resident multi's raw header and 16 part blocks, read-only
+    multi_exported = Signal(object)  # akai_multi_file.MultiFile
+    multi_export_failed = Signal(str)  # error
+    # Load Multi: first a read-only plan (so the window can ask), then the load itself
+    multi_plan_ready = Signal(object, object, object, object)  # MultiFile, LoadPlan, [Assignment], [sentences]
+    multi_imported = Signal(object)  # akai_multi_file.LoadResult
+    multi_import_failed = Signal(str, str)  # error, backup path ("" if none was made)
+    # Save as Akai File (core/akai_sample_file.py): one sample's raw header block, read-only
+    sample_header_exported = Signal(int, object)  # sample_index, the header block (bytes)
+    sample_header_export_failed = Signal(int, str)  # sample_index, error
     # an S1000 keygroup delete done by rebuilding the program: the program MOVED
     # (the rebuilt copy is last in the list)
     program_rebuilt = Signal(int, int, int)  # old program_index, deleted keygroup_index, new program_index
@@ -659,6 +695,8 @@ class BridgeWorker(QThread):
         self._idle = threading.Condition(self._lock)
         self._queue = deque()
         self._busy = False
+        self._running_silent = False  # the job running now is one of _SILENT_KINDS
+        self._busy_announced = False  # busy_changed(True) has been emitted and its False has not
         self._stopped = False
         # PRGNUM (a program's own MIDI program number, independent of its
         # position in the program list) is what a Program Change actually
@@ -678,11 +716,15 @@ class BridgeWorker(QThread):
 
     def _submit(self, job):
         with self._idle:
-            was_idle = not self._queue and not self._busy
             kind = job[0]
+            # "idle" as far as busy_changed is concerned: nothing queued and nothing running except silent jobs
+            was_idle = all(j[0] in self._SILENT_KINDS for j in self._queue) and (not self._busy or self._running_silent)
             if kind in self._COALESCE_KINDS:
                 self._queue = deque(j for j in self._queue if j[0] != kind)
             self._queue.append(job)
+            announce = was_idle and kind not in self._SILENT_KINDS
+            if announce:
+                self._busy_announced = True
             self._idle.notify_all()
         # diagnostic-only - see AGENTS.md's "Diagnosing a load that
         # silently does nothing". isRunning()/isFinished() are QThread's
@@ -696,8 +738,12 @@ class BridgeWorker(QThread):
             f"BridgeWorker._submit: queued {job!r} (queue_len={len(self._queue)}, "
             f"is_running={self.isRunning()}, is_finished={self.isFinished()})"
         )
-        if was_idle:
+        if announce:
             self.busy_changed.emit(True)
+
+    def submit_midi(self, message):
+        """One raw MIDI channel message (bytes; a keyboard note or a Panic message), sent on the bridge's own open port. Never coalesced, in order with everything else."""
+        self._submit(("midi", bytes(message)))
 
     def submit_program_list(self):
         self._submit(("program_list",))
@@ -736,6 +782,9 @@ class BridgeWorker(QThread):
     def submit_global_settings(self):
         self._submit(("global_settings",))
 
+    def submit_memory_status(self):
+        self._submit(("memory_status",))
+
     def submit_set_global_setting(self, key, value):
         # not coalesced: every choice must reach the sampler, in order
         self._submit(("set_global_setting", key, value))
@@ -754,6 +803,18 @@ class BridgeWorker(QThread):
 
     def submit_export_program(self, program_index):
         self._submit(("export_program", program_index))
+
+    def submit_export_multi(self):
+        self._submit(("export_multi",))
+
+    def submit_export_sample_header(self, sample_index):
+        self._submit(("export_sample_header", sample_index))
+
+    def submit_plan_multi(self, multi_file):
+        self._submit(("plan_multi", multi_file))
+
+    def submit_import_multi(self, multi_file):
+        self._submit(("import_multi", multi_file))
 
     def submit_import_program(self, program_file, new_name):
         self._submit(("import_program", program_file, new_name))
@@ -819,12 +880,16 @@ class BridgeWorker(QThread):
                     return
                 job = self._queue.popleft()
                 self._busy = True
+                self._running_silent = job[0] in self._SILENT_KINDS
             self._safe_dispatch(job)
             with self._idle:
                 self._busy = False
-                now_idle = not self._queue
+                self._running_silent = False
+                announce_idle = not self._queue and self._busy_announced
+                if announce_idle:
+                    self._busy_announced = False
                 self._idle.notify_all()
-            if now_idle:
+            if announce_idle:
                 self.busy_changed.emit(False)
 
     def process_pending(self):
@@ -839,12 +904,16 @@ class BridgeWorker(QThread):
                     return
                 job = self._queue.popleft()
                 self._busy = True
+                self._running_silent = job[0] in self._SILENT_KINDS
             self._safe_dispatch(job)
             with self._idle:
                 self._busy = False
-                now_idle = not self._queue
+                self._running_silent = False
+                announce_idle = not self._queue and self._busy_announced
+                if announce_idle:
+                    self._busy_announced = False
                 self._idle.notify_all()
-            if now_idle:
+            if announce_idle:
                 self.busy_changed.emit(False)
 
     def _safe_dispatch(self, job):
@@ -1009,6 +1078,11 @@ class BridgeWorker(QThread):
                     header["PMCHAN"],
                     header["STEREO"],
                     header["PANPOS"],
+                    header["PRIORT"],
+                    header["PLAYLO"],
+                    header["PLAYHI"],
+                    header["TRANSPOSE"],
+                    header["PTUNOCM"],
                 ))
         except Exception as e:
             self.parts_load_failed.emit(str(e))
@@ -1037,51 +1111,69 @@ class BridgeWorker(QThread):
             self.change_sent.emit(part_index, program_name)
             return
         try:
-            if not self._programs_renumbered:
-                # see the comment on _programs_renumbered in __init__ - this
-                # is what actually fixes "picking the Nth program always
-                # sends the Program Change for the 1st": every program gets
-                # its own distinct number before the first change is sent
-                renumber = getattr(self._bridge, "renumber_programs", None)
-                if renumber is not None:
-                    # not one of LoggingBridge's wrapped methods (its
-                    # existence has to stay tellable-apart from a demo
-                    # bridge that simply lacks it - see the comment on
-                    # LoggingBridge._WRAPPED_METHODS), so it gets its own
-                    # explicit START/FAILED logging here instead. A failed
-                    # renumber silently breaks every Program Change sent
-                    # afterward (every program can go back to colliding on
-                    # PRGNUM==0 - see this method's own docstring above),
-                    # so this needs to be visible on its own, not just
-                    # inferred from the Program Change itself failing.
-                    thread_name = threading.current_thread().name
-                    logger = debug_log.get_logger()
-                    logger.debug(f"[{thread_name}] START renumber_programs()")
-                    try:
-                        renumber()
-                    except Exception:
-                        logger.error(
-                            f"[{thread_name}] FAILED renumber_programs()",
-                            exc_info=True,
-                        )
-                        raise
-                    logger.debug(f"[{thread_name}] END renumber_programs()")
-                self._programs_renumbered = True
-            # get_parameter applies PRGNUM's display_offset (the panel's
-            # 1-based numbering, since s3ked's params table declared it -
-            # see AGENTS.md's "PRGNUM and Program Change" section) - a MIDI
-            # Program Change needs the raw 0-based wire value, so the
-            # offset is subtracted back out here rather than assumed away.
-            prgnum_param = p.lookup("PRGNUM", "program")
-            program_number = (
-                self._bridge.get_parameter(prgnum_param, program_index)
-                - prgnum_param.display_offset
-            )
-            out.send_message([0xC0 | (channel & 0x0F), program_number & 0x7F])
+            self._send_program_change(program_index, channel)
         except Exception as e:
             self.change_send_failed.emit(part_index, str(e))
             return
         self.change_sent.emit(part_index, program_name)
+
+    def _send_program_change(self, program_index, channel):
+        """The Program Change itself (see _handle_program_change): renumbers the programs once per session, reads the program's PRGNUM and sends it on `channel`. Raises on failure."""
+        out = getattr(self._bridge, "out", None)
+        if out is None:
+            raise DeviceError("not available on this connection")
+        if not self._programs_renumbered:
+            # see the comment on _programs_renumbered in __init__ - this
+            # is what actually fixes "picking the Nth program always
+            # sends the Program Change for the 1st": every program gets
+            # its own distinct number before the first change is sent
+            renumber = getattr(self._bridge, "renumber_programs", None)
+            if renumber is not None:
+                # not one of LoggingBridge's wrapped methods (its
+                # existence has to stay tellable-apart from a demo
+                # bridge that simply lacks it - see the comment on
+                # LoggingBridge._WRAPPED_METHODS), so it gets its own
+                # explicit START/FAILED logging here instead. A failed
+                # renumber silently breaks every Program Change sent
+                # afterward (every program can go back to colliding on
+                # PRGNUM==0 - see this method's own docstring above),
+                # so this needs to be visible on its own, not just
+                # inferred from the Program Change itself failing.
+                thread_name = threading.current_thread().name
+                logger = debug_log.get_logger()
+                logger.debug(f"[{thread_name}] START renumber_programs()")
+                try:
+                    renumber()
+                except Exception:
+                    logger.error(
+                        f"[{thread_name}] FAILED renumber_programs()",
+                        exc_info=True,
+                    )
+                    raise
+                logger.debug(f"[{thread_name}] END renumber_programs()")
+            self._programs_renumbered = True
+        # get_parameter applies PRGNUM's display_offset (the panel's
+        # 1-based numbering, since s3ked's params table declared it -
+        # see AGENTS.md's "PRGNUM and Program Change" section) - a MIDI
+        # Program Change needs the raw 0-based wire value, so the
+        # offset is subtracted back out here rather than assumed away.
+        prgnum_param = p.lookup("PRGNUM", "program")
+        program_number = (
+            self._bridge.get_parameter(prgnum_param, program_index)
+            - prgnum_param.display_offset
+        )
+        out.send_message([0xC0 | (channel & 0x0F), program_number & 0x7F])
+
+    def _handle_midi(self, message):
+        # A keyboard note or Panic (ui/audition_bar.py): a plain channel message on the bridge's own open port, nothing read back. The demo bridge has no port: silently nothing.
+        out = getattr(self._bridge, "out", None)
+        if out is None:
+            return
+        try:
+            out.send_message(list(message))
+        except Exception as e:
+            debug_log.get_logger().error(f"BridgeWorker: couldn't send MIDI message {bytes(message).hex()}", exc_info=True)
+            self.midi_send_failed.emit(str(e))
 
     def _handle_write(
         self, writer_key, param_name, region, program_index, value, keygroup_index
@@ -1165,6 +1257,22 @@ class BridgeWorker(QThread):
         )
         self._misc_block_backed_up = True
         debug_log.get_logger().info(f"misc block backed up to {path}")
+
+    def _handle_memory_status(self):
+        try:
+            status = self._bridge.status()
+            info = {
+                "max_num_samp_words": status.max_words,
+                "num_words_free": status.free_words,
+                "num_blocks_free": status.free_blocks,
+                "max_blocks": status.max_blocks,
+                "version": midi_identity.akai_version_string(status.raw.version_major, status.raw.version_minor),
+            }
+        except Exception as e:
+            debug_log.get_logger().warning(f"memory status (RSTAT) not read: {e}")
+            self.memory_status_load_failed.emit(str(e))
+            return
+        self.memory_status_loaded.emit(info)
 
     def _handle_global_settings(self):
         log = debug_log.get_logger()
@@ -1720,6 +1828,130 @@ class BridgeWorker(QThread):
             block_size=akai_program_file.validate_blocks(program, keygroups),
             program=program,
             keygroups=keygroups,
+        )
+
+    def _read_multi_file(self):
+        return akai_multi_file.read_from_bridge(self._bridge)
+
+    def _handle_export_sample_header(self, sample_index):
+        try:
+            # 192 is an S2000/S3000 block; an S1000 adapter clips the read to its real (150-byte) block, so the same call serves both
+            header = bytes(self._bridge.get_header_bytes("sample", sample_index, 0, akai_sample_file.S3000_HEADER_SIZE))
+            akai_sample_file.validate_header(header)
+        except Exception as e:
+            debug_log.get_logger().error("export sample header %d failed: %s", sample_index, e, exc_info=True)
+            self.sample_header_export_failed.emit(sample_index, str(e))
+            return
+        self.sample_header_exported.emit(sample_index, header)
+
+    def _handle_export_multi(self):
+        try:
+            multi_file = self._read_multi_file()
+        except Exception as e:
+            debug_log.get_logger().error("export multi failed: %s", e, exc_info=True)
+            self.multi_export_failed.emit(str(e))
+            return
+        self.multi_exported.emit(multi_file)
+
+    # -- Load Multi (core/akai_multi_file.py: plan_load, program_assignments) ---------------------------------------------------------
+    # Writes ONLY the planned fields whose write has been checked on a unit (akai_multi_file.LOAD_EVIDENCE), one set_parameter each (never a whole-block MULTIDATA write),
+    # after the whole multi is saved to MULTI_BACKUP_DIR (no backup, no write), then reads the multi back and compares every written field. A write that fails puts the
+    # fields already written back. Programs are bound by Program Changes on the parts' channels afterwards (nothing in SysEx assigns one). Never writes a pointer,
+    # "last note played", FX above 204 (plan_load clamps) or a name; see AGENTS.md, "Multi files".
+
+    multi_import_blocked = False  # set when a load's read-back disagreed or a rollback failed: no more loads this session
+
+    def _plan_multi_load(self, multi_file):
+        current = self._read_multi_file()
+        names = list(self._bridge.program_list())
+        plan = akai_multi_file.plan_load(current, multi_file, names)
+        assignments, notes = akai_multi_file.program_assignments(plan, current, multi_file, names)
+        return current, plan, assignments, notes
+
+    def _handle_plan_multi(self, multi_file):
+        try:
+            _current, plan, assignments, notes = self._plan_multi_load(multi_file)
+        except Exception as e:
+            debug_log.get_logger().error("plan multi load failed: %s", e, exc_info=True)
+            self.multi_import_failed.emit(str(e), "")
+            return
+        self.multi_plan_ready.emit(multi_file, plan, assignments, notes)
+
+    def _save_multi_backup(self, multi):
+        MULTI_BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+        path = MULTI_BACKUP_DIR / f"{akai_multi_file.safe_file_stem(multi.name)}-before-load-{stamp}{akai_multi_file.EXTENSION}"
+        path.write_bytes(akai_multi_file.build_file(multi.header, multi.parts, multi.extra_header))
+        return path
+
+    def _write_multi_change(self, change, value):
+        if change.scope == "multi":
+            region, index = "multi", 0
+        else:
+            region, index = "multipart", int(change.scope.split()[1]) - 1
+        self._bridge.set_parameter(_lookup_for_write(change.name, region), index, value)
+
+    def _handle_import_multi(self, multi_file):
+        logger = debug_log.get_logger()
+        backup = ""
+        written = []
+        try:
+            if self.multi_import_blocked:
+                raise DeviceError(
+                    "multi loading is disabled for this session after an earlier load did not read back as written - "
+                    "check the multi on the sampler, then restart the editor"
+                )
+            current, plan, assignments, notes = self._plan_multi_load(multi_file)
+            todo = akai_multi_file.writable_changes(plan)
+            skipped = akai_multi_file.skipped_changes(plan)
+            backup = str(self._save_multi_backup(current))  # before the first write
+            logger.info(
+                f"BridgeWorker: loading multi {multi_file.name!r} over {current.name!r}: {len(todo)} field(s), {len(assignments)} program(s), "
+                f"{len(skipped)} unchecked field(s) left alone; backup {backup}"
+            )
+            try:
+                for change in todo:
+                    self._write_multi_change(change, change.new)
+                    written.append(change)
+                    logger.info(f"BridgeWorker: multi load wrote {change.scope} {change.name} = {change.new!r} (was {change.current!r})")
+            except Exception:
+                # put back what was already written (newest first); the backup file is the safety net if even that fails
+                failed = []
+                for change in reversed(written):
+                    try:
+                        self._write_multi_change(change, change.current)
+                    except Exception:
+                        failed.append(f"{change.scope} {change.name}")
+                        logger.error(f"BridgeWorker: multi load rollback of {change.scope} {change.name} FAILED", exc_info=True)
+                if failed:
+                    self.multi_import_blocked = True
+                    raise DeviceError("a write failed and these could not be put back: " + ", ".join(failed) + ". The multi was saved first (see the backup)")
+                raise
+            _sleep(MULTI_LOAD_SETTLE_S)
+            after = self._read_multi_file()
+            mismatches = akai_multi_file.verify_changes(after, todo)
+            for assignment in assignments:
+                self._send_program_change(assignment.program_index, assignment.channel)
+                logger.info(f"BridgeWorker: multi load sent Program Change for part {assignment.part} ({assignment.name!r}) on channel {assignment.channel + 1}")
+                _sleep(MULTI_LOAD_PROGRAM_CHANGE_S)
+            if assignments:
+                _sleep(MULTI_LOAD_SETTLE_S)
+                after = self._read_multi_file()
+                for assignment in assignments:
+                    held = after.part_name(assignment.part - 1).rstrip()
+                    if held != assignment.name.rstrip():
+                        mismatches.append(f"part {assignment.part}: asked for program {assignment.name!r}, the sampler shows {held!r}")
+            if mismatches:
+                self.multi_import_blocked = True
+                logger.warning("BridgeWorker: multi load read back differently: %s", "; ".join(mismatches))
+        except Exception as e:
+            logger.error("import multi failed: %s", e, exc_info=True)
+            self.multi_import_failed.emit(str(e), backup)
+            return
+        self.multi_imported.emit(
+            akai_multi_file.LoadResult(
+                backup=backup, written=todo, skipped=skipped, assigned=assignments, not_assigned=notes, mismatches=mismatches
+            )
         )
 
     def _handle_export_program(self, program_index):

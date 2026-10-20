@@ -63,7 +63,7 @@ jobs:
 
   # Bumps ONLY the version and the two sha256 lines in the tap's existing
   # Casks/akaisds.rb (the cask itself, caveats included, lives in the tap repo).
-  # Needs a fine-grained PAT with Contents read/write on ONLY martincurkovic/homebrew-akaisds,
+  # Needs a fine-grained PAT with Contents read/write on ONLY martincurkovic/homebrew-tap,
   # saved as the TAP_REPO_TOKEN secret.
   homebrew:
     needs: checksums
@@ -71,7 +71,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          repository: martincurkovic/homebrew-akaisds
+          repository: martincurkovic/homebrew-tap
           token: ${{ secrets.TAP_REPO_TOKEN }}
 
       - name: Bump the cask

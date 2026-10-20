@@ -385,11 +385,25 @@ def test_view_changed_emits_on_zoom(qapp):
     assert frame_count == 100000
 
 
-def test_max_zoom_reaches_single_sample_resolution(qapp):
+def test_zoom_in_stops_at_a_readable_number_of_samples_like_the_main_waveform(qapp):
+    from ui.waveform_view import _MIN_VISIBLE_FRAMES, WaveformView
+
     view = _view(50000)
     for _ in range(60):
         view.zoom_in()
-    assert view._view_length() == 1
+    assert view._view_length() == _MIN_VISIBLE_FRAMES  # it used to go on to a single frame, with nothing left to see
+    view.set_zoom(1e9)  # a pinch or a wheel past the ceiling is clamped the same way
+    assert view._view_length() == _MIN_VISIBLE_FRAMES
+    main = WaveformView()
+    main.set_waveform([0] * 50000, 0, 0, 0, 49999)
+    assert view._max_zoom() == main._max_zoom()  # one rule for both
+
+
+def test_a_sample_shorter_than_the_minimum_view_does_not_zoom_at_all(qapp):
+    view = _view(20)
+    for _ in range(10):
+        view.zoom_in()
+    assert view._view_length() == 20
 
 
 # --- paint smoke tests -------------------------------------------------------
@@ -614,3 +628,40 @@ def test_a_real_drag_cancels_a_pending_preview(qapp):
     assert view._preview_timer.isActive()
     view.mouseMoveEvent(_FakeEvent(start_x + 20))
     assert not view._preview_timer.isActive()
+
+
+# --- a second channel: two stacked lanes, one set of markers ---------------------------------------------------------
+
+
+def test_a_second_channel_gets_its_own_lane_under_the_first(qapp):
+    view = SliceWaveformView()
+    view.resize(600, 400)
+    view.set_waveform([100] * 1000, 0, 999, right=[-100] * 1000)
+    (left_samples, _e1, left_mid, _h1), (right_samples, _e2, right_mid, _h2) = view._lanes()
+    assert left_samples[0] == 100 and right_samples[0] == -100
+    assert left_mid < 200 < right_mid  # one above the divider, one below
+    assert view.minimumHeight() > 220
+
+
+def test_a_mono_view_keeps_its_single_full_height_lane(qapp):
+    view = SliceWaveformView()
+    view.resize(600, 400)
+    view.set_waveform([100] * 1000, 0, 999)
+    (_samples, _envelope, mid, half), = view._lanes()
+    assert mid == 200 and half == 194
+    assert view.minimumHeight() == 220
+
+
+def test_a_right_channel_of_the_wrong_length_is_ignored(qapp):
+    view = SliceWaveformView()
+    view.set_waveform([1] * 100, 0, 99, right=[1] * 50)
+    assert view._right is None and len(view._lanes()) == 1
+
+
+def test_markers_snap_to_a_zero_crossing_of_the_mix_not_just_the_left_channel(qapp):
+    # the left channel crosses zero at ~400, but the mix (what is heard) crosses at ~300, right where the click is
+    left = [100] * 400 + [-100] * 600
+    right = [-150] * 300 + [150] * 700
+    view = SliceWaveformView()
+    view.set_waveform(left, 0, 999, right=right)
+    assert view.add_marker(310) in (299, 300)

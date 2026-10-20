@@ -2,11 +2,12 @@
 
 ```
 uv sync
+uv run python tools/build_velociloops.py   # the REX2 reader; needs a C++ compiler
 uv run pytest tests/ -q
 ```
 
 The whole suite takes about 3-4 minutes. CI runs the same command with `AKAISDS_CI_NO_AUDIO_DEVICE=1`, which skips the tests that
-need a real audio output device. When you fix a bug, add a test that would have caught it.
+need a real audio output device. Without the library built, the `.rx2` tests are skipped, not failed. When you fix a bug, add a test that would have caught it.
 
 ## What's covered
 
@@ -20,6 +21,8 @@ need a real audio output device. When you fix a bug, add a test that would have 
 
 Not covered: painted pixels, and real hardware. Hardware test plans live next to the tests: `tests/s1000_test_plan.md`,
 `s950_test_plan.md`, `akai_program_file_test_plan.md`, `midi_transport_consolidation_test_plan.md`.
+
+Looking at the app by hand instead of through a test: the demo samplers (fake units on fake ports) are described in [CONTRIBUTING.md](CONTRIBUTING.md#running-the-app-without-a-sampler).
 
 ## Techniques worth knowing
 
@@ -50,4 +53,11 @@ Not covered: painted pixels, and real hardware. Hardware test plans live next to
   stand-in app object to `apply_to_app` and `deleteLater()` window fixtures.
 - Audio-preview tests poll (`_wait_until`) instead of sleeping, and stop their players in an autouse fixture (a running device at
   exit crashes macOS). `test_update_loop_points_with_degenerate_bounds_is_ignored` has flaked once on timing; re-run it alone.
+- **One full run hung once (2026-10-19) and was not reproduced** (the run straight after passed: 3461 tests in 6:46). `sample <pid>` showed a deadlock: the main thread waiting on
+  a Python lock while the `BridgeWorker` thread sat inside `QMainWindow`'s destructor (`QWidget::~QWidget` -> `QWindow::close()`), i.e. a Program Editor window was destroyed on the
+  worker thread (which needs the GUI thread) - the same family as the audio-preview player bug (a Qt object whose last reference is dropped on another thread; see AGENTS.md, "Slice
+  Editor"). It happened while hardware tools were using the MIDI ports at the same time, which is probably only the timing that exposed it. `pyproject.toml` now sets
+  `faulthandler_timeout = 300`, so a stuck test dumps all threads' stacks: if it recurs, the traceback names the test and what the main thread waits for; look for the code that lets
+  the worker thread (or a signal it emits) hold the last reference to an editor window.
+- **A full run crashed once with SIGBUS (2026-10-19 19:53, the run straight after passed: 3477 tests in 6:44; not reproduced).** The crash report: main thread inside shiboken's `mainThreadDeletionHandler` (a Qt wrapper queued for deletion via `Py_AddPendingCall`, run from `_Py_HandlePending` between bytecodes of a generator `next()`), a `BridgeWorker` thread still alive and idle in the process, the `faulthandler` handler firing on the bad access. Same family as the two entries above (a Qt object whose last Python reference is dropped off the GUI thread, here a leaked `BridgeWorker` whose editor wasn't stopped in teardown); the Python traceback that would name the test was lost because that run's output was cut with `tail`. **When a run crashes, keep the whole output (`pytest ... > file 2>&1`)**: faulthandler prints the Python stack of every thread, and the test is in it. Not related to the multi write-check change that was being tested.
 - One harmless warning: `Wave_write.__del__` from the stdlib `wave`, from a test that writes to an unwritable path.

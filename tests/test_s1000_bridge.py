@@ -332,7 +332,7 @@ def test_connect_wraps_a_real_connection_for_the_s1000_model(monkeypatch):
     )
     sentinel = FakeS1000().bridge()
     monkeypatch.setattr(
-        program_editor_bridge.S3kBridge, "standard", lambda output_name: sentinel
+        program_editor_bridge.S3kBridge, "standard", lambda output_name, **kw: sentinel
     )
     wrapped = program_editor_bridge.connect(sampler_model="akai_s1000")
     assert isinstance(wrapped._bridge, S1000Bridge)

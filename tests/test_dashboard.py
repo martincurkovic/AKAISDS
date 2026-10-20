@@ -19,12 +19,12 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
 from PySide6.QtCore import QCoreApplication, QEvent, Qt
-from PySide6.QtWidgets import QApplication, QLineEdit
+from PySide6.QtWidgets import QApplication, QLabel, QLineEdit
 
-from core import dropped_files, sample_slicing, sds_encoder
+from core import dropped_files, rx2, sample_slicing, sds_encoder
 from core.midi_manager import MidiManager
 from controller.sampler_controller import SamplerController
-from ui.dashboard import SETTINGS_ROLE, TransferDashboard
+from ui.dashboard import RX2_MARKERS_ROLE, SETTINGS_ROLE, TransferDashboard
 
 
 @pytest.fixture(scope="session")
@@ -572,6 +572,12 @@ def test_open_slice_editor_wires_both_channels_through_to_export(
             self._shlto,
             _noop,
             _noop,
+            # what the real dialog adds for a stereo file: the right channel, cut at the same frames
+            extra_slices=[
+                sample_slicing.slice_samples(
+                    self._extra_channels[0], self.waveform.start(), self.waveform.end(), [2205]
+                )
+            ],
         )
         return 0
 
@@ -713,6 +719,181 @@ def test_open_editor_is_enabled_for_the_s1000_too(dashboard):
     dashboard.sampler_controller.set_device_type("akai_s1000")
     dashboard._update_open_editor_enabled()
     assert dashboard.btn_open_editor.isEnabled() is True
+
+
+# --- Ensoniq EPS/ASR (placeholder: no engine yet) ---------------------------------
+
+
+@pytest.fixture
+def ensoniq_dashboard(dashboard):
+    dashboard.midi_manager.input_name = "Fake In"
+    dashboard.midi_manager.output_name = "Fake Out"
+    dashboard.sampler_controller.set_device_type("ensoniq_eps_asr")
+    dashboard.list_local.addItem("kick.wav")
+    dashboard._update_device_type_ui()
+    dashboard._update_open_editor_enabled()
+    return dashboard
+
+
+def test_ensoniq_with_an_input_enables_browsing_and_sending_but_not_deleting(ensoniq_dashboard):
+    d = ensoniq_dashboard
+    assert d.list_hardware.isEnabled()
+    assert d.btn_refresh.isEnabled()
+    assert d.btn_send.isEnabled() is True and d.btn_send.toolTip() == ""
+    assert d.btn_delete_selected.isEnabled() is False
+    assert d.btn_open_editor.isEnabled() is False
+    assert "no editor" in d.btn_open_editor.toolTip()
+    assert not d.memory_avail_prog_bar.isHidden()  # free blocks + instrument sizes, read after each list
+
+
+def test_the_ensoniq_memory_bar_shows_a_figure_and_a_zero_total_means_unknown(ensoniq_dashboard):
+    bar = ensoniq_dashboard.memory_avail_prog_bar
+    ensoniq_dashboard.on_memory_status_updated(
+        {"max_num_samp_words": 1000 * 256, "num_words_free": 250 * 256, "num_blocks_free": 250}
+    )
+    assert bar.value() == 75 and "memory used" in bar.format()
+    ensoniq_dashboard.on_memory_status_updated({"max_num_samp_words": 0, "num_words_free": 0, "num_blocks_free": 0})
+    assert bar.value() == 0 and bar.format() == bar.UNKNOWN_FORMAT
+
+
+def test_ensoniq_without_an_input_cant_refresh_or_receive(dashboard):
+    dashboard.midi_manager.input_name = None
+    dashboard.sampler_controller.set_device_type("ensoniq_eps_asr")
+    dashboard._update_device_type_ui()
+    assert dashboard.btn_refresh.isEnabled() is False
+    assert dashboard.btn_receive.isEnabled() is False
+    assert dashboard.btn_send.isEnabled() is False  # every step of a send is answered by the unit
+    assert "MIDI input" in dashboard.empty_hardware_label.text()
+
+
+def test_ensoniq_rows_can_be_received_but_not_deleted_or_edited(ensoniq_dashboard):
+    d = ensoniq_dashboard
+    d.on_sample_slots_updated([(1, "KICK"), (130, "SNARE")])
+    assert d.list_hardware.count() == 2
+    assert d.btn_receive.isEnabled() is True
+    row = d.list_hardware.itemWidget(d.list_hardware.item(0))
+    buttons = {b.text(): b for b in row.findChildren(type(d.btn_send))}
+    assert buttons["Delete"].isEnabled() is False and buttons["Edit"].isEnabled() is False
+
+
+def test_ensoniq_without_an_input_cant_send_and_says_why(dashboard):
+    dashboard.midi_manager.input_name = None
+    dashboard.sampler_controller.set_device_type("ensoniq_eps_asr")
+    dashboard.list_local.addItem("kick.wav")
+    dashboard._update_device_type_ui()
+    assert dashboard.btn_send.isEnabled() is False
+    assert "MIDI input" in dashboard.btn_send.toolTip()
+
+
+def test_the_ensoniq_experimental_warning_shows_once_and_cancel_blocks_the_send(ensoniq_dashboard, monkeypatch):
+    from PySide6.QtWidgets import QMessageBox
+
+    from core import app_config
+
+    state = {"acknowledged": False, "asked": 0, "answer": QMessageBox.StandardButton.Cancel}
+    monkeypatch.setattr(app_config, "get_ensoniq_transfer_warning_acknowledged", lambda: state["acknowledged"])
+    monkeypatch.setattr(
+        app_config, "save_ensoniq_transfer_warning_acknowledged", lambda value=True: state.update(acknowledged=value)
+    )
+
+    def _warning(*_a, **_k):
+        state["asked"] += 1
+        return state["answer"]
+
+    monkeypatch.setattr(QMessageBox, "warning", _warning)
+    assert ensoniq_dashboard._confirm_ensoniq_experimental() is False
+    assert state == {"acknowledged": False, "asked": 1, "answer": QMessageBox.StandardButton.Cancel}
+    state["answer"] = QMessageBox.StandardButton.Ok
+    assert ensoniq_dashboard._confirm_ensoniq_experimental() is True
+    assert ensoniq_dashboard._confirm_ensoniq_experimental() is True
+    assert state["acknowledged"] is True and state["asked"] == 2
+
+
+def test_other_sampler_types_never_see_the_ensoniq_warning(dashboard, monkeypatch):
+    from PySide6.QtWidgets import QMessageBox
+
+    monkeypatch.setattr(QMessageBox, "warning", lambda *a, **k: pytest.fail("warned a non-Ensoniq user"))
+    assert dashboard._confirm_ensoniq_experimental() is True
+
+
+def test_leaving_the_ensoniq_type_re_enables_send(ensoniq_dashboard):
+    d = ensoniq_dashboard
+    d.sampler_controller.set_device_type("akai_s2000_s3000")
+    d._update_device_type_ui()
+    assert d.btn_send.isEnabled() is True
+    assert d.btn_send.toolTip() == ""
+
+
+# --- Ensoniq ASR-X (the same Dashboard branches as the EPS/ASR, its own engine and warning) ----------
+
+
+@pytest.fixture
+def asrx_dashboard(dashboard):
+    dashboard.midi_manager.input_name = "Fake In"
+    dashboard.midi_manager.output_name = "Fake Out"
+    dashboard.sampler_controller.set_device_type("ensoniq_asrx")
+    dashboard.list_local.addItem("kick.wav")
+    dashboard._update_device_type_ui()
+    dashboard._update_open_editor_enabled()
+    return dashboard
+
+
+def test_asrx_with_an_input_enables_browsing_and_sending_but_not_deleting(asrx_dashboard):
+    d = asrx_dashboard
+    assert d.list_hardware.isEnabled() and d.btn_refresh.isEnabled()
+    assert d.btn_send.isEnabled() is True and d.btn_send.toolTip() == ""
+    assert d.btn_delete_selected.isEnabled() is False
+    assert d.btn_open_editor.isEnabled() is False
+
+
+def test_asrx_without_an_input_cant_send_and_says_why(dashboard):
+    dashboard.midi_manager.input_name = None
+    dashboard.sampler_controller.set_device_type("ensoniq_asrx")
+    dashboard.list_local.addItem("kick.wav")
+    dashboard._update_device_type_ui()
+    assert dashboard.btn_send.isEnabled() is False
+    assert "MIDI input" in dashboard.btn_send.toolTip()
+
+
+def test_asrx_rows_can_be_received_but_not_deleted_or_edited(asrx_dashboard):
+    d = asrx_dashboard
+    d.on_sample_slots_updated([(0, "KICK"), (7, "SNARE")])
+    assert d.list_hardware.count() == 2 and d.btn_receive.isEnabled() is True
+    row = d.list_hardware.itemWidget(d.list_hardware.item(0))
+    buttons = {b.text(): b for b in row.findChildren(type(d.btn_send))}
+    assert buttons["Delete"].isEnabled() is False and buttons["Edit"].isEnabled() is False
+
+
+def test_the_asrx_warning_has_its_own_text_and_its_own_flag(asrx_dashboard, monkeypatch):
+    from PySide6.QtWidgets import QMessageBox
+
+    from core import app_config
+
+    state = {"asrx": False, "eps": False, "titles": [], "answer": QMessageBox.StandardButton.Ok}
+    monkeypatch.setattr(app_config, "get_asrx_transfer_warning_acknowledged", lambda: state["asrx"])
+    monkeypatch.setattr(app_config, "save_asrx_transfer_warning_acknowledged", lambda value=True: state.update(asrx=value))
+    monkeypatch.setattr(app_config, "get_ensoniq_transfer_warning_acknowledged", lambda: state["eps"])
+    monkeypatch.setattr(app_config, "save_ensoniq_transfer_warning_acknowledged", lambda value=True: state.update(eps=value))
+
+    def _warning(parent, title, text, *_a, **_k):
+        state["titles"].append((title, text))
+        return state["answer"]
+
+    monkeypatch.setattr(QMessageBox, "warning", _warning)
+    assert asrx_dashboard._confirm_ensoniq_experimental() is True
+    assert asrx_dashboard._confirm_ensoniq_experimental() is True  # once
+    assert state["asrx"] is True and state["eps"] is False
+    assert len(state["titles"]) == 1 and "ASR-X" in state["titles"][0][0] and "akaisds.log" in state["titles"][0][1]
+
+
+def test_cancelling_the_asrx_warning_blocks_the_send(asrx_dashboard, monkeypatch):
+    from PySide6.QtWidgets import QMessageBox
+
+    from core import app_config
+
+    monkeypatch.setattr(app_config, "get_asrx_transfer_warning_acknowledged", lambda: False)
+    monkeypatch.setattr(QMessageBox, "warning", lambda *a, **k: QMessageBox.StandardButton.Cancel)
+    assert asrx_dashboard._confirm_ensoniq_experimental() is False
 
 
 # --- Akai S900/S950 ------------------------------------------------------------
@@ -1012,3 +1193,247 @@ def test_yamaha_editor_refuses_without_a_midi_input(yamaha_dashboard, monkeypatc
     yamaha_dashboard.midi_manager.input_name = None  # every answer comes back on the input
     yamaha_dashboard.open_program_editor()
     assert "MIDI input" in yamaha_dashboard.status_bar.currentMessage()
+
+
+# --- Dropping a ReCycle .rx2 queues one row per slice ---------------------
+
+
+_RX2_FIXTURES = os.path.join(os.path.dirname(__file__), "fixtures", "rx2")
+
+
+def _row_names(dashboard):
+    return [
+        dashboard.list_local.itemWidget(dashboard.list_local.item(i))
+        .findChild(QLineEdit)
+        .text()
+        for i in range(dashboard.list_local.count())
+    ]
+
+
+def _capture_sent_entries(dashboard, monkeypatch):
+    sent = []
+    monkeypatch.setattr(
+        dashboard.sampler_controller, "send_file_queue", lambda entries, **kw: sent.extend(entries) or True
+    )
+    return sent
+
+
+def _drop_stereo_loop(dashboard):
+    dashboard.on_files_dropped([os.path.join(_RX2_FIXTURES, "120Stereo.rx2")])
+
+
+@pytest.mark.skipif(not rx2.is_available(), reason="VelociLoops not built")
+def test_dropping_an_rx2_queues_ONE_row_that_knows_it_is_a_loop_of_slices(dashboard):
+    _drop_stereo_loop(dashboard)
+
+    assert dashboard.list_local.count() == 1
+    assert _row_names(dashboard) == ["120STEREO"]
+    item = dashboard.list_local.item(0)
+    assert len(item.data(RX2_MARKERS_ROLE)) == 9
+    badge = dashboard.list_local.itemWidget(item).findChild(QLabel, "sliceBadge")
+    assert badge.text() == "10 slices" and not badge.isHidden()
+    # the row is an ordinary WAV: the ten slices end to end, stereo, one bar at 120 BPM
+    with wave.open(item.data(Qt.ItemDataRole.UserRole), "rb") as wf:
+        assert (wf.getnchannels(), wf.getframerate(), wf.getnframes()) == (2, 44100, 2 * 44100)
+    assert "10 slices" in dashboard.status_bar.currentMessage()
+
+
+@pytest.mark.skipif(not rx2.is_available(), reason="VelociLoops not built")
+def test_send_cuts_a_queued_loop_into_one_sample_per_slice(dashboard, monkeypatch):
+    _drop_stereo_loop(dashboard)
+    sent = _capture_sent_entries(dashboard, monkeypatch)
+
+    dashboard.send_queued_samples()
+
+    # a stereo slice goes out as <name>-L / <name>-R, so the base is cut to leave room for the suffix (12 characters in all)
+    assert [e["name"] for e in sent] == [f"120STER-{i:02d}" for i in range(1, 11)]
+    assert all(len(e["name"] + "-L") <= 12 for e in sent)
+    frames = 0
+    for entry in sent:
+        with wave.open(entry["filepath"], "rb") as wf:
+            assert wf.getnchannels() == 2 and wf.getframerate() == 44100
+            frames += wf.getnframes()
+        assert entry["mono"] == dashboard._global_mono  # the row's own settings, like any queued file
+    assert frames == 2 * 44100  # nothing lost or repeated
+    assert dashboard.list_local.count() == 1  # the queue still shows the one loop
+
+
+@pytest.mark.skipif(not rx2.is_available(), reason="VelociLoops not built")
+def test_send_uses_the_rows_current_name_and_settings(dashboard, monkeypatch):
+    _drop_stereo_loop(dashboard)
+    item = dashboard.list_local.item(0)
+    dashboard.list_local.itemWidget(item).findChild(QLineEdit).setText("Amen Break")
+    item.setData(SETTINGS_ROLE, dict(item.data(SETTINGS_ROLE), mono=True, bit_depth=12))
+    sent = _capture_sent_entries(dashboard, monkeypatch)
+
+    dashboard.send_queued_samples()
+
+    # sent mono, so no -L/-R suffix to leave room for: the full 12 characters
+    assert sent[0]["name"] == "AMEN BREA-01" and len(sent) == 10
+    assert all(e["mono"] is True and e["bit_depth"] == 12 for e in sent)
+
+
+@pytest.mark.skipif(not rx2.is_available(), reason="VelociLoops not built")
+def test_a_loop_is_sent_alongside_ordinary_files_in_queue_order(dashboard, monkeypatch, tmp_path):
+    plain = tmp_path / "kick.wav"
+    _write_wav(plain)
+    dashboard.on_files_dropped([str(plain)])
+    dashboard.on_files_dropped([os.path.join(_RX2_FIXTURES, "120Mono.rx2")])
+    sent = _capture_sent_entries(dashboard, monkeypatch)
+
+    dashboard.send_queued_samples()
+
+    assert [e["name"] for e in sent][0] == "kick"
+    assert [e["name"] for e in sent][1:] == [f"120MONO-{i:02d}" for i in range(1, 11)]
+
+
+@pytest.mark.skipif(not rx2.is_available(), reason="VelociLoops not built")
+def test_the_slice_editor_opens_on_a_queued_loop_with_its_cut_points_marked(dashboard, monkeypatch):
+    from ui.slice_editor_window import SliceEditorWindow
+
+    _drop_stereo_loop(dashboard)
+    item = dashboard.list_local.item(0)
+    edit_field = dashboard.list_local.itemWidget(item).findChild(QLineEdit)
+    seen = {}
+
+    def _fake_exec(self):
+        seen["markers"] = self.waveform.slice_markers()
+        seen["stereo"] = self.waveform._right is not None
+        return 0
+
+    monkeypatch.setattr(SliceEditorWindow, "exec", _fake_exec)
+    dashboard._open_slice_editor(item, edit_field)
+
+    assert seen["markers"] == item.data(RX2_MARKERS_ROLE) and seen["stereo"] is True
+    assert dashboard.list_local.count() == 1  # closing without exporting changes nothing
+
+
+@pytest.mark.skipif(not rx2.is_available(), reason="VelociLoops not built")
+def test_exporting_from_the_slice_editor_replaces_the_loop_with_its_slices(dashboard, monkeypatch):
+    from ui.slice_editor_window import SliceEditorWindow
+
+    _drop_stereo_loop(dashboard)
+    item = dashboard.list_local.item(0)
+    edit_field = dashboard.list_local.itemWidget(item).findChild(QLineEdit)
+
+    def _fake_exec(self):
+        self.name_edit.setText("HIT")
+        monkeypatch.setattr(sew_module.QMessageBox, "question", lambda *a, **k: sew_module.QMessageBox.StandardButton.Yes)
+        monkeypatch.setattr(sew_module.QMessageBox, "information", lambda *a, **k: None)
+        self.export_button.click()
+        return 0
+
+    from ui import slice_editor_window as sew_module
+
+    monkeypatch.setattr(SliceEditorWindow, "exec", _fake_exec)
+    dashboard._open_slice_editor(item, edit_field)
+
+    assert dashboard.list_local.count() == 10
+    assert all(dashboard.list_local.item(i).data(RX2_MARKERS_ROLE) is None for i in range(10))  # now ordinary rows
+    sent = _capture_sent_entries(dashboard, monkeypatch)
+    dashboard.send_queued_samples()
+    assert len(sent) == 10  # not cut a second time
+
+
+@pytest.mark.skipif(not rx2.is_available(), reason="VelociLoops not built")
+def test_dropping_a_corrupt_rx2_adds_nothing_and_says_why(dashboard):
+    dashboard.on_files_dropped([os.path.join(_RX2_FIXTURES, "ErrorCorrupt.rx2")])
+
+    assert dashboard.list_local.count() == 0
+    assert "ErrorCorrupt.rx2" in dashboard.status_bar.currentMessage()
+
+
+def test_dropping_an_mp3_queues_it_like_a_wav_and_an_m4a_is_refused(dashboard, tmp_path):
+    import numpy as np
+    import soundfile as sf
+
+    mp3 = tmp_path / "loop.mp3"
+    sf.write(str(mp3), np.full((4000, 1), 0.25, dtype="float32"), 44100, format="MP3", subtype="MPEG_LAYER_III")
+    m4a = tmp_path / "loop.m4a"
+    m4a.write_bytes(b"not decodable")
+
+    dashboard.on_files_dropped([str(mp3), str(m4a)])
+
+    assert _row_names(dashboard) == ["loop"]
+    assert "unsupported" in dashboard.status_bar.currentMessage() or "Added 1" in dashboard.status_bar.currentMessage()
+
+
+# -- saving received samples as an Akai sample file --------------------------------------------------------------------------
+
+
+def test_the_receive_format_choice_shows_for_an_akai_sampler_only(dashboard):
+    dashboard.sampler_controller.set_device_type("akai_s2000_s3000")
+    dashboard._update_device_type_ui()
+    assert not dashboard.receive_format_combo.isHidden() and not dashboard.receive_format_label.isHidden()
+    for other in ("generic", "akai_s900_s950", "ensoniq_eps_asr", "yamaha_a4000"):
+        dashboard.sampler_controller.set_device_type(other)
+        dashboard._update_device_type_ui()
+        assert dashboard.receive_format_combo.isHidden(), other
+
+
+def test_the_receive_format_is_remembered_and_only_applies_to_an_akai_sampler(dashboard):
+    from core import app_config
+
+    dashboard.sampler_controller.set_device_type("akai_s2000_s3000")
+    dashboard.receive_format_combo.setCurrentIndex(dashboard.receive_format_combo.findData("both"))
+    dashboard._on_receive_format_chosen(0)
+    assert app_config.get_saved_receive_format() == "both" and dashboard._receive_format() == "both"
+    dashboard.sampler_controller.set_device_type("generic")
+    assert dashboard._receive_format() == "wav"  # (the combo still says both, but a generic receive has no Akai header)
+
+
+def test_an_unknown_saved_format_reads_as_wav():
+    from core import app_config
+
+    config = app_config.load_config()
+    config["receive_format"] = "mp3"
+    app_config.save_config(config)
+    assert app_config.get_saved_receive_format() == "wav"
+
+
+def test_the_combo_starts_on_the_saved_format(qapp):
+    from core import app_config
+
+    app_config.save_receive_format("s3")
+    midi_manager = MidiManager()
+    dash = TransferDashboard(SamplerController(midi_manager), midi_manager)
+    assert dash.receive_format_combo.currentData() == "s3"
+
+
+def test_unique_save_path_keeps_clear_of_every_file_the_receive_may_write(tmp_path):
+    (tmp_path / "kick.s3").write_bytes(b"x")
+    assert TransferDashboard._unique_save_path(str(tmp_path), "kick") == str(tmp_path / "kick.wav")  # a WAV-only receive: only .wav counts
+    taken = TransferDashboard._unique_save_path(str(tmp_path), "kick", extensions=(".wav", ".s3", ".s1"))
+    assert taken == str(tmp_path / "kick (2).wav")
+    (tmp_path / "kick (2).s1").write_bytes(b"x")
+    assert TransferDashboard._unique_save_path(str(tmp_path), "kick", extensions=(".wav", ".s3", ".s1")) == str(tmp_path / "kick (3).wav")
+    assert TransferDashboard._unique_save_path(str(tmp_path), "kick", {str(tmp_path / "other.wav")}) == str(tmp_path / "kick.wav")
+
+
+def test_receiving_hands_the_chosen_format_to_the_controller(dashboard, tmp_path, monkeypatch):
+    from PySide6.QtWidgets import QFileDialog
+
+    dashboard.sampler_controller.set_device_type("akai_s2000_s3000")
+    dashboard.on_sample_slots_updated([(0, "KICK"), (1, "SNARE")])
+    for i in range(dashboard.list_hardware.count()):
+        from PySide6.QtWidgets import QCheckBox
+
+        dashboard.list_hardware.itemWidget(dashboard.list_hardware.item(i)).findChild(QCheckBox).setChecked(True)
+    dashboard.receive_format_combo.setCurrentIndex(dashboard.receive_format_combo.findData("s3"))
+    (tmp_path / "KICK.s3").write_bytes(b"x")  # an existing Akai file: the receive must not overwrite it
+    monkeypatch.setattr(QFileDialog, "getExistingDirectory", lambda *a, **k: str(tmp_path))
+    seen = []
+    monkeypatch.setattr(dashboard.sampler_controller, "receive_samples", lambda requests: seen.append(requests))
+    dashboard.receive_selected_samples()
+    assert dashboard.sampler_controller.receive_format == "s3"
+    assert seen == [[(0, str(tmp_path / "KICK (2).wav")), (1, str(tmp_path / "SNARE.wav"))]]
+
+
+def test_the_receive_format_names_the_s1_extension_for_an_s1000(dashboard):
+    s3 = dashboard.receive_format_combo.findData("s3")
+    dashboard.sampler_controller.set_device_type("akai_s2000_s3000")
+    dashboard._update_device_type_ui()
+    assert dashboard.receive_format_combo.itemText(s3) == "Akai sample (.s3)"
+    dashboard.sampler_controller.set_device_type("akai_s1000")
+    dashboard._update_device_type_ui()
+    assert dashboard.receive_format_combo.itemText(s3) == "Akai sample (.s1)"

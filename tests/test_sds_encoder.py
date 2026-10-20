@@ -389,3 +389,40 @@ def test_build_data_packets_packet_number_wraps_at_128():
     assert len(packets) == 130
     assert packets[127][4] == 127
     assert packets[128][4] == 0  # wrapped back around per SDS spec
+
+
+# --- compressed audio (MP3 / Ogg / Opus) reads through the same soundfile path -----------------------------------------
+
+
+def _write_compressed(path, fmt, subtype, frames=8000, channels=1):
+    import numpy as np
+    import soundfile as sf
+
+    t = np.arange(frames) / 44100.0
+    tone = (0.5 * np.sin(2 * np.pi * 440 * t)).astype("float32")
+    data = np.stack([tone] * channels, axis=1)
+    sf.write(str(path), data, 44100, format=fmt, subtype=subtype)
+
+
+@pytest.mark.parametrize(
+    "extension, fmt, subtype",
+    [(".mp3", "MP3", "MPEG_LAYER_III"), (".ogg", "OGG", "VORBIS")],
+)
+def test_compressed_audio_reads_like_a_wav(tmp_path, extension, fmt, subtype):
+    path = tmp_path / f"tone{extension}"
+    _write_compressed(path, fmt, subtype)
+
+    assert extension in sds_encoder.SUPPORTED_AUDIO_EXTENSIONS
+    channels, rate = sds_encoder.read_wav_channels(str(path))
+    assert rate == 44100 and len(channels) == 1
+    assert len(channels[0]) == 8000  # nothing padded or trimmed
+    assert 10000 < max(channels[0]) <= 32767  # a real tone, not silence
+    assert sds_encoder.read_wav_info(str(path)) == (1, 44100)
+    assert sds_encoder.read_wav_native_bit_depth(str(path)) == 16  # a lossy file has none: the default
+
+
+def test_a_stereo_mp3_keeps_both_channels(tmp_path):
+    path = tmp_path / "wide.mp3"
+    _write_compressed(path, "MP3", "MPEG_LAYER_III", channels=2)
+    channels, _rate = sds_encoder.read_wav_channels(str(path))
+    assert len(channels) == 2 and len(channels[0]) == len(channels[1])

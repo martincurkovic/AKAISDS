@@ -93,6 +93,7 @@ def build_window(qapp, fake):  # noqa: F811
 
 
 def dispose(window):
+    window.samples_tab._staged.clear()  # unsent edits would make closing ask a (modal) question
     window.samples_tab.disconnect_controller()
     window._writer.close()
     window._scan_generation += 1
@@ -460,7 +461,7 @@ def test_sample_rows_show_just_the_name_and_read_no_dumps_to_fill_in_a_duration(
         assert item.text() == "" and item.data(Qt.ItemDataRole.UserRole) == "sine wave"  # no double-painted text
         assert item.sizeHint().height() > 20  # still the row widget's height (its own 6 px margins)
         row = tab.sample_list_widget.itemWidget(item)
-        assert [label.text() for label in row.findChildren(QLabel)] == ["sine wave", ""]  # name only, no duration
+        assert [label.text() for label in row.findChildren(QLabel) if label.objectName() != "unsentDot"] == ["sine wave", ""]  # name only, no duration
         assert not hasattr(tab, "_start_duration_scan")
     finally:
         dispose(window)
@@ -473,17 +474,17 @@ def test_the_envelope_graphs_follow_the_values_on_load_and_on_edit(win):
     graphs = tab.panel.envelope_graphs
     assert set(graphs) == {"aeg", "feg", "peg"}
     # the factory sample: instant attack and decay (rate 127), a release rate of 126 (a hair over instant), full sustain
-    assert (graphs["aeg"]._attack, graphs["aeg"]._decay) == (0, 0)
-    assert tab.panel.value("aeg_release_rate") == 126 and graphs["aeg"]._release == pytest.approx(99 / 127)
-    assert graphs["aeg"]._sustain == pytest.approx(99.0 * tab.panel.value("aeg_sustain_level") / 127)
-    assert graphs["feg"]._values[:4] == tuple(
+    assert (graphs["aeg"].values()["attack"], graphs["aeg"].values()["decay"]) == (0, 0)
+    assert tab.panel.value("aeg_release_rate") == 126 and graphs["aeg"].values()["release"] == pytest.approx(99 / 127)
+    assert graphs["aeg"].values()["sustain"] == pytest.approx(99.0 * tab.panel.value("aeg_sustain_level") / 127)
+    assert tuple(graphs["feg"].values().values())[:4] == tuple(
         tab.panel.value(f"feg_{k}_level") for k in ("init", "attack", "sustain", "release")
     )
     # editing a knob redraws at once (before any read-back)
     tab.panel.widgets["aeg_attack_rate"].setValue(10)
-    assert graphs["aeg"]._attack == pytest.approx((127 - 10) * 99 / 127)
+    assert graphs["aeg"].values()["attack"] == pytest.approx((127 - 10) * 99 / 127)
     tab.panel.widgets["peg_decay_rate"].setValue(20)
-    assert graphs["peg"]._values[5] == 20
+    assert graphs["peg"].values()["decay_rate"] == 20
 
 
 # --- the layout/styling pass ---------------------------------------------------------------------------------------------
@@ -593,8 +594,8 @@ def test_the_sample_page_is_aligned_pairs_with_no_collapsible_parts(win):
     page.resize(1000, 2600)
     _assert_pairs_line_up(
         page,
-        [("Pitch", "Key & Velocity Range"), ("Level & Pan", "Wave"), ("Filter", "Filter Envelope"),
-         ("Amplitude Envelope", "Pitch Envelope"), ("LFO", "Controllers"), ("Output", "EQ")],
+        [("Pitch", "Key & Velocity Range"), ("Level & Pan", "Output"), ("Filter", "Filter Envelope"),
+         ("Amplitude Envelope", "Pitch Envelope"), ("LFO", "Controllers")],
     )
     # everything is simply shown: nothing hides behind a header
     assert not [b for b in tab.cards_scroll.widget().findChildren(QToolButton) if b.text().startswith(("▸", "▾"))]
@@ -931,3 +932,102 @@ def test_the_buttons_follow_the_selection(assign_ui):
     win.assigned_list.setCurrentRow(1)
     win._update_assign_buttons()
     assert win.remove_assigned_button.isEnabled()
+
+
+# --- the on-screen keyboard (View > Audition Keyboard, Cmd/Ctrl+K; NOT tried on a unit yet) ---------------------
+
+
+def _keyboard_ready(win):
+    assert wait_until(lambda: win.audition_bar.body.isEnabled())
+
+
+def test_the_keyboard_starts_closed_and_cmd_k_toggles_it(win):
+    bar = win.audition_bar
+    assert not bar.is_open() and not win.audition_action.isChecked()
+    assert win.audition_action.shortcut().toString() == "Ctrl+K"
+    win.audition_action.trigger()
+    assert bar.is_open() and win.audition_action.isChecked()
+    win.audition_action.trigger()
+    assert not bar.is_open()
+
+
+def test_a_key_press_goes_out_as_plain_notes_and_never_as_sysex(win):
+    _keyboard_ready(win)
+    win.audition_bar.set_open(True)
+    sysex_before = list(win.midi.sent)
+    win.audition_bar.keyboard._press(60)
+    win.audition_bar.keyboard._release(60)
+    assert win.midi.channel_sent == [bytes([0x90, 60, 100]), bytes([0x80, 60, 0])]
+    assert win.midi.sent == sysex_before
+
+
+def test_the_keyboard_is_off_while_a_long_operation_or_a_transfer_runs(win, monkeypatch):
+    _keyboard_ready(win)
+    win._linking = True
+    win._sync_audition_available()
+    assert not win.audition_bar.body.isEnabled() and "busy" in win.audition_bar.note.text()
+    win.audition_bar.keyboard._press(60)
+    assert win.midi.channel_sent == []
+    win._linking = False
+    monkeypatch.setattr(win._controller, "is_transfer_busy", lambda: True)
+    win._sync_audition_available()
+    assert not win.audition_bar.body.isEnabled()
+    monkeypatch.undo()
+    win._sync_audition_available()
+    assert win.audition_bar.body.isEnabled()
+
+
+def test_the_keyboard_is_off_while_the_session_has_a_conversation_going(win, monkeypatch):
+    _keyboard_ready(win)
+    monkeypatch.setattr(type(win._session), "idle", property(lambda self: False))
+    win._sync_audition_available()
+    assert not win.audition_bar.body.isEnabled()
+
+
+def test_a_failed_note_is_reported_not_raised(win):
+    _keyboard_ready(win)
+    win.audition_bar.set_open(True)
+    win.midi.fail_sends = True
+    win.audition_bar.keyboard._press(60)
+    assert "Couldn't play the note" in win.status_bar.currentMessage()
+
+
+def test_closing_the_editor_gives_the_computer_keyboard_back(win):
+    win.audition_bar.set_open(True)
+    win.close()
+    assert not win.audition_bar.is_open() and not win._audition_timer.isActive()
+
+
+
+
+def _menu(window, title):
+    return next(a.menu() for a in window.menuBar().actions() if a.text().replace("&", "") == title)
+
+
+def _texts(menu):
+    return [a.text() for a in menu.actions() if not a.isSeparator()]
+
+
+def test_help_menu_is_the_standard_one(win):
+    assert _texts(_menu(win, "Help")) == [
+        "Quick Start Guide...",
+        "Keyboard Shortcuts...",
+        "Open Log Folder",
+        "About AKAISDS...",
+        "Check for Updates...",
+    ]
+    assert "Open Log Folder" not in _texts(_menu(win, "Hardware"))
+    assert "Cancel Transfer" in _texts(_menu(win, "Hardware"))
+    assert [t for t in _texts(_menu(win, "View")) if t.startswith("Zoom")] == ["Zoom In", "Zoom Out", "Zoom to Fit"]
+
+
+def test_zoom_actions_follow_the_samples_tab(win):
+    zoom = [a for a in _menu(win, "View").actions() if a.text().startswith("Zoom")]
+    win.main_tabs.setCurrentIndex(0)
+    assert not any(a.isEnabled() for a in zoom)
+    win.main_tabs.setCurrentIndex(win._samples_tab_index)
+    assert all(a.isEnabled() for a in zoom)
+    zoomed = []
+    win.samples_tab.waveform_view.zoom_in = lambda *a: zoomed.append(True)
+    next(a for a in zoom if a.text() == "Zoom In").trigger()
+    assert zoomed == [True]

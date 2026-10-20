@@ -15,6 +15,7 @@ from PySide6.QtCore import QCoreApplication, QEvent, Qt
 from PySide6.QtWidgets import QMainWindow
 
 from core import s950_program as prog
+from core import s950_sysex as s
 from core.demo_s950 import FakeS950
 from PySide6.QtWidgets import QLabel, QMessageBox
 
@@ -173,6 +174,75 @@ def test_the_program_write_buttons_only_show_on_the_programs_tab(win):
         assert not w.isHidden()
 
 
+def test_the_sample_write_buttons_only_show_on_the_samples_tab(win):
+    win.main_tabs.setCurrentIndex(0)
+    for w in (win.sample_write_button, win.sample_revert_button, win.sample_dirty_label):
+        assert w.isHidden()
+    win.main_tabs.setCurrentIndex(win._samples_tab_index)
+    for w in (win.sample_write_button, win.sample_revert_button):
+        assert not w.isHidden()
+    for w in (win.write_button, win.discard_button, win.restore_button):
+        assert w.isHidden()  # one set at a time
+
+
+def test_the_sample_buttons_sit_left_of_close_in_the_bottom_bar(win):
+    from PySide6.QtCore import QPoint
+    from PySide6.QtWidgets import QPushButton
+
+    win.show()
+    win.main_tabs.setCurrentIndex(win._samples_tab_index)
+    QCoreApplication.processEvents()
+    close = next(b for b in win.findChildren(QPushButton) if b.text() == "Close")
+    x = lambda w: w.mapTo(win, QPoint(0, 0)).x()  # noqa: E731
+    assert x(win.refresh_button) < x(win.sample_revert_button) < x(win.sample_write_button) < x(close)
+    assert abs(win.sample_write_button.mapTo(win, QPoint(0, 0)).y() - close.mapTo(win, QPoint(0, 0)).y()) <= 2  # the same row
+
+
+def test_the_sample_buttons_follow_the_staged_edit_and_write_it(win, monkeypatch):
+    win.main_tabs.setCurrentIndex(win._samples_tab_index)
+    tab = win.samples_tab
+    assert wait_until(lambda: tab.sample_list_widget.count() == 3)
+    tab.sample_list_widget.setCurrentRow(1)
+    assert wait_until(lambda: tab._params.get(1) is not None)
+    win._update_buttons()
+    assert not win.sample_write_button.isEnabled() and not win.sample_revert_button.isEnabled() and win.sample_dirty_label.text() == ""
+    tab.replay_combo.setCurrentIndex(tab.replay_combo.findData(s.REPLAY_LOOP))
+    assert win.sample_write_button.isEnabled() and win.sample_revert_button.isEnabled()
+    assert win.sample_dirty_label.text() == "1 unsaved change"
+    monkeypatch.setattr(tab, "_confirm_first_write", lambda: True)
+    win.sample_write_button.click()
+    assert wait_until(lambda: win.rig.fake.sprm_writes == 1 and not tab.is_writing())
+    assert win.rig.fake.samples[1]["params"].replay_mode == s.REPLAY_LOOP
+    assert not win.sample_write_button.isEnabled() and win.sample_dirty_label.text() == ""
+
+
+def test_the_revert_button_puts_the_combos_back(win):
+    win.main_tabs.setCurrentIndex(win._samples_tab_index)
+    tab = win.samples_tab
+    assert wait_until(lambda: tab.sample_list_widget.count() == 3)
+    tab.sample_list_widget.setCurrentRow(0)
+    assert wait_until(lambda: tab._params.get(0) is not None)
+    tab.direction_combo.setCurrentIndex(tab.direction_combo.findData(s.PLAY_REVERSED))
+    assert win.sample_revert_button.isEnabled()
+    win.sample_revert_button.click()
+    assert tab.direction_combo.currentData() == s.PLAY_FORWARD and not win.sample_revert_button.isEnabled()
+    assert win.rig.fake.sprm_writes == 0
+
+
+def test_a_sample_write_in_flight_blocks_closing_the_window(win, monkeypatch):
+    win.main_tabs.setCurrentIndex(win._samples_tab_index)
+    tab = win.samples_tab
+    assert wait_until(lambda: tab.sample_list_widget.count() == 3)
+    tab.sample_list_widget.setCurrentRow(1)
+    assert wait_until(lambda: tab._params.get(1) is not None)
+    tab.replay_combo.setCurrentIndex(tab.replay_combo.findData(s.REPLAY_LOOP))
+    monkeypatch.setattr(tab, "_confirm_first_write", lambda: True)
+    win.sample_write_button.click()
+    assert tab.is_writing() and win._controller.is_transfer_busy()
+    assert win.close() is False  # refused: a MIDI operation is in flight on the shared connection
+    assert wait_until(lambda: not tab.is_writing())
+
+
 def test_unsaved_program_edits_survive_a_visit_to_the_samples_tab(win):
     _show(win, 0)
     _kg(win, "attack").setValue(40)
@@ -272,8 +342,8 @@ def test_the_range_bar_and_graphs_follow_the_program(win):
     _show(win, 0)
     assert win.keygroup_range_bar._ranges == [(24, 59), (60, 127)]
     kg = win._working.keygroups[0]
-    assert win.amp_graph._attack == kg.attack
-    assert win.filter_graph._release == kg.filter_release
+    assert win.amp_graph.values()["attack"] == kg.attack
+    assert win.filter_graph.values()["release"] == kg.filter_release
 
 
 def test_control_bits_are_shown_but_not_editable(win):
@@ -358,7 +428,7 @@ def test_editing_a_field_stages_it_without_writing(win):
     assert win.write_button.isEnabled()
     assert "1 unsaved change" in win.dirty_label.text()
     assert win.rig.fake.prgm_writes == 0
-    assert win.amp_graph._attack == 40  # the graph follows live
+    assert win.amp_graph.values()["attack"] == 40  # the graph follows live
 
 
 def test_edits_apply_to_the_selected_keygroup_only(win):
@@ -652,3 +722,89 @@ def test_the_s950_editors_signed_knobs_draw_their_arc_from_zero_too(win):
     assert signed and unsigned  # the editor has both kinds
     assert all(0.0 < k._origin_fraction() < 1.0 for k in signed)
     assert all(k._origin_fraction() == 0.0 for k in unsigned)
+
+
+# --- the on-screen keyboard (View > Audition Keyboard, Cmd/Ctrl+K; NOT tried on a real S900/S950) ----------------
+
+
+def test_the_keyboard_starts_closed_and_cmd_k_toggles_it(win):
+    bar = win.audition_bar
+    assert not bar.is_open() and not win.audition_action.isChecked()
+    assert win.audition_action.shortcut().toString() == "Ctrl+K"
+    win.audition_action.trigger()
+    assert bar.is_open() and win.audition_action.isChecked()
+    win.audition_action.trigger()
+    assert not bar.is_open()
+
+
+def test_a_key_press_goes_out_as_plain_notes_and_never_as_sysex(win):
+    _wait_listed(win)
+    assert wait_until(lambda: win.audition_bar.body.isEnabled())
+    win.audition_bar.set_open(True)
+    sysex_before = list(win.rig.midi.sent)
+    win.audition_bar.keyboard._press(60)
+    win.audition_bar.keyboard._release(60)
+    assert win.rig.midi.channel_sent == [bytes([0x90, 60, 100]), bytes([0x80, 60, 0])]
+    assert win.rig.midi.sent == sysex_before
+
+
+def test_the_keyboard_is_off_while_a_write_or_transfer_is_on_the_wire(win):
+    _wait_listed(win)
+    assert wait_until(lambda: win.audition_bar.body.isEnabled())
+    win._writing = True
+    win._update_buttons()
+    assert not win.audition_bar.body.isEnabled() and "busy" in win.audition_bar.note.text()
+    win.audition_bar.keyboard._press(60)
+    assert win.rig.midi.channel_sent == []
+    win._writing = False
+    win._update_buttons()
+    assert win.audition_bar.body.isEnabled()
+
+
+def test_a_failed_note_is_reported_not_raised(win):
+    _wait_listed(win)
+    assert wait_until(lambda: win.audition_bar.body.isEnabled())
+    win.audition_bar.set_open(True)
+    win.rig.midi.fail_sends = True
+    win.audition_bar.keyboard._press(60)
+    assert "Couldn't play the note" in win.status_bar.currentMessage()
+
+
+def test_closing_the_editor_gives_the_computer_keyboard_back(win):
+    win.audition_bar.set_open(True)
+    win._working = None
+    win.close()
+    assert not win.audition_bar.is_open()
+
+
+def _menu(window, title):
+    return next(a.menu() for a in window.menuBar().actions() if a.text().replace("&", "") == title)
+
+
+def _texts(menu):
+    return [a.text() for a in menu.actions() if not a.isSeparator()]
+
+
+def test_help_menu_is_the_standard_one(win):
+    assert _texts(_menu(win, "Help")) == [
+        "Quick Start Guide...",
+        "Keyboard Shortcuts...",
+        "Open Log Folder",
+        "About AKAISDS...",
+        "Check for Updates...",
+    ]
+    assert "Open Log Folder" not in _texts(_menu(win, "Hardware"))
+    assert "Cancel Transfer" in _texts(_menu(win, "Hardware"))
+    assert [t for t in _texts(_menu(win, "View")) if t.startswith("Zoom")] == ["Zoom In", "Zoom Out", "Zoom to Fit"]
+
+
+def test_zoom_actions_follow_the_samples_tab(win):
+    zoom = [a for a in _menu(win, "View").actions() if a.text().startswith("Zoom")]
+    win.main_tabs.setCurrentIndex(0)
+    assert not any(a.isEnabled() for a in zoom)
+    win.main_tabs.setCurrentIndex(win._samples_tab_index)
+    assert all(a.isEnabled() for a in zoom)
+    zoomed = []
+    win.samples_tab.waveform_view.zoom_in = lambda *a: zoomed.append(True)
+    next(a for a in zoom if a.text() == "Zoom In").trigger()
+    assert zoomed == [True]

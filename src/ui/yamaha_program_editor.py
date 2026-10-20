@@ -22,6 +22,8 @@ side effects an edit's own read-back can't show (mirrored bytes, derived EQ coef
 unwritable stays disabled (`FieldPanel`). The window refuses to close or refresh while a write is on its way.
 """
 
+from functools import partial
+
 from PySide6.QtCore import Qt, QTimer, QUrl
 from PySide6.QtGui import QAction, QDesktopServices
 from PySide6.QtWidgets import (
@@ -49,7 +51,9 @@ from core import yamaha_params as yp
 from core import yamaha_sysex as ysx
 from core.midi_notes import midi_note_to_name
 from ui import theme, tooltips as tt
-from ui.diagnostics_ui import add_open_log_folder_action
+from ui.audition_bar import AuditionBar, add_audition_action
+from ui.shortcuts_dialog import audition_section, dragging_section, preview_dialogs_section, slice_editor_section
+from ui.standard_menus import add_cancel_transfer_action, add_help_menu, build_zoom_actions
 from ui.yamaha_assign_dialog import AssignDialog
 from ui.yamaha_restore_dialog import RestoreDialog
 from ui.yamaha_writer import WriteCoordinator
@@ -63,9 +67,12 @@ from ui.editor_layout import (
     style_card_page_layout,
 )
 from ui.keygroup_range_bar import KeygroupRangeBar, keygroup_color
-from ui.qt_helpers import FullWidthTabBar, build_scroll_area, build_section_card
+from ui.qt_helpers import FullWidthTabBar, build_scroll_area, build_editor_card
 from ui.yamaha_fields import Field, FieldPanel
 from ui.yamaha_samples_tab import YamahaSamplesTab, _check, _combo, _knob, _spin
+
+# collapsible cards, remembered as "yamaha_program/<title>" (ui/section_card.py)
+_card = partial(build_editor_card, "yamaha_program")
 
 _SPECIAL_ALL_NOTES = {-1: "All notes"}
 NOTE_MAX = 127
@@ -300,8 +307,16 @@ class YamahaProgramEditorWindow(QMainWindow):
         bottom.addWidget(self._loading_progress)  # beside Refresh, like the S3000 editor's
         bottom.addStretch()
         bottom.addWidget(close_button)
+        # the keyboard (View > Audition Keyboard, Cmd/Ctrl+K): always starts CLOSED, an open bar owns the computer keyboard. Its menu item is made in _build_menus.
+        # Notes go straight out on the GUI thread (no worker here), only while nothing is on the unit's wire: see _sync_audition_available
+        self.audition_bar = AuditionBar()
+        self.audition_bar.midi_out.connect(self._send_audition_message)
+        self._audition_timer = QTimer(self)
+        self._audition_timer.timeout.connect(self._sync_audition_available)
+        self._audition_timer.start(150)
         layout = QVBoxLayout()
         layout.addWidget(self.main_tabs, stretch=1)
+        layout.addWidget(self.audition_bar)
         layout.addLayout(bottom)
         container = QWidget()
         container.setLayout(layout)
@@ -323,14 +338,14 @@ class YamahaProgramEditorWindow(QMainWindow):
         k, s, c, ck = _knob, _spin, _combo, _check
         note = Field("lfo_reset_note", "Reset note", "note", specials=_SPECIAL_ALL_NOTES)
 
-        program = build_section_card(
+        program = _card(
             "Program",
             row(Field("program_name", "Name", "text")),
             row(Field("assigned_samples", "Assigned samples", "text")),
             knobs([k("program_level", "Level", 56)]),
             row(s("transpose", "Transpose")),
         )
-        lfo = build_section_card(
+        lfo = _card(
             "LFO",
             row(c("lfo_wave", "Wave")),
             row(c("lfo_sync", "Sync")),
@@ -340,12 +355,12 @@ class YamahaProgramEditorWindow(QMainWindow):
             row(note),
             row(c("lfo_reset_midi_channel", "Reset channel")),
         )
-        porta = build_section_card(
+        porta = _card(
             "Portamento & S/H",
             row(c("portamento_type", "Type")),
             knobs([k("portamento_rate", "Rate"), k("portamento_time", "Time"), k("sh_speed", "S/H speed")]),
         )
-        audio = build_section_card(
+        audio = _card(
             "Audio Input",
             row(ck("ad_in_on", "Input on")),
             row(c("ad_in_source", "Source")),
@@ -358,7 +373,7 @@ class YamahaProgramEditorWindow(QMainWindow):
                    k("ad_in_r_output1_level", "R out 1"), k("ad_in_r_output2_level", "R out 2")]),
         )
         steps = [k(f"lfo_step_value_{n}", str(n), 28) for n in range(1, 17)]
-        step_card = build_section_card(
+        step_card = _card(
             "LFO Step Wave",
             row(c("lfo_step_total", "Total steps")),
             row(c("lfo_step_slope", "Slope")),
@@ -407,7 +422,7 @@ class YamahaProgramEditorWindow(QMainWindow):
         head.addLayout(title, stretch=1)
         head.addWidget(self.edit_sample_button)
 
-        key = build_section_card(
+        key = _card(
             "Key",
             row(low_note),
             row(high_note),
@@ -415,30 +430,30 @@ class YamahaProgramEditorWindow(QMainWindow):
             row(s("velocity_limit_low", "Velocity low limit")),
             row(s("velocity_limit_high", "Velocity high limit")),
         )
-        level = build_section_card(
+        level = _card(
             "Level & Pan",
             knobs([k("level_offset", "Level"), k("pan_offset", "Pan"), k("velocity_sensitivity_offset", "Velocity")]),
         )
         equalize_card_heights(key, level)
 
-        pitch = build_section_card(
+        pitch = _card(
             "Pitch",
             knobs([k("coarse_tune_offset", "Coarse"), k("fine_tune_offset", "Fine")]),
             row(c("portamento", "Portamento")),
         )
-        filt = build_section_card(
+        filt = _card(
             "Filter",
             knobs([k("filter_cutoff_offset", "Cutoff"), k("filter_q_offset", "Q / Width"),
                    k("filter_gain_offset", "Gain"), k("cutoff_distance_offset", "Distance")]),
         )
         equalize_card_heights(pitch, filt)
 
-        aeg = build_section_card(
+        aeg = _card(
             "Amplitude Envelope",
             knobs([k("aeg_attack_rate_offset", "Attack"), k("aeg_decay_rate_offset", "Decay"),
                    k("aeg_release_rate_offset", "Release")]),
         )
-        xfade = build_section_card(
+        xfade = _card(
             "Velocity Crossfade",
             knobs([k("velocity_xfade_low_offset", "Low"), k("velocity_xfade_high_offset", "High")]),
         )
@@ -463,7 +478,7 @@ class YamahaProgramEditorWindow(QMainWindow):
         out_columns.setSpacing(20)
         out_columns.addLayout(routing, 1)
         out_columns.addLayout(playback, 1)
-        out = build_section_card("Output & Playback", out_columns)
+        out = _card("Output & Playback", out_columns)
 
         layout = QVBoxLayout()
         style_card_page_layout(layout)
@@ -478,6 +493,28 @@ class YamahaProgramEditorWindow(QMainWindow):
         return page
 
     def _build_menus(self):
+        # not a button on the Samples tab: unlike the edits there it acts on no selected sample, it opens a file
+        self._import_audio_action = QAction("Import Audio...", self)
+        self._import_audio_action.setShortcut("Ctrl+Shift+I")
+        self._import_audio_action.setToolTip(tt.IMPORT_AUDIO_ACTION)
+        self._import_audio_action.triggered.connect(lambda: self.samples_tab.import_audio())
+        self.menuBar().addMenu("&File").addAction(self._import_audio_action)
+
+        # the same actions as the Edit Sample card's buttons and the sample list's right-click menu (one QAction each, owned by the Samples
+        # tab); they only work while the Samples tab is showing, and not while something long runs (see _apply_lock)
+        self._sample_menu = self.menuBar().addMenu("&Sample")
+        for action in self.samples_tab.sample_menu_actions():
+            self._sample_menu.addAction(action)
+
+        view = self.menuBar().addMenu("&View")
+        # act on the Samples tab's waveform, which is built after the menus; only on while that tab shows (_on_tab_changed)
+        self._zoom_actions = build_zoom_actions(self, lambda: self.samples_tab.waveform_view)
+        for action in self._zoom_actions:
+            action.setEnabled(False)
+            view.addAction(action)
+        view.addSeparator()
+        self.audition_action = add_audition_action(self, view, self.audition_bar)
+
         hardware = self.menuBar().addMenu("&Hardware")
         self._refresh_action = QAction("Refresh from Hardware", self)
         self._refresh_action.setShortcut("Ctrl+R")
@@ -501,7 +538,7 @@ class YamahaProgramEditorWindow(QMainWindow):
         backups.triggered.connect(self._open_backup_folder)
         hardware.addAction(backups)
         hardware.addSeparator()
-        add_open_log_folder_action(hardware, self)
+        add_cancel_transfer_action(self, hardware, self._cancel_long_operation)
 
         window = self.menuBar().addMenu("&Window")
         dashboard = QAction("Transfer Dashboard", self)
@@ -524,9 +561,13 @@ class YamahaProgramEditorWindow(QMainWindow):
         window.addAction(samples)
         self._tab_actions.append(samples)
 
+        add_help_menu(self, [audition_section(), slice_editor_section(), preview_dialogs_section(), dragging_section()])
+
     def _on_tab_changed(self, index):
         on_samples = index == self._samples_tab_index
         _log(f"tab: {'Samples' if on_samples else 'Programs'}")
+        for action in self._zoom_actions:
+            action.setEnabled(on_samples)
         self.samples_tab.set_active(on_samples)
         if not on_samples:
             self._recompute_ranges()  # a sample's key range may have been edited there
@@ -1053,8 +1094,9 @@ class YamahaProgramEditorWindow(QMainWindow):
             focused = QApplication.focusWidget()  # (see YamahaSamplesTab._drop_focus: a disabled widget's focus scrolls a page)
             if focused is not None and self.isAncestorOf(focused):
                 focused.clearFocus()
-        for action in (self._restore_action, self._unchanged_action, self._refresh_action, *self._tab_actions):
+        for action in (self._restore_action, self._unchanged_action, self._refresh_action, self._import_audio_action, *self._tab_actions):
             action.setEnabled(not busy)
+        self._sample_menu.setEnabled(not busy)
         self.refresh_button.setEnabled(not busy)
         for widget in (
             self.program_list, self.assigned_list, self.show_empty_check, self.samples_tab.sample_list_widget, self.main_tabs.tabBar(),
@@ -1195,7 +1237,22 @@ class YamahaProgramEditorWindow(QMainWindow):
             self.status_bar.showMessage("Still writing to the sampler - try closing again in a moment", 5000)
             event.ignore()
             return
+        if self.samples_tab.has_unsent_edits():
+            names = ", ".join(repr(n) for n in self.samples_tab.unsent_names())
+            answer = QMessageBox.question(
+                self,
+                "Unsent edits",
+                f"These samples have edits that are not on the unit: {names}.\n\nClose anyway and lose them?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                event.ignore()
+                return
         _log("closed")
+        self._audition_timer.stop()
+        self._update_runner.wait()
+        self.audition_bar.set_open(False)  # lets go of every note and gives the computer keyboard back
         self._writer.close()
         self._scan_generation += 1
         self._session.cancel()
@@ -1216,6 +1273,21 @@ class YamahaProgramEditorWindow(QMainWindow):
                 pass
         self._main_window.show()
         super().closeEvent(event)
+
+    def _sync_audition_available(self):
+        # Off while anything is on the unit's wire: a conversation (the session, which also covers a drain after a cancelled wave), a restore or
+        # assignment, an audio load or an edit's send, or a transfer. A note must not land inside any of them. Off = nothing is routed, so a
+        # dead keyboard never swallows typing. (Not is_transfer_busy() alone: the session must never wait on that, but a keyboard can.)
+        available = self._session.idle and not self._is_busy() and not self._controller.is_transfer_busy()
+        self.audition_bar.set_available(available, "" if available else "The keyboard is off while the sampler is busy.")
+
+    def _send_audition_message(self, message):
+        # a plain channel message straight to the output (nothing is read back, so the session never hears of it)
+        try:
+            self._controller.midi_manager.send_channel_message(message)
+        except Exception as ex:
+            debug_log.get_logger().error(f"YamahaEditor: couldn't send MIDI message {bytes(message).hex()}", exc_info=True)
+            self.status_bar.showMessage(f"Couldn't play the note: {ex}", 5000)
 
     def _stop_busy_indicator(self):
         for timer in (self._busy_show_timer, self._busy_hide_timer):

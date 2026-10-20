@@ -38,7 +38,10 @@ def classify_response(data_bytes):
 # WAV READING CODE
 # -----------------------
 
-SUPPORTED_AUDIO_EXTENSIONS = {".aif", ".aiff", ".flac", ".wav", ".wave"}
+# everything goes through soundfile (libsndfile 1.2 bundles MP3 and Ogg/Opus decoding), so the compressed formats are just more
+# extensions. They are decoded to 16-bit PCM like any other file, and a lossy file has no native bit depth (it defaults to 16).
+# NOT supported: AAC/M4A, WMA (libsndfile can't read them).
+SUPPORTED_AUDIO_EXTENSIONS = {".aif", ".aiff", ".flac", ".mp3", ".ogg", ".oga", ".opus", ".wav", ".wave"}
 
 _SOUNDFILE_SUBTYPE_TO_BIT_DEPTH = {
     "PCM_S8": 8,

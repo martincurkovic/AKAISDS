@@ -54,16 +54,25 @@ def build_rstat_request_message(channel=0):
     return [0x47, channel, 0x00, 0x48]
 
 
+# an Akai STAT reply's major version byte is the panel's major number + 15 (measured on a real S2000: OS 2.00 -> 0x11, OS 1.30 -> 0x10).
+# Only those two versions were seen; other models are untested
+_STAT_MAJOR_OFFSET = 15
+
+
+def akai_version_string(major_byte, minor_byte):
+    """The OS version as the sampler's panel shows it ("2.00") from a STAT reply's raw version bytes. A major byte below the offset
+    can't be an offset one (a fake sampler reporting the plain number), so it is shown as it is."""
+    major = major_byte & 0x7F
+    if major >= _STAT_MAJOR_OFFSET:
+        major -= _STAT_MAJOR_OFFSET
+    return f"{major}.{minor_byte & 0x7F:02d}"
+
+
 def parse_stat_response(data_bytes):
     # decodes the akai specific STAT message
     # example response:
     # 0x47, 0x00, 0x01, 0x48, 0x00, 0x11, 0x6E, 0x07, 0x68, 0x07, 0x00, 0x00, 0x40, 0x02, 0x00, 0x76, 0x3B, 0x02, 0x00
-    version_minor = data_bytes[4] & 0x7F
-    version_major = (data_bytes[5] & 0x7F) - 15
-    # honestly this is kinda just an educated guess for the version number format
-    # i only was able to test OS versions 1.30 and 2.00 on an S2000.
-    # no idea if this pattern holds true for other samplers, so further testing will be required
-    version_string = f"{version_major}.{version_minor:02d}"
+    version_string = akai_version_string(data_bytes[5], data_bytes[4])
 
     max_num_blocks = (data_bytes[6] & 0x7F) | ((data_bytes[7] & 0x7F) << 7)
     num_blocks_free = (data_bytes[8] & 0x7F) | ((data_bytes[9] & 0x7F) << 7)

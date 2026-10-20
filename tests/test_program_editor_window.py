@@ -16,6 +16,7 @@ from ui import tooltips as tt
 from ui.global_tab import DISABLED_SETTINGS
 from ui.loop_preview_view import HALF_WINDOW_FRAMES
 from ui.program_editor_window import ProgramEditorWindow, _LOOP_TYPE_OPTIONS
+from core import rx2
 from core.program_editor_bridge import MULTI_PART_COUNT
 
 
@@ -34,6 +35,7 @@ class FakeBridge:
         self.multipart_channels = list(range(MULTI_PART_COUNT))
         self.multipart_levels = [60 + i for i in range(MULTI_PART_COUNT)]
         self.multipart_pans = [i - 8 for i in range(MULTI_PART_COUNT)]
+        self.multipart_extra = {}
         self.multi_name = "DEMO MULTI"
         self.set_parameter_calls = []
         # sample header (Samples tab / loop points) - distinct values, real
@@ -169,6 +171,12 @@ class FakeBridge:
                 "PMCHAN": self.multipart_channels[index],
                 "STEREO": self.multipart_levels[index],
                 "PANPOS": self.multipart_pans[index],
+                # the per-part priority / play range / transpose / tune (a write is kept in multipart_extra)
+                "PRIORT": self.multipart_extra.get(("PRIORT", index), index % 4),
+                "PLAYLO": self.multipart_extra.get(("PLAYLO", index), 24 + index),
+                "PLAYHI": self.multipart_extra.get(("PLAYHI", index), 127 - index),
+                "TRANSPOSE": self.multipart_extra.get(("TRANSPOSE", index), index - 8),
+                "PTUNOCM": self.multipart_extra.get(("PTUNOCM", index), 2 * index - 16),
             }
         raise AssertionError(f"unexpected region {region!r}")
 
@@ -192,6 +200,8 @@ class FakeBridge:
             self.multipart_levels[program_index] = value
         if param.name == "PANPOS":
             self.multipart_pans[program_index] = value
+        if param.name in ("PRIORT", "PLAYLO", "PLAYHI", "TRANSPOSE", "PTUNOCM"):
+            self.multipart_extra[(param.name, program_index)] = value
 
     def get_parameter(self, param, program_index, keygroup=0, **kwargs):
         if param.region == "sample":
@@ -691,6 +701,9 @@ class FakeSamplerController(QObject):
         #: where a sent sample lands in the list (None = the end). A real S2000 gives a new sample the LOWEST FREE slot, which after an
         #: earlier delete is below samples that were there first (measured 2026-10-07)
         self.insert_new_at = None
+        #: the bandwidth bucket a sent sample lands on (SBANDW): 1 = 44100 Hz, 0 = 22050 Hz. A 16-bit Akai send picks the nearest to the
+        #: sample's rate; a sample the sampler imported itself (generic SDS) sits on 1 whatever its rate
+        self.new_sample_sbandw = 1
 
     def is_transfer_busy(self):
         return self.busy
@@ -733,7 +746,7 @@ class FakeSamplerController(QObject):
                 }
                 self._bridge.sample_headers[new_index] = {
                     "SSTART": 0, "SMPEND": 0, "LOOPAT1": 0, "LLNGTH1": 0,
-                    "SLNGTH": len(sent_samples), "SSRATE": 44100, "SBANDW": 1, "SPTYPE": 0,
+                    "SLNGTH": len(sent_samples), "SSRATE": sent_rate, "SBANDW": self.new_sample_sbandw, "SPTYPE": 0,
                     "SPITCH": 60, "SHLTO": 0, "STUNO": 0, "LDWELL1": 0,
                 }
         # deferred, not synchronous - _perform_sample_edit_real connects
@@ -2991,10 +3004,11 @@ def test_trim_sample_in_demo_mode_shows_a_live_percentage_in_the_status_bar(
 
     monkeypatch.setattr(editor, "_on_sample_receive_progress", _recording_progress)
 
-    editor._confirm_trim_sample()
+    editor._confirm_trim_sample()  # applies to the working copy: nothing to pace yet
+    editor._send_staged_to_sampler()
 
     assert len(messages) >= 6
-    assert all("%" in m and m.startswith('Trim sample (demo)') for m in messages)
+    assert all("%" in m and m.startswith('Send sample (demo)') for m in messages)
 
 
 def test_trim_sample_while_loop_is_off_clamps_the_frozen_loop_first(
@@ -3194,33 +3208,6 @@ def test_confirm_normalize_sample_does_nothing_when_already_at_peak(
     assert editor._sample_waveform_cache[0] == before
 
 
-def test_normalize_sample_does_nothing_when_declined(editor, qapp, monkeypatch):
-    import ui.program_editor_window as pew
-
-    monkeypatch.setenv("AKAISDS_DEMO_SAMPLER", "1")
-    _stub_demo_audio(editor, monkeypatch, [100, -200, 50] * 100)
-    editor.sample_list_widget.setCurrentRow(0)
-    editor._worker.wait_until_idle()
-    _pump_until(qapp, lambda: editor.waveform_view.has_header())
-    editor._load_sample_waveform()
-    before = dict(editor._sample_waveform_cache[0])
-
-    monkeypatch.setattr(
-        pew.QMessageBox, "question", lambda *a, **k: pew.QMessageBox.StandardButton.No
-    )
-    editor._confirm_normalize_sample()
-
-    assert editor._sample_waveform_cache[0] == before
-
-
-# --- Samples tab: small Trim/Reverse/Fade progress bar next to Zoom --------
-# The full-width bar under Trim/Reverse was removed for ordinary sample
-# loading (redundant with the progressively-filling waveform - see
-# AGENTS.md), but Trim/Reverse/Fade SEND already-loaded audio back out with
-# no such visual of their own, so a small one lives next to the zoom
-# controls just for these three - per direct user request.
-
-
 def test_sample_edit_progress_bar_shows_during_trim_and_hides_after(
     editor, qapp, monkeypatch
 ):
@@ -3255,7 +3242,9 @@ def test_sample_edit_progress_bar_shows_during_trim_and_hides_after(
 
     monkeypatch.setattr(editor, "_on_sample_edit_progress", _recording)
 
-    editor._confirm_trim_sample()
+    editor._confirm_trim_sample()  # applies to the working copy: nothing is sent, so no bar
+    assert not shown_during
+    editor._send_staged_to_sampler()
 
     assert shown_during and all(shown_during)  # visible on every tick
     assert editor.sample_edit_progress.isHidden() is True  # hidden again after
@@ -3275,25 +3264,6 @@ def test_sample_edit_progress_bar_stays_hidden_during_ordinary_sample_load(
     editor._load_sample_waveform()
 
     assert editor.sample_edit_progress.isHidden() is True
-
-
-def test_trim_sample_does_nothing_when_declined(editor, qapp, monkeypatch):
-    import ui.program_editor_window as pew
-
-    monkeypatch.setenv("AKAISDS_DEMO_SAMPLER", "1")
-    _stub_demo_audio(editor, monkeypatch, list(range(500)))
-    editor.sample_list_widget.setCurrentRow(0)
-    editor._worker.wait_until_idle()
-    _pump_until(qapp, lambda: editor.waveform_view.has_header())
-    editor._load_sample_waveform()
-    editor.waveform_view.set_marker("start", 100)
-    monkeypatch.setattr(
-        pew.QMessageBox, "question", lambda *a, **k: pew.QMessageBox.StandardButton.No
-    )
-
-    editor._confirm_trim_sample()
-
-    assert editor._sample_waveform_cache[0]["frame_count"] == 500
 
 
 def test_reverse_sample_in_demo_mode_reverses_the_cached_sample(editor, qapp, monkeypatch):
@@ -3325,34 +3295,6 @@ def test_reverse_sample_in_demo_mode_reverses_the_cached_sample(editor, qapp, mo
     assert (entry["start"], entry["loop_start"], entry["loop_end"], entry["end"]) == (
         99 - 90, 99 - 60, 99 - 30, 99 - 10,
     )
-
-
-def test_trim_sample_real_mode_without_sampler_controller_shows_message(
-    editor, qapp, monkeypatch
-):
-    import ui.program_editor_window as pew
-
-    monkeypatch.delenv("AKAISDS_DEMO_SAMPLER", raising=False)
-    editor.sample_list_widget.setCurrentRow(0)
-    editor._worker.wait_until_idle()
-    _pump_until(qapp, lambda: editor.waveform_view.has_header())
-    # real mode has no sampler_controller on the fixture's bare QWidget
-    # main_window, mirroring _load_sample_waveform's own equivalent guard
-    monkeypatch.setattr(
-        pew.QMessageBox, "question", lambda *a, **k: pew.QMessageBox.StandardButton.Yes
-    )
-    # force has_waveform() true without a real (demo-mode-only) audio
-    # fetch, since this test is specifically about the pre-fetch guard
-    editor.waveform_view.set_waveform([0] * 10, 0, 2, 7, 9)
-    editor._sample_waveform_cache[0] = {
-        "samples": [0] * 10, "framerate": 44100, "frame_count": 10,
-        "start": 0, "loop_start": 2, "loop_end": 7, "end": 9,
-        "sptype": 0, "spitch": 60,
-    }
-
-    editor._confirm_reverse_sample()
-
-    assert "no Transfer Dashboard connection available" in editor.status_bar.currentMessage()
 
 
 def _select_sample_with_full_audio(editor, qapp, sample_index, samples, markers):
@@ -3884,7 +3826,8 @@ def test_reverse_sample_real_mode_happy_path_sends_deletes_and_renames(
         {"start": 10, "loop_start": 30, "loop_end": 60, "end": 90},
     )
 
-    editor._confirm_reverse_sample()
+    editor._confirm_reverse_sample()  # applies to the working copy
+    editor._send_staged_to_sampler()
 
     # sent the reversed audio under a distinct temp name first, never the
     # original's own name (see the ambiguous-name-resolution reasoning in
@@ -3933,7 +3876,8 @@ def test_reverse_sample_real_mode_deletes_the_original_by_name_when_the_replacem
     )
     edited = names_before[2]
 
-    editor._confirm_reverse_sample()
+    editor._confirm_reverse_sample()  # applies to the working copy
+    editor._send_staged_to_sampler()
 
     after = bridge.sample_list()
     assert after.count(edited) == 1 and f"{edited}-TMP" not in after
@@ -3966,13 +3910,15 @@ def test_reverse_sample_real_mode_send_failure_leaves_original_untouched(
         {"start": 0, "loop_start": 10, "loop_end": 40, "end": 49},
     )
 
-    editor._confirm_reverse_sample()
+    editor._confirm_reverse_sample()  # applies to the working copy
+    editor._send_staged_to_sampler()
 
     assert bridge.sample_list() == original_samples_before  # nothing deleted
     assert not any(c[0] == "SHNAME" for c in bridge.set_parameter_calls)
     message = editor.status_bar.currentMessage().lower()
     assert "failed" in message
     assert "not touched" in message
+    assert editor._staged_edits  # nothing was lost: the edited copy is still here to send again
 
 
 def test_duplicate_sample_button_disabled_in_demo_mode(editor, monkeypatch):
@@ -4070,7 +4016,8 @@ def test_reverse_sample_real_mode_keeps_the_sent_waveform_on_screen(
         {"start": 10, "loop_start": 30, "loop_end": 60, "end": 90},
     )
 
-    editor._confirm_reverse_sample()
+    editor._confirm_reverse_sample()  # applies to the working copy
+    editor._send_staged_to_sampler()
     _wait_for_audio(editor, qapp)
 
     row = editor.sample_list_widget.currentRow()
@@ -4380,7 +4327,7 @@ def test_open_slice_editor_does_nothing_while_a_transfer_is_busy(editor, qapp):
 # --- Filter Sample (Samples tab) --------------------------------------------
 # a real FilterSampleDialog.exec() would hang an offscreen test (same
 # reasoning as the Slice Editor's own modal dialog above) - the dialog
-# itself (default values, Preview retriggering, accept/reject stopping the
+# itself (default values, the Preview / Stop button, accept/reject stopping the
 # preview player) is covered instead in tests/test_filter_sample_dialog.py.
 # Here, _confirm_filter_sample's own wiring is what's under test: does it
 # open the dialog with the right sample data, and does an accepted dialog
@@ -4389,12 +4336,16 @@ def test_open_slice_editor_does_nothing_while_a_transfer_is_busy(editor, qapp):
 
 
 class _FakeFilterSampleDialog:
-    def __init__(self, parent, sample_name, samples, framerate, *, accept=True):
+    def __init__(self, parent, sample_name, samples, framerate, *, accept=True, pitch_shift_semitones=0, allow_new_sample=False, applies_to_working_copy=False):
         self.parent = parent
+        self.pitch_shift_semitones = pitch_shift_semitones
         self.sample_name = sample_name
         self.samples = samples
         self.framerate = framerate
         self._accept = accept
+
+    def send_as_new(self):
+        return False
 
     def exec(self):
         return self._accept
@@ -4424,7 +4375,7 @@ def test_confirm_filter_sample_passes_the_right_sample_data_to_the_dialog(
     captured = {}
 
     class _CapturingFakeDialog(_FakeFilterSampleDialog):
-        def __init__(self, parent, sample_name, samples, framerate):
+        def __init__(self, parent, sample_name, samples, framerate, pitch_shift_semitones=0, allow_new_sample=False, applies_to_working_copy=False):
             captured["sample_name"] = sample_name
             captured["samples"] = samples
             captured["framerate"] = framerate
@@ -4444,7 +4395,7 @@ def test_confirm_filter_sample_passes_the_right_sample_data_to_the_dialog(
     assert captured["framerate"] == 44100
 
 
-def test_confirm_filter_sample_declined_does_not_call_perform_sample_edit(
+def test_confirm_filter_sample_declined_does_not_apply_the_edit(
     editor, qapp, monkeypatch
 ):
     monkeypatch.setattr(
@@ -4453,7 +4404,7 @@ def test_confirm_filter_sample_declined_does_not_call_perform_sample_edit(
     )
     calls = []
     monkeypatch.setattr(
-        editor, "_perform_sample_edit", lambda *a, **k: calls.append((a, k))
+        editor, "_apply_sample_edit", lambda *a, **k: calls.append((a, k))
     )
     samples = list(range(-500, 500))
     markers = {"start": 0, "loop_start": 100, "loop_end": 900, "end": 999}
@@ -4464,36 +4415,7 @@ def test_confirm_filter_sample_declined_does_not_call_perform_sample_edit(
     assert calls == []
 
 
-def test_confirm_filter_sample_declined_at_the_second_confirmation_does_not_send(
-    editor, qapp, monkeypatch
-):
-    # the dialog itself was accepted (OK clicked), but the extra
-    # QMessageBox.question added after real use (see _confirm_filter_
-    # sample's own comment - an accidental OK click right after Preview
-    # had no way to back out) is answered No - must not perform the edit
-    import ui.program_editor_window as pew
-
-    monkeypatch.setattr(
-        "ui.program_editor_window.FilterSampleDialog",
-        lambda *a, **k: _FakeFilterSampleDialog(*a, **k, accept=True),
-    )
-    monkeypatch.setattr(
-        pew.QMessageBox, "question", lambda *a, **k: pew.QMessageBox.StandardButton.No
-    )
-    calls = []
-    monkeypatch.setattr(
-        editor, "_perform_sample_edit", lambda *a, **k: calls.append((a, k))
-    )
-    samples = list(range(-500, 500))
-    markers = {"start": 0, "loop_start": 100, "loop_end": 900, "end": 999}
-    _select_sample_with_full_audio(editor, qapp, 0, samples, markers)
-
-    editor._confirm_filter_sample()
-
-    assert calls == []
-
-
-def test_confirm_filter_sample_accepted_calls_perform_sample_edit_with_a_working_transform(
+def test_confirm_filter_sample_accepted_applies_a_working_transform_to_the_working_copy(
     editor, qapp, monkeypatch
 ):
     import ui.program_editor_window as pew
@@ -4507,7 +4429,7 @@ def test_confirm_filter_sample_accepted_calls_perform_sample_edit_with_a_working
     )
     calls = []
     monkeypatch.setattr(
-        editor, "_perform_sample_edit", lambda *a, **k: calls.append((a, k))
+        editor, "_apply_sample_edit", lambda *a, **k: calls.append((a, k))
     )
     samples = list(range(-500, 500))
     markers = {"start": 0, "loop_start": 100, "loop_end": 900, "end": 999}
@@ -4870,6 +4792,7 @@ def test_export_slices_real_mode_happy_path_sends_batch_and_writes_headers(
         names, slices, 44100, 16, None, 60, 128, 3,
         lambda cur, total: progress_calls.append((cur, total)),
         lambda text: status_calls.append(text),
+        source_sbandw=1, source_rate=44100,
     )
 
     assert success is True
@@ -5206,3 +5129,172 @@ def test_the_s3000_editors_signed_knobs_draw_their_arc_from_zero_and_the_unsigne
     assert editor.pan_knob.minimum() == -50 and abs(editor.pan_knob._origin_fraction() - 0.5) < 1e-9
     assert abs(editor.key_filter_track_knob._origin_fraction() - 0.5) < 1e-9  # -24..+24
     assert editor.attack1_knob.minimum() == 0 and editor.attack1_knob._origin_fraction() == 0.0
+
+
+
+# --- Import RX2 ---------------------------------------------------------------
+
+
+def _fake_rx2_dialogs(monkeypatch, path, captured):
+    class _FakeSliceEditorWindow:
+        export_succeeded = False
+
+        def __init__(self, parent, name, samples, framerate, spitch, stuno, shlto, *a, **kwargs):
+            captured.update(
+                name=name, samples=samples, framerate=framerate, spitch=spitch,
+                markers=kwargs.get("initial_markers"),
+                extra_channels=kwargs.get("extra_channels"),
+                channel_suffixes=kwargs.get("channel_suffixes"),
+            )
+
+        def exec(self):
+            pass
+
+    monkeypatch.setattr("ui.program_editor_window.SliceEditorWindow", _FakeSliceEditorWindow)
+    monkeypatch.setattr(
+        "ui.program_editor_window.QFileDialog.getOpenFileName", lambda *a, **k: (path, "")
+    )
+
+
+@pytest.mark.skipif(not rx2.is_available(), reason="VelociLoops not built")
+def test_import_rx2_opens_the_slice_editor_with_the_cut_points_marked(editor, monkeypatch):
+    path = os.path.join(os.path.dirname(__file__), "fixtures", "rx2", "120Stereo.rx2")
+    captured = {}
+    _fake_rx2_dialogs(monkeypatch, path, captured)
+    editor._main_window.sampler_controller = FakeSamplerController(editor._bridge)
+
+    editor._import_audio()
+
+    assert captured["name"] == "120STEREO"
+    assert captured["framerate"] == 44100
+    assert len(captured["samples"]) == 2 * 44100  # the ten slices end to end
+    assert len(captured["markers"]) == 9
+    # a stereo loop stays stereo: the right channel rides along and each slice will go out as a -L/-R pair
+    assert len(captured["extra_channels"]) == 1 and len(captured["extra_channels"][0]) == 2 * 44100
+    assert captured["channel_suffixes"] == ("-L", "-R")
+    assert "-L/-R" in editor.status_bar.currentMessage()
+
+
+def test_import_rx2_is_a_file_menu_action_that_needs_no_selected_sample(editor):
+    assert editor._import_audio_action.shortcut().toString() == "Ctrl+Shift+I"
+    assert editor._import_audio_action.isEnabled() is True
+    assert "File" in [a.text().replace("&", "") for a in editor.menuBar().actions()]
+
+
+def test_import_audio_action_is_frozen_with_the_rest_of_the_window(editor):
+    editor._set_hardware_busy_ui(True)
+    assert editor._import_audio_action.isEnabled() is False
+    editor._set_hardware_busy_ui(False)
+    assert editor._import_audio_action.isEnabled() is True
+
+
+def test_import_rx2_with_a_bad_file_says_why_and_opens_nothing(editor, monkeypatch, tmp_path):
+    bad = tmp_path / "bad.rx2"
+    bad.write_bytes(b"not a rex file")
+    captured = {}
+    _fake_rx2_dialogs(monkeypatch, str(bad), captured)
+    editor._main_window.sampler_controller = FakeSamplerController(editor._bridge)
+
+    editor._import_audio()
+
+    assert captured == {}
+    assert editor.status_bar.currentMessage()
+
+
+# --- stereo slices (an imported stereo .rx2): a -L/-R sample pair per slice, left/right zones in the program ----------
+
+
+def test_export_slices_sends_a_stereo_slice_as_a_left_and_a_right_sample(editor, qapp, monkeypatch):
+    monkeypatch.delenv("AKAISDS_DEMO_SAMPLER", raising=False)
+    bridge = editor._bridge
+    fake_sampler = FakeSamplerController(bridge)
+    editor._main_window.sampler_controller = fake_sampler
+    left = [list(range(0, 50)), list(range(50, 120))]
+    right = [list(range(1000, 1050)), list(range(1050, 1120))]
+
+    success, message = editor._export_slices(
+        ["LOOP-1", "LOOP-2"], left, 44100, 16, None, 60, 0, 0,
+        lambda *_: None, lambda *_: None, extra_slices=[right],
+    )
+
+    assert success is True
+    assert "2 stereo slices" in message and "4 samples" in message
+    sent = fake_sampler.sent_entries
+    assert [e["name"] for e in sent] == ["LOOP-1-L", "LOOP-1-R", "LOOP-2-L", "LOOP-2-R"]
+    assert [e["samples"] for e in sent] == [left[0], right[0], left[1], right[1]]
+    assert all(e["mono"] is True for e in sent)  # each is a mono resident sample
+    for name, samples in zip(["LOOP-1-L", "LOOP-1-R", "LOOP-2-L", "LOOP-2-R"], [left[0], right[0], left[1], right[1]]):
+        index = bridge.sample_list().index(name)
+        header = {c[0]: c[2] for c in bridge.set_parameter_calls if c[1] == index}
+        assert header["SPTYPE"] == 3 and header["SMPEND"] == len(samples) - 1
+
+
+def test_create_program_from_stereo_slices_puts_left_in_zone_1_and_right_in_zone_2(editor, qapp):
+    bridge = editor._bridge
+    names = ["LOOP-1", "LOOP-2", "LOOP-3"]
+
+    success, _message = editor._create_program_from_slices(
+        names, 0, "LOOP", lambda *_: None, lambda *_: None, stereo=True
+    )
+
+    assert success is True
+    new_index = bridge.program_list().index("LOOP")
+    assert len(bridge._keygroups[new_index]) == 3
+    writes = {
+        (keygroup, param): value
+        for param, index, value, keygroup in bridge.set_parameter_calls
+        if index == new_index
+    }
+    for i, name in enumerate(names):
+        assert writes[(i, "SNAME1")] == name + "-L"
+        assert writes[(i, "SNAME2")] == name + "-R"
+        assert writes[(i, "LONOTE")] == writes[(i, "HINOTE")] == 36 + i
+    # everything else is written once, on keygroup 0, and inherited by the clones: Const Pitch on both zones, the whole velocity
+    # range for both, left hard left and right hard right, zones 3-4 empty
+    first = {param: value for (keygroup, param), value in writes.items() if keygroup == 0}
+    assert (first["CP1"], first["CP2"]) == (1, 1)
+    assert (first["LOVEL1"], first["HIVEL1"], first["LOVEL2"], first["HIVEL2"]) == (0, 127, 0, 127)
+    assert (first["VPANO1"], first["VPANO2"]) == (-50, 50)
+    assert (first["SNAME3"], first["SNAME4"]) == ("", "")
+    assert (1, "VPANO1") not in writes
+
+
+# --- Import Audio: a plain audio file ----------------------------------------------------------------------------------
+
+
+def test_import_audio_opens_a_plain_stereo_file_with_no_markers(editor, monkeypatch, tmp_path):
+    import numpy as np
+    import soundfile as sf
+
+    path = tmp_path / "pad.wav"
+    sf.write(str(path), np.full((4410, 2), 0.2, dtype="float32"), 44100)
+    captured = {}
+    _fake_rx2_dialogs(monkeypatch, str(path), captured)
+    editor._main_window.sampler_controller = FakeSamplerController(editor._bridge)
+
+    editor._import_audio()
+
+    assert captured["name"] == "PAD" and captured["framerate"] == 44100
+    assert len(captured["samples"]) == 4410 and captured["markers"] is None  # no cut points: one sample unless the user adds some
+    assert len(captured["extra_channels"]) == 1 and captured["channel_suffixes"] == ("-L", "-R")
+
+
+def _menu(window, title):
+    return next(a.menu() for a in window.menuBar().actions() if a.text().replace("&", "") == title)
+
+
+def _texts(menu):
+    return [a.text() for a in menu.actions() if not a.isSeparator()]
+
+
+def test_help_menu_is_the_standard_one(editor):
+    assert _texts(_menu(editor, "Help")) == [
+        "Quick Start Guide...",
+        "Keyboard Shortcuts...",
+        "Open Log Folder",
+        "About AKAISDS...",
+        "Check for Updates...",
+    ]
+    assert "Open Log Folder" not in _texts(_menu(editor, "Hardware"))
+    assert "Cancel Transfer" in _texts(_menu(editor, "Hardware"))
+    assert [t for t in _texts(_menu(editor, "View")) if t.startswith("Zoom")] == ["Zoom In", "Zoom Out", "Zoom to Fit"]

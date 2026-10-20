@@ -29,6 +29,28 @@ cd AKAISDS
 uv sync
 ```
 
+#### Running the app without a sampler
+
+You don't need hardware to work on the UI. The "demo samplers" are fakes that speak the real wire format, so the real transfer and editor code runs on top of them; only the MIDI ports are fake. From the repo root:
+
+One launcher runs every demo sampler: `uv run python tools/demo.py <sampler>` (`demo.py list` shows them).
+
+| What you want | Command |
+|---|---|
+| The **S2000/S3000 Program Editor** on a fake sampler with sample audio | `uv run python tools/demo.py s3000` |
+| The **S1000 Program Editor** on `FakeS1000` | `uv run python tools/demo.py s1000` |
+| The Dashboard on a fake **Akai S900/S950** (Open Editor for the S950 editor) | `uv run python tools/demo.py s950` |
+| The Dashboard on a fake **Yamaha A4000** (Yamaha editor, Samples tab, edits, Slice Editor) | `uv run python tools/demo.py a4000` |
+| ...straight into its Program Editor's Samples tab | `uv run python tools/demo.py a4000 --editor` |
+| The Dashboard on a fake **Ensoniq EPS/ASR** or **ASR-X** | `uv run python tools/demo.py ensoniq` / `asrx` |
+| The whole app with the S1000 / S2000 / S3000 editor on a fake sampler | `AKAISDS_DEMO_SAMPLER=1 uv run python src/main.py`, then pick ports and click Open Editor. Choose the **S1000** Sampler Type to get the S1000 fake instead of the S2000/S3000 one |
+
+On Windows (PowerShell) set the variable first: `$env:AKAISDS_DEMO_SAMPLER = "1"`.
+
+**Speed.** The demos pace themselves like the real wire by default (a Yamaha send waits out MIDI-speed wire time, a link waits several seconds, an S2000 sample load takes about a millisecond per word), because that is what makes them feel real. To skip all of that, add **`--instant`** (to any demo that supports it; `demo.py list` shows which) or set **`AKAISDS_DEMO_INSTANT=1`**; the same Yamaha edit send goes from about 10 seconds to instant.
+
+A few things worth knowing: the Settings dialog is not usable in the A4000/S950 demos (it would reopen real ports); in the `AKAISDS_DEMO_SAMPLER` mode the Dashboard's own Send/Receive still talk to whatever MIDI ports you selected, so only the editors are fake; the demo A4000 starts with "DEMO LOOP", "DEMO STEREO" and "DEMO BREAK" (a loop, a stereo sample and something to slice); and `uv run python tools/make_screenshots.py` regenerates the manual's pictures from the same fakes. The details are in AGENTS.md ("Developing without hardware").
+
 #### Before you open a PR
 
 Run the test suite - see TESTING.md for details

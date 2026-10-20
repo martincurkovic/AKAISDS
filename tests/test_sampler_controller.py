@@ -1228,6 +1228,26 @@ def test_reply_arriving_cancels_the_watchdog(controller):
     assert not any("No reply" in s for s in statuses)
 
 
+def test_no_reply_names_a_non_zero_device_id_on_an_akai(controller):
+    # S1100 report, 2026-10-16: Settings said 1, the sampler answered on 0
+    statuses = _statuses(controller)
+    controller.device_type = "akai"
+    controller.channel = 1
+    controller.refresh_sample_list()
+    controller._on_reply_timeout(controller._reply_generation)
+    assert any("it is 1; most Akais use 0" in s for s in statuses)
+
+
+def test_no_reply_has_no_device_id_hint_when_it_is_already_zero(controller):
+    statuses = _statuses(controller)
+    controller.device_type = "akai"
+    controller.channel = 0
+    controller.refresh_sample_list()
+    controller._on_reply_timeout(controller._reply_generation)
+    assert any("No reply from the sampler" in s for s in statuses)
+    assert not any("most Akais use 0" in s for s in statuses)
+
+
 def test_pre_send_slist_timeout_aborts_the_batch(controller):
     statuses = _statuses(controller)
     finished = []
@@ -1785,6 +1805,116 @@ def test_s950_refuses_what_it_has_no_protocol_for(s950_controller, tmp_path):
     assert c._s950_engine.calls == []
 
 
+# --- Sampler Type: Ensoniq EPS/ASR (list, receive and the file queue delegate to the engine; everything else refuses) ---
+
+
+class _StubEnsoniqEngine:
+    # stands in for controller/ensoniq_transfers.EnsoniqTransfers (real Qt timers - tested on its own in test_ensoniq_transfers.py);
+    # this file runs under a fake QtCore and only checks the controller's DELEGATION
+    def __init__(self):
+        self.calls = []
+        self.busy = False
+        self.idle = True
+        self.cancel_result = False
+
+    def refresh_catalog(self, silent=False):
+        self.calls.append(("refresh_catalog", silent))
+
+    def receive_samples(self, requests):
+        self.calls.append(("receive_samples", requests))
+
+    def send_file_queue(self, entries):
+        self.calls.append(("send_file_queue", entries))
+        return True
+
+    def handle_sysex(self, data):
+        self.calls.append(("handle_sysex", bytes(data)))
+
+    def cancel(self):
+        self.calls.append(("cancel",))
+        return self.cancel_result
+
+
+@pytest.fixture
+def ensoniq_controller(controller):
+    controller.set_device_type("ensoniq_eps_asr")
+    controller._ensoniq_engine = _StubEnsoniqEngine()
+    statuses = []
+    controller.status_changed.connect(statuses.append)
+    controller.statuses = statuses
+    return controller
+
+
+def test_set_device_type_ensoniq_is_its_own_family(controller):
+    controller.set_device_type("ensoniq_eps_asr")
+    assert controller.device_type == "ensoniq"
+    assert controller.sampler_model == "ensoniq_eps_asr"
+
+
+def test_ensoniq_list_receive_and_send_delegate_to_the_engine(ensoniq_controller):
+    c = ensoniq_controller
+    c.refresh_sample_list(silent=True)
+    c.receive_samples([(1, "x.wav")])
+    assert c.send_file_queue([{"filepath": "a.wav"}], starting_sample_number=5) is True
+    assert c._ensoniq_engine.calls == [
+        ("refresh_catalog", True),
+        ("receive_samples", [(1, "x.wav")]),
+        ("send_file_queue", [{"filepath": "a.wav"}]),
+    ]
+    # none of it went through the Akai/generic paths
+    assert c.midi_manager.sent == [] and c.statuses == []
+
+
+def test_ensoniq_sysex_goes_to_the_engine_not_the_akai_or_sds_parsers(ensoniq_controller):
+    c = ensoniq_controller
+    updates = []
+    c.sample_list_updated.connect(updates.append)
+    c.on_sysex_received([0x0F, 0x03, 0x00, 0x01, 0x00, 0x00])
+    c.on_sysex_received([0x7E, 0x00, 0x02, 0x00])  # an SDS ACK is the engine's to ignore, not the SDS parser's
+    assert updates == []
+    assert c._ensoniq_engine.calls == [
+        ("handle_sysex", bytes([0x0F, 0x03, 0x00, 0x01, 0x00, 0x00])),
+        ("handle_sysex", bytes([0x7E, 0x00, 0x02, 0x00])),
+    ]
+    assert c.statuses == [] and c.midi_manager.sent == []
+
+
+def test_ensoniq_refuses_what_it_has_no_protocol_for(ensoniq_controller, tmp_path):
+    # the legacy per-file senders, renaming, deleting and sample info have no Ensoniq version: none may put Akai or SDS bytes on the wire
+    c = ensoniq_controller
+    wav = str(tmp_path / "x.wav")
+    c.delete_sample(1)
+    c.rename_sample(1, "NEW")
+    c.request_sample_info(1)
+    c.send_sample_file(wav)
+    c.send_stereo_sample_file(wav, 0, 1)
+    c.send_sample_file_generic(wav)
+    c.send_sample_file_generic_and_rename(wav, "NEW")
+    c.receive_sample_generic(1, wav)
+    assert c.midi_manager.sent == []
+    assert not c._receiving and not c._file_queue and not c._receive_queue and not c._awaiting_memory_status
+    assert len(c.statuses) == 8
+    assert all("Ensoniq" in s and "yet" in s for s in c.statuses)
+    assert c._ensoniq_engine.calls == []
+
+
+def test_cancel_and_busy_include_the_ensoniq_engine(ensoniq_controller):
+    c = ensoniq_controller
+    assert c.is_transfer_busy() is False and c.is_ensoniq_idle() is True
+    c._ensoniq_engine.busy = True
+    c._ensoniq_engine.idle = False
+    assert c.is_transfer_busy() is True and c.is_ensoniq_idle() is False
+    c._ensoniq_engine.cancel_result = True
+    c.cancel_transfer()
+    assert c._ensoniq_engine.calls == [("cancel",)]
+
+
+def test_other_families_are_not_refused_as_ensoniq(controller):
+    for selection in ("akai_s2000_s3000", "generic", "akai_s900_s950"):
+        controller.set_device_type(selection)
+        assert controller._ensoniq_not_supported("anything") is False
+
+
 def test_cancel_and_busy_include_the_s950_engine(s950_controller):
     c = s950_controller
     assert c.is_transfer_busy() is False
@@ -1808,3 +1938,132 @@ def test_leaving_the_s950_family_restores_normal_behaviour(s950_controller):
     c.set_device_type("akai_s2000_s3000")
     c.refresh_sample_list()
     assert len(c.midi_manager.sent) == 1  # an RSTAT again
+
+
+# -----------------------------------------------------------------
+# RECEIVING - saving the Akai sample file (.s3) as well as / instead of a WAV
+# -----------------------------------------------------------------
+
+
+def _akai_receive_with_format(controller, save_path, samples, receive_format):
+    from core import akai_sysex, sds_encoder
+
+    controller.receive_format = receive_format
+    controller.receive_samples([(3, save_path)], channel=0)
+    sdata_msg = akai_sysex.build_sdata_message(
+        name="AKAI SAMP", sample_length=len(samples), sample_rate=44100, sample_number=3, channel=0
+    )
+    controller.on_sysex_received(list(sdata_msg[1:-1]))
+    received = []
+    controller.sample_received.connect(received.append)
+    for packet in sds_encoder.build_data_packets(samples, channel=0, bit_depth=16):
+        controller.on_sysex_received(list(packet[1:-1]))
+    return akai_sysex.parse_sdata_response(list(sdata_msg[1:-1])), received
+
+
+def test_a_receive_saves_only_a_wav_by_default(controller, tmp_path):
+    save_path = str(tmp_path / "plain.wav")
+    _akai_receive_with_format(controller, save_path, [1, -2, 3, -4, 5], controller.receive_format)
+    assert controller.receive_format == "wav"
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["plain.wav"]
+
+
+def test_a_receive_can_save_the_akai_sample_file_instead_of_a_wav(controller, tmp_path):
+    from core import akai_sample_file
+
+    samples = [10, -10, 20, -20, 30, -32768, 32767]
+    statuses = _statuses(controller)
+    info, received = _akai_receive_with_format(controller, str(tmp_path / "kick.wav"), samples, "s3")
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["kick.s3"]  # no WAV
+    sample = akai_sample_file.parse_file((tmp_path / "kick.s3").read_bytes())
+    assert sample.samples == samples and sample.name == "AKAI SAMP" and sample.sample_rate == 44100
+    # the header is the one the sampler sent (its addresses zeroed), not a rebuilt one
+    assert sample.header == akai_sample_file.normalized_header(info["raw_header"])
+    assert received == [str(tmp_path / "kick.s3")]
+    assert any("kick.s3" in s for s in statuses)
+
+
+def test_a_receive_can_save_both(controller, tmp_path):
+    from core import akai_sample_file, sds_encoder
+
+    samples = [1, 2, 3, 4, 5]
+    statuses = _statuses(controller)
+    _info, received = _akai_receive_with_format(controller, str(tmp_path / "both.wav"), samples, "both")
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["both.s3", "both.wav"]
+    assert akai_sample_file.parse_file((tmp_path / "both.s3").read_bytes()).samples == samples
+    assert list(sds_encoder.read_wav_samples(str(tmp_path / "both.wav"))[0]) == samples
+    assert received == [str(tmp_path / "both.wav")]  # the WAV is the one reported
+    assert any("and both.s3" in s for s in statuses)
+
+
+def test_a_receive_without_the_akai_header_falls_back_to_the_wav_and_says_so(controller, tmp_path):
+    from core import sds_encoder
+
+    samples = list(range(-45, 45))
+    statuses = _statuses(controller)
+    controller.receive_format = "s3"
+    controller.receive_sample_generic(sample_number=1, save_path=str(tmp_path / "generic.wav"), channel=0)
+    controller.on_sysex_received(
+        list(sds_encoder.build_dump_header(samples, framerate=44100, sample_number=1, channel=0, bit_depth=16)[1:-1])
+    )
+    for packet in sds_encoder.build_data_packets(samples, channel=0, bit_depth=16):
+        controller.on_sysex_received(list(packet[1:-1]))
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["generic.wav"]  # a receive never ends with nothing
+    assert any("no Akai sample file" in s for s in statuses)
+
+
+def test_an_unwritable_akai_file_falls_back_to_the_wav(controller, tmp_path, monkeypatch):
+    import builtins
+
+    real_open = builtins.open
+
+    def refuse_s3(path, mode="r", *args, **kwargs):
+        if str(path).endswith(".s3"):
+            raise OSError("disk full")
+        return real_open(path, mode, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "open", refuse_s3)
+    statuses = _statuses(controller)
+    _akai_receive_with_format(controller, str(tmp_path / "full.wav"), [1, 2, 3], "s3")
+    monkeypatch.undo()
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["full.wav"]
+    assert any("disk full" in s for s in statuses)
+
+
+def test_an_s1000_sized_header_saves_an_s1_file(controller, tmp_path):
+    # The S1000 header block is 150 bytes in the format (the real unit's SDATA length is not confirmed); built here the way the controller receives it,
+    # nibbled after the sample number
+    from core import akai_sample_file, akai_sysex, sds_encoder
+
+    block = bytearray(150)
+    block[0] = 3
+    block[3:15] = akai_sysex.encode_name("S1000 KICK")
+    block[26:30] = (5).to_bytes(4, "little")
+    block[138:140] = (44100).to_bytes(2, "little")
+    message = [0x47, 0, 0x0B, 0x48, 3, 0] + akai_sysex.to_nibble_pairs(bytes(block))
+    controller.receive_format = "s3"
+    controller.receive_samples([(3, str(tmp_path / "kick.wav"))], channel=0)
+    controller.on_sysex_received(message)
+    samples = [10, -10, 20, -20, 30]
+    for packet in sds_encoder.build_data_packets(samples, channel=0, bit_depth=16):
+        controller.on_sysex_received(list(packet[1:-1]))
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["kick.s1"]
+    sample = akai_sample_file.parse_file((tmp_path / "kick.s1").read_bytes())
+    assert sample.extension == ".s1" and sample.samples == samples and sample.name == "S1000 KICK"
+
+
+def test_a_header_of_an_unknown_length_falls_back_to_the_wav_with_the_reason(controller, tmp_path):
+    from core import akai_sysex, sds_encoder
+
+    block = bytearray(141)  # (what the editor models of an S1000 sample, not a size the file format has)
+    block[3:15] = akai_sysex.encode_name("ODD")
+    block[26:30] = (3).to_bytes(4, "little")
+    block[138:140] = (44100).to_bytes(2, "little")
+    statuses = _statuses(controller)
+    controller.receive_format = "s3"
+    controller.receive_samples([(3, str(tmp_path / "odd.wav"))], channel=0)
+    controller.on_sysex_received([0x47, 0, 0x0B, 0x48, 3, 0] + akai_sysex.to_nibble_pairs(bytes(block)))
+    for packet in sds_encoder.build_data_packets([1, 2, 3], channel=0, bit_depth=16):
+        controller.on_sysex_received(list(packet[1:-1]))
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["odd.wav"]
+    assert any("141-byte sample header" in s for s in statuses)

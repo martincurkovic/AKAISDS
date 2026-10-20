@@ -76,8 +76,11 @@ def test_an_edit_does_not_scroll_the_page(window, monkeypatch):
     window.controller._yamaha_transfers.verify_delay_ms = 0
     button = tab.edit_buttons["reverse"]
     button.setFocus()
-    QTest.mouseClick(button, Qt.MouseButton.LeftButton)
+    QTest.mouseClick(button, Qt.MouseButton.LeftButton)  # changes the working copy (and shows the banner)
+    send = tab.send_edits_as_new_button
+    send.setFocus()
+    QTest.mouseClick(send, Qt.MouseButton.LeftButton)
     seen = []
-    assert wait_until(lambda: (seen.append(bar.value()), "ST REV" in window.fake.samples and not tab._edit_busy)[1], timeout=20)
-    assert wait_until(lambda: "ST REV" in tab.sample_names())
+    assert wait_until(lambda: (seen.append(bar.value()), "ST EDIT" in window.fake.samples and not tab._edit_busy)[1], timeout=20)
+    assert wait_until(lambda: "ST EDIT" in tab.sample_names())
     assert set(seen) == {0} and bar.value() == 0  # the page never moved

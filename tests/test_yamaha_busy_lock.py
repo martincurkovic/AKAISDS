@@ -20,7 +20,7 @@ def navigation(w):
 
 
 def actions(w):
-    return [w._refresh_action, w._restore_action, w._unchanged_action, *w._tab_actions]
+    return [w._refresh_action, w._restore_action, w._unchanged_action, w._import_audio_action, *w._tab_actions]
 
 
 def test_everything_that_navigates_or_starts_something_is_off_during_a_long_operation(win):
@@ -68,10 +68,11 @@ def test_a_real_edit_send_locks_the_window_and_the_bottom_cancel_stops_it(window
     window._session.send_baud, window._session.send_gap_ms, window._session.send_tick_ms = 60_000, 0, 5  # slow enough to catch it mid-send
     window.controller._yamaha_transfers.verify_delay_ms = 0
     tab.edit_buttons["reverse"].click()
+    tab.send_edits_as_new_button.click()  # the edit changes the working copy; sending it is the long operation
     assert wait_until(lambda: tab._edit_busy and bool(window.fake.bulk_loads), timeout=10)
     assert not window.program_list.isEnabled() and not tab.sample_list_widget.isEnabled() and not window.refresh_button.isEnabled()
     assert not window.cancel_button.isHidden() and not tab.edit_progress.isHidden()  # the progress bar is not swapped out for a placeholder
     window.cancel_button.click()
     assert wait_until(lambda: not tab._edit_busy, timeout=10)
     assert window.program_list.isEnabled() and tab.sample_list_widget.isEnabled() and window.refresh_button.isEnabled()
-    assert window.cancel_button.isHidden() and "UM REV" not in window.fake.samples
+    assert window.cancel_button.isHidden() and "UM EDIT" not in window.fake.samples

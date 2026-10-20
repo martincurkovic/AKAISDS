@@ -13,10 +13,19 @@ dependencies = [
     "soundfile>=0.14.0",
     "s3ked",
     "miniaudio>=1.71",
+    "certifi>=2026.7.22",
 ]
 
 [dependency-groups]
-dev = ["pytest>=9", "numpy>=2.5.1"]
+dev = [
+    "pytest>=9",
+    "numpy>=2.5.1",
+    "dmgbuild>=1.6.7",
+]
+
+[tool.pytest.ini_options]
+# a test stuck for this long dumps every thread's stack (pytest's faulthandler), instead of the run hanging silently: one full run deadlocked once (see TESTING.md)
+faulthandler_timeout = 300
 
 [tool.uv.sources]
 s3ked = { git = "https://github.com/lentferj/s3ked.git", rev = "665e855c45da9fe8102328961503f3282311862a" }

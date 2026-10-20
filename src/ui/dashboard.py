@@ -2,6 +2,7 @@ import os
 import tempfile
 from PySide6.QtWidgets import (
     QCheckBox,
+    QComboBox,
     QFileDialog,
     QHBoxLayout,
     QInputDialog,
@@ -23,6 +24,7 @@ from core import (
     sample_slicing,
     sds_encoder,
     program_editor_bridge,
+    rx2,
     debug_log,
     diagnostics,
     sampler_models,
@@ -30,16 +32,23 @@ from core import (
 from ui.qt_helpers import load_colored_pixmap
 from ui.settings_dialog import MidiSettingsDialog
 from ui.drop_list_widget import DropListWidget
+from ui.memory_bar import MemoryBar
 from ui.program_editor_window import ProgramEditorWindow
 from ui.s950_program_editor import S950ProgramEditorWindow
 from ui.yamaha_program_editor import YamahaProgramEditorWindow
 from ui.sample_settings_dialog import SampleSettingsDialog
 from ui.sample_info_dialog import SampleInfoDialog
-from ui.slice_editor_window import SliceEditorWindow
+from s3k.messages import NAME_LENGTH
+from ui.slice_editor_window import SliceEditorWindow, slice_export_names
 from ui.ascii_logo import LOGO
 from ui import tooltips
 
 SETTINGS_ROLE = Qt.ItemDataRole.UserRole + 1
+# a queued ReCycle loop: the frames (in the row's WAV, the slices laid end to end) where each slice after the first begins. Present =
+# "send this as individual slices"; the Slice Editor opens on it with these as markers, and exporting from there replaces the row.
+RX2_MARKERS_ROLE = Qt.ItemDataRole.UserRole + 2
+# the longest slice name that still takes a "-L"/"-R" within the sampler's 12 characters
+_MAX_STEREO_BASE = NAME_LENGTH - 2
 
 
 class TransferDashboard(QWidget):
@@ -120,7 +129,8 @@ class TransferDashboard(QWidget):
         self.lbl_logo.setFont(logo_font)
         self.lbl_logo.setTextFormat(Qt.TextFormat.PlainText)
         self.lbl_logo.setWordWrap(False)
-        self.lbl_logo.setStyleSheet("background: transparent;")
+        # (the app stylesheet fixes every font at 13 px: only a rule on the label itself can change it; 10 px is JV-Studio's logo size)
+        self.lbl_logo.setStyleSheet("background: transparent; font-size: 10px;")
         top_bar.addWidget(self.lbl_logo)
 
         top_bar.addStretch()
@@ -229,8 +239,7 @@ class TransferDashboard(QWidget):
         self.list_hardware.set_overlay_widget(self.empty_hardware_label)
 
         # MEMORY AVAILABILITY PROGRESS BAR
-        self.memory_avail_prog_bar = QProgressBar()
-        self.memory_avail_prog_bar.setRange(0, 100)
+        self.memory_avail_prog_bar = MemoryBar(collapsible=True)  # double-click: thin line / full bar (the same setting as the editor's)
         self.memory_avail_prog_bar.setVisible(True)
         self.memory_avail_prog_bar.setFormat("%p% memory used")
         # self.memory_avail_prog_bar.setFixedHeight(20) # nup, this looks shit, dont worry about it
@@ -284,8 +293,22 @@ class TransferDashboard(QWidget):
         self.btn_receive.clicked.connect(self.on_receive_clicked)
         self.btn_cancel.clicked.connect(self.cancel_transfer)
 
+        # what a receive saves from an Akai sampler (hidden for every other type, which can only give a WAV): see _sync_receive_format_ui
+        self.receive_format_label = QLabel("Save received as:")
+        self.receive_format_combo = QComboBox()
+        self.receive_format_combo.addItem("WAV", app_config.RECEIVE_FORMAT_WAV)
+        self.receive_format_combo.addItem("Akai sample (.s3)", app_config.RECEIVE_FORMAT_S3)
+        self.receive_format_combo.addItem("WAV and Akai sample", app_config.RECEIVE_FORMAT_BOTH)
+        self.receive_format_combo.setToolTip(tooltips.RECEIVE_FORMAT)
+        self.receive_format_combo.setCurrentIndex(
+            max(0, self.receive_format_combo.findData(app_config.get_saved_receive_format()))
+        )
+        self.receive_format_combo.activated.connect(self._on_receive_format_chosen)
+
         # Add stretch spacer to push both control columns cleanly to the bottom of the window
         action_layout.addStretch()
+        action_layout.addWidget(self.receive_format_label)
+        action_layout.addWidget(self.receive_format_combo)
         action_layout.addWidget(self.btn_cancel)
         action_layout.addWidget(self.btn_receive)
         action_layout.addWidget(self.btn_send)
@@ -463,11 +486,14 @@ class TransferDashboard(QWidget):
     def on_files_dropped(self, paths):
         paths = self._expand_dropped_paths(paths)
         added = 0
+        rx2_imported = False
         for path in paths:
-            if (
-                os.path.splitext(path)[1].lower()
-                in sds_encoder.SUPPORTED_AUDIO_EXTENSIONS
-            ):
+            extension = os.path.splitext(path)[1].lower()
+            if extension == rx2.RX2_EXTENSION:
+                # one ReCycle loop becomes a queue row per slice; _import_rx2
+                # leaves its own status message (the result, or why not)
+                rx2_imported = self._import_rx2(path) or rx2_imported
+            elif extension in sds_encoder.SUPPORTED_AUDIO_EXTENSIONS:
                 # False means create_local_row already showed its own
                 # "couldn't add" status message (the file was gone before
                 # it could even be copied - see its own comment) - don't
@@ -476,12 +502,127 @@ class TransferDashboard(QWidget):
                     added += 1
             else:
                 self.status_bar.showMessage(
-                    f"Skipped non-WAV file: {os.path.basename(path)}"
+                    f"Skipped unsupported file: {os.path.basename(path)}"
                 )
         if added:
             self.status_bar.showMessage(f"Added {added} file(s) to the queue")
+        if added or rx2_imported:
             self._update_queue_buttons_state()
         self._update_empty_queue_placeholder()
+
+    def _import_rx2(self, path):
+        # A ReCycle .rx2 -> ONE queue row, like any other file: the loop's slices laid end to end as a WAV, carrying the cut points
+        # (RX2_MARKERS_ROLE). Send cuts it into one sample per slice (_expand_rx2_entry); the row's Slice Editor opens on it with the
+        # cut points already marked, for adjusting first (core/rx2.py: slices are the raw cut-point audio). Returns True if a row was added.
+        name = os.path.basename(path)
+        try:
+            loop = rx2.load(path)
+        except rx2.Rx2Error as e:
+            debug_log.get_logger().error(
+                f"TransferDashboard: couldn't import {path!r}", exc_info=True
+            )
+            self.status_bar.showMessage(str(e))
+            return False
+
+        channels, markers = loop.channel_buffers()
+        fd, temp_path = tempfile.mkstemp(suffix=".wav", prefix="akaisds_rx2_")
+        os.close(fd)
+        try:
+            if len(channels) == 2:
+                sds_encoder.write_wav_file_stereo(
+                    temp_path, channels[0], channels[1], loop.sample_rate, bit_depth=16
+                )
+            else:
+                sds_encoder.write_wav_file(
+                    temp_path, channels[0], loop.sample_rate, bit_depth=16
+                )
+            if not self.create_local_row(temp_path):
+                return False
+        except Exception:
+            debug_log.get_logger().error(
+                "TransferDashboard: unexpected error importing an .rx2", exc_info=True
+            )
+            self.status_bar.showMessage(
+                f"Couldn't import {name} - see {debug_log.LOG_PATH}"
+            )
+            return False
+        finally:
+            try:
+                os.remove(temp_path)  # create_local_row keeps its own copy
+            except OSError:
+                pass
+
+        item = self.list_local.item(self.list_local.count() - 1)
+        item.setData(RX2_MARKERS_ROLE, markers)
+        row_widget = self.list_local.itemWidget(item)
+        edit_field = row_widget.findChild(QLineEdit) if row_widget else None
+        if edit_field is not None:
+            edit_field.setText(rx2.slice_base_name(path))
+            edit_field.setCursorPosition(0)
+        badge = row_widget.findChild(QLabel, "sliceBadge") if row_widget else None
+        if badge is not None:
+            count = len(markers) + 1
+            badge.setText(f"{count} slices")
+            badge.setToolTip(
+                f"A ReCycle loop: Send puts each of its {count} slices on the sampler as its own sample. "
+                "Edit > Slice Editor to adjust the cut points first."
+            )
+            badge.setVisible(True)
+        debug_log.get_logger().info(
+            f"TransferDashboard: queued {name!r} as one row: {len(markers) + 1} slices, {len(channels)} ch, "
+            f"{loop.sample_rate} Hz, {loop.tempo_bpm:g} BPM"
+        )
+        self.status_bar.showMessage(
+            f"Added {name}: {len(markers) + 1} slices at {loop.tempo_bpm:g} BPM - sent as separate samples "
+            "(Edit > Slice Editor to adjust them first)"
+        )
+        return True
+
+    def _slice_name_length(self, n_channels, settings):
+        # a stereo slice goes out as <name>-L / <name>-R (the Akai send path cuts the BASE to fit "-L" in 12 characters, which would
+        # eat a slice number), so leave room for that - unless it is sent mono, or the unit takes a stereo file as one sample (Yamaha)
+        stereo_pair = n_channels == 2 and not settings["mono"] and not self._is_yamaha()
+        return _MAX_STEREO_BASE if stereo_pair else NAME_LENGTH
+
+    def _expand_rx2_entry(self, item, name, settings):
+        """The send entries for a queued ReCycle loop: one WAV (written now, kept until this session ends) per slice, named
+        <row name>-01.. . Raises OSError/ValueError if the loop's WAV can't be read or written."""
+        channels, rate = sds_encoder.read_wav_channels(item.data(Qt.ItemDataRole.UserRole))
+        markers = item.data(RX2_MARKERS_ROLE)
+        sliced = [
+            sample_slicing.slice_samples(channel, 0, len(channel) - 1, markers)
+            for channel in channels
+        ]
+        names = slice_export_names(
+            rx2.sanitize_name(name), len(sliced[0]), self._slice_name_length(len(channels), settings)
+        )
+        directory = dropped_files.session_dir() / "rx2_slices"
+        directory.mkdir(parents=True, exist_ok=True)
+        batch = tempfile.mkdtemp(prefix="send_", dir=directory)
+        entries = []
+        for index, slice_name in enumerate(names):
+            slice_path = os.path.join(batch, f"slice_{index:03d}.wav")
+            if len(channels) == 2:
+                sds_encoder.write_wav_file_stereo(
+                    slice_path, sliced[0][index], sliced[1][index], rate, bit_depth=16
+                )
+            else:
+                sds_encoder.write_wav_file(slice_path, sliced[0][index], rate, bit_depth=16)
+            entries.append(
+                {
+                    "filepath": slice_path,
+                    "name": slice_name,
+                    "bit_depth": settings["bit_depth"],
+                    "sample_rate": settings["sample_rate"],
+                    "mono": settings["mono"],
+                }
+            )
+        debug_log.get_logger().info(
+            f"TransferDashboard: cut queued loop {name!r} into {len(entries)} slices {names[0]!r}..{names[-1]!r} "
+            f"({len(channels)} ch, {rate} Hz, name length {self._slice_name_length(len(channels), settings)}, "
+            f"mono={settings['mono']}, bit_depth={settings['bit_depth']})"
+        )
+        return entries
 
     def _update_empty_queue_placeholder(self):
         self.empty_queue_label.setVisible(self.list_local.count() == 0)
@@ -493,6 +634,7 @@ class TransferDashboard(QWidget):
         if self._is_yamaha() or self.sampler_controller.device_type in (
             "akai",
             sampler_models.FAMILY_S950,
+            sampler_models.FAMILY_ENSONIQ,
         ):
             if self.sampler_controller.is_open_loop():
                 self.empty_hardware_label.setText(
@@ -527,6 +669,7 @@ class TransferDashboard(QWidget):
         )
         is_akai = self.sampler_controller.device_type == "akai"
         is_s950 = self.sampler_controller.device_type == sampler_models.FAMILY_S950
+        is_ensoniq = self.sampler_controller.device_type == sampler_models.FAMILY_ENSONIQ
         is_yamaha = sampler_models.is_yamaha(self.sampler_controller.sampler_model)
         # a MIDI transfer in progress (started from here, or from the
         # Program Editor sharing this same sampler_controller) locks out
@@ -548,6 +691,8 @@ class TransferDashboard(QWidget):
             self.btn_open_editor.setToolTip("")
         elif not has_ports:
             self.btn_open_editor.setToolTip(tooltips.OPEN_EDITOR_NEEDS_MIDI_PORTS)
+        elif is_ensoniq:
+            self.btn_open_editor.setToolTip(tooltips.ENSONIQ_NO_EDITOR)
         elif is_s950:
             self.btn_open_editor.setToolTip(tooltips.OPEN_EDITOR_S950)
         elif is_yamaha:
@@ -557,9 +702,29 @@ class TransferDashboard(QWidget):
                 tooltips.OPEN_EDITOR_NEEDS_AKAI_DEVICE_TYPE
             )
 
+    def _sync_receive_format_ui(self):
+        """The Akai sample file needs the sampler's own header block, which only an Akai-mode receive gets: the choice is shown for those only."""
+        akai = self.sampler_controller.device_type == sampler_models.FAMILY_AKAI
+        self.receive_format_label.setVisible(akai)
+        self.receive_format_combo.setVisible(akai)
+        # the file's name is .s1 on an S1000 (150-byte header) and .s3 on an S2000/S3000
+        extension = ".s1" if sampler_models.is_s1000(self.sampler_controller.sampler_model) else ".s3"
+        self.receive_format_combo.setItemText(self.receive_format_combo.findData(app_config.RECEIVE_FORMAT_S3), f"Akai sample ({extension})")
+
+    def _on_receive_format_chosen(self, _index):
+        app_config.save_receive_format(self.receive_format_combo.currentData())
+
+    def _receive_format(self):
+        """What the next receive saves: the combo's choice for an Akai sampler, a WAV for anything else."""
+        if self.sampler_controller.device_type != sampler_models.FAMILY_AKAI:
+            return app_config.RECEIVE_FORMAT_WAV
+        return self.receive_format_combo.currentData()
+
     def _update_device_type_ui(self):
+        self._sync_receive_format_ui()
         is_generic = self.sampler_controller.device_type == "generic"  # True or False
         is_s950 = self.sampler_controller.device_type == sampler_models.FAMILY_S950
+        is_ensoniq = self.sampler_controller.device_type == sampler_models.FAMILY_ENSONIQ
         is_open_loop = self.sampler_controller.is_open_loop()
         # the rows on show belong to whichever Sampler Type produced them (an
         # Akai list's numbering means nothing to an S900/S950) - drop them
@@ -571,6 +736,24 @@ class TransferDashboard(QWidget):
             self.list_hardware.clear()
             self._hardware_list_family = None
         has_samples = self.list_hardware.count() > 0
+
+        if is_ensoniq:
+            # Ensoniq EPS/ASR: listing, receiving and sending work (controller/ensoniq_transfers.py) but need a MIDI input - the unit answers on
+            # it. The memory bar is free blocks plus every instrument's size (read after each list), and nothing can be deleted or renamed
+            self.list_hardware.setEnabled(True)
+            self.btn_select_all.setEnabled(has_samples)
+            self.btn_refresh.setEnabled(not is_open_loop)
+            self.btn_receive.setEnabled(not is_open_loop and has_samples)
+            self.btn_delete_selected.setEnabled(False)
+            self.memory_avail_prog_bar.setVisible(True)
+            self.memory_avail_prog_bar.setEnabled(not is_open_loop)
+            if is_open_loop:
+                self.empty_hardware_label.setText(tooltips.ENSONIQ_NEEDS_MIDI_INPUT)
+                self.empty_hardware_label.setVisible(self.list_hardware.count() == 0)
+            else:
+                self._update_empty_hardware_placeholder()
+            self._update_queue_buttons_state()
+            return
 
         if is_s950:
             # S900/S950: browsing/receiving/sending work like the Akai family,
@@ -818,6 +1001,7 @@ class TransferDashboard(QWidget):
             progress_callback,
             status_callback,
             busy_callback=None,
+            extra_slices=None,
         ):
             # spitch/stuno/shlto are Akai program-header concepts
             # (SliceEditorWindow's shared export_callback contract always
@@ -828,20 +1012,9 @@ class TransferDashboard(QWidget):
             # verify) is accepted for the same "shared contract" reason but
             # never called - this export never leaves the local queue, so
             # there's no hardware round-trip to mark indeterminate.
-            right_slices = None
-            if right_channel is not None:
-                # the exact same start/end/markers that produced `slices`
-                # (the left channel's own sliced buffers) just above, read
-                # live off the still-open dialog - see sample_slicing.
-                # slice_samples's own contract; this can't disagree with
-                # `slices` since nothing else runs between SliceEditorWindow
-                # computing one and calling this callback with the other
-                right_slices = sample_slicing.slice_samples(
-                    right_channel,
-                    dialog.waveform.start(),
-                    dialog.waveform.end(),
-                    dialog.waveform.slice_markers(),
-                )
+            # the right channel's slices, cut by the dialog at exactly the frames that
+            # produced `slices` (it is shown both channels - see extra_channels below)
+            right_slices = extra_slices[0] if extra_slices else None
             return self._export_slices_to_queue(
                 item,
                 names,
@@ -865,6 +1038,10 @@ class TransferDashboard(QWidget):
             _existing_names,
             _export,
             demo_mode=False,
+            # a stereo file shows both channels; its slices are sent as -L/-R pairs, so the names leave room for the suffix
+            extra_channels=[right_channel] if right_channel is not None else None,
+            channel_suffixes=("-L", "-R") if right_channel is not None else None,
+            initial_markers=item.data(RX2_MARKERS_ROLE),
             export_confirm_message=lambda slice_count, names: (
                 f'Replace "{sample_name}" in the queue with {slice_count} '
                 f'slice{"s" if slice_count != 1 else ""} '
@@ -1019,6 +1196,20 @@ class TransferDashboard(QWidget):
                 "mono": self._global_mono,
             }
 
+            if item.data(RX2_MARKERS_ROLE) is not None:
+                # a queued ReCycle loop goes out as its individual slices
+                try:
+                    entries.extend(
+                        self._expand_rx2_entry(item, override_name or "RX2", settings)
+                    )
+                except (OSError, ValueError) as e:
+                    debug_log.get_logger().error(
+                        f"TransferDashboard: couldn't cut {filepath!r} into slices", exc_info=True
+                    )
+                    self.status_bar.showMessage(f"Couldn't cut the loop into slices: {e}")
+                    return
+                continue
+
             entries.append(
                 {
                     "filepath": filepath,
@@ -1036,6 +1227,8 @@ class TransferDashboard(QWidget):
             return
 
         if not self._confirm_s950_experimental():
+            return
+        if not self._confirm_ensoniq_experimental():
             return
 
         started = self.sampler_controller.send_file_queue(
@@ -1057,7 +1250,8 @@ class TransferDashboard(QWidget):
         # determine real units to send so the second progress_bar_overall can be shown appropriately
         total_units = 0
         for entry in entries:
-            if entry["mono"] or self._is_yamaha():  # a Yamaha loads a stereo file as ONE (stereo) sample
+            # a Yamaha loads a stereo file as ONE (stereo) sample; an Ensoniq gets it as one instrument (two layers)
+            if entry["mono"] or self._is_yamaha() or self.sampler_controller.device_type == sampler_models.FAMILY_ENSONIQ:
                 units = 1
             else:
                 try:
@@ -1095,6 +1289,47 @@ class TransferDashboard(QWidget):
         if answer != QMessageBox.StandardButton.Ok:
             return False
         app_config.save_s950_transfer_warning_acknowledged(True)
+        return True
+
+    def _confirm_ensoniq_experimental(self):
+        # Ensoniq sends were written without an Ensoniq on hand (see controller/ensoniq_transfers.py and asrx_transfers.py) - say so before the
+        # first send, once. The ASR-X has its own text and its own "don't ask again" flag
+        if self.sampler_controller.device_type != sampler_models.FAMILY_ENSONIQ:
+            return True
+        if sampler_models.is_asrx(self.sampler_controller.sampler_model):
+            if app_config.get_asrx_transfer_warning_acknowledged():
+                return True
+            answer = QMessageBox.warning(
+                self,
+                "Ensoniq ASR-X - experimental",
+                "Sending samples to an Ensoniq ASR-X is experimental.\n\n"
+                "It was written from the ASR-X's firmware, without an ASR-X to test against. Each file becomes a NEW sample in the "
+                "first free slot (nothing is overwritten); a stereo file becomes two. Sending is slow (MIDI speed, about 5 minutes for "
+                "10 s of audio). If a send fails a half-written sample may be left, and it can only be deleted from the front panel.\n\n"
+                "Save anything you can't afford to lose first, and please report problems along with ~/.akaisds/akaisds.log.",
+                QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Cancel,
+            )
+            if answer != QMessageBox.StandardButton.Ok:
+                return False
+            app_config.save_asrx_transfer_warning_acknowledged(True)
+            return True
+        if app_config.get_ensoniq_transfer_warning_acknowledged():
+            return True
+        answer = QMessageBox.warning(
+            self,
+            "Ensoniq EPS/ASR - experimental",
+            "Sending samples to an Ensoniq EPS/ASR is experimental.\n\n"
+            "It was written from Ensoniq's spec documents, without an Ensoniq to test against. Each file becomes a NEW "
+            "instrument in the first free slot (nothing is overwritten), but if a send fails, a half-built instrument "
+            "may be left on the unit. It can only be deleted from the front panel.\n\n"
+            "Save anything you can't afford to lose first, and please report problems along with ~/.akaisds/akaisds.log.",
+            QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Cancel,
+        )
+        if answer != QMessageBox.StandardButton.Ok:
+            return False
+        app_config.save_ensoniq_transfer_warning_acknowledged(True)
         return True
 
     def cancel_transfer(self):
@@ -1165,14 +1400,22 @@ class TransferDashboard(QWidget):
         if not save_dir:
             return
 
+        receive_format = self._receive_format()
+        # every file this receive may write must be free, not just the WAV: the Akai file is .s3 (S2000/S3000) or .s1 (S1000), told apart only once the sampler's header arrives
+        extensions = {
+            app_config.RECEIVE_FORMAT_WAV: (".wav",),
+            app_config.RECEIVE_FORMAT_S3: (".wav", ".s3", ".s1"),
+            app_config.RECEIVE_FORMAT_BOTH: (".wav", ".s3", ".s1"),
+        }[receive_format]
         requests = []
         claimed_paths = set()
         for sample_number, name in selected:
             safe_name = self._sanitize_filename(name) or f"sample_{sample_number}"
-            save_path = self._unique_save_path(save_dir, safe_name, claimed_paths)
+            save_path = self._unique_save_path(save_dir, safe_name, claimed_paths, extensions)
             claimed_paths.add(save_path)
             requests.append((sample_number, save_path))
 
+        self.sampler_controller.receive_format = receive_format
         self.sampler_controller.receive_samples(requests)
 
         # a receive is now running - disable Send/Receive so the user cant double click them
@@ -1208,14 +1451,18 @@ class TransferDashboard(QWidget):
         return name.replace("/", "-").replace("\\", "-")
 
     @staticmethod
-    def _unique_save_path(save_dir, base_name, claimed_paths=()):
-        # build a save path that doesnt collide with any other existing files
-        path = os.path.join(save_dir, f"{base_name}.wav")
+    def _unique_save_path(save_dir, base_name, claimed_paths=(), extensions=(".wav",)):
+        # build a save path that doesnt collide with any other existing files. The path is always the .wav one (the controller swaps the extension for
+        # an Akai sample file); `extensions` are every file the receive may write next to it, none of which may already exist
+        def taken(stem):
+            return any(os.path.exists(stem + extension) for extension in extensions)
+
+        stem = os.path.join(save_dir, base_name)
         counter = 2
-        while os.path.exists(path) or path in claimed_paths:
-            path = os.path.join(save_dir, f"{base_name} ({counter}).wav")
+        while taken(stem) or stem + ".wav" in claimed_paths:
+            stem = os.path.join(save_dir, f"{base_name} ({counter})")
             counter += 1
-        return path
+        return stem + ".wav"
 
     def on_receive_progress(self, received, total):
         percent = int((received / total) * 100) if total else 0
@@ -1453,6 +1700,11 @@ class TransferDashboard(QWidget):
         lbl_override.setFixedSize(12, 24)
         lbl_override.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
+        # "N slices": only shown for a queued ReCycle loop (see _import_rx2)
+        lbl_slices = QLabel()
+        lbl_slices.setObjectName("sliceBadge")
+        lbl_slices.setVisible(False)
+
         # mono/stereo indicator icon - set by _refresh_row_indicators
         lbl_channels = QLabel()
         lbl_channels.setObjectName("channelIcon")
@@ -1475,6 +1727,7 @@ class TransferDashboard(QWidget):
         row_layout.addWidget(
             edit_field, stretch=1
         )  # stretch=1 forces file name to take maximum room
+        row_layout.addWidget(lbl_slices)
         row_layout.addWidget(lbl_override)
         row_layout.addWidget(lbl_channels)
         row_layout.addWidget(btn_edit)
@@ -1517,7 +1770,8 @@ class TransferDashboard(QWidget):
         # the S900/S950 answers on the MIDI input (slot choice, readiness check
         # and naming all read replies), so it can't be sent to open loop
         needs_input = (
-            self.sampler_controller.device_type == sampler_models.FAMILY_S950
+            self.sampler_controller.device_type
+            in (sampler_models.FAMILY_S950, sampler_models.FAMILY_ENSONIQ)  # the Ensoniq answers every step of a send
             or self._is_yamaha()  # a native Yamaha load is checked by reading the unit afterwards
         ) and self.sampler_controller.is_open_loop()
         self.btn_send.setEnabled(has_files and not needs_input)
@@ -1525,7 +1779,11 @@ class TransferDashboard(QWidget):
             (
                 tooltips.YAMAHA_SEND_NEEDS_MIDI_INPUT
                 if self._is_yamaha()
-                else tooltips.S950_NEEDS_MIDI_INPUT
+                else (
+                    tooltips.ENSONIQ_NEEDS_MIDI_INPUT
+                    if self.sampler_controller.device_type == sampler_models.FAMILY_ENSONIQ
+                    else tooltips.S950_NEEDS_MIDI_INPUT
+                )
             )
             if has_files and needs_input
             else ""
@@ -1541,10 +1799,12 @@ class TransferDashboard(QWidget):
             if checkbox and checkbox.isChecked():
                 any_checked = True
                 break
-        # nothing is ever deletable on an S900/S950 (no such opcode), nor on a Yamaha A4000/A5000 (none known)
+        # nothing is ever deletable on an S900/S950 (no such opcode), nor on a Yamaha A4000/A5000 (none known), nor on an Ensoniq
+        # (the delete commands exist but are never sent from here)
         self.btn_delete_selected.setEnabled(
             any_checked
-            and self.sampler_controller.device_type != sampler_models.FAMILY_S950
+            and self.sampler_controller.device_type
+            not in (sampler_models.FAMILY_S950, sampler_models.FAMILY_ENSONIQ)
             and not self._is_yamaha()
         )
 
@@ -1583,6 +1843,11 @@ class TransferDashboard(QWidget):
         if self.sampler_controller.device_type == sampler_models.FAMILY_S950:
             btn_del.setEnabled(False)
             btn_del.setToolTip(tooltips.S950_CANT_DELETE)
+        if self.sampler_controller.device_type == sampler_models.FAMILY_ENSONIQ:
+            btn_del.setEnabled(False)
+            btn_del.setToolTip(tooltips.ENSONIQ_CANT_DELETE)
+            btn_edit.setEnabled(False)
+            btn_edit.setToolTip(tooltips.ENSONIQ_CANT_DELETE)
         if self._is_yamaha():
             btn_del.setEnabled(False)
             btn_del.setToolTip(tooltips.YAMAHA_CANT_DELETE)
@@ -1606,29 +1871,11 @@ class TransferDashboard(QWidget):
                 self.sampler_controller.rename_sample(info["sample_number"], new_name)
 
     def on_memory_status_updated(self, info):
-        if info["max_num_samp_words"] > 0:
-            percent_used = int(
-                (info["max_num_samp_words"] - info["num_words_free"])
-                / info["max_num_samp_words"]
-                * 100
-            )
-        else:
-            percent_used = 0
-
-        if percent_used >= 90:
-            self.memory_avail_prog_bar.setProperty("memoryLevel", "critical")
-        elif percent_used >= 70:
-            self.memory_avail_prog_bar.setProperty("memoryLevel", "warning")
-        else:
-            self.memory_avail_prog_bar.setProperty("memoryLevel", "normal")
-
-        self.memory_avail_prog_bar.setValue(percent_used)
-        self.memory_avail_prog_bar.setToolTip(
-            f"{info['num_words_free']:,} sample words free\n"
-            f"{info['num_blocks_free']:,} sample blocks/slots free"
-        )
-        self.memory_avail_prog_bar.style().unpolish(self.memory_avail_prog_bar)
-        self.memory_avail_prog_bar.style().polish(self.memory_avail_prog_bar)
+        if info.get("max_num_samp_words", 0) <= 0:
+            # the Ensoniq engine's way of saying "couldn't read it": show an empty bar saying so, not a stale figure
+            self.memory_avail_prog_bar.set_unknown("The sampler didn't report its memory")
+            return
+        self.memory_avail_prog_bar.set_status(info)
 
     def confirm_and_delete_sample(self, name, sample_number):
         reply = QMessageBox.question(

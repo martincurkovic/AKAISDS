@@ -1,4 +1,5 @@
 import functools
+from dataclasses import dataclass, field
 import math
 import os
 import random
@@ -8,12 +9,6 @@ import tempfile
 import time
 import wave
 
-if __name__ == "__main__":
-    # running this file directly (not through main.py) puts src/ui on
-    # sys.path, not src/ - so the ui./core. imports below would otherwise
-    # fail with "No module named 'ui'"
-    sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
-
 from PySide6.QtGui import (
     Qt,
     QAction,
@@ -21,11 +16,13 @@ from PySide6.QtGui import (
     QRegularExpressionValidator,
     QPainter,
     QColor,
+    QDrag,
 )
-from PySide6.QtCore import QEventLoop, QTimer, QRegularExpression
+from PySide6.QtCore import QEventLoop, QMimeData, QTimer, QRegularExpression, QUrl
 from PySide6.QtWidgets import (
     QAbstractSpinBox,
     QApplication,
+    QFrame,
     QGridLayout,
     QHBoxLayout,
     QInputDialog,
@@ -50,9 +47,13 @@ from PySide6.QtWidgets import (
     QProgressBar,
 )
 from s3k.messages import AKAI_CHARSET, NAME_LENGTH
-from core import akai_program_file
-from ui.diagnostics_ui import add_open_log_folder_action
+from core import akai_multi_file, akai_program_file, akai_sample_file
+from core import app_config
+from core import dropped_files
+from core import external_edit
+from ui.external_edit_tracker import ExternalEditTracker
 from ui.knob import Knob
+from ui.program_list_widget import ProgramListWidget
 from ui.note_spinbox import NoteSpinBox
 from ui.editor_layout import (
     add_keygroup_row,
@@ -72,27 +73,43 @@ from ui.editor_layout import (
     style_card_page_layout,
     sync_waveform_scrollbar,
 )
-from ui.qt_helpers import FullWidthTabBar, build_scroll_area, build_section_card
-from ui.envelope_graph import ADSREnvelopeGraph, Envelope2Graph
+from ui.qt_helpers import (
+    FullWidthTabBar,
+    build_scroll_area,
+    build_editor_card,
+    set_enabled_without_scrolling,
+)
+from ui.envelope_graph import GRAPH_SIZE, ADSREnvelopeGraph, Envelope2Graph
 from ui.keygroup_range_bar import KeygroupRangeBar, keygroup_color
 from ui.waveform_view import WaveformView
-from ui.loop_preview_view import LoopJoinPreview, HALF_WINDOW_FRAMES
+from ui.loop_preview_view import LoopJoinPreview, LoopPreviewZoomControls
 from ui.slice_editor_window import SliceEditorWindow
 from ui.filter_sample_dialog import FilterSampleDialog
+from ui.reverb_dialog import ReverbDialog
+from ui.time_stretch_dialog import TimeStretchDialog
 from core.audio_preview import SlicePreviewPlayer
-from ui import theme
-from ui.about_dialog import AboutDialog
-from ui.quickstart_dialog import show_quickstart_dialog
-from ui.update_helper import UpdateCheckRunner
+from ui import theme, wheel_guard
+from ui.shortcuts_dialog import (
+    audition_section,
+    dragging_section,
+    lists_section,
+    preview_dialogs_section,
+    slice_editor_section,
+)
+from ui.standard_menus import add_cancel_transfer_action, add_help_menu, build_zoom_actions
 from ui import tooltips as tt
-from core import debug_log, diagnostics
+from core import debug_log, demo_timing, diagnostics
 from core.akai_sysex import baseline_semitones_for_bandwidth
 from core import midi_manager as midi_manager_module
 from core import program_editor_bridge
 from core import root_note_detection
+from ui import import_audio
 from core import s1000_bridge as s1000_bridge_module
 from core import sampler_models
+from core import preview_pitch
 from core import sample_editing
+from core import reverb, time_stretch
+from core.ui_lag_probe import LagProbe
 from core import sds_encoder
 from core.midi_notes import midi_note_to_name
 from core.program_editor_bridge import (
@@ -104,6 +121,8 @@ from core.program_editor_bridge import (
 from core.global_settings import EXTERNAL_CONTROLLER_LABELS
 from core.sample_duration import sample_duration_seconds
 from ui.global_tab import GlobalSettingsTab, build_external_controller_combo
+from ui.memory_bar import MemoryBar
+from ui.audition_bar import AuditionBar
 from ui.settings_dialog import MidiSettingsDialog
 
 # shared by every list's "Delete ..." QAction (program/keygroup/sample) -
@@ -179,7 +198,11 @@ _LOOP_HOLD_HOLD_VALUE = 9999
 # comment). Matching that fixed-note behaviour here is a deliberate
 # approximation of the hardware's FACTORY DEFAULT, not a live read of
 # whatever a given unit is actually configured to right now.
-_PREVIEW_ROOT_NOTE = 60
+_PREVIEW_ROOT_NOTE = preview_pitch.PREVIEW_ROOT_NOTE
+# root note given to slices from an imported file (no sampler header to copy one from) - what the Dashboard's Slice Editor uses too
+_IMPORT_ROOT_NOTE = 60
+# a stereo slice goes out as two mono samples: <slice name>-L (zone 1, panned left) and <slice name>-R (zone 2, panned right)
+_STEREO_SUFFIXES = ("-L", "-R")
 
 
 def _format_loop_hold(value):
@@ -342,7 +365,7 @@ def _sample_edit_temp_name(original_name):
     return (original_name.strip()[: NAME_LENGTH - len(suffix)] + suffix)[:NAME_LENGTH]
 
 
-def _duplicate_default_name(original_name):
+def _duplicate_default_name(original_name, suffix=" COPY"):
     # default name pre-filled into the "Duplicate Program.../Duplicate
     # Sample..." dialogs - same truncate-to-make-room-for-a-suffix shape as
     # _sample_edit_temp_name above, but a real space rather than a hyphen
@@ -350,7 +373,6 @@ def _duplicate_default_name(original_name):
     # sample trim/reverse temp name does) and no requirement to avoid the
     # source's own name - this is only ever a user-editable *suggestion*
     # shown in the prompt, never sent to the hardware as-is
-    suffix = " COPY"
     return (original_name.strip()[: NAME_LENGTH - len(suffix)] + suffix)[:NAME_LENGTH]
 
 
@@ -414,6 +436,59 @@ class _ModMatrixGrid(QWidget):
             painter.drawLine(x, 0, x, self.height())
 
         super().paintEvent(event)
+
+
+_MARKER_KEYS = ("start", "loop_start", "loop_end", "end")
+#: how many earlier working copies Undo can step back through (each is a whole copy of the audio)
+_UNDO_LIMIT = 10
+#: the width of the Edit Sample rows' labels - every row's buttons start at the same x
+_EDIT_SAMPLE_LABEL_WIDTH = 80
+
+
+@dataclass
+class _StagedEdit:
+    """A sample's WORKING COPY: audio edited in this app (or loaded back from an external editor) that has NOT been sent to the
+    sampler. `original_*` is what the sampler holds (its audio and header markers when the edits began): Revert goes back to it, and
+    it is what gets backed up before a send. `markers` are the working copy's own - marker and loop edits stay local while a sample
+    is staged and go to the sampler with the audio."""
+
+    samples: list
+    markers: dict
+    original_samples: list
+    original_framerate: int
+    original_markers: dict
+    original_frame_count: int
+    #: earlier working copies, oldest first: (samples, markers) before each change, for Undo (see _UNDO_LIMIT)
+    history: list = field(default_factory=list)
+
+    @property
+    def framerate(self):
+        # edits never change the rate: an edited file is resampled back to it on load
+        return self.original_framerate
+
+
+# the Edit Sample card's rows: (label, what the label's tooltip says, groups of control keys - a thin rule goes between groups)
+_EDIT_SAMPLE_ROWS = (
+    (
+        "Edit audio",
+        "These change the sample here. Nothing reaches the sampler until you click Send to Sampler.",
+        (("trim", "reverse", "fade", "normalize", "filter", "stretch", "reverb"),),
+    ),
+    (
+        "More",
+        "Duplicate and the Slice Editor add new samples (the original is not changed). The external app round trip opens "
+        "the sample in your own audio editor and brings the saved version back.",
+        (("duplicate", "slice"), ("external_edit", "external_load"), ("save_akai", "load_akai")),
+    ),
+)
+# the Sample menu / right-click menu, in order: groups are separated
+_SAMPLE_MENU_GROUPS = (
+    ("trim", "reverse", "fade", "normalize", "filter", "stretch", "reverb"),
+    ("duplicate", "slice"),
+    ("external_edit", "external_load", "save_akai", "load_akai"),
+    ("stage_undo", "stage_send", "stage_new", "stage_revert"),
+    ("detect",),
+)
 
 
 class ProgramEditorWindow(QMainWindow):
@@ -614,7 +689,12 @@ class ProgramEditorWindow(QMainWindow):
             )
         )
         self._worker.stray_replies_detected.connect(self._on_stray_replies_detected)
+        self._worker.midi_send_failed.connect(
+            lambda e: self.status_bar.showMessage(f"Couldn't send a note: {e}")
+        )
         self._worker.global_settings_loaded.connect(self._on_global_settings_loaded)
+        self._worker.memory_status_loaded.connect(self._on_memory_status_loaded)
+        self._worker.memory_status_load_failed.connect(self._on_memory_status_load_failed)
         self._worker.global_settings_load_failed.connect(
             self._on_global_settings_load_failed
         )
@@ -639,6 +719,13 @@ class ProgramEditorWindow(QMainWindow):
         )
         self._worker.program_exported.connect(self._on_program_exported)
         self._worker.program_export_failed.connect(self._on_program_export_failed)
+        self._worker.sample_header_exported.connect(self._on_sample_header_exported)
+        self._worker.sample_header_export_failed.connect(self._on_sample_header_export_failed)
+        self._worker.multi_exported.connect(self._on_multi_exported)
+        self._worker.multi_export_failed.connect(self._on_multi_export_failed)
+        self._worker.multi_plan_ready.connect(self._on_multi_plan_ready)
+        self._worker.multi_imported.connect(self._on_multi_imported)
+        self._worker.multi_import_failed.connect(self._on_multi_import_failed)
         self._worker.program_imported.connect(self._on_program_imported)
         self._worker.program_import_failed.connect(self._on_program_import_failed)
         self._worker.keygroup_created.connect(self._on_keygroup_created)
@@ -671,8 +758,9 @@ class ProgramEditorWindow(QMainWindow):
         self._worker.start()
 
         # placeholder - real program, keygroup panels come later
-        self.program_list = QListWidget()
+        self.program_list = ProgramListWidget()
         self.program_list.setObjectName("programList")
+        self.program_list.drag_out_requested.connect(self._drag_program_out)
         self.program_list.setFixedWidth(160)
 
         self.keygroup_list = QListWidget()
@@ -854,10 +942,12 @@ class ProgramEditorWindow(QMainWindow):
         self.key_filter_track_knob.setFixedSize(56, 56)
         self.key_filter_track_knob.setToolTip(tt.FILTER_KEY_TRACK_KNOB)
 
+        # draggable (ui/envelope_graph.py): see _wire_envelope_graph. Inert until a keygroup's values have loaded
+        self._envelope_graphs = []
         self.env1_graph = ADSREnvelopeGraph()
-        self.env1_graph.setFixedSize(200, 90)
+        self.env1_graph.setFixedSize(*GRAPH_SIZE)
         self.env2_graph = Envelope2Graph()
-        self.env2_graph.setFixedSize(200, 90)
+        self.env2_graph.setFixedSize(*GRAPH_SIZE)
 
         # ENV1 - a standard ADSR: one knob per stage, in a single row.
         # Defaults are the Akai factory-preset values (double-click a knob
@@ -1005,6 +1095,21 @@ class ProgramEditorWindow(QMainWindow):
                 "keygroup",
                 keygroup_index_getter=self.keygroup_list.currentRow,
             )
+
+        self._wire_envelope_graph(
+            self.env1_graph,
+            {
+                "attack": (self.attack1_knob, self.attack1_value_label, "ATTAK1"),
+                "decay": (self.decay1_knob, self.decay1_value_label, "DECAY1"),
+                "sustain": (self.sustain1_knob, self.sustain1_value_label, "SUSTN1"),
+                "release": (self.release1_knob, self.release1_value_label, "RELSE1"),
+            },
+        )
+        env2_controls = {}
+        for i, (rate_field, level_field) in enumerate(zip(_ENV2_FIELDS, ["ENV2L1", "ENV2L2", "SUSTN2", "ENV2L4"]), start=1):
+            env2_controls[f"rate{i}"] = (self._env2_rate_knobs[i - 1], self._env2_rate_value_labels[i - 1], rate_field)
+            env2_controls[f"level{i}"] = (self._env2_level_knobs[i - 1], self._env2_level_value_labels[i - 1], level_field)
+        self._wire_envelope_graph(self.env2_graph, env2_controls)
 
         env1_graph_row = build_centered_row(self.env1_graph)
         env2_graph_row = build_centered_row(self.env2_graph)
@@ -1488,7 +1593,7 @@ class ProgramEditorWindow(QMainWindow):
         kg_mod_grid_row.addWidget(kg_mod_matrix)
 
         keygroup_modulation_section = self._build_section_card(
-            "Modulation", kg_mod_grid_row, kg_mod_footnote_row
+            "Modulation", kg_mod_grid_row, kg_mod_footnote_row, key="Keygroup Modulation"
         )
 
         detail_container_layout = QVBoxLayout()
@@ -2237,8 +2342,14 @@ class ProgramEditorWindow(QMainWindow):
         bottom_row.addStretch()
         bottom_row.addWidget(close_button)
 
+        # the keyboard along the bottom (View > Audition Keyboard, Cmd/Ctrl+K). Always starts CLOSED: an open bar takes over the computer keyboard.
+        # It sends through the BridgeWorker's queue, so a note never overlaps a SysEx exchange.
+        self.audition_bar = AuditionBar()
+        self.audition_bar.midi_out.connect(self._worker.submit_midi)
+
         main_layout = QVBoxLayout()
         main_layout.addWidget(self.main_tabs)
+        main_layout.addWidget(self.audition_bar)
         main_layout.addLayout(bottom_row)
 
         container = QWidget()
@@ -2248,6 +2359,23 @@ class ProgramEditorWindow(QMainWindow):
         # self._refresh_action (not a local) - _set_hardware_busy_ui toggles
         # it (and refresh_button) off for the duration of any blocking
         # hardware operation on this window, see that method's own comment
+        # not a button on the Samples tab: unlike every control there it acts on
+        # no selected sample - it opens a file. Disabled with the rest of the
+        # window by _set_hardware_busy_ui.
+        # a .p1/.p3 dropped anywhere on the window loads like Programs > Load... (dropEvent below)
+        self.setAcceptDrops(True)
+        self._program_drag_active = False
+
+        self._import_audio_action = QAction("Import Audio...", self)
+        self._import_audio_action.setShortcut("Ctrl+Shift+I")
+        self._import_audio_action.setToolTip(tt.IMPORT_AUDIO_ACTION)
+        self._import_audio_action.triggered.connect(self._import_audio)
+        file_menu = self.menuBar().addMenu("&File")
+        file_menu.addAction(self._import_audio_action)
+        file_menu.addAction(self._load_multi_action)
+        file_menu.addAction(self._save_multi_action)
+        self._build_sample_menu()
+
         self._refresh_action = QAction("Refresh from Hardware", self)
         self._refresh_action.setShortcut("Ctrl+R")  # shows as ⌘R on macOS
         self._refresh_action.triggered.connect(self._refresh_from_hardware)
@@ -2264,10 +2392,7 @@ class ProgramEditorWindow(QMainWindow):
         # slice_editor_window.py), this window is a plain top-level window
         # and keeps focus during the freeze, so an ordinary QAction on its
         # own menu bar reaches it fine.
-        cancel_action = QAction("Cancel Transfer", self)
-        cancel_action.setShortcut("Ctrl+.")
-        cancel_action.triggered.connect(self._cancel_hardware_transfer)
-        hardware_menu.addAction(cancel_action)
+        cancel_action = add_cancel_transfer_action(self, hardware_menu, self._cancel_hardware_transfer)
         # same "append the resolved, platform-native shortcut rather than
         # hardcoding one platform's symbol" fix-up the zoom buttons get
         # further down - see that block's own comment for why
@@ -2310,43 +2435,24 @@ class ProgramEditorWindow(QMainWindow):
             self._settings_action.triggered.connect(self._open_settings_dialog)
             hardware_menu.addAction(self._settings_action)
 
-        # zoom for the Samples tab's waveform view. "Ctrl+=" is the primary
-        # zoom-in binding (auto-translates to "Cmd+=" on macOS via Qt's own
-        # Ctrl->Cmd substitution, same as every other shortcut string in
-        # this file) rather than QKeySequence.StandardKey.ZoomIn's own
-        # platform-default primary binding, "Ctrl++" - on a US keyboard "+"
-        # needs Shift, so that default would actually require
-        # Ctrl+Shift+=. QKeySequence.keyBindings(...) is still appended
-        # after it (as secondary bindings) so a keyboard/platform that DOES
-        # have a dedicated "+" key, or a real "Zoom In" media key, keeps
-        # working too - just not shown in the tooltip, which only reflects
-        # the primary (first) binding. Zoom out keeps StandardKey.ZoomOut's
-        # own default ("Ctrl+-") unmodified since "-" needs no Shift on a US
-        # keyboard already. There's no standard key for "zoom to fit" so
-        # that one is a plain "Ctrl+0", matching the common browser/editor
-        # convention for "reset zoom". These act on self.waveform_view
-        # regardless of which tab is currently showing - harmless no-ops
-        # off the Samples tab, same as Ctrl+1/2/3 below being global rather
-        # than tab-scoped.
-        self.zoom_in_action = QAction("Zoom In", self)
-        self.zoom_in_action.setShortcuts(
-            [QKeySequence("Ctrl+=")]
-            + QKeySequence.keyBindings(QKeySequence.StandardKey.ZoomIn)
-        )
-        self.zoom_in_action.triggered.connect(self.waveform_view.zoom_in)
-        self.zoom_out_action = QAction("Zoom Out", self)
-        self.zoom_out_action.setShortcuts(
-            QKeySequence.keyBindings(QKeySequence.StandardKey.ZoomOut)
-        )
-        self.zoom_out_action.triggered.connect(self.waveform_view.zoom_out)
-        self.zoom_fit_action = QAction("Zoom to Fit", self)
-        self.zoom_fit_action.setShortcut("Ctrl+0")
-        self.zoom_fit_action.triggered.connect(self.waveform_view.reset_zoom)
+        self.zoom_in_action, self.zoom_out_action, self.zoom_fit_action = build_zoom_actions(self, lambda: self.waveform_view)
 
         view_menu = self.menuBar().addMenu("&View")
         view_menu.addAction(self.zoom_in_action)
         view_menu.addAction(self.zoom_out_action)
         view_menu.addAction(self.zoom_fit_action)
+        view_menu.addSeparator()
+        self.audition_action = QAction("Audition Keyboard", self)
+        self.audition_action.setCheckable(True)
+        self.audition_action.setShortcut("Ctrl+K")  # (Cmd+K on a Mac)
+        self.audition_action.setToolTip("Show or hide the keyboard along the bottom. Hidden, it plays nothing.")
+        self.audition_action.triggered.connect(
+            lambda checked: self.audition_bar.set_open(checked, focus=checked)
+        )
+        self.audition_bar.open_changed.connect(self.audition_action.setChecked)
+        self.audition_bar.locked_changed.connect(lambda locked: self.audition_action.setEnabled(not locked))
+        view_menu.addAction(self.audition_action)
+        self._sync_audition_available()
 
         # append each action's own resolved (platform-native) shortcut text
         # to the zoom buttons' existing tooltips, rather than hardcoding
@@ -2461,28 +2567,10 @@ class ProgramEditorWindow(QMainWindow):
         )
         window_menu.addAction(self._global_tab_action)
 
-        # Qt has no MenuRole for "check for updates" (only About/Preferences/
-        # Quit get auto-relocated into the native app menu on macOS - see
-        # QAction.MenuRole), so this stays a plain Help menu on every
-        # platform, same as main_window.py's own
-        help_menu = self.menuBar().addMenu("&Help")
-
-        quickstart_action = QAction("Quick Start Guide...", self)
-        quickstart_action.triggered.connect(lambda: show_quickstart_dialog(self))
-        help_menu.addAction(quickstart_action)
-        help_menu.addSeparator()
-        add_open_log_folder_action(help_menu, self)
-
-        about_action = QAction("About AKAISDS...", self)
-        about_action.setMenuRole(QAction.MenuRole.AboutRole)
-        about_action.triggered.connect(self._show_about_dialog)
-        help_menu.addAction(about_action)
-
-        check_for_updates_action = QAction("Check for Updates...", self)
-        check_for_updates_action.triggered.connect(self._check_for_updates_manual)
-        help_menu.addAction(check_for_updates_action)
-
-        self._update_runner = UpdateCheckRunner(self)
+        add_help_menu(
+            self,
+            [lists_section(), audition_section(), slice_editor_section(), preview_dialogs_section(), dragging_section()],
+        )
 
         # same idea as the dashboard's status bar (dashboard.py), but that's
         # a plain QWidget so it builds its own QStatusBar into its layout -
@@ -2707,6 +2795,10 @@ class ProgramEditorWindow(QMainWindow):
             if menu is not None and self._multi_tab_action in menu.actions():
                 menu.removeAction(self._multi_tab_action)
                 menu.removeAction(self._global_tab_action)
+            if menu is not None and self._save_multi_action in menu.actions():
+                menu.removeAction(self._save_multi_action)  # (the multi file is an S2000/S3000 thing)
+            if menu is not None and self._load_multi_action in menu.actions():
+                menu.removeAction(self._load_multi_action)
         # nor the S2000/S3000's global settings (see _request_global_settings)
         self.main_tabs.setTabVisible(self._global_tab_index, False)
         self.setWindowTitle("AKAISDS - Program Editor (Akai S1000, experimental)")
@@ -2941,7 +3033,7 @@ class ProgramEditorWindow(QMainWindow):
         # S1000 that card's grid/graph are hidden (see the caller) and an
         # ENV1-style ADSR graph + four knobs take their place.
         self.env2_adsr_graph = ADSREnvelopeGraph()
-        self.env2_adsr_graph.setFixedSize(200, 90)
+        self.env2_adsr_graph.setFixedSize(*GRAPH_SIZE)
 
         # (attr, label, field, default, tooltip) - the defaults are ENV2's
         # own Akai factory-preset values, same as the 4-stage knobs it
@@ -2976,6 +3068,18 @@ class ProgramEditorWindow(QMainWindow):
                 keygroup_index_getter=self.keygroup_list.currentRow,
             )
 
+        self._wire_envelope_graph(
+            self.env2_adsr_graph,
+            {
+                name: (knob, label, field)
+                for name, knob, label, field in zip(
+                    ("attack", "decay", "sustain", "release"),
+                    self._env2_adsr_knobs,
+                    self._env2_adsr_value_labels,
+                    ("ATTAK2", "DECAY2", "SUSTN2", "RELSE2"),
+                )
+            },
+        )
         graph_row = QHBoxLayout()
         graph_row.addStretch()
         graph_row.addWidget(self.env2_adsr_graph)
@@ -3181,6 +3285,24 @@ class ProgramEditorWindow(QMainWindow):
             return
         self._worker.submit_global_settings()
 
+    def _on_memory_status_loaded(self, info):
+        if not getattr(self, "_system_info_logged", False):
+            # once per window, for bug reports (the per-call RSTAT lines are DEBUG)
+            self._system_info_logged = True
+            debug_log.get_logger().info(
+                f"ProgramEditor: sampler OS {info['version']}, sample memory "
+                f"{info['max_num_samp_words'] - info['num_words_free']:,} of {info['max_num_samp_words']:,} words used, "
+                f"{info['num_blocks_free']:,} of {info.get('max_blocks', '?')} slots free"
+            )
+        self.sample_memory_bar.set_status(info)
+        self.global_tab.set_system_status(info)
+
+    def _on_memory_status_load_failed(self, error):
+        # no stale figure: the bars say they don't know (the log has the reason)
+        reason = f"Couldn't read the sampler's memory: {error}"
+        self.sample_memory_bar.set_unknown(reason)
+        self.global_tab.set_system_unavailable(reason)
+
     def _on_global_settings_loaded(self, values):
         self.global_tab.set_values(values)
         if "external_controller" in values:
@@ -3231,7 +3353,7 @@ class ProgramEditorWindow(QMainWindow):
         # back to hardware (see _on_multi_part_program_changed/
         # _on_multi_part_channel_changed), and an unblocked call here would
         # schedule a write that just echoes the just-loaded value back
-        for part_index, (program_name, channel, level, pan) in enumerate(parts):
+        for part_index, (program_name, channel, level, pan, priority, low_note, high_note, transpose, tune) in enumerate(parts):
             program_combo = self._multi_program_combos[part_index]
             program_combo.blockSignals(True)
             match = program_combo.findText(program_name) if program_name else -1
@@ -3254,6 +3376,24 @@ class ProgramEditorWindow(QMainWindow):
             pan_knob.setValue(pan)
             pan_knob.blockSignals(False)
             self._multi_pan_value_labels[part_index].setText(str(pan))
+
+            priority_combo = self._multi_priority_combos[part_index]
+            priority_combo.blockSignals(True)
+            priority_combo.setCurrentIndex(max(0, priority_combo.findData(priority)))
+            priority_combo.blockSignals(False)
+            # (a range can arrive with Low above High only if the sampler holds one; show it as it is rather than push it)
+            for spin, value in ((self._multi_low_spins[part_index], low_note), (self._multi_high_spins[part_index], high_note)):
+                spin.blockSignals(True)
+                spin.setValue(value)
+                spin.blockSignals(False)
+            for knob, label, value in (
+                (self._multi_transpose_knobs[part_index], self._multi_transpose_value_labels[part_index], transpose),
+                (self._multi_tune_knobs[part_index], self._multi_tune_value_labels[part_index], tune),
+            ):
+                knob.blockSignals(True)
+                knob.setValue(value)
+                knob.blockSignals(False)
+                label.setText(self._signed(value))
 
         if self._multi_refresh_in_progress:
             self._multi_refresh_in_progress = False
@@ -3314,6 +3454,13 @@ class ProgramEditorWindow(QMainWindow):
         self.cancel_transfer_button.setVisible(busy)
         self.refresh_button.setEnabled(not busy)
         self._refresh_action.setEnabled(not busy)
+        self._import_audio_action.setEnabled(not busy)
+        self._sync_save_multi_enabled(busy)
+        # the Sample menu too: its actions would reach the sampler mid-operation.
+        # (_sync_window_menu_busy_state's timer must not re-enable it meanwhile)
+        self._hardware_busy_ui = bool(busy)
+        self._sample_menu.setEnabled(not busy)
+        self._sync_audition_available()
         for action in (
             self._multi_tab_action,
             self._programs_tab_action,
@@ -3927,6 +4074,7 @@ class ProgramEditorWindow(QMainWindow):
         if self._is_s1000 and self._program_name_taken(program_index, new_name):
             self._warn_name_in_use("Program", new_name)
             return
+        debug_log.get_logger().info(f"ProgramEditor: rename program {current_name!r} -> {new_name!r}")
         self._program_name_on_sampler = new_name
         item.setText(new_name)
         self._update_multi_program_combo_names(program_index, new_name)
@@ -3972,6 +4120,7 @@ class ProgramEditorWindow(QMainWindow):
                 "behaviour) - pick a different name.",
             )
             return
+        debug_log.get_logger().info(f"ProgramEditor: duplicate program {current_name!r} as {new_name!r}")
         self.status_bar.showMessage(f'Duplicating program "{current_name}"…')
         self._worker.submit_create_program(source_index, new_name)
 
@@ -3991,6 +4140,7 @@ class ProgramEditorWindow(QMainWindow):
         )
         if answer != QMessageBox.StandardButton.Yes:
             return
+        debug_log.get_logger().info(f"ProgramEditor: duplicate keygroup {keygroup_index + 1} of program {program_index + 1}")
         self.status_bar.showMessage(f"Duplicating keygroup {keygroup_index + 1}…")
         self._worker.submit_create_keygroup(program_index, keygroup_index)
 
@@ -4060,6 +4210,362 @@ class ProgramEditorWindow(QMainWindow):
         self.status_bar.showMessage(f"Couldn't read program: {error}")
         QMessageBox.warning(self, "Save Program", f"Couldn't read the program:\n\n{error}")
 
+    # -- save a sample as an Akai .s3 / .s1 file ----------------------------------
+
+    def _save_sample_as_akai_file(self):
+        sample_index = self.sample_list_widget.currentRow()
+        entry = self._sample_waveform_cache.get(sample_index)
+        if sample_index < 0 or entry is None or entry["samples"] is None or not self.waveform_view.has_waveform():
+            return
+        if getattr(self, "_pending_akai_sample_export", None) is not None:
+            return
+        name = self._sample_name_at_row(sample_index)
+        staged = name in self._staged_edits
+        # the audio and markers AS SHOWN (a working copy included); the header comes from the sampler
+        self._pending_akai_sample_export = {
+            "index": sample_index,
+            "name": name,
+            "samples": entry["samples"],
+            "markers": dict(self.waveform_view.markers_with_loop_in_range()),
+            "staged": staged,
+        }
+        self.status_bar.showMessage(f'Reading the header of "{name}" from the sampler…')
+        self._worker.submit_export_sample_header(sample_index)
+
+    def _on_sample_header_exported(self, sample_index, header):
+        pending = getattr(self, "_pending_akai_sample_export", None)
+        if pending is None or pending["index"] != sample_index:
+            return
+        self._pending_akai_sample_export = None
+        samples, markers = pending["samples"], pending["markers"]
+        # An untouched sample goes out with the sampler's header EXACTLY as read. A working copy (or audio whose length differs from the header's)
+        # is no longer what that header describes, so its length and markers are filled in from what is shown; every other byte stays the sampler's.
+        if pending["staged"] or akai_sample_file.SampleFile(header=header).length != len(samples):
+            header = akai_sample_file.with_markers(
+                header, len(samples), markers["start"], markers["end"], markers["loop_start"], markers["loop_end"]
+            )
+        try:
+            data = akai_sample_file.build_file(header, samples)
+        except akai_sample_file.SampleFileError as e:
+            QMessageBox.warning(self, "Save as Akai File", f"Couldn't make the file:\n\n{e}")
+            self.status_bar.showMessage(f"Couldn't save the Akai file: {e}")
+            return
+        extension = akai_sample_file.HEADER_SIZES[len(header)]
+        default_path = os.path.join(
+            getattr(self, "_last_akai_sample_dir", "") or self._program_file_directory(),
+            akai_sample_file.safe_file_stem(pending["name"]) + extension,
+        )
+        path, _filter = QFileDialog.getSaveFileName(
+            self, "Save as Akai File", default_path, f"Akai sample (*{extension});;All files (*)"
+        )
+        if not path:
+            self.status_bar.showMessage("Save cancelled")
+            return
+        try:
+            with open(path, "wb") as handle:
+                handle.write(data)
+        except OSError as e:
+            QMessageBox.warning(self, "Save as Akai File", f"Couldn't save the file:\n\n{e}")
+            self.status_bar.showMessage(f"Couldn't save the Akai file: {e}")
+            return
+        self._last_akai_sample_dir = os.path.dirname(path)
+        debug_log.get_logger().info(
+            f"ProgramEditor: saved sample {pending['name']!r} ({len(samples)} frames, {'working copy, markers from the editor' if pending['staged'] else 'header as the sampler has it'}) to {path}"
+        )
+        self.status_bar.showMessage(f'Saved "{pending["name"]}" ({len(samples)} frames) to {os.path.basename(path)}')
+
+    # -- load an Akai .s3 / .s1 sample file back onto the sampler ----------------------
+
+    def _load_akai_sample_from_file(self):
+        path, _filter = QFileDialog.getOpenFileName(
+            self,
+            "Load Akai Sample",
+            getattr(self, "_last_akai_sample_dir", "") or self._program_file_directory(),
+            "Akai samples (*.s1 *.s3);;All files (*)",
+        )
+        if not path:
+            return
+        self._load_akai_sample_path(path)
+
+    def _load_akai_sample_path(self, path):
+        """Make a NEW sample from an Akai sample file. The audio goes through the ordinary send; the file's header block is never sent as a whole (the
+        sampler resets it when audio arrives, and an S3000 block is not an S1000's). Instead the fields the sampler can hold are written back one by one
+        afterwards: root note, sample type, tuning, start/end, loop 1 and any other loop in use. See core/akai_sample_file.restore_plan."""
+        logger = debug_log.get_logger()
+        self._last_akai_sample_dir = os.path.dirname(path)
+        try:
+            with open(path, "rb") as handle:
+                data = handle.read()
+            try:
+                sample = akai_sample_file.parse_file(data)
+            except akai_sample_file.SampleFileError:
+                # a file padded to a block size (real files may be: see tools/s2000_sample_check.py): the audio is still read from where SLNGTH says
+                sample = akai_sample_file.parse_file(data, allow_padding=True)
+                logger.info(f"ProgramEditor: {os.path.basename(path)} is {len(data)} bytes, longer than header + audio: read as padded")
+            plan = akai_sample_file.restore_plan(sample.header, len(sample.samples))
+        except (OSError, akai_sample_file.SampleFileError) as e:
+            QMessageBox.warning(self, "Load Akai Sample", f"Couldn't read this file:\n\n{e}")
+            return
+        sampler_controller = getattr(self._main_window, "sampler_controller", None)
+        if sampler_controller is None:
+            self.status_bar.showMessage("Can't load a sample - no Transfer Dashboard connection available")
+            return
+        if sampler_controller.is_transfer_busy():
+            self.status_bar.showMessage("Can't load a sample - a transfer is already in progress on the Transfer Dashboard")
+            return
+        if self._is_s1000 and sample.family == "s2000_s3000":
+            answer = QMessageBox.question(
+                self,
+                "Load Akai Sample",
+                "This is an S2000/S3000 sample (.s3). An S1000 can't load that file itself, but its audio, name, root note, tuning, start and end and "
+                "loops can be set here; the parts of the header only an S2000/S3000 has are left out.\n\nLoad it?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.Yes,
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                return
+        existing_names = list(self._sample_list)
+        new_name = sample.name or "SAMPLE"
+        while True:
+            new_name = self._prompt_akai_name("Load Akai Sample", "Sample name on the sampler:", new_name)
+            if new_name is None:
+                return
+            if new_name not in existing_names:
+                break
+            # two resident samples sharing a name make every zone using it ambiguous - and on an S1000 the send would DELETE the other one
+            QMessageBox.warning(
+                self,
+                "Load Akai Sample",
+                f'"{new_name}" is already in use by a resident sample.\n\nTwo resident samples can\'t safely share a name - pick a different one.',
+            )
+        entry = {
+            "samples": sample.samples,
+            "framerate": plan.rate,
+            "sptype": plan.sptype,
+            "spitch": plan.spitch,
+            "shlto": plan.shlto,
+            "stuno": plan.stuno,
+            "sbandw": plan.sbandw,
+        }
+        markers = {"start": plan.start, "loop_start": plan.loop_start, "loop_end": plan.loop_end, "end": plan.end}
+        logger.info(
+            f"ProgramEditor: loading {os.path.basename(path)} as {new_name!r}: {len(sample.samples)} frames at {plan.rate} Hz, SBANDW {plan.sbandw}, "
+            f"STUNO {plan.stuno}, {len(plan.writes)} header fields to write back"
+            + (f"; left out: {'; '.join(plan.notes)}" if plan.notes else "")
+        )
+        self.waveform_view.set_loading(True)
+        self._set_hardware_busy_ui(True)
+        self.status_bar.showMessage(f'Loading "{new_name}" from {os.path.basename(path)} - this can take a while and will freeze the interface...')
+        QApplication.processEvents()
+        try:
+            self._perform_duplicate_sample_real(
+                entry,
+                sampler_controller,
+                None,
+                new_name,
+                samples=sample.samples,
+                markers=markers,
+                label="Load",
+                file_fields=plan.writes,
+            )
+        finally:
+            self._set_hardware_busy_ui(False)
+            self.waveform_view.set_loading(False)
+            self.sample_edit_progress.setVisible(False)
+        if plan.notes and new_name in self._sample_list:
+            self.status_bar.showMessage(f'Loaded "{new_name}" - left at the sampler\'s defaults: {"; ".join(plan.notes)}')
+
+    def _file_fields_with_tuning(self, file_fields, new_stuno):
+        """The header fields of a loaded file in write order, with STUNO (recomputed for the new sample's bandwidth bucket) after SHLTO. On an S1000 only
+        fields its block holds are kept: that is what "patching out the S3000-only parts" comes to, since nothing else is ever written."""
+        fields = []
+        for name, value in file_fields:
+            fields.append((name, value))
+            if name == "SHLTO":
+                fields.append(("STUNO", new_stuno))
+        if not any(name == "STUNO" for name, _value in fields):
+            fields.insert(0, ("STUNO", new_stuno))
+        if self._is_s1000:
+            kept = [f for f in fields if s1000_bridge_module.supports(akai_sample_file.sample_param(f[0]))]
+            if len(kept) != len(fields):
+                debug_log.get_logger().info(
+                    f"ProgramEditor: not written on an S1000: {[f[0] for f in fields if f not in kept]}"
+                )
+            fields = kept
+        return fields
+
+    def _on_sample_header_export_failed(self, sample_index, error):
+        pending = getattr(self, "_pending_akai_sample_export", None)
+        if pending is None or pending["index"] != sample_index:
+            return
+        self._pending_akai_sample_export = None
+        self.status_bar.showMessage(f"Couldn't read the sample header: {error}")
+        QMessageBox.warning(self, "Save as Akai File", f"Couldn't read the sample's header:\n\n{error}")
+
+    # -- save the multi as an Akai .m3 file ---------------------------------------
+
+    def _sync_save_multi_enabled(self, busy):
+        # off while a blocking job or a Dashboard transfer owns the wire (a BridgeWorker request mid-SDS-handshake is the race the other actions are gated
+        # against), and on an S1000 (it has no multi)
+        enabled = not busy and not self._is_s1000
+        self._save_multi_action.setEnabled(enabled)
+        self.save_multi_button.setEnabled(enabled)
+        # loading WRITES, which the demo bridge can't take; also off while a load is already running
+        demo_mode = bool(os.environ.get("AKAISDS_DEMO_SAMPLER"))
+        can_load = enabled and not demo_mode and not getattr(self, "_pending_multi_load", False)
+        self._load_multi_action.setEnabled(can_load)
+        self.load_multi_button.setEnabled(can_load)
+        tip = tt.LOAD_MULTI_DEMO_MODE if demo_mode else tt.LOAD_MULTI_BUTTON
+        self._load_multi_action.setToolTip(tip)
+        self.load_multi_button.setToolTip(tip)
+
+    def _save_multi_to_file(self):
+        if getattr(self, "_pending_multi_export", False):
+            return
+        self._pending_multi_export = True
+        self.status_bar.showMessage("Reading the multi from the sampler…")
+        self._worker.submit_export_multi()
+
+    def _on_multi_exported(self, multi_file):
+        if not getattr(self, "_pending_multi_export", False):
+            return
+        self._pending_multi_export = False
+        default_path = os.path.join(
+            getattr(self, "_last_multi_file_dir", "") or self._program_file_directory(),
+            akai_multi_file.safe_file_stem(multi_file.name) + akai_multi_file.EXTENSION,
+        )
+        path, _filter = QFileDialog.getSaveFileName(
+            self,
+            "Save Multi",
+            default_path,
+            f"Akai multi (*{akai_multi_file.EXTENSION});;All files (*)",
+        )
+        if not path:
+            self.status_bar.showMessage("Save cancelled")
+            return
+        try:
+            data = akai_multi_file.build_file(multi_file.header, multi_file.parts)
+            with open(path, "wb") as handle:
+                handle.write(data)
+        except (OSError, akai_multi_file.MultiFileError) as e:
+            QMessageBox.warning(self, "Save Multi", f"Couldn't save the multi:\n\n{e}")
+            self.status_bar.showMessage(f"Couldn't save multi: {e}")
+            return
+        self._last_multi_file_dir = os.path.dirname(path)
+        used = sum(1 for index in range(akai_multi_file.PART_COUNT) if multi_file.part_name(index))
+        debug_log.get_logger().info(
+            f"ProgramEditor: saved multi {multi_file.name!r} ({used} of {akai_multi_file.PART_COUNT} parts with a program) to {path}"
+        )
+        self.status_bar.showMessage(f'Saved multi "{multi_file.name}" ({used} parts with a program) to {os.path.basename(path)}')
+
+    def _on_multi_export_failed(self, error):
+        if not getattr(self, "_pending_multi_export", False):
+            return
+        self._pending_multi_export = False
+        self.status_bar.showMessage(f"Couldn't read the multi: {error}")
+        QMessageBox.warning(self, "Save Multi", f"Couldn't read the multi:\n\n{error}")
+
+    # -- Load Multi -------------------------------------------------------------------------------------------------------------
+
+    def _load_multi_from_file(self):
+        if getattr(self, "_pending_multi_load", False) or not self._load_multi_action.isEnabled():
+            return
+        path, _filter = QFileDialog.getOpenFileName(
+            self,
+            "Load Multi",
+            getattr(self, "_last_multi_file_dir", "") or self._program_file_directory(),
+            f"Akai multi (*{akai_multi_file.EXTENSION} *{akai_multi_file.EXTENSION.upper()});;All files (*)",
+        )
+        if not path:
+            return
+        self._last_multi_file_dir = os.path.dirname(path)
+        try:
+            with open(path, "rb") as handle:
+                multi_file = akai_multi_file.parse_file(handle.read())
+        except (OSError, akai_multi_file.MultiFileError) as e:
+            QMessageBox.warning(self, "Load Multi", f"Couldn't read this file:\n\n{e}")
+            return
+        self._pending_multi_load = True
+        self._sync_save_multi_enabled(False)
+        debug_log.get_logger().info(f"ProgramEditor: load multi {path} ({multi_file.name!r}): reading the sampler for a plan")
+        self.status_bar.showMessage("Comparing the file with the sampler…")
+        self._worker.submit_plan_multi(multi_file)
+
+    def _finish_multi_load_request(self):
+        self._pending_multi_load = False
+        self._sync_save_multi_enabled(getattr(self, "_hardware_busy_ui", False))
+
+    def _on_multi_plan_ready(self, multi_file, plan, assignments, notes):
+        if not getattr(self, "_pending_multi_load", False):
+            return
+        todo = akai_multi_file.writable_changes(plan)
+        skipped = akai_multi_file.skipped_changes(plan)
+        detail = []
+        for change in todo:
+            line = f"{change.scope} {change.name}: {akai_multi_file.format_value(change.name, change.current)} -> {akai_multi_file.format_value(change.name, change.new)}"
+            detail.append(line + (f"  ({change.note})" if change.note else ""))
+        for a in assignments:
+            detail.append(f"part {a.part}: program {a.name!r} (Program Change on channel {a.channel + 1})")
+        if notes or skipped or plan.not_loaded:
+            detail.append("")
+            detail.append("Not loaded:")
+            detail.extend(notes)
+            detail.extend(f"{c.scope} {c.name}: not checked on a unit yet" for c in skipped)
+            detail.extend(plan.not_loaded)
+        if not todo and not assignments:
+            self._finish_multi_load_request()
+            box = QMessageBox(QMessageBox.Icon.Information, "Load Multi", "The sampler already matches this file.", QMessageBox.StandardButton.Ok, self)
+            if detail:
+                box.setDetailedText("\n".join(detail))
+            box.exec()
+            self.status_bar.showMessage("Nothing to load")
+            return
+        parts = len({c.scope for c in todo if c.scope != "multi"})
+        box = QMessageBox(QMessageBox.Icon.Question, "Load Multi", f'Load multi "{multi_file.name}" onto the sampler?', QMessageBox.StandardButton.NoButton, self)
+        box.setInformativeText(f"{len(todo)} setting(s) on {parts} part(s) change and {len(assignments)} program(s) are assigned. The current multi is saved first.")
+        box.setDetailedText("\n".join(detail))
+        yes = box.addButton("Load", QMessageBox.ButtonRole.AcceptRole)
+        no = box.addButton(QMessageBox.StandardButton.Cancel)
+        box.setDefaultButton(no)
+        box.exec()
+        if box.clickedButton() is not yes:
+            self._finish_multi_load_request()
+            self.status_bar.showMessage("Load cancelled")
+            return
+        debug_log.get_logger().info(f"ProgramEditor: load multi {multi_file.name!r} confirmed ({len(todo)} fields, {len(assignments)} programs)")
+        self.status_bar.showMessage(f'Loading multi "{multi_file.name}"…')
+        self._worker.submit_import_multi(multi_file)
+
+    def _on_multi_imported(self, result):
+        if not getattr(self, "_pending_multi_load", False):
+            return
+        self._finish_multi_load_request()
+        self._refresh_multi_parts()
+        message = f"Loaded multi: {len(result.written)} settings, {len(result.assigned)} programs"
+        debug_log.get_logger().info(f"ProgramEditor: {message}; backup {result.backup}; read-back problems: {result.mismatches}; not assigned: {result.not_assigned}")
+        self.status_bar.showMessage(message)
+        if result.mismatches:
+            QMessageBox.warning(
+                self,
+                "Load Multi",
+                "The multi was loaded, but not everything reads back as written:\n\n" + "\n".join(result.mismatches) + f"\n\nThe previous multi is saved at\n{result.backup}",
+            )
+        elif result.not_assigned or result.skipped:
+            box = QMessageBox(QMessageBox.Icon.Information, "Load Multi", f"{message}. Some things were left out.", QMessageBox.StandardButton.Ok, self)
+            box.setDetailedText("\n".join(result.not_assigned + [f"{c.scope} {c.name}: not checked on a unit yet" for c in result.skipped]))
+            box.exec()
+
+    def _on_multi_import_failed(self, error, backup):
+        if not getattr(self, "_pending_multi_load", False):
+            return
+        self._finish_multi_load_request()
+        self.status_bar.showMessage(f"Couldn't load the multi: {error}")
+        text = f"Couldn't load the multi:\n\n{error}"
+        if backup:
+            text += f"\n\nThe previous multi is saved at\n{backup}"
+        QMessageBox.warning(self, "Load Multi", text)
+        self._refresh_multi_parts()
+
     def _load_program_from_file(self):
         path, _filter = QFileDialog.getOpenFileName(
             self,
@@ -4069,6 +4575,10 @@ class ProgramEditorWindow(QMainWindow):
         )
         if not path:
             return
+        self._load_program_path(path)
+
+    def _load_program_path(self, path):
+        # everything after a file has been chosen - by the Load dialog or by dropping it on the window
         self._last_program_file_dir = os.path.dirname(path)
         try:
             with open(path, "rb") as handle:
@@ -4151,6 +4661,117 @@ class ProgramEditorWindow(QMainWindow):
         self.status_bar.showMessage(f'Loading program "{name}"…')
         self._worker.submit_import_program(program_file, name)
 
+    # -- drag a program file in (load) or out (save) ------------------------------------------------------------
+
+    @staticmethod
+    def _program_paths_in(mime_data):
+        """The local .p1/.p3 files in a drag/drop's URLs."""
+        if not mime_data.hasUrls():
+            return []
+        paths = [url.toLocalFile() for url in mime_data.urls() if url.isLocalFile()]
+        return [p for p in paths if os.path.splitext(p)[1].lower() in (".p1", ".p3")]
+
+    def dragEnterEvent(self, event):
+        # only program files are taken; anything else (audio, say) is left to whatever is under the cursor
+        if self._program_paths_in(event.mimeData()):
+            event.acceptProposedAction()
+        else:
+            super().dragEnterEvent(event)
+
+    def dragMoveEvent(self, event):
+        if self._program_paths_in(event.mimeData()):
+            event.acceptProposedAction()
+        else:
+            super().dragMoveEvent(event)
+
+    def dropEvent(self, event):
+        paths = self._program_paths_in(event.mimeData())
+        if not paths:
+            super().dropEvent(event)
+            return
+        event.acceptProposedAction()
+        debug_log.get_logger().info(f"ProgramEditor: program file(s) dropped: {paths}")
+        # answered later, not in here: Load asks questions in modal dialogs, which would hold the drag open in the app it came from
+        QTimer.singleShot(0, lambda: self._load_dropped_program_files(paths))
+
+    def _load_dropped_program_files(self, paths):
+        logger = debug_log.get_logger()
+        if not self.main_tabs.isEnabled():
+            logger.info("ProgramEditor: drop refused - the window is busy")
+            self.status_bar.showMessage("Can't load a program while something else is running - try again in a moment")
+            return
+        if not self._load_program_action.isEnabled():
+            logger.info("ProgramEditor: drop refused - loading is unavailable (demo mode)")
+            self.status_bar.showMessage("Loading programs isn't available in demo mode")
+            return
+        if len(paths) > 1:
+            logger.info(f"ProgramEditor: drop refused - {len(paths)} files at once")
+            # each load is checked against the programs on the sampler NOW (a name that matches one deletes it), and a second one would
+            # be checked before the first has landed
+            self.status_bar.showMessage("Drop one program file at a time")
+            return
+        self.main_tabs.setCurrentIndex(1)  # the Programs tab, where the new program appears
+        self._load_program_path(paths[0])
+
+    def _export_program_to_temp_file(self, row):
+        """Read program *row* from the sampler into a .p1/.p3 file in this session's temp area, WAITING for the read (a few seconds for a
+        big program, with a busy cursor): the file has to exist before a drag can start. Returns its path, or None after saying why."""
+        item = self.program_list.item(row)
+        if item is None:
+            return None
+        self.status_bar.showMessage(f'Reading program "{item.text()}" from the sampler…')
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            which, args = self._wait_for_any_signal(
+                [self._worker.program_exported, self._worker.program_export_failed],
+                start=lambda: self._worker.submit_export_program(row),
+                timeout_ms=60000,
+            )
+        finally:
+            QApplication.restoreOverrideCursor()
+        if which != 0 or args[0] != row:
+            reason = args[1] if which == 1 and args else "the sampler didn't answer"
+            debug_log.get_logger().warning(f"ProgramEditor: reading program {row} for a drag failed: {reason}")
+            self.status_bar.showMessage(f"Couldn't read program: {reason}")
+            return None
+        program_file = args[1]
+        try:
+            directory = dropped_files.session_dir() / "program_drag"
+            directory.mkdir(parents=True, exist_ok=True)
+            path = directory / (akai_program_file.safe_file_stem(program_file.name) + program_file.extension)
+            path.write_bytes(akai_program_file.build_file(program_file.program, program_file.keygroups))
+        except (OSError, akai_program_file.ProgramFileError) as e:
+            debug_log.get_logger().warning(f"ProgramEditor: couldn't write the drag file for program {row}: {e}", exc_info=True)
+            self.status_bar.showMessage(f"Couldn't make the program file: {e}")
+            return None
+        debug_log.get_logger().info(
+            f"ProgramEditor: program {row} {program_file.name!r} ({len(program_file.keygroups)} keygroups) read for a drag -> {path}"
+        )
+        return str(path)
+
+    def _drag_program_out(self, row):
+        if self._program_drag_active or not self.main_tabs.isEnabled():
+            return
+        self._program_drag_active = True
+        try:
+            path = self._export_program_to_temp_file(row)
+            if path is None:
+                return
+            mime = QMimeData()
+            mime.setUrls([QUrl.fromLocalFile(path)])
+            drag = QDrag(self.program_list)
+            drag.setMimeData(mime)
+            name = os.path.basename(path)
+            self.status_bar.showMessage(f"Drag {name} to a folder to save it")
+            result = drag.exec(Qt.DropAction.CopyAction)
+            debug_log.get_logger().info(f"ProgramEditor: drag of {name} ended with {result.name}")
+            if result == Qt.DropAction.CopyAction:
+                self.status_bar.showMessage(f"Saved {name}")
+            else:
+                self.status_bar.showMessage("Drag cancelled - nothing saved")
+        finally:
+            self._program_drag_active = False
+
     def _on_program_imported(self, new_index, name):
         self.status_bar.showMessage(f'Loaded program "{name}"')
         # same select-after-reload path a duplicate uses
@@ -4193,6 +4814,7 @@ class ProgramEditorWindow(QMainWindow):
         )
         if answer != QMessageBox.StandardButton.Yes:
             return
+        debug_log.get_logger().info(f"ProgramEditor: delete program {program_name!r}")
         self.status_bar.showMessage(f'Deleting program "{program_name}"…')
         self._worker.submit_delete_program(program_index)
 
@@ -4267,6 +4889,7 @@ class ProgramEditorWindow(QMainWindow):
         )
         if answer != QMessageBox.StandardButton.Yes:
             return
+        debug_log.get_logger().info(f"ProgramEditor: delete keygroup {keygroup_index + 1} of program {program_index + 1}")
         self.status_bar.showMessage(f"Deleting keygroup {keygroup_index + 1}…")
         self._worker.submit_delete_keygroup(program_index, keygroup_index)
 
@@ -4347,14 +4970,18 @@ class ProgramEditorWindow(QMainWindow):
         ):
             self._warn_name_in_use("Sample", new_name)
             return
+        debug_log.get_logger().info(f"ProgramEditor: rename sample {current_name!r} -> {new_name!r}")
         self._sample_list[sample_index] = new_name
         # the audio keeps its cache entry (by index); a retained copy under
         # the old name must not attach to some other sample later
         self._forget_retained_audio(current_name)
+        if current_name in self._staged_edits:
+            self._staged_edits[new_name] = self._staged_edits.pop(current_name)
         entry = self._sample_row_labels.get(sample_index)
         if entry is not None:
             _generation, name_label, _duration_label = entry
             name_label.setText(new_name)
+        self._update_staged_row_labels()
         self._update_zone_sample_combo_names(sample_index, new_name)
         self._write_knob_value(
             "SHNAME", "sample", new_name, keygroup_index=0, index=sample_index
@@ -4387,6 +5014,8 @@ class ProgramEditorWindow(QMainWindow):
         )
         if answer != QMessageBox.StandardButton.Yes:
             return
+        debug_log.get_logger().info(f"ProgramEditor: delete sample {sample_name!r}")
+        self._discard_staged(sample_name, restore_entry=False)
         self.status_bar.showMessage(f'Deleting sample "{sample_name}"…')
         self._worker.submit_delete_sample(sample_index)
 
@@ -4450,6 +5079,7 @@ class ProgramEditorWindow(QMainWindow):
             )
             return
 
+        debug_log.get_logger().info(f"ProgramEditor: duplicate sample {current_name!r} as {new_name!r}")
         self.waveform_view.set_loading(True)
         self._set_hardware_busy_ui(True)
         self.status_bar.showMessage(
@@ -4467,8 +5097,24 @@ class ProgramEditorWindow(QMainWindow):
             self.sample_edit_progress.setVisible(False)
 
     def _perform_duplicate_sample_real(
-        self, entry, sampler_controller, current_name, new_name
+        self,
+        entry,
+        sampler_controller,
+        current_name,
+        new_name,
+        *,
+        samples=None,
+        markers=None,
+        label="Duplicate",
+        file_fields=None,
     ):
+        # current_name None / file_fields: a sample made from an Akai sample FILE (Load Akai File) rather than copied from a resident one - there is no
+        # source to keep the audio of, and `file_fields` ([(name, value)], see core/akai_sample_file.restore_plan) are the header fields to write
+        # instead of the markers-derived ones. STUNO is not in them: it is recomputed below for the bandwidth bucket the sampler gives the new sample.
+        # samples/markers: send these (an EDITED version of the source - a
+        # filter or time stretch result, with the markers that go with it)
+        # instead of an exact copy. The source's own audio is never touched
+        # either way. markers: {"start", "loop_start", "loop_end", "end"}.
         # Simpler than _perform_sample_edit_real's replace-in-place dance:
         # there's no original to delete and no name-collision window to
         # dodge with a temp name (new_name was already confirmed distinct
@@ -4480,16 +5126,17 @@ class ProgramEditorWindow(QMainWindow):
         # the sampler picks for a fresh sample, not an actual copy of the
         # one it was duplicated from).
         logger = debug_log.get_logger()
+        send_samples = entry["samples"] if samples is None else samples
         fd, temp_path = tempfile.mkstemp(suffix=".wav", prefix="akaisds_dup_")
         os.close(fd)
         try:
             sds_encoder.write_wav_file(
-                temp_path, entry["samples"], entry["framerate"], bit_depth=16
+                temp_path, send_samples, entry["framerate"], bit_depth=16
             )
 
             progress_connection = sampler_controller.transfer_progress.connect(
                 lambda current, total: self._on_sample_edit_progress(
-                    current, total, f'Duplicate "{current_name}"'
+                    current, total, f'{label} "{current_name}"' if current_name else f'{label} "{new_name}"'
                 )
             )
 
@@ -4523,7 +5170,7 @@ class ProgramEditorWindow(QMainWindow):
                     "_perform_duplicate_sample_real: send_file_queue refused to start"
                 )
                 self.status_bar.showMessage(
-                    "Duplicate failed - couldn't start sending the sample"
+                    f"{label} failed - couldn't start sending the sample"
                 )
                 return
             if not args[0]:
@@ -4532,18 +5179,19 @@ class ProgramEditorWindow(QMainWindow):
                     "did not complete successfully"
                 )
                 self.status_bar.showMessage(
-                    f'Duplicate failed - couldn\'t send "{new_name}"'
+                    f'{label} failed - couldn\'t send "{new_name}"'
                 )
                 return
 
             # both samples' audio is in hand and unchanged on the sampler -
             # keep it across the reloads below (see _retain_sample_audio)
-            self._retain_sample_audio(
-                new_name, entry["samples"], entry["framerate"]
-            )
-            self._retain_sample_audio(
-                current_name, entry["samples"], entry["framerate"]
-            )
+            self._retain_sample_audio(new_name, send_samples, entry["framerate"])
+            if current_name is not None:
+                self._retain_sample_audio(
+                    current_name,
+                    self._sampler_audio(current_name, entry),
+                    entry["framerate"],
+                )
 
             # find the duplicate's index by name - nothing shifted
             # underneath it the way a replace-in-place delete does, but
@@ -4573,8 +5221,12 @@ class ProgramEditorWindow(QMainWindow):
                 return
             new_index = samples_after_send.index(new_name)
 
-            markers = self.waveform_view.markers()
+            if markers is None:
+                markers = self.waveform_view.markers()
             loop_length_frames = markers["loop_end"] - markers["loop_start"]
+            new_stuno, new_sbandw = self._tuning_for_resent_sample(
+                new_index, entry["stuno"], entry.get("sbandw"), entry["framerate"]
+            )
             # SHNAME is deliberately not written here - new_name already
             # went out as the send's own filename, so the duplicate is
             # already named correctly, unlike _perform_sample_edit_real's
@@ -4582,19 +5234,23 @@ class ProgramEditorWindow(QMainWindow):
             # read directly like the other three fields - it's always raw
             # now (see _on_sample_tune_changed's own comment on the bug
             # this used to be).
-            for param_name, value in (
-                ("SPTYPE", entry["sptype"]),
-                ("SPITCH", entry["spitch"]),
-                ("SHLTO", entry["shlto"]),
-                ("STUNO", entry["stuno"]),
-                ("SSTART", markers["start"]),
-                ("SMPEND", markers["end"]),
-                ("LOOPAT1", markers["loop_end"]),
-                (
-                    "LLNGTH1",
-                    loop_length_frames * _LOOP_LENGTH_FIXED_POINT_SCALE,
-                ),
-            ):
+            if file_fields is None:
+                fields = (
+                    ("SPTYPE", entry["sptype"]),
+                    ("SPITCH", entry["spitch"]),
+                    ("SHLTO", entry["shlto"]),
+                    ("STUNO", new_stuno),
+                    ("SSTART", markers["start"]),
+                    ("SMPEND", markers["end"]),
+                    ("LOOPAT1", markers["loop_end"]),
+                    (
+                        "LLNGTH1",
+                        loop_length_frames * _LOOP_LENGTH_FIXED_POINT_SCALE,
+                    ),
+                )
+            else:
+                fields = self._file_fields_with_tuning(file_fields, new_stuno)
+            for param_name, value in fields:
                 self._write_knob_value(
                     param_name, "sample", value, keygroup_index=0, index=new_index
                 )
@@ -4607,7 +5263,7 @@ class ProgramEditorWindow(QMainWindow):
                 timeout_ms=20000,
             )
             self.status_bar.showMessage(
-                f'Duplicate complete: "{current_name}" -> "{new_name}"'
+                f'{label} complete: "{current_name}" -> "{new_name}"' if current_name is not None else f'{label} complete: "{new_name}"'
             )
             if which == 0:
                 final_samples = args[0]
@@ -4628,7 +5284,7 @@ class ProgramEditorWindow(QMainWindow):
                 "_perform_duplicate_sample_real: unexpected error", exc_info=True
             )
             self.status_bar.showMessage(
-                f'Duplicate failed - unexpected error, see {debug_log.LOG_PATH} '
+                f'{label} failed - unexpected error, see {debug_log.LOG_PATH} '
                 "for details"
             )
         finally:
@@ -4649,7 +5305,37 @@ class ProgramEditorWindow(QMainWindow):
         if entry is None or entry["samples"] is None:
             return
         sample_name = self._sample_name_at_row(sample_index)
+        self._run_slice_editor(
+            sample_name,
+            entry["samples"],
+            entry["framerate"],
+            entry["spitch"],
+            entry["stuno"],
+            entry["shlto"],
+            # a resident sample's slices preview as the sampler plays it (Tune
+            # and Root Note); audio from a file has neither, so no shift
+            preview_pitch_shift=self._preview_pitch_shift_semitones(entry),
+            sbandw=entry.get("sbandw"),
+        )
 
+    def _run_slice_editor(
+        self,
+        sample_name,
+        samples,
+        framerate,
+        spitch,
+        stuno,
+        shlto,
+        initial_markers=None,
+        resident_source=True,
+        extra_channels=None,
+        preview_pitch_shift=0.0,
+        sbandw=None,
+    ):
+        # The Slice Editor over *samples*. sbandw: the source sample's SBANDW (None for audio from a file, which has no tuning to carry). resident_source is True when they
+        # are a sample already on the sampler (retained across the export's
+        # reloads); False for audio from a file (Import RX2), whose name must
+        # not be tied to a resident sample of the same name.
         sampler_controller = getattr(self._main_window, "sampler_controller", None)
         if sampler_controller is None:
             self.status_bar.showMessage(
@@ -4675,24 +5361,42 @@ class ProgramEditorWindow(QMainWindow):
         dialog = SliceEditorWindow(
             self,
             sample_name,
-            entry["samples"],
-            entry["framerate"],
-            entry["spitch"],
-            entry["stuno"],
-            entry["shlto"],
+            samples,
+            framerate,
+            spitch,
+            stuno,
+            shlto,
             _existing_names,
-            self._export_slices,
+            functools.partial(
+                self._export_slices, source_sbandw=sbandw, source_rate=framerate
+            ),
             demo_mode=bool(os.environ.get("AKAISDS_DEMO_SAMPLER")),
             program_names_provider=_existing_program_names,
-            create_program_callback=self._create_program_from_slices,
+            create_program_callback=(
+                functools.partial(self._create_program_from_slices, stereo=True)
+                if extra_channels
+                else self._create_program_from_slices
+            ),
             max_program_slices=_MAX_SLICES_PER_PROGRAM,
             cancel_callback=sampler_controller.cancel_transfer,
+            initial_markers=initial_markers,
+            # a stereo loop: both channels shown, each slice sent as a -L/-R pair
+            extra_channels=extra_channels,
+            channel_suffixes=_STEREO_SUFFIXES if extra_channels else None,
+            preview_pitch_shift_semitones=preview_pitch_shift,
         )
         # the export reloads the sample list (wiping the cache), so keep the
         # source's audio across it; dropped again below if nothing was exported
-        self._retain_sample_audio(sample_name, entry["samples"], entry["framerate"])
+        if resident_source:
+            self._retain_sample_audio(
+                sample_name,
+                self._staged_edits[sample_name].original_samples
+                if sample_name in self._staged_edits
+                else samples,
+                framerate,
+            )
         dialog.exec()
-        if not dialog.export_succeeded:
+        if resident_source and not dialog.export_succeeded:
             self._forget_retained_audio(sample_name)
         # slice export can add several new resident samples - refresh so
         # the Samples tab's own list/zone combos pick them up. Only when
@@ -4706,6 +5410,38 @@ class ProgramEditorWindow(QMainWindow):
         # Editor," reported directly.
         if dialog.export_succeeded:
             self._worker.submit_sample_list()
+
+    def _import_audio(self):
+        # An audio file or a ReCycle .rx2 into the Slice Editor (ui/import_audio.py): an .rx2 with its cut points already marked, any
+        # other file with none (exporting with none sends the whole selection as one sample). Export sends each slice as a one-shot
+        # sample and can build a program from them - the Slice Editor's own paths, nothing import-specific on the wire. A stereo
+        # file stays stereo (-L/-R samples, left/right zones). Needs no sample selected.
+        sampler_controller = getattr(self._main_window, "sampler_controller", None)
+        if sampler_controller is not None and sampler_controller.is_transfer_busy():
+            self.status_bar.showMessage(
+                "Can't import - a transfer is already in progress on the Transfer Dashboard"
+            )
+            return
+        imported = import_audio.pick_and_load(self, self.status_bar.showMessage)
+        if imported is None:
+            return
+        debug_log.get_logger().info(
+            f"ProgramEditor: import {imported.name!r} into the Slice Editor: {len(imported.channels)} ch, "
+            f"{imported.rate} Hz, {len(imported.channels[0])} frames, {len(imported.markers)} cut points"
+        )
+        if imported.stereo:
+            self.status_bar.showMessage("Stereo: each slice is sent as a -L/-R pair, panned left and right in the program")
+        self._run_slice_editor(
+            imported.name,
+            imported.channels[0],
+            imported.rate,
+            _IMPORT_ROOT_NOTE,
+            0,
+            0,
+            initial_markers=imported.markers or None,
+            resident_source=False,
+            extra_channels=imported.channels[1:] or None,
+        )
 
     def _reload_sample_list_with_retries(self, attempts=3, retry_delay_seconds=0.3):
         # submit_sample_list() with a couple of retries on failure. Root
@@ -4751,6 +5487,9 @@ class ProgramEditorWindow(QMainWindow):
         progress_callback,
         status_callback,
         busy_callback=None,
+        extra_slices=None,
+        source_sbandw=None,
+        source_rate=None,
     ):
         # the actual hardware-talking half of the Slice Editor (see
         # ui/slice_editor_window.py's own class docstring for the split) -
@@ -4785,9 +5524,20 @@ class ProgramEditorWindow(QMainWindow):
 
         logger = debug_log.get_logger()
         temp_paths = []
+        # what actually goes to the sampler, [(resident name, samples)]: one sample per slice, or - for a stereo loop
+        # (extra_slices = the right channel's slices) - a -L and a -R sample per slice, since resident samples are mono
+        if extra_slices:
+            debug_log.get_logger().info(f"ProgramEditor: exporting {len(names)} stereo slices as {2 * len(names)} -L/-R samples")
+            items = []
+            for slice_index, slice_name in enumerate(names):
+                items.append((slice_name + _STEREO_SUFFIXES[0], slices[slice_index]))
+                items.append((slice_name + _STEREO_SUFFIXES[1], extra_slices[0][slice_index]))
+        else:
+            items = list(zip(names, slices))
+        resident_names = [n for n, _ in items]
         try:
             file_entries = []
-            for name, slice_samples in zip(names, slices):
+            for name, slice_samples in items:
                 fd, temp_path = tempfile.mkstemp(
                     suffix=".wav", prefix="akaisds_slice_"
                 )
@@ -4843,7 +5593,7 @@ class ProgramEditorWindow(QMainWindow):
                 # sent as-is, so each new slice can come back with its
                 # waveform (see _retain_sample_audio); a requantised or
                 # resampled send is not the audio we hold
-                for name, slice_samples in zip(names, slices):
+                for name, slice_samples in items:
                     self._retain_sample_audio(name, slice_samples, framerate)
 
             # nothing numeric to report while this reloads/retries - see
@@ -4854,21 +5604,21 @@ class ProgramEditorWindow(QMainWindow):
             finally:
                 _set_busy(False)
             if which != 0:
-                sent = f'"{names[0]}"' if len(names) == 1 else f"{len(names)} slices"
+                sent = f'"{resident_names[0]}"' if len(resident_names) == 1 else f"{len(names)} slices"
                 return False, (
                     f"{sent} sent, but the sample list couldn't be "
                     "refreshed to set the header fields - refresh manually "
                     "and check the sampler directly."
                 )
             samples_after_send = args[0]
-            landed = [n for n in names if n in samples_after_send]
-            missing = [n for n in names if n not in samples_after_send]
+            landed = [n for n in resident_names if n in samples_after_send]
+            missing = [n for n in resident_names if n not in samples_after_send]
 
-            for index, name in enumerate(names):
+            for name, item_samples in items:
                 if name not in samples_after_send:
                     continue
                 new_index = samples_after_send.index(name)
-                slice_frame_count = len(slices[index])
+                slice_frame_count = len(item_samples)
                 # SPTYPE forced to one-shot (3, matching
                 # _SAMPLE_PLAYBACK_TYPE_OPTIONS' own raw-byte-order) - a
                 # chopped slice isn't meant to loop, regardless of what
@@ -4879,14 +5629,21 @@ class ProgramEditorWindow(QMainWindow):
                 # SSTART/SMPEND cover the whole sent buffer (send_file_queue
                 # only ever sends audio, never these header fields - same
                 # reasoning as Duplicate Sample's own header fixup)
-                for param_name, value in (
+                header_fields = [
                     ("SPTYPE", 3),
                     ("SPITCH", spitch),
                     ("SHLTO", shlto),
-                    ("STUNO", stuno),
-                    ("SSTART", 0),
-                    ("SMPEND", slice_frame_count - 1),
-                ):
+                ]
+                if source_sbandw is not None:
+                    # the tuning of a slice of a resident sample: its own bandwidth baseline plus what the user dialled in on the
+                    # source (see _tuning_for_resent_sample). Audio from a FILE has no tuning to carry, so the sampler's own
+                    # (the baseline the send baked in) is left alone - writing 0 over it played a 11025 Hz import an octave high.
+                    slice_stuno, _slice_sbandw = self._tuning_for_resent_sample(
+                        new_index, stuno, source_sbandw, source_rate or framerate
+                    )
+                    header_fields.append(("STUNO", slice_stuno))
+                header_fields += [("SSTART", 0), ("SMPEND", slice_frame_count - 1)]
+                for param_name, value in header_fields:
                     self._write_knob_value(
                         param_name, "sample", value, keygroup_index=0, index=new_index
                     )
@@ -4902,12 +5659,17 @@ class ProgramEditorWindow(QMainWindow):
 
             if missing:
                 return False, (
-                    f"Sent {len(landed)}/{len(names)} slice(s); missing from the "
+                    f"Sent {len(landed)}/{len(resident_names)} sample(s); missing from the "
                     f"reloaded list: {', '.join(missing)} - check the sampler "
                     "directly."
                 )
-            if len(names) == 1:
+            if len(names) == 1 and not extra_slices:
                 return True, f'Export complete: "{names[0]}" sent'
+            if extra_slices:
+                return True, (
+                    f"Export complete: {len(names)} stereo slices sent as {len(resident_names)} samples, "
+                    f"{resident_names[0]}..{resident_names[-1]}"
+                )
             return True, f"Export complete: {len(names)} slices sent as {names[0]}..{names[-1]}"
         except Exception:
             # same reasoning as _perform_duplicate_sample_real/
@@ -4936,7 +5698,10 @@ class ProgramEditorWindow(QMainWindow):
         progress_callback,
         status_callback,
         busy_callback=None,
+        stereo=False,
     ):
+        # stereo: every slice was sent as a -L/-R pair, so each keygroup plays the left sample in zone 1 (panned hard left) and
+        # the right one in zone 2 (hard right), both over the whole velocity range - see _create_program_from_slices_locked
         # the "ReCycle-style export" half of the Slice Editor's
         # create-program checkbox (see ui/slice_editor_window.py) - called
         # AFTER _export_slices has already landed every slice as a
@@ -4994,7 +5759,7 @@ class ProgramEditorWindow(QMainWindow):
             return self._create_program_from_slices_locked(
                 names, template_program_index, program_name,
                 progress_callback, status_callback, slice_count,
-                busy_callback=busy_callback,
+                busy_callback=busy_callback, stereo=stereo,
             )
         finally:
             self._worker.program_created.connect(self._on_program_created)
@@ -5009,12 +5774,17 @@ class ProgramEditorWindow(QMainWindow):
         status_callback,
         slice_count,
         busy_callback=None,
+        stereo=False,
     ):
         def _set_busy(busy):
             if busy_callback is not None:
                 busy_callback(busy)
 
         logger = debug_log.get_logger()
+        logger.info(
+            f'ProgramEditor: creating program "{program_name}" from {slice_count} slices '
+            f"({'stereo: left in zone 1, right in zone 2' if stereo else 'mono'})"
+        )
         status_callback(f'Creating program "{program_name}"...')
         which, args = self._wait_for_any_signal(
             [self._worker.program_created, self._worker.program_create_failed],
@@ -5065,16 +5835,39 @@ class ProgramEditorWindow(QMainWindow):
         # plays from a velocity zone this feature isn't using. Every
         # keygroup created further down clones THIS keygroup, so
         # CP1/ZPLAY1/the cleared zones only need writing once, here.
-        for param_name, value in (
-            ("SNAME1", names[0]),
-            ("SNAME2", ""),
-            ("SNAME3", ""),
-            ("SNAME4", ""),
-            ("CP1", 1),
-            ("ZPLAY1", 0),
-            ("LONOTE", _FIRST_SLICE_NOTE),
-            ("HINOTE", _FIRST_SLICE_NOTE),
-        ):
+        if stereo:
+            # left in zone 1, right in zone 2, each panned hard to its side (VPANO is the zone's pan OFFSET, -50..+50) over the
+            # whole velocity range, so one key plays the pair together. Zones 3-4 stay empty.
+            first_keygroup = (
+                ("SNAME1", names[0] + _STEREO_SUFFIXES[0]),
+                ("SNAME2", names[0] + _STEREO_SUFFIXES[1]),
+                ("SNAME3", ""),
+                ("SNAME4", ""),
+                ("CP1", 1),
+                ("CP2", 1),
+                ("ZPLAY1", 0),
+                ("ZPLAY2", 0),
+                ("LOVEL1", 0),
+                ("HIVEL1", 127),
+                ("LOVEL2", 0),
+                ("HIVEL2", 127),
+                ("VPANO1", -50),
+                ("VPANO2", 50),
+                ("LONOTE", _FIRST_SLICE_NOTE),
+                ("HINOTE", _FIRST_SLICE_NOTE),
+            )
+        else:
+            first_keygroup = (
+                ("SNAME1", names[0]),
+                ("SNAME2", ""),
+                ("SNAME3", ""),
+                ("SNAME4", ""),
+                ("CP1", 1),
+                ("ZPLAY1", 0),
+                ("LONOTE", _FIRST_SLICE_NOTE),
+                ("HINOTE", _FIRST_SLICE_NOTE),
+            )
+        for param_name, value in first_keygroup:
             self._write_knob_value(
                 param_name, "keygroup", value, keygroup_index=0, index=new_index
             )
@@ -5097,8 +5890,16 @@ class ProgramEditorWindow(QMainWindow):
         # order (see this method's own docstring-style comment above)
         for slice_index in range(1, slice_count):
             self._worker.submit_create_keygroup(new_index, 0)
+            slice_zones = (
+                (
+                    ("SNAME1", names[slice_index] + _STEREO_SUFFIXES[0]),
+                    ("SNAME2", names[slice_index] + _STEREO_SUFFIXES[1]),
+                )
+                if stereo
+                else (("SNAME1", names[slice_index]),)
+            )
             for param_name, value in (
-                ("SNAME1", names[slice_index]),
+                *slice_zones,
                 ("LONOTE", _FIRST_SLICE_NOTE + slice_index),
                 ("HINOTE", _FIRST_SLICE_NOTE + slice_index),
             ):
@@ -5143,6 +5944,7 @@ class ProgramEditorWindow(QMainWindow):
         )
 
     def _on_keygroup_selected(self, current, previous):
+        self._set_envelope_graphs_editable(False)
         if current is None:
             return
         self._zone_stack.setCurrentIndex(0)
@@ -5281,6 +6083,7 @@ class ProgramEditorWindow(QMainWindow):
                 values["ATTAK2"], values["DECAY2"], values["SUSTN2"], values["RELSE2"]
             )
         self._update_zone_panels(values)
+        self._set_envelope_graphs_editable(True)
 
     def _on_detail_load_failed(self, program_index, keygroup_index, error_message):
         if (
@@ -5319,6 +6122,12 @@ class ProgramEditorWindow(QMainWindow):
         busy = sampler_controller is not None and sampler_controller.is_transfer_busy()
         self._dashboard_action.setEnabled(not busy)
         self._dashboard_action.setToolTip(tt.BUSY_BLOCKS_OTHER_WINDOWS if busy else "")
+        # a transfer the Dashboard started blocks the Sample menu as well (shared
+        # connection), as does one of this window's own blocking operations
+        self._sample_menu.setEnabled(
+            not (busy or getattr(self, "_hardware_busy_ui", False))
+        )
+        self._sync_save_multi_enabled(busy or getattr(self, "_hardware_busy_ui", False))
         # same reasoning as dashboard.py's own btn_settings guard - Settings
         # can reopen the shared ports out from under an in-flight transfer.
         # None when shared_transport_enabled() was false at construction
@@ -5328,6 +6137,18 @@ class ProgramEditorWindow(QMainWindow):
             self._settings_action.setToolTip(
                 tt.BUSY_BLOCKS_OTHER_WINDOWS if busy else ""
             )
+        self._sync_audition_available()
+
+    def _sync_audition_available(self):
+        # The keyboard is off during any blocking hardware operation (a sample load, a send) and while the Dashboard's controller has a transfer in flight: a note
+        # must not land in the middle of a SysEx exchange. Off = nothing is routed, so a dead keyboard never swallows typing.
+        sampler_controller = getattr(self._main_window, "sampler_controller", None)
+        transfer = sampler_controller is not None and sampler_controller.is_transfer_busy()
+        working = getattr(self, "_hardware_busy_ui", False)
+        why = "The keyboard is off while the sampler is busy." if (transfer or working) else ""
+        self.audition_bar.set_available(not (transfer or working), why)
+        # Locked, not just greyed out: it closes and cannot be opened until the job is over (a sample load over SDS made even a disabled bar lag)
+        self.audition_bar.set_locked(bool(transfer or working), why)
 
     def closeEvent(self, event):
         # refuse to switch back to the Dashboard (whether via Ctrl+T, the
@@ -5350,10 +6171,26 @@ class ProgramEditorWindow(QMainWindow):
             event.ignore()
             return
 
+        if self._staged_edits:
+            names = ", ".join(f'"{name}"' for name in self._staged_edits)
+            answer = QMessageBox.question(
+                self,
+                "Unsent edits",
+                f"These samples have edits that are not on the sampler: {names}.\n\n"
+                "Close anyway and lose them?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                event.ignore()
+                return
+
         # a "Hold" preview loop never stops on its own (see
         # _on_waveform_preview_requested) - closing the window must not
         # leave it sounding forever in the background
         self._sample_preview_player.stop()
+        self.audition_bar.set_open(False)  # lets go of every note and gives the computer keyboard back
+        self._external_edit.close()
 
         # runs regardless of how the window closes (close button, command + w,
         # etc) - stop() lets anything already queued (in particular, pending
@@ -5376,13 +6213,6 @@ class ProgramEditorWindow(QMainWindow):
             pass  # already disconnected
         self._main_window.show()
         event.accept()
-
-    def _show_about_dialog(self):
-        dialog = AboutDialog(self)
-        dialog.exec()
-
-    def _check_for_updates_manual(self):
-        self._update_runner.start(manual=True)
 
     # --- modulation matrix helpers -------------------------------------
     # The assignable modulation matrix (MODS*/MODV* fields - see the
@@ -5676,14 +6506,15 @@ class ProgramEditorWindow(QMainWindow):
         edit.setValidator(QRegularExpressionValidator(name_pattern, edit))
         return edit
 
-    def _build_section_card(self, title, *row_layouts):
+    def _build_section_card(self, title, *row_layouts, header_widgets=(), collapsible=True, key=None):
         # groups related rows (e.g. every LFO control, or Volume/Pan/
         # Velocity together on the Program tab; Filter or Envelopes on the
         # Keygroup tab) into one visually distinct card - see
         # ui.qt_helpers.build_section_card's own docstring for the actual
         # implementation and the gotchas it exists to avoid (also used
         # directly, not through this wrapper, by ui/settings_dialog.py).
-        return build_section_card(title, *row_layouts)
+        # collapsible (ui/section_card.py), remembered as "program_editor/<title>"; collapsible=False for a card that must stay open
+        return build_editor_card("program_editor", title, *row_layouts, header_widgets=header_widgets, collapsible=collapsible, key=key)
 
     def _build_scroll_area(self, page):
         # both detail_stack pages (Program, Keygroup) are wrapped in one of
@@ -5724,6 +6555,16 @@ class ProgramEditorWindow(QMainWindow):
         return knob, value_label, widget
 
     def _build_samples_tab(self):
+        # every sample action (Trim ... Send Edited Audio, Detect Root Note) is a
+        # button AND a QAction - see _make_sample_edit_control
+        self._sample_edit_controls = {}
+        self._sample_control_wanted = {}
+        # name -> _StagedEdit: samples with edits that are not on the sampler yet
+        self._staged_edits = {}
+        # sample name -> what to call the app its audio was opened in, while the external round trip waits for a save / a Load
+        self._external_waiting = {}
+        self._auto_load_scheduled = False  # an automatic Load Edited Audio is about to run (see _refresh_external_edit_buttons)
+        self._sample_row_dots = {}  # list row -> the dot that marks unsent edits
         # same row-widget-free QListWidget + labeled column shape as the
         # Programs tab's own program_list/keygroup_list (see __init__) -
         # deliberately not sharing that code since this list's rows are
@@ -5765,7 +6606,10 @@ class ProgramEditorWindow(QMainWindow):
         self._delete_sample_action.setEnabled(False)
         self.sample_list_widget.addAction(self._delete_sample_action)
 
-        samples_container = build_list_column("Samples", self.sample_list_widget)
+        # how full the sampler's sample memory is (RSTAT), refreshed with every sample list load - so after every send, delete and edit
+        self.sample_memory_bar = MemoryBar(collapsible=True)  # double-click: thin line / full bar
+        self.sample_memory_bar.setFixedWidth(200)
+        samples_container = build_list_column("Samples", self.sample_list_widget, self.sample_memory_bar)
 
         self.waveform_view = WaveformView()
 
@@ -5909,8 +6753,6 @@ class ProgramEditorWindow(QMainWindow):
         # section cards
         loop_meta_row = QHBoxLayout()
         loop_meta_row.setSpacing(18)
-        tune_meta_row = QHBoxLayout()
-        tune_meta_row.setSpacing(18)
         loop_type_label = QLabel("Loop Type")
         loop_type_label.setFixedWidth(70)
         self.sample_loop_type_combo = QComboBox()
@@ -6049,12 +6891,6 @@ class ProgramEditorWindow(QMainWindow):
         loop_meta_row.addWidget(loop_tune_widget)
         loop_meta_row.addStretch()
 
-        tune_meta_row.addWidget(root_note_label)
-        tune_meta_row.addWidget(self.sample_root_note_spinbox)
-        tune_meta_row.addSpacing(12)
-        tune_meta_row.addWidget(sample_tune_label)
-        tune_meta_row.addWidget(self.sample_tune_spinbox)
-        tune_meta_row.addSpacing(12)
         # needs real audio in memory to analyse, same has_waveform() gate
         # as Trim/Reverse/etc - see _set_sample_edit_buttons_enabled. Works
         # fine in demo mode - unlike Duplicate Sample/Export, this never
@@ -6062,74 +6898,204 @@ class ProgramEditorWindow(QMainWindow):
         # sample_root_note_spinbox/sample_tune_spinbox already make via
         # their own existing paths (_commit_sample_root_note/
         # _commit_sample_tune), which already work in demo mode fine.
-        self.detect_root_note_button = QPushButton("Detect Root Note")
-        self.detect_root_note_button.setToolTip(tt.DETECT_ROOT_NOTE_BUTTON)
-        self.detect_root_note_button.clicked.connect(self._confirm_detect_root_note)
-        tune_meta_row.addWidget(self.detect_root_note_button)
+        self.detect_root_note_button = self._make_sample_edit_control(
+            "detect",
+            "Detect Root Note",
+            tt.DETECT_ROOT_NOTE_BUTTON,
+            self._confirm_detect_root_note,
+        )
+        # two rows, not one: this card shares its row with the Loop Preview
+        # (half the page width each)
+        root_note_row = QHBoxLayout()
+        root_note_row.setSpacing(8)
+        root_note_row.addWidget(root_note_label)
+        root_note_row.addWidget(self.sample_root_note_spinbox)
+        root_note_row.addSpacing(4)
+        root_note_row.addWidget(self.detect_root_note_button)
+        root_note_row.addStretch()
+        sample_tune_row = QHBoxLayout()
+        sample_tune_row.setSpacing(8)
+        sample_tune_row.addWidget(sample_tune_label)
+        sample_tune_row.addWidget(self.sample_tune_spinbox)
+        sample_tune_row.addStretch()
+        tune_meta_row = QVBoxLayout()
+        tune_meta_row.setSpacing(6)
+        tune_meta_row.addLayout(root_note_row)
+        tune_meta_row.addLayout(sample_tune_row)
         tune_meta_row.addStretch()
 
-        # Trim/Reverse/Fade/Normalise - destructive, hardware-write
-        # actions, so all four stay disabled until has_waveform() is true
-        # (real audio actually in memory to transform, not just
-        # header-only markers) - see _set_sample_edit_buttons_enabled. See
-        # _confirm_trim_sample/_confirm_reverse_sample/_confirm_fade_sample/
-        # _confirm_normalize_sample for the confirmation dialogs and
-        # _perform_sample_edit_real for why this is a real, multi-step
-        # send/delete/rename pipeline rather than a simple in-place write.
-        sample_edit_row = QHBoxLayout()
-        sample_edit_row.setSpacing(8)
-        self.trim_sample_button = QPushButton("Trim to Markers")
-        self.trim_sample_button.setToolTip(tt.TRIM_SAMPLE_BUTTON)
-        self.trim_sample_button.setEnabled(False)
-        self.trim_sample_button.clicked.connect(self._confirm_trim_sample)
-        self.reverse_sample_button = QPushButton("Reverse sample")
-        self.reverse_sample_button.setToolTip(tt.REVERSE_SAMPLE_BUTTON)
-        self.reverse_sample_button.setEnabled(False)
-        self.reverse_sample_button.clicked.connect(self._confirm_reverse_sample)
-        self.fade_sample_button = QPushButton("Fade In/Out")
-        self.fade_sample_button.setToolTip(tt.FADE_SAMPLE_BUTTON)
-        self.fade_sample_button.setEnabled(False)
-        self.fade_sample_button.clicked.connect(self._confirm_fade_sample)
-        self.normalize_sample_button = QPushButton("Normalise Sample")
-        self.normalize_sample_button.setToolTip(tt.NORMALIZE_SAMPLE_BUTTON)
-        self.normalize_sample_button.setEnabled(False)
-        self.normalize_sample_button.clicked.connect(self._confirm_normalize_sample)
-        # unlike the other four transforms here, this one has an actual
-        # PARAMETER (filter type + cutoff frequency) - opens a small
-        # dialog (ui/filter_sample_dialog.py) with a Preview button rather
-        # than a plain QMessageBox.question, same has_waveform() gating
-        # (enabled/disabled alongside the other four - see
-        # _set_sample_edit_buttons_enabled)
-        self.filter_sample_button = QPushButton("Filter Sample…")
-        self.filter_sample_button.setToolTip(tt.FILTER_SAMPLE_BUTTON)
-        self.filter_sample_button.setEnabled(False)
-        self.filter_sample_button.clicked.connect(self._confirm_filter_sample)
-        sample_edit_row.addWidget(self.trim_sample_button)
-        sample_edit_row.addWidget(self.reverse_sample_button)
-        sample_edit_row.addWidget(self.fade_sample_button)
-        sample_edit_row.addWidget(self.normalize_sample_button)
-        sample_edit_row.addWidget(self.filter_sample_button)
-        sample_edit_row.addStretch()
-        # right-aligned, and its own thing rather than a 5th button
-        # grouped with the four above - unlike them it never touches the
-        # source sample's own audio (see _confirm_duplicate_sample's own
-        # comment), it ADDS a new one, so it's not "cannot be undone" in
-        # the same destructive sense those four are
-        self.duplicate_sample_button = QPushButton("Duplicate Sample")
-        self.duplicate_sample_button.setToolTip(tt.DUPLICATE_SAMPLE_BUTTON)
-        self.duplicate_sample_button.setEnabled(False)
-        self.duplicate_sample_button.clicked.connect(self._confirm_duplicate_sample)
-        sample_edit_row.addWidget(self.duplicate_sample_button)
-        # ReCycle-style breakbeat chopper - manual slice markers, no
-        # transient detection (see AGENTS.md's own design discussion), a
-        # whole separate modal window rather than more controls on this
-        # page. Same demo-mode/has_waveform() gating as Duplicate Sample -
-        # see _open_slice_editor/_set_sample_edit_buttons_enabled.
-        self.slice_editor_button = QPushButton("Slice Editor…")
-        self.slice_editor_button.setToolTip(tt.SLICE_EDITOR_BUTTON)
-        self.slice_editor_button.setEnabled(False)
-        self.slice_editor_button.clicked.connect(self._open_slice_editor)
-        sample_edit_row.addWidget(self.slice_editor_button)
+        # Every sample action is a button here (in the Edit Sample card) AND a
+        # QAction (the Sample menu, and the sample list's right-click menu) -
+        # see _make_sample_edit_control. All need has_waveform() true (real
+        # audio in memory, not just header-only markers) - see
+        # _set_sample_edit_buttons_enabled. The first six overwrite the
+        # sample on the sampler: see _confirm_trim_sample/... for their
+        # confirmations and _perform_sample_edit_real for why that is a
+        # real, multi-step send/delete/rename pipeline rather than an
+        # in-place write. Filter and Stretch / Pitch have parameters, so they
+        # open a dialog with a Preview (ui/filter_sample_dialog.py,
+        # ui/time_stretch_dialog.py). Duplicate and the Slice Editor (a
+        # ReCycle-style chopper, own modal window) ADD samples and never touch
+        # the source's audio. The last two are the round trip through the
+        # user's own audio editor (Settings > External Audio Editor): export
+        # the loaded audio to a WAV, open it, and when the editor has saved
+        # over it send it back through the same replace Trim/Reverse use.
+        self._external_edit = ExternalEditTracker(self)
+        self._external_edit.changed.connect(self._refresh_external_edit_buttons)
+        self._sample_edit_ready = False
+        make = self._make_sample_edit_control
+        self.trim_sample_button = make(
+            "trim", "Trim to Markers", tt.TRIM_SAMPLE_BUTTON, self._confirm_trim_sample
+        )
+        self.reverse_sample_button = make(
+            "reverse", "Reverse", tt.REVERSE_SAMPLE_BUTTON, self._confirm_reverse_sample
+        )
+        self.fade_sample_button = make(
+            "fade", "Fade In/Out", tt.FADE_SAMPLE_BUTTON, self._confirm_fade_sample
+        )
+        self.normalize_sample_button = make(
+            "normalize",
+            "Normalise",
+            tt.NORMALIZE_SAMPLE_BUTTON,
+            self._confirm_normalize_sample,
+        )
+        self.filter_sample_button = make(
+            "filter", "Filter\u2026", tt.FILTER_SAMPLE_BUTTON, self._confirm_filter_sample
+        )
+        self.time_stretch_button = make(
+            "stretch",
+            "Stretch / Pitch\u2026",
+            tt.TIME_STRETCH_BUTTON,
+            self._confirm_time_stretch,
+        )
+        self.reverb_button = make(
+            "reverb",
+            "Reverb\u2026",
+            tt.REVERB_BUTTON,
+            self._confirm_reverb,
+        )
+        self.duplicate_sample_button = make(
+            "duplicate",
+            "Duplicate",
+            tt.DUPLICATE_SAMPLE_BUTTON,
+            self._confirm_duplicate_sample,
+        )
+        self.slice_editor_button = make(
+            "slice", "Slice Editor\u2026", tt.SLICE_EDITOR_BUTTON, self._open_slice_editor
+        )
+        self.save_akai_button = make(
+            "save_akai",
+            "Save as Akai File\u2026",
+            tt.SAVE_AKAI_SAMPLE_BUTTON,
+            self._save_sample_as_akai_file,
+        )
+        self.load_akai_button = make(
+            "load_akai",
+            "Load Akai File\u2026",
+            tt.LOAD_AKAI_SAMPLE_BUTTON,
+            self._load_akai_sample_from_file,
+        )
+        self.external_edit_button = make(
+            "external_edit",
+            "Edit in External App\u2026",
+            tt.EXTERNAL_EDIT_BUTTON,
+            self._edit_in_external_app,
+        )
+        self.external_load_button = make(
+            "external_load",
+            "Load Edited Audio",
+            tt.EXTERNAL_LOAD_BUTTON,
+            self._load_edited_audio,
+        )
+        # The working copy: shown only while the selected sample has edits that
+        # are not on the sampler (see _StagedEdit)
+        self.undo_edits_button = make(
+            "stage_undo", "Undo", tt.STAGE_UNDO_BUTTON, self._undo_staged
+        )
+        self.send_edits_button = make(
+            "stage_send", "Send to Sampler", tt.STAGE_SEND_BUTTON, self._send_staged_to_sampler
+        )
+        self.send_edits_as_new_button = make(
+            "stage_new",
+            "Send as New Sample\u2026",
+            tt.SEND_AS_NEW_SAMPLE_BUTTON,
+            self._send_staged_as_new_sample,
+        )
+        self.revert_edits_button = make(
+            "stage_revert", "Revert", tt.STAGE_REVERT_BUTTON, self._revert_staged
+        )
+        # The working-copy strip: ALWAYS shown, so the card never changes height. Quiet ("Original from the sampler", its buttons off)
+        # until the sample has unsent edits, then tinted with the warning colour; the QSS keys off the "unsent" property.
+        self._staged_banner = QFrame()
+        self._staged_banner.setObjectName("workingCopyStrip")
+        self._staged_banner.setProperty("unsent", False)
+        strip = QHBoxLayout(self._staged_banner)
+        strip.setContentsMargins(10, 6, 8, 6)
+        strip.setSpacing(8)
+        self._working_copy_dot = QLabel("\u25cf")
+        self._working_copy_dot.setObjectName("unsentDot")
+        self._working_copy_dot.setVisible(False)
+        self._working_copy_label = QLabel("Original from the sampler")
+        self._working_copy_label.setObjectName("workingCopyLabel")
+        strip.addWidget(self._working_copy_dot)
+        strip.addWidget(self._working_copy_label, 1)
+        self.send_edits_button.setProperty("primary", True)  # the filled one (QSS), while enabled
+        for button in (
+            self.undo_edits_button,
+            self.send_edits_button,
+            self.send_edits_as_new_button,
+            self.revert_edits_button,
+        ):
+            strip.addWidget(button)
+
+        # Two body rows under the strip, their buttons starting at one x: what changes the audio here, and everything else
+        edit_sample_grid = QGridLayout()
+        edit_sample_grid.setHorizontalSpacing(12)
+        edit_sample_grid.setVerticalSpacing(8)
+        # what the external app round trip is waiting for (see _refresh_external_edit_buttons): inline at the end of the last row, so
+        # it appearing never changes the card's height
+        self._external_hint = QLabel()
+        self._external_hint.setObjectName("mutedLabel")
+        # never sets the page's width: a long app name is clipped (its tooltip has the whole text) rather than adding a scroll bar
+        self._external_hint.setSizePolicy(
+            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred
+        )
+        self._external_hint.setVisible(False)
+        for row, (label, tooltip, groups) in enumerate(_EDIT_SAMPLE_ROWS):
+            name_label = QLabel(label)
+            name_label.setFixedWidth(_EDIT_SAMPLE_LABEL_WIDTH)
+            name_label.setToolTip(tooltip)
+            buttons_row = QHBoxLayout()
+            buttons_row.setSpacing(8)
+            for group_index, keys in enumerate(groups):
+                if group_index:
+                    divider = QFrame()
+                    divider.setObjectName("groupDivider")
+                    divider.setFixedWidth(1)
+                    divider.setMinimumHeight(22)
+                    buttons_row.addSpacing(4)
+                    buttons_row.addWidget(divider)
+                    buttons_row.addSpacing(4)
+                for key in keys:
+                    buttons_row.addWidget(self._sample_edit_controls[key][0])
+            if row == len(_EDIT_SAMPLE_ROWS) - 1:
+                # the hint takes the rest of the row (stretch 1) - with a plain trailing stretch too, an Ignored-policy label can be
+                # handed no width at all
+                buttons_row.addSpacing(8)
+                buttons_row.addWidget(self._external_hint, 1)
+            else:
+                buttons_row.addStretch()
+            edit_sample_grid.addWidget(name_label, row, 0)
+            edit_sample_grid.addLayout(buttons_row, row, 1)
+        edit_sample_grid.setColumnStretch(1, 1)
+        edit_sample_content = QVBoxLayout()
+        edit_sample_content.setSpacing(8)
+        edit_sample_content.addWidget(self._staged_banner)
+        edit_sample_content.addLayout(edit_sample_grid)
+        edit_sample_card = self._build_section_card("Edit Sample", edit_sample_content)
+        # collapsed, it must still say there are unsent edits (see _sync_edit_sample_card)
+        self._edit_sample_card = edit_sample_card
+        self._edit_card_staged = False
 
         # two section cards, same style as the Programs tab's own (see
         # _build_section_card) - one for the loop editor itself, one for
@@ -6141,9 +7107,8 @@ class ProgramEditorWindow(QMainWindow):
         loop_controls_content.addWidget(scrollbar_container)
         loop_controls_content.addLayout(legend_row)
         loop_controls_content.addLayout(loop_meta_row)
-        loop_controls_content.addLayout(sample_edit_row)
         loop_controls_card = self._build_section_card(
-            "Loop Controls", loop_controls_content
+            "Loop Controls", loop_controls_content, collapsible=False
         )
 
         # a small, read-only pane showing the actual SPLICE a loop makes -
@@ -6156,16 +7121,24 @@ class ProgramEditorWindow(QMainWindow):
         self.loop_preview = LoopJoinPreview()
         loop_preview_row = QHBoxLayout()
         loop_preview_row.addWidget(self.loop_preview)
-        loop_preview_card = self._build_section_card("Loop Preview", loop_preview_row)
+        # tiny zoom controls right beside the title (they take no room from the preview); the zoom itself lives in the widget, which
+        # also answers Ctrl+scroll and a trackpad pinch
+        loop_preview_zoom = LoopPreviewZoomControls(self.loop_preview)
+        self.loop_preview.zoom_changed.connect(self._refresh_loop_preview_for_zoom)
+        loop_preview_card = self._build_section_card(
+            "Loop Preview", loop_preview_row, header_widgets=(loop_preview_zoom,)
+        )
 
         tune_card = self._build_section_card("Root Note & Tune", tune_meta_row)
+        # half the page width each, one height
+        equalize_card_heights(loop_preview_card, tune_card)
 
         # the right margin leaves a gap between the cards and the scrollbar below
         waveform_column = QVBoxLayout()
         style_card_page_layout(waveform_column)
         waveform_column.addWidget(loop_controls_card)
-        waveform_column.addWidget(loop_preview_card)
-        waveform_column.addWidget(tune_card)
+        waveform_column.addWidget(edit_sample_card)
+        waveform_column.addLayout(build_paired_row(loop_preview_card, tune_card))
         waveform_column.addStretch()
         waveform_container = QWidget()
         waveform_container.setLayout(waveform_column)
@@ -6192,6 +7165,14 @@ class ProgramEditorWindow(QMainWindow):
         self._multi_pan_knobs = []
         self._multi_level_value_labels = []
         self._multi_pan_value_labels = []
+        # per-part priority, play range (low/high note), transpose and tune: written the same debounced way as level and pan
+        self._multi_priority_combos = []
+        self._multi_low_spins = []
+        self._multi_high_spins = []
+        self._multi_transpose_knobs = []
+        self._multi_transpose_value_labels = []
+        self._multi_tune_knobs = []
+        self._multi_tune_value_labels = []
 
         page = QWidget()
         layout = QVBoxLayout(page)
@@ -6203,12 +7184,28 @@ class ProgramEditorWindow(QMainWindow):
         # same "commit once, on Enter/focus-loss" reasoning as
         # program_name_edit - see the comment where that one is wired
         self.multi_name_edit.editingFinished.connect(self._commit_multi_name)
+        # Save Multi to File: reads the resident multi (read only) and writes a 4096-byte .m3 (core/akai_multi_file.py). Also in the File menu.
+        self._save_multi_action = QAction("Save Multi to File...", self)
+        self._save_multi_action.setToolTip(tt.SAVE_MULTI_BUTTON)
+        self._save_multi_action.triggered.connect(self._save_multi_to_file)
+        self.save_multi_button = QPushButton("Save to File...")
+        self.save_multi_button.setToolTip(tt.SAVE_MULTI_BUTTON)
+        self.save_multi_button.clicked.connect(self._save_multi_action.trigger)
+        # Load Multi from File: asks first, saves the resident multi, writes the fields whose writes were checked on a unit, assigns resident programs (core/akai_multi_file.py)
+        self._load_multi_action = QAction("Load Multi from File...", self)
+        self._load_multi_action.setToolTip(tt.LOAD_MULTI_BUTTON)
+        self._load_multi_action.triggered.connect(self._load_multi_from_file)
+        self.load_multi_button = QPushButton("Load from File...")
+        self.load_multi_button.setToolTip(tt.LOAD_MULTI_BUTTON)
+        self.load_multi_button.clicked.connect(self._load_multi_action.trigger)
         name_row = QHBoxLayout()
         name_row.setSpacing(10)
         name_label = QLabel("<b>Multi Name</b>")
         name_row.addWidget(name_label)
         name_row.addWidget(self.multi_name_edit)
         name_row.addStretch()
+        name_row.addWidget(self.load_multi_button)
+        name_row.addWidget(self.save_multi_button)
         layout.addLayout(name_row)
         layout.addSpacing(6)
 
@@ -6225,11 +7222,24 @@ class ProgramEditorWindow(QMainWindow):
         level_header.setFixedWidth(60)
         pan_header = QLabel("<b>Pan</b>")
         pan_header.setFixedWidth(60)
+        range_header = QLabel("<b>Key range</b>")
+        range_header.setFixedWidth(self._MULTI_RANGE_WIDTH)
+        priority_header = QLabel("<b>Priority</b>")
+        priority_header.setFixedWidth(self._MULTI_PRIORITY_WIDTH)
+        transpose_header = QLabel("<b>Semi</b>")
+        transpose_header.setFixedWidth(60)
+        tune_header = QLabel("<b>Cents</b>")
+        tune_header.setFixedWidth(60)
+        # Part | Program | Level | Pan | Channel | Key range | Semi | Cents | Priority (the knobs sit apart from the channel / range controls)
         header_row.addWidget(part_header)
         header_row.addWidget(program_header, stretch=1)
-        header_row.addWidget(channel_header)
         header_row.addWidget(level_header)
         header_row.addWidget(pan_header)
+        header_row.addWidget(channel_header)
+        header_row.addWidget(range_header)
+        header_row.addWidget(transpose_header)
+        header_row.addWidget(tune_header)
+        header_row.addWidget(priority_header)
         layout.addLayout(header_row)
 
         for part_index in range(MULTI_PART_COUNT):
@@ -6264,12 +7274,38 @@ class ProgramEditorWindow(QMainWindow):
             )
             pan_knob.setToolTip(tt.MULTI_PART_PAN_KNOB)
 
+            low_spin, high_spin, range_widget = self._build_multi_part_range()
+            priority_combo = QComboBox()
+            for label, raw in self._MULTI_PRIORITIES:
+                priority_combo.addItem(label, raw)
+            priority_combo.setFixedWidth(self._MULTI_PRIORITY_WIDTH)
+            priority_combo.setToolTip(tt.MULTI_PART_PRIORITY)
+            priority_combo.setCurrentIndex(priority_combo.findData(1))  # Norm, the sampler's default
+            transpose_knob, transpose_label, transpose_widget = self._build_multi_part_knob(-50, 50, default=0)
+            transpose_knob.setToolTip(tt.MULTI_PART_TRANSPOSE_KNOB)
+            transpose_label.setText(self._signed(0))
+            tune_knob, tune_label, tune_widget = self._build_multi_part_knob(-50, 50, default=0)
+            tune_knob.setToolTip(tt.MULTI_PART_TUNE_KNOB)
+            tune_label.setText(self._signed(0))
+
             row.addWidget(part_label)
             row.addWidget(program_combo, stretch=1)
-            row.addWidget(channel_combo)
             row.addWidget(level_widget)
             row.addWidget(pan_widget)
+            row.addWidget(channel_combo)
+            row.addWidget(range_widget)
+            row.addWidget(transpose_widget)
+            row.addWidget(tune_widget)
+            row.addWidget(priority_combo)
             layout.addLayout(row)
+
+            self._multi_priority_combos.append(priority_combo)
+            self._multi_low_spins.append(low_spin)
+            self._multi_high_spins.append(high_spin)
+            self._multi_transpose_knobs.append(transpose_knob)
+            self._multi_transpose_value_labels.append(transpose_label)
+            self._multi_tune_knobs.append(tune_knob)
+            self._multi_tune_value_labels.append(tune_label)
 
             self._multi_program_combos.append(program_combo)
             self._multi_channel_combos.append(channel_combo)
@@ -6317,11 +7353,88 @@ class ProgramEditorWindow(QMainWindow):
                 lambda z=part_index: self._flush_write(f"multipart_pan_{z}")
             )
 
+            priority_combo.currentIndexChanged.connect(
+                lambda _, z=part_index: self._schedule_write(
+                    "PRIORT",
+                    "multipart",
+                    self._multi_priority_combos[z].currentData(),
+                    index=z,
+                    debounce_key=f"multipart_priority_{z}",
+                )
+            )
+            low_spin.valueChanged.connect(lambda v, z=part_index: self._on_multi_part_range_changed(z, "low"))
+            high_spin.valueChanged.connect(lambda v, z=part_index: self._on_multi_part_range_changed(z, "high"))
+            # typed notes are applied on Enter / leaving the box, not per keystroke
+            low_spin.editingFinished.connect(lambda z=part_index: self._flush_write(f"multipart_playlo_{z}"))
+            high_spin.editingFinished.connect(lambda z=part_index: self._flush_write(f"multipart_playhi_{z}"))
+            for knob, label, field, key in (
+                (transpose_knob, transpose_label, "TRANSPOSE", "transpose"),
+                (tune_knob, tune_label, "PTUNOCM", "tune"),
+            ):
+                knob.valueChanged.connect(lambda v, lbl=label: lbl.setText(self._signed(v)))
+                knob.valueChanged.connect(
+                    lambda v, z=part_index, field=field, key=key: self._schedule_write(
+                        field, "multipart", v, index=z, debounce_key=f"multipart_{key}_{z}"
+                    )
+                )
+                knob.sliderReleased.connect(lambda z=part_index, key=key: self._flush_write(f"multipart_{key}_{z}"))
+
         layout.addStretch()
         # same wrap as the Programs tab's pages - see _build_samples_tab's own
         # comment on why (an explicit window setMinimumSize means a layout
         # can be squeezed below its own minimum instead of forcing a scroll)
         return self._build_scroll_area(page)
+
+    # Priority is raw 0-3 on the wire; widths keep the header labels above the controls
+    _MULTI_PRIORITIES = (("Low", 0), ("Norm", 1), ("High", 2), ("Hold", 3))
+    _MULTI_PRIORITY_WIDTH = 70
+    _MULTI_RANGE_WIDTH = 160
+
+    @staticmethod
+    def _signed(value):
+        """+7 / -15 / 0, the readout beside the transpose and tune knobs."""
+        return f"{value:+d}" if value else "0"
+
+    def _build_multi_part_range(self):
+        """Low and High note spin boxes (note names, 21-127) for one part's play range, in one fixed-width container."""
+        low = NoteSpinBox()
+        high = NoteSpinBox()
+        for spin, tip, value in ((low, tt.MULTI_PART_LOW_NOTE, 24), (high, tt.MULTI_PART_HIGH_NOTE, 127)):
+            spin.setRange(21, 127)
+            spin.setValue(value)
+            spin.setFixedWidth(68)
+            spin.setToolTip(tip)
+            spin.setKeyboardTracking(False)
+        widget = QWidget()
+        widget.setObjectName("transparentContainer")
+        widget.setFixedWidth(self._MULTI_RANGE_WIDTH)
+        row = QHBoxLayout(widget)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(4)
+        row.addWidget(low)
+        row.addWidget(QLabel("-"))
+        row.addWidget(high)
+        row.addStretch()
+        return low, high, widget
+
+    def _on_multi_part_range_changed(self, part_index, which):
+        """A play-range edit. Low can't pass High (and the other way round): the other end is pushed along, as the key range does on the Keygroup tab. The pushed end is written
+        first, so the sampler never holds a range with Low above High."""
+        low, high = self._multi_low_spins[part_index], self._multi_high_spins[part_index]
+        if which == "low" and low.value() > high.value():
+            high.blockSignals(True)
+            high.setValue(low.value())
+            high.blockSignals(False)
+            self._schedule_write("PLAYHI", "multipart", high.value(), index=part_index, debounce_key=f"multipart_playhi_{part_index}")
+            self._flush_write(f"multipart_playhi_{part_index}")
+        elif which == "high" and high.value() < low.value():
+            low.blockSignals(True)
+            low.setValue(high.value())
+            low.blockSignals(False)
+            self._schedule_write("PLAYLO", "multipart", low.value(), index=part_index, debounce_key=f"multipart_playlo_{part_index}")
+            self._flush_write(f"multipart_playlo_{part_index}")
+        spin, field = (low, "PLAYLO") if which == "low" else (high, "PLAYHI")
+        self._schedule_write(field, "multipart", spin.value(), index=part_index, debounce_key=f"multipart_{field.lower()}_{part_index}")
 
     def _on_multi_part_channel_changed(self, part_index):
         channel = self._multi_channel_combos[part_index].currentData()
@@ -6516,6 +7629,41 @@ class ProgramEditorWindow(QMainWindow):
             key, param_name, region, program_index, value, keygroup_index
         )
 
+    def _wire_envelope_graph(self, graph, controls):
+        # `controls`: {the graph's value name: (knob, its readout label, keygroup field)}. While the pointer drags a handle the knobs and readouts follow
+        # at once but NOTHING is sent (their valueChanged is blocked, which is also what schedules a write); on release the graph says which values
+        # changed and each goes through the same write path a knob release uses.
+        graph.set_defaults({name: knob.defaultValue() for name, (knob, _label, _field) in controls.items()})
+        graph.values_changed.connect(lambda values: self._on_envelope_graph_values(controls, values))
+        graph.edit_committed.connect(lambda values: self._on_envelope_graph_committed(controls, values))
+        self._envelope_graphs.append(graph)
+
+    def _on_envelope_graph_values(self, controls, values):
+        for name, value in values.items():
+            knob, label, _field = controls[name]
+            knob.blockSignals(True)
+            knob.setValue(value)
+            knob.blockSignals(False)
+            label.setText(str(value))
+
+    def _on_envelope_graph_committed(self, controls, values):
+        keygroup_index = self.keygroup_list.currentRow()
+        if keygroup_index < 0:
+            return
+        debug_log.get_logger().info(
+            f"ProgramEditor: envelope graph edit on keygroup {keygroup_index}: "
+            + ", ".join(f"{controls[name][2]}={value}" for name, value in values.items())
+        )
+        for name, value in values.items():
+            _knob, _label, field = controls[name]
+            self._schedule_write(field, "keygroup", value, keygroup_index=keygroup_index)
+            self._flush_write(field)
+
+    def _set_envelope_graphs_editable(self, editable):
+        # a graph edits only the keygroup whose values it is showing: off from the moment another one is chosen until its values have loaded
+        for graph in self._envelope_graphs:
+            graph.set_editable(editable)
+
     def _on_env1_knob_changed(self):
         # redraws the graph immediately as any ADSR knob is dragged - the
         # actual hardware write is throttled separately, on sliderReleased
@@ -6683,6 +7831,7 @@ class ProgramEditorWindow(QMainWindow):
         previous_row = self.sample_list_widget.currentRow()
         previous_sample = self._sample_name_at_row(previous_row)
         self._sample_list = samples
+        self._worker.submit_memory_status()
 
         # a sample's INDEX is what addresses its header/audio (see
         # _load_sample_waveform) and that index can mean something
@@ -6696,9 +7845,11 @@ class ProgramEditorWindow(QMainWindow):
             for name, audio in self._retained_sample_audio.items()
             if name in samples
         }
+        self._prune_staged_edits(samples)
         self._sample_list_generation += 1
         generation = self._sample_list_generation
         self._sample_row_labels = {}
+        self._sample_row_dots = {}
         self.sample_list_widget.blockSignals(True)
         self.sample_list_widget.clear()
         for name in samples:
@@ -6712,7 +7863,10 @@ class ProgramEditorWindow(QMainWindow):
             item = QListWidgetItem()
             self.sample_list_widget.addItem(item)
             row_widget, name_label, duration_label = (
-                build_sample_list_row_widget(name)
+                build_sample_list_row_widget(name, with_unsent_dot=True)
+            )
+            self._sample_row_dots[self.sample_list_widget.row(item)] = (
+                row_widget.unsent_dot
             )
             item.setSizeHint(row_widget.sizeHint())
             self.sample_list_widget.setItemWidget(item, row_widget)
@@ -6722,6 +7876,7 @@ class ProgramEditorWindow(QMainWindow):
                 duration_label,
             )
         self.sample_list_widget.blockSignals(False)
+        self._update_staged_row_labels()
         # duration isn't in the name/list payload itself - fetch it
         # separately per sample (lightweight, 2 fields, not the full
         # 11-field sample_detail - see submit_sample_length's own comment)
@@ -6784,6 +7939,7 @@ class ProgramEditorWindow(QMainWindow):
         ):
             self.sample_list_widget.setCurrentRow(0)
         self._update_zoom_actions_enabled()
+        self._update_sample_actions_enabled()
 
     def _update_zoom_actions_enabled(self):
         # the &View menu's Zoom In/Out/to Fit act on self.waveform_view
@@ -6879,6 +8035,19 @@ class ProgramEditorWindow(QMainWindow):
             "sbandw": values["SBANDW"],
         }
         has_audio = self._attach_retained_audio(sample_index, entry)
+        staged = self._staged_edits.get(self._sample_name_at_row(sample_index))
+        if staged is not None:
+            # the sampler's header says what it holds; the working copy is what
+            # is shown and edited (the header's tune/root/loop type still apply)
+            self._apply_staged_to_entry(entry, staged)
+            frame_count, start, loop_start, loop_end, end = (
+                entry["frame_count"],
+                entry["start"],
+                entry["loop_start"],
+                entry["loop_end"],
+                entry["end"],
+            )
+            has_audio = True
         self._sample_waveform_cache[sample_index] = entry
         if sample_index == self.sample_list_widget.currentRow():
             self._set_marker_spinbox_range(frame_count)
@@ -6960,22 +8129,19 @@ class ProgramEditorWindow(QMainWindow):
         self._set_sample_edit_buttons_enabled(False)
 
     def _set_sample_edit_buttons_enabled(self, enabled):
-        # Trim/Reverse/Fade/Normalise/Filter need real audio in memory to
-        # transform, not just header-only markers - has_waveform(), same
-        # gate mouseDoubleClickEvent uses to decide whether a double-click
-        # should even try loading audio again
-        self.trim_sample_button.setEnabled(enabled)
-        self.reverse_sample_button.setEnabled(enabled)
-        self.fade_sample_button.setEnabled(enabled)
-        self.normalize_sample_button.setEnabled(enabled)
-        self.filter_sample_button.setEnabled(enabled)
-        # Duplicate Sample needs the same loaded audio (it re-sends it
-        # under a new name - see its own construction comment) AND is
-        # unavailable in demo mode (DemoBridge has no add-sample
-        # primitive, same reasoning as _duplicate_program_action/
+        # Every sample action needs real audio in memory to work on, not
+        # just header-only markers - has_waveform(), same gate
+        # mouseDoubleClickEvent uses to decide whether a double-click should
+        # even try loading audio again
+        set_enabled = self._set_sample_control_enabled
+        for key in ("trim", "reverse", "fade", "normalize", "filter", "stretch", "reverb"):
+            set_enabled(key, enabled)
+        # Duplicate Sample re-sends the loaded audio under a new name AND is
+        # unavailable in demo mode (DemoBridge has no add-sample primitive,
+        # same reasoning as _duplicate_program_action/
         # _duplicate_keygroup_action in _update_list_context_actions_enabled)
         demo_mode = bool(os.environ.get("AKAISDS_DEMO_SAMPLER"))
-        self.duplicate_sample_button.setEnabled(enabled and not demo_mode)
+        set_enabled("duplicate", enabled and not demo_mode)
         # Unlike Duplicate Sample, the Slice Editor is NOT all-or-nothing in
         # demo mode: placing/dragging/previewing slices needs only the
         # audio already in memory, nothing hardware-shaped. Only its Export
@@ -6983,11 +8149,156 @@ class ProgramEditorWindow(QMainWindow):
         # primitive Duplicate Sample needs (DemoBridge has none) - so the
         # button itself stays enabled here, and SliceEditorWindow disables
         # just its own Export button when demo_mode (see _open_slice_editor).
-        self.slice_editor_button.setEnabled(enabled)
-        # same has_waveform() gate as everything above - Detect Root Note
-        # needs real audio to analyse, but (unlike Duplicate/Export) never
-        # needs actual hardware, so no demo_mode restriction here
-        self.detect_root_note_button.setEnabled(enabled)
+        set_enabled("slice", enabled)
+        # Detect Root Note needs real audio to analyse, but (unlike
+        # Duplicate/Export) never needs actual hardware, so no demo_mode
+        # restriction here
+        set_enabled("detect", enabled)
+        # saving only reads (the sampler's header) and writes a file, so it works in demo mode too
+        set_enabled("save_akai", enabled)
+        # loading makes a NEW sample from a file, so it needs no sample or audio - but, like Duplicate, no demo mode (the DemoBridge can't add one)
+        set_enabled("load_akai", not demo_mode)
+        self._sample_edit_ready = enabled
+        self._refresh_external_edit_buttons()
+        self._refresh_staged_controls()
+
+    def _make_sample_edit_control(self, key, text, tooltip, slot):
+        # a sample action is a button (the Edit Sample card, or Root Note &
+        # Tune) AND a QAction (the Sample menu and the sample list's
+        # right-click menu) that do the same thing and are enabled together -
+        # see _set_sample_control_enabled. No shortcuts on purpose.
+        button = QPushButton(text)
+        button.setToolTip(tooltip)
+        button.setEnabled(False)
+        button.clicked.connect(slot)
+        action = QAction(text, self)
+        action.setToolTip(tooltip)
+        action.setEnabled(False)
+        action.triggered.connect(slot)
+        self._sample_edit_controls[key] = (button, action)
+        self._sample_control_wanted[key] = False
+        return button
+
+    def _on_samples_tab(self):
+        # None of the attributes exist yet while the tabs are being built
+        tabs = getattr(self, "main_tabs", None)
+        index = getattr(self, "_samples_tab_index", None)
+        return tabs is not None and index is not None and tabs.currentIndex() == index
+
+    def _set_sample_control_enabled(self, key, enabled):
+        button, _action = self._sample_edit_controls[key]
+        self._sample_control_wanted[key] = bool(enabled)
+        # (a button that turns itself off when clicked - Load Edited Audio, Undo, Revert - must not hand its focus on: see
+        # set_enabled_without_scrolling)
+        set_enabled_without_scrolling(button, enabled)
+        self._update_sample_actions_enabled()
+
+    def _build_sample_menu(self):
+        # The same actions as the Edit Sample card's buttons and the sample
+        # list's right-click menu (all share one QAction each - see
+        # _make_sample_edit_control). Enabled only on the Samples tab and not
+        # while a transfer runs (see _update_sample_actions_enabled,
+        # _set_hardware_busy_ui, _sync_window_menu_busy_state). Rename/Delete
+        # here are menu-only twins of the list's own actions (those keep their
+        # list-scoped Delete shortcut).
+        self._load_audio_action = QAction("Load Audio", self)
+        self._load_audio_action.setToolTip(tt.LOAD_AUDIO_ACTION)
+        self._load_audio_action.setEnabled(False)
+        self._load_audio_action.triggered.connect(self._load_sample_waveform)
+        self._menu_rename_sample_action = QAction("Rename Sample...", self)
+        self._menu_rename_sample_action.setEnabled(False)
+        self._menu_rename_sample_action.triggered.connect(self._confirm_rename_sample)
+        self._menu_delete_sample_action = QAction("Delete Sample...", self)
+        self._menu_delete_sample_action.setEnabled(False)
+        self._menu_delete_sample_action.triggered.connect(self._confirm_delete_sample)
+
+        self._sample_menu = self.menuBar().addMenu("&Sample")
+        self._sample_menu.addAction(self._load_audio_action)
+        for group in _SAMPLE_MENU_GROUPS:
+            self._sample_menu.addSeparator()
+            for key in group:
+                self._sample_menu.addAction(self._sample_edit_controls[key][1])
+        self._sample_menu.addSeparator()
+        self._sample_menu.addAction(self._menu_rename_sample_action)
+        self._sample_menu.addAction(self._menu_delete_sample_action)
+
+        # ...and in the sample list's right-click menu, above its own Rename/
+        # Delete. A right-click selects the row under it, but the actions need
+        # the audio loaded: "Load Audio" is first for that reason.
+        first = self._rename_sample_action
+        for action in self._sample_list_context_actions():
+            self.sample_list_widget.insertAction(first, action)
+        self._update_sample_actions_enabled()
+
+    def _sample_list_context_actions(self):
+        actions = [self._load_audio_action]
+        for group in _SAMPLE_MENU_GROUPS:
+            separator = QAction(self.sample_list_widget)
+            separator.setSeparator(True)
+            actions.append(separator)
+            actions.extend(self._sample_edit_controls[key][1] for key in group)
+        separator = QAction(self.sample_list_widget)
+        separator.setSeparator(True)
+        actions.append(separator)
+        return actions
+
+    def _update_sample_actions_enabled(self):
+        # The menu/right-click actions follow the buttons, but only on the
+        # Samples tab: from another tab a menu item would act, destructively,
+        # on a sample the user can't see (same idea as
+        # _update_zoom_actions_enabled).
+        if not hasattr(self, "_menu_delete_sample_action"):
+            return  # still building
+        on_tab = self._on_samples_tab()
+        for key, (_button, action) in self._sample_edit_controls.items():
+            action.setEnabled(self._sample_control_wanted.get(key, False) and on_tab)
+        # Load Audio is what a double-click on the waveform does: offered while
+        # the header is known and the audio isn't loaded (every edit needs it)
+        has_sample = self.sample_list_widget.currentRow() >= 0
+        can_load = (
+            has_sample
+            and self.waveform_view.has_header()
+            and not self.waveform_view.has_waveform()
+        )
+        self._load_audio_action.setEnabled(can_load and on_tab)
+        self._menu_rename_sample_action.setEnabled(has_sample and on_tab)
+        self._menu_delete_sample_action.setEnabled(has_sample and on_tab)
+
+    def _refresh_external_edit_buttons(self):
+        # Edit needs the audio in memory like the other edits; Send also needs
+        # the editor to have saved over the exported file for THIS sample
+        # (is_ready re-reads the file, so it doesn't rely on a watcher event)
+        ready = self._sample_edit_ready
+        name = self._sample_name_at_row(self.sample_list_widget.currentRow())
+        saved = bool(name) and self._external_edit.is_ready(name)
+        self._set_sample_control_enabled("external_edit", ready)
+        self._set_sample_control_enabled("external_load", ready and saved)
+        # the filled (primary) look once there is something to load
+        primary = bool(ready and saved)
+        if self.external_load_button.property("primary") != primary:
+            self.external_load_button.setProperty("primary", primary)
+            self._repolish(self.external_load_button)
+        # Settings > "Load automatically when the file is saved": once the saved file has stopped changing, load it without the click
+        if (
+            primary
+            and self._external_edit.is_stable(name)
+            and not self._auto_load_scheduled
+            and app_config.get_saved_external_auto_load()
+        ):
+            self._auto_load_scheduled = True
+            QTimer.singleShot(0, lambda n=name: self._auto_load_edited_audio(n))
+        # what the round trip is waiting for
+        app = self._external_waiting.get(name)
+        if app is None:
+            self._external_hint.setVisible(False)
+        else:
+            self._external_hint.setText(
+                "Saved \u2013 ready to load"
+                if saved
+                else f"Waiting for you to save in {app}"
+            )
+            self._external_hint.setToolTip(self._external_hint.text())
+            self._external_hint.setVisible(True)
 
     def _update_sample_meta_controls(
         self, sptype, spitch, shlto=None, stuno=None, ldwell1=None
@@ -7156,7 +8467,13 @@ class ProgramEditorWindow(QMainWindow):
             analysis_samples, entry["framerate"], anchor
         )
 
+        sample_name = self._sample_name_at_row(self.sample_list_widget.currentRow())
         if result is None or result[2] < root_note_detection.CONFIDENCE_THRESHOLD:
+            debug_log.get_logger().info(
+                f"ProgramEditor: root note detection for {sample_name!r}: no reliable pitch "
+                f"({len(analysis_samples)} frames analysed at {entry['framerate']} Hz, "
+                f"anchor {midi_note_to_name(anchor)}, result {result})"
+            )
             # per direct user request: nothing actionable here - no note,
             # no confidence number, no Yes/No choice to make. Only an
             # acknowledgement that detection was attempted and came up
@@ -7179,6 +8496,11 @@ class ProgramEditorWindow(QMainWindow):
             "Set this sample's root note and tune to match?",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.Yes,
+        )
+        debug_log.get_logger().info(
+            f"ProgramEditor: root note detection for {sample_name!r}: {note_name} {cents:+.0f} cents, "
+            f"confidence {confidence:.2f} ({len(analysis_samples)} frames analysed, anchor {midi_note_to_name(anchor)}) - "
+            f"{'applied' if answer == QMessageBox.StandardButton.Yes else 'declined'}"
         )
         if answer != QMessageBox.StandardButton.Yes:
             return
@@ -7322,12 +8644,18 @@ class ProgramEditorWindow(QMainWindow):
             # out, they don't draw at all - see set_loop_enabled)
             self.loop_preview.clear_no_loop()
             return
-        end_samples = self.waveform_view.samples_before(loop_end, HALF_WINDOW_FRAMES)
-        start_samples = self.waveform_view.samples_after(loop_start, HALF_WINDOW_FRAMES)
+        frames = self.loop_preview.half_window()  # frames each side, at the preview's own zoom
+        end_samples = self.waveform_view.samples_before(loop_end, frames)
+        start_samples = self.waveform_view.samples_after(loop_start, frames)
         if end_samples is None or start_samples is None:
             self.loop_preview.clear()
         else:
             self.loop_preview.set_join(end_samples, start_samples)
+
+    def _refresh_loop_preview_for_zoom(self, _frames):
+        # the preview's zoom changed: ask for that many frames again, around the markers as they are now
+        markers = self.waveform_view.markers()
+        self._refresh_loop_preview(markers["loop_start"], markers["loop_end"])
 
     def _on_loop_preview_marker_dragged(self, name, delta):
         # LoopJoinPreview owns no marker state itself - it only measures a
@@ -7548,6 +8876,9 @@ class ProgramEditorWindow(QMainWindow):
         flush_timer = QTimer(self)
         flush_timer.timeout.connect(self._flush_live_chunks)
         flush_timer.start(_LIVE_CHUNK_FLUSH_MS)
+        # how late the GUI thread's own heartbeat runs during the load, in the log afterwards (core/ui_lag_probe.py)
+        lag_probe = LagProbe(f"audio load of sample {sample_index}", self)
+        lag_probe.start()
         try:
             which, args = self._wait_for_any_signal(
                 [
@@ -7568,6 +8899,8 @@ class ProgramEditorWindow(QMainWindow):
             self.status_bar.showMessage("Couldn't receive sample audio from hardware")
             return None, None
         finally:
+            lag_probe.stop()
+            lag_probe.deleteLater()
             sampler_controller.receive_progress.disconnect(progress_connection)
             sampler_controller.sample_chunk_received.disconnect(chunk_connection)
             flush_timer.stop()
@@ -7669,7 +9002,7 @@ class ProgramEditorWindow(QMainWindow):
         # to load in one step instead of waiting out a realistic transfer
         # each time they select one.
         total = len(samples)
-        instant = bool(os.environ.get("AKAISDS_DEMO_INSTANT"))
+        instant = demo_timing.is_instant()
         if instant:
             steps = 1
         else:
@@ -8008,20 +9341,7 @@ class ProgramEditorWindow(QMainWindow):
                 "Nothing to trim - Start/End already cover the whole sample"
             )
             return
-        sample_name = self._sample_name_at_row(sample_index)
-        answer = QMessageBox.question(
-            self,
-            "Trim Sample",
-            f'Trim "{sample_name}" down to the current Start/End markers '
-            f"({markers['start']}-{markers['end']} of {frame_count} frames)?\n\n"
-            "This overwrites the sample's audio on the sampler and cannot "
-            "be undone.",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.Yes,
-        )
-        if answer != QMessageBox.StandardButton.Yes:
-            return
-        self._perform_sample_edit(sample_index, sample_editing.trim_samples, "Trim")
+        self._apply_sample_edit(sample_index, sample_editing.trim_samples, "Trim")
 
     def _confirm_reverse_sample(self):
         sample_index = self.sample_list_widget.currentRow()
@@ -8031,19 +9351,7 @@ class ProgramEditorWindow(QMainWindow):
         if entry is None or len(entry["samples"]) <= 1:
             self.status_bar.showMessage("Nothing to reverse - sample is too short")
             return
-        sample_name = self._sample_name_at_row(sample_index)
-        answer = QMessageBox.question(
-            self,
-            "Reverse Sample",
-            f'Reverse "{sample_name}"\'s audio?\n\n'
-            "This overwrites the sample's audio on the sampler and cannot "
-            "be undone.",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.Yes,
-        )
-        if answer != QMessageBox.StandardButton.Yes:
-            return
-        self._perform_sample_edit(
+        self._apply_sample_edit(
             sample_index, sample_editing.reverse_samples, "Reverse"
         )
 
@@ -8063,20 +9371,7 @@ class ProgramEditorWindow(QMainWindow):
                 "Nothing to fade - Start/End already cover the whole sample"
             )
             return
-        sample_name = self._sample_name_at_row(sample_index)
-        answer = QMessageBox.question(
-            self,
-            "Fade Sample",
-            f'Fade in "{sample_name}" from frame 0 up to Start ({markers["start"]}), '
-            f"and fade out from End ({markers['end']}) to the last frame?\n\n"
-            "This overwrites the sample's audio on the sampler and cannot "
-            "be undone.",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.Yes,
-        )
-        if answer != QMessageBox.StandardButton.Yes:
-            return
-        self._perform_sample_edit(
+        self._apply_sample_edit(
             sample_index, sample_editing.fade_in_out_samples, "Fade In/Out"
         )
 
@@ -8099,20 +9394,7 @@ class ProgramEditorWindow(QMainWindow):
         if peak >= sample_editing._MAX_AMPLITUDE:
             self.status_bar.showMessage("Sample is already normalised")
             return
-        sample_name = self._sample_name_at_row(sample_index)
-        answer = QMessageBox.question(
-            self,
-            "Normalise Sample",
-            f'Gain up "{sample_name}" so its loudest point hits maximum '
-            "amplitude?\n\n"
-            "This overwrites the sample's audio on the sampler and cannot "
-            "be undone.",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.Yes,
-        )
-        if answer != QMessageBox.StandardButton.Yes:
-            return
-        self._perform_sample_edit(
+        self._apply_sample_edit(
             sample_index, sample_editing.normalize_samples, "Normalise"
         )
 
@@ -8139,24 +9421,16 @@ class ProgramEditorWindow(QMainWindow):
         sample_name = self._sample_name_at_row(sample_index)
 
         dialog = FilterSampleDialog(
-            self, sample_name, entry["samples"], entry["framerate"]
+            self,
+            sample_name,
+            entry["samples"],
+            entry["framerate"],
+            pitch_shift_semitones=self._preview_pitch_shift_semitones(entry),
+            allow_new_sample=self._can_send_edit_as_new_sample(),
+            applies_to_working_copy=True,
         )
         if not dialog.exec():
             return
-
-        answer = QMessageBox.question(
-            self,
-            "Filter Sample",
-            f'Send the filtered audio for "{sample_name}" to the sampler '
-            "now?\n\n"
-            "This overwrites the sample's audio on the sampler and cannot "
-            "be undone.",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.Yes,
-        )
-        if answer != QMessageBox.StandardButton.Yes:
-            return
-
         # filter_samples needs framerate + both filters' own
         # enabled/cutoff/slope on top of the standard (samples, start,
         # loop_start, loop_end, end) shape _perform_sample_edit's
@@ -8174,9 +9448,618 @@ class ProgramEditorWindow(QMainWindow):
             lowpass_cutoff_hz=dialog.lowpass_cutoff_hz(),
             lowpass_slope_db_per_octave=dialog.lowpass_slope_db_per_octave(),
         )
-        self._perform_sample_edit(sample_index, transform, "Filter")
+        debug_log.get_logger().info(
+            f"Filter: {sample_name!r} high-pass "
+            f"{'%d Hz, %d dB/oct' % (dialog.highpass_cutoff_hz(), dialog.highpass_slope_db_per_octave()) if dialog.highpass_enabled() else 'off'}, low-pass "
+            f"{'%d Hz, %d dB/oct' % (dialog.lowpass_cutoff_hz(), dialog.lowpass_slope_db_per_octave()) if dialog.lowpass_enabled() else 'off'} "
+            f"({len(entry['samples'])} frames at {entry['framerate']} Hz){' - as a new sample' if dialog.send_as_new() else ''}"
+        )
+        if dialog.send_as_new():
+            self._send_edit_as_new_sample(
+                sample_index, entry, transform, "Filter", " FILT"
+            )
+            return
+        self._apply_sample_edit(sample_index, transform, "Filter")
+
+    def _send_edit_as_new_sample(self, sample_index, entry, transform, label, suffix):
+        # "Send as New Sample" in the Filter and Stretch / Pitch dialogs: the
+        # same edit, but sent as a NEW sample through the Duplicate Sample
+        # flow instead of replacing the original (which is never touched, so
+        # none of the replace path's send/delete/rename is involved). Name
+        # rules are Duplicate Sample's: no clash with a resident sample - two
+        # sharing a name make every zone using it ambiguous, and on an S1000
+        # the send would DELETE the other one.
+        current_name = self._sample_name_at_row(sample_index)
+        new_name = self._prompt_akai_name(
+            f"{label} - New Sample",
+            "New sample name:",
+            _duplicate_default_name(current_name, suffix),
+        )
+        if new_name is None:
+            return
+        if new_name in list(self._sample_list):
+            QMessageBox.warning(
+                self,
+                f"{label} - New Sample",
+                f'"{new_name}" is already in use by another resident '
+                "sample.\n\nTwo resident samples can't safely share a "
+                "name - pick a different one.",
+            )
+            return
+        sampler_controller = getattr(self._main_window, "sampler_controller", None)
+        if sampler_controller is None:
+            self.status_bar.showMessage(
+                f"Can't {label.lower()} - no Transfer Dashboard connection available"
+            )
+            return
+        if sampler_controller.is_transfer_busy():
+            self.status_bar.showMessage(
+                f"Can't {label.lower()} - a transfer is already in progress "
+                "on the Transfer Dashboard"
+            )
+            return
+        # not .markers(): see _perform_sample_edit for why the loop is clamped
+        markers = self.waveform_view.markers_with_loop_in_range()
+        self.waveform_view.set_loading(True)
+        self._set_hardware_busy_ui(True)
+        self.status_bar.showMessage(
+            f'{label} "{current_name}" as new sample "{new_name}" - this can '
+            "take a while and will freeze the interface..."
+        )
+        QApplication.processEvents()
+        try:
+            try:
+                new_samples, *new_markers = transform(
+                    entry["samples"],
+                    markers["start"],
+                    markers["loop_start"],
+                    markers["loop_end"],
+                    markers["end"],
+                )
+            except Exception:
+                debug_log.get_logger().error(
+                    f"_send_edit_as_new_sample: {label} raised", exc_info=True
+                )
+                self.status_bar.showMessage(
+                    f"{label} failed - unexpected error, see "
+                    f"{debug_log.LOG_PATH} for details"
+                )
+                return
+            self._perform_duplicate_sample_real(
+                entry,
+                sampler_controller,
+                current_name,
+                new_name,
+                samples=new_samples,
+                markers=dict(zip(_MARKER_KEYS, new_markers)),
+                label=label,
+            )
+            if new_name in self._sample_list:
+                # the result now exists as its own sample: the original goes back
+                # to what the sampler holds
+                self._discard_staged(current_name, restore_entry=True)
+        finally:
+            self._set_hardware_busy_ui(False)
+            self.waveform_view.set_loading(False)
+            self.sample_edit_progress.setVisible(False)
+
+    def _can_send_edit_as_new_sample(self):
+        # the same gate as the Duplicate Sample button: DemoBridge has no
+        # add-sample primitive
+        return not os.environ.get("AKAISDS_DEMO_SAMPLER")
+
+    def _confirm_time_stretch(self):
+        # same two-step shape as _confirm_filter_sample (a dialog with a
+        # Preview, then a plain confirmation), then the standard replace
+        sample_index = self.sample_list_widget.currentRow()
+        if sample_index < 0 or not self.waveform_view.has_waveform():
+            return
+        entry = self._sample_waveform_cache.get(sample_index)
+        if entry is None or entry["samples"] is None:
+            return
+        sample_name = self._sample_name_at_row(sample_index)
+        dialog = TimeStretchDialog(
+            self,
+            sample_name,
+            entry["samples"],
+            entry["framerate"],
+            pitch_shift_semitones=self._preview_pitch_shift_semitones(entry),
+            allow_new_sample=self._can_send_edit_as_new_sample(),
+            applies_to_working_copy=True,
+        )
+        if not dialog.exec():
+            return
+        kind, options = dialog.edit()
+        label = time_stretch.EDITS[kind][2]
+        if dialog.send_as_new():
+            self._send_edit_as_new_sample(
+                sample_index,
+                entry,
+                time_stretch.transform_for(kind, **options),
+                label,
+                time_stretch.EDITS[kind][1],
+            )
+            return
+        debug_log.get_logger().info(
+            f"TimeStretch: {sample_name!r} {kind} {options}, grain "
+            f"{dialog.grain_ms()} ms ({len(entry['samples'])} frames at "
+            f"{entry['framerate']} Hz)"
+        )
+        self._apply_sample_edit(
+            sample_index, time_stretch.transform_for(kind, **options), label
+        )
+
+    def _confirm_reverb(self):
+        # same shape as _confirm_time_stretch: a dialog with a Preview, then the edit goes to the working copy (or out as a new sample)
+        sample_index = self.sample_list_widget.currentRow()
+        if sample_index < 0 or not self.waveform_view.has_waveform():
+            return
+        entry = self._sample_waveform_cache.get(sample_index)
+        if entry is None or entry["samples"] is None:
+            return
+        sample_name = self._sample_name_at_row(sample_index)
+        dialog = ReverbDialog(
+            self,
+            sample_name,
+            entry["samples"],
+            entry["framerate"],
+            pitch_shift_semitones=self._preview_pitch_shift_semitones(entry),
+            allow_new_sample=self._can_send_edit_as_new_sample(),
+            applies_to_working_copy=True,
+        )
+        if not dialog.exec():
+            return
+        transform = reverb.transform_for(**dialog.options())
+        if dialog.send_as_new():
+            self._send_edit_as_new_sample(sample_index, entry, transform, "Reverb", " REV")
+            return
+        debug_log.get_logger().info(
+            f"Reverb: {sample_name!r} {dialog.summary()} ({len(entry['samples'])} frames at {entry['framerate']} Hz)"
+        )
+        self._apply_sample_edit(sample_index, transform, "Reverb")
+
+    def _edit_in_external_app(self):
+        sample_index = self.sample_list_widget.currentRow()
+        entry = self._sample_waveform_cache.get(sample_index)
+        if (
+            sample_index < 0
+            or entry is None
+            or entry["samples"] is None
+            or not self.waveform_view.has_waveform()
+        ):
+            return
+        name = self._sample_name_at_row(sample_index)
+        samples, framerate = entry["samples"], entry["framerate"]
+        problem = self._external_edit.open(
+            name,
+            name,
+            lambda path: sds_encoder.write_wav_file(
+                path, samples, framerate, bit_depth=16
+            ),
+        )
+        if problem:
+            self.status_bar.showMessage(problem)
+            return
+        editor_path = app_config.get_saved_external_editor()
+        hint = "" if editor_path else " (pick an editor in Settings)"
+        self.status_bar.showMessage(
+            f'Opened "{name}"{hint} - save it there, then click Load Edited Audio'
+        )
+        app_name = os.path.basename(editor_path.rstrip("/\\")) if editor_path else ""
+        if app_name.lower().endswith(".app"):
+            app_name = app_name[:-4]
+        self._external_waiting[name] = app_name or "your default app"
+        self._refresh_external_edit_buttons()
+
+    def _auto_load_edited_audio(self, name):
+        self._auto_load_scheduled = False
+        # not while this window is mid-operation, nor for a sample that is no longer the selected one: the refresh that follows a
+        # selection (or the end of the operation) looks again and loads it then
+        if getattr(self, "_hardware_busy_ui", False) or not self.main_tabs.isEnabled():
+            return
+        if self._sample_name_at_row(self.sample_list_widget.currentRow()) != name or not self._sample_edit_ready:
+            return
+        self._load_edited_audio_impl(auto=True)
+
+    def _load_edited_audio(self):
+        self._load_edited_audio_impl(auto=False)
+
+    def _load_edited_audio_impl(self, auto):
+        # The editor's saved file becomes the sample's WORKING COPY (see
+        # _StagedEdit): shown in the waveform, editable here, and sent to the
+        # sampler only by Send to Sampler / Send as New Sample.
+        sample_index = self.sample_list_widget.currentRow()
+        entry = self._sample_waveform_cache.get(sample_index)
+        if (
+            sample_index < 0
+            or entry is None
+            or entry["samples"] is None
+            or not self.waveform_view.has_waveform()
+        ):
+            return
+        name = self._sample_name_at_row(sample_index)
+        if not self._external_edit.is_ready(name):
+            self.status_bar.showMessage("Save the file in the editor first")
+            return
+        logger = debug_log.get_logger()
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)  # (a long file in another rate is resampled)
+        try:
+            channels, source_rate = external_edit.read_edited(
+                self._external_edit.path(name), entry["framerate"]
+            )
+        except ValueError as e:
+            logger.info(f"ExternalEdit: couldn't read the edited file for {name!r}: {e}")
+            self.status_bar.showMessage(f"Couldn't read the edited file: {e}")
+            return
+        finally:
+            QApplication.restoreOverrideCursor()
+        new_samples = external_edit.mix_to_mono(channels)
+        old_frames = len(entry["samples"])
+        m = self.waveform_view.markers_with_loop_in_range()
+        new_markers = external_edit.remap_markers(
+            old_frames,
+            len(new_samples),
+            m["start"],
+            m["loop_start"],
+            m["loop_end"],
+            m["end"],
+        )
+        logger.info(
+            f"ExternalEdit: {name!r} {'auto-' if auto else ''}loaded: {old_frames} -> {len(new_samples)} frames, "
+            f"{len(channels)} ch at {source_rate} Hz (sampler rate {entry['framerate']}), "
+            f"markers {tuple(m.values())} -> {new_markers}"
+        )
+        self._stage_working_copy(
+            sample_index, new_samples, dict(zip(_MARKER_KEYS, new_markers))
+        )
+        self._external_edit.mark_sent(name)  # Load waits for the next save
+        self._external_waiting.pop(name, None)
+        self._refresh_external_edit_buttons()
+        self.status_bar.showMessage(
+            f'Loaded the edited audio for "{name}" automatically - Undo goes back'
+            if auto
+            else f'Loaded the edited audio for "{name}" - not on the sampler yet'
+        )
+
+    # -- the working copy (unsent edits) ----------------------------------------------------------------------
+
+    def _apply_staged_to_entry(self, entry, staged):
+        entry["samples"] = staged.samples
+        entry["framerate"] = staged.framerate
+        entry["frame_count"] = len(staged.samples)
+        entry.update(staged.markers)
+
+    def _show_entry_audio(self, entry):
+        # the waveform + marker spinboxes for a cache entry whose audio changed
+        self._set_marker_spinbox_range(entry["frame_count"])
+        self.waveform_view.set_waveform(
+            entry["samples"],
+            entry["start"],
+            entry["loop_start"],
+            entry["loop_end"],
+            entry["end"],
+        )
+
+    def _read_sample_header_blocking(self, sample_index):
+        """The header fields (SBANDW, SSRATE, ...) of resident sample `sample_index`, read now through the worker; None if the read fails."""
+        for _attempt in range(2):
+            which, args = self._wait_for_any_signal(
+                [self._worker.sample_detail_loaded, self._worker.sample_detail_load_failed],
+                start=lambda: self._worker.submit_sample_detail(sample_index),
+                timeout_ms=20000,
+            )
+            if which != 0:
+                return None
+            if args[0] == sample_index:
+                return args[1]
+        return None
+
+    def _tuning_for_resent_sample(self, new_index, source_stuno, source_sbandw, source_rate):
+        """The raw STUNO to leave on a sample that was just SENT from another one's audio. The sent sample gets the bandwidth bucket the send
+        path chose (the nearest one to its rate, for a 16-bit Akai send - or whatever the sampler derives for a generic one), which need
+        not be the SOURCE's: an 11025 Hz sample the sampler imported itself has SBANDW 1 and a baseline of -24 semitones in its STUNO, but
+        a 16-bit send of the same rate lands on SBANDW 0 and a baseline of -12. Copying the source's STUNO across as it was played that
+        pair back an OCTAVE LOW (seen on a real S2000, 2026-10-13). What is carried over is the part of STUNO the USER chose - STUNO minus
+        the source's own baseline - on top of the new sample's baseline. Returns (STUNO raw, SBANDW the new sample has or None)."""
+        if source_sbandw is None:
+            return source_stuno, None  # nothing to compare against: as before
+        header = self._read_sample_header_blocking(new_index)
+        logger = debug_log.get_logger()
+        if header is None:
+            new_sbandw, new_rate = None, source_rate
+            logger.warning(f"tuning: couldn't read the header of the sent sample (index {new_index}) - keeping the source's STUNO")
+            return source_stuno, None
+        new_sbandw, new_rate = header["SBANDW"], header.get("SSRATE") or source_rate
+        user_semitones = self._sample_tune_offset_to_semitones(source_stuno) - baseline_semitones_for_bandwidth(
+            source_rate, source_sbandw
+        )
+        new_stuno = self._semitones_to_sample_tune_offset(
+            user_semitones + baseline_semitones_for_bandwidth(new_rate, new_sbandw)
+        )
+        logger.info(
+            f"tuning: sent sample (index {new_index}) lands at {new_rate} Hz, SBANDW {new_sbandw} (source: {source_rate} Hz, SBANDW "
+            f"{source_sbandw}, STUNO {source_stuno}) -> STUNO {new_stuno} (the sampler's own was {header.get('STUNO')})"
+        )
+        return new_stuno, new_sbandw
+
+    def _stage_working_copy(self, sample_index, samples, markers):
+        # Put `samples` (with `markers`: start/loop_start/loop_end/end) on the
+        # selected sample as its working copy. The first time, remember what the
+        # sampler holds. Nothing is sent.
+        name = self._sample_name_at_row(sample_index)
+        entry = self._sample_waveform_cache.get(sample_index)
+        if not name or entry is None or entry["samples"] is None:
+            return False
+        staged = self._staged_edits.get(name)
+        if staged is None:
+            staged = _StagedEdit(
+                samples=samples,
+                markers=dict(markers),
+                original_samples=entry["samples"],
+                original_framerate=entry["framerate"],
+                original_markers={key: entry[key] for key in _MARKER_KEYS},
+                original_frame_count=entry["frame_count"],
+            )
+            self._staged_edits[name] = staged
+        else:
+            staged.history.append((staged.samples, dict(staged.markers)))
+            del staged.history[:-_UNDO_LIMIT]
+        staged.samples = samples
+        staged.markers = dict(markers)
+        self._apply_staged_to_entry(entry, staged)
+        if sample_index == self.sample_list_widget.currentRow():
+            self._show_entry_audio(entry)
+        self._staged_changed()
+        return True
+
+    def _staged_changed(self):
+        self._update_staged_row_labels()
+        self._refresh_staged_controls()
+        self._update_sample_actions_enabled()
+
+    def _sampler_audio(self, name, entry):
+        # the audio the SAMPLER holds for `name`: the working copy's original
+        # while it has unsent edits, else the cache entry's
+        staged = self._staged_edits.get(name)
+        return staged.original_samples if staged is not None else entry["samples"]
+
+    def _discard_staged(self, name, restore_entry):
+        # Forget `name`'s working copy. restore_entry: also put the sampler's
+        # version back on its cache entry (Revert; a send that left the original
+        # alone) - False when the working copy IS what the sampler now holds.
+        staged = self._staged_edits.pop(name, None)
+        if staged is None:
+            return None
+        if restore_entry and name in self._sample_list:
+            index = self._sample_list.index(name)
+            entry = self._sample_waveform_cache.get(index)
+            if entry is not None:
+                entry["samples"] = staged.original_samples
+                entry["framerate"] = staged.original_framerate
+                entry["frame_count"] = staged.original_frame_count
+                entry.update(staged.original_markers)
+                if index == self.sample_list_widget.currentRow():
+                    self._show_entry_audio(entry)
+        self._staged_changed()
+        return staged
+
+    def _prune_staged_edits(self, names):
+        # a sample that is no longer on the sampler (deleted or renamed on the
+        # front panel) takes its unsent edits with it - but never while this
+        # window is mid-operation: a replace deletes the original and renames
+        # its copy back, so the name is missing from the list for a moment
+        if getattr(self, "_hardware_busy_ui", False):
+            return
+        gone = [name for name in self._staged_edits if name not in names]
+        for name in gone:
+            del self._staged_edits[name]
+        if gone:
+            self.status_bar.showMessage(
+                "Dropped the unsent edits of "
+                + ", ".join(f'"{name}"' for name in gone)
+                + " - no longer on the sampler"
+            )
+
+    def _update_staged_row_labels(self):
+        for row, (_generation, name_label, _duration) in self._sample_row_labels.items():
+            name = self._sample_name_at_row(row)
+            edited = name in self._staged_edits
+            name_label.setText(name)
+            name_label.setToolTip("Edited - not on the sampler yet" if edited else "")
+            dot = self._sample_row_dots.get(row)
+            if dot is not None:
+                dot.setVisible(edited)
+
+    def _sync_edit_sample_card(self, staged):
+        # The Edit Sample card holds the unsent-edits strip and Send to Sampler, so a collapsed card must not hide unsent work: it
+        # shows an amber dot beside its title, and opens (not remembered - it isn't the user's choice) when a working copy APPEARS.
+        # Only on that change, so a user who collapses it while editing is not fought on every refresh.
+        card = getattr(self, "_edit_sample_card", None)
+        if card is None:
+            return
+        card.set_attention(staged, "Edited \u2013 not on the sampler yet")
+        if staged and not self._edit_card_staged and card.is_collapsed():
+            card.set_collapsed(False, remember=False)
+        self._edit_card_staged = staged
+
+    def _refresh_staged_controls(self):
+        if not hasattr(self, "_staged_banner"):
+            return  # still building
+        name = self._sample_name_at_row(self.sample_list_widget.currentRow())
+        staged = name in self._staged_edits
+        # the strip's look (QSS, by property) and its words
+        if self._staged_banner.property("unsent") != staged:
+            self._staged_banner.setProperty("unsent", staged)
+            self._repolish(self._staged_banner, self._working_copy_label)
+        self._working_copy_dot.setVisible(staged)
+        self._working_copy_label.setText(
+            "Edited \u2013 not on the sampler yet" if staged else "Original from the sampler"
+        )
+        self._sync_edit_sample_card(staged)
+        ready = staged and self._sample_edit_ready
+        self._set_sample_control_enabled("stage_undo", ready)
+        self._set_sample_control_enabled("stage_send", ready)
+        self._set_sample_control_enabled(
+            "stage_new", ready and self._can_send_edit_as_new_sample()
+        )
+        self._set_sample_control_enabled("stage_revert", ready)
+
+    @staticmethod
+    def _repolish(*widgets):
+        # a style sheet rule keyed on a dynamic property only re-applies after an unpolish/polish
+        for widget in widgets:
+            widget.style().unpolish(widget)
+            widget.style().polish(widget)
+
+    def _send_staged_to_sampler(self):
+        sample_index = self.sample_list_widget.currentRow()
+        entry = self._sample_waveform_cache.get(sample_index)
+        name = self._sample_name_at_row(sample_index)
+        staged = self._staged_edits.get(name)
+        if staged is None or entry is None or entry["samples"] is None:
+            return
+        answer = QMessageBox.question(
+            self,
+            "Send to Sampler",
+            f'Replace "{name}" on the sampler with the edited audio '
+            f"({len(staged.samples):,} frames, was {len(staged.original_samples):,})?\n\n"
+            "This overwrites the sample's audio and cannot be undone. "
+            "A copy of the original is saved first.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        logger = debug_log.get_logger()
+        try:
+            backup = external_edit.backup_original(
+                name, staged.original_samples, staged.original_framerate
+            )
+        except OSError:
+            logger.error("Staged edit: couldn't save the backup", exc_info=True)
+            self.status_bar.showMessage(
+                "Couldn't save a copy of the original - nothing was sent"
+            )
+            return
+        logger.info(f"Staged edit: original of {name!r} saved to {backup}")
+        samples = staged.samples
+        markers = self.waveform_view.markers_with_loop_in_range()
+        new_markers = tuple(markers[key] for key in _MARKER_KEYS)
+        logger.info(
+            f"Staged edit: sending {name!r}: {len(samples)} frames (sampler has {len(staged.original_samples)}), "
+            f"markers {new_markers} (working copy's own: {tuple(staged.markers[k] for k in _MARKER_KEYS)})"
+        )
+
+        def _working_copy(*_markers):
+            return (samples, *new_markers)
+
+        # _perform_sample_edit discards the working copy once it is on the sampler
+        self._perform_sample_edit(sample_index, _working_copy, "Send")
+
+    def _send_staged_as_new_sample(self):
+        sample_index = self.sample_list_widget.currentRow()
+        entry = self._sample_waveform_cache.get(sample_index)
+        name = self._sample_name_at_row(sample_index)
+        staged = self._staged_edits.get(name)
+        if staged is None or entry is None or entry["samples"] is None:
+            return
+        samples = staged.samples
+
+        def _working_copy(_samples, start, loop_start, loop_end, end):
+            return samples, start, loop_start, loop_end, end
+
+        self._send_edit_as_new_sample(
+            sample_index, entry, _working_copy, "Send", " EDIT"
+        )
+
+    def _undo_staged(self):
+        sample_index = self.sample_list_widget.currentRow()
+        name = self._sample_name_at_row(sample_index)
+        staged = self._staged_edits.get(name)
+        entry = self._sample_waveform_cache.get(sample_index)
+        if staged is None or entry is None:
+            return
+        if not staged.history:
+            # nothing before the first change but the sampler's own version
+            debug_log.get_logger().info(f"ProgramEditor: undo on {name!r}: back to the sampler's version")
+            self._discard_staged(name, restore_entry=True)
+            self.status_bar.showMessage(f'"{name}" is back to the sampler version')
+            return
+        staged.samples, staged.markers = staged.history.pop()
+        debug_log.get_logger().info(f"ProgramEditor: undo on {name!r}: {len(staged.history)} more step(s) to undo")
+        self._apply_staged_to_entry(entry, staged)
+        self._show_entry_audio(entry)
+        self._staged_changed()
+        self.status_bar.showMessage(f'Undid the last edit to "{name}"')
+
+    def _apply_sample_edit(self, sample_index, transform, label):
+        # Trim / Reverse / Fade / Normalise / Filter / Stretch-Pitch: transform the
+        # sample's working copy (or, the first time, the sampler's audio) and
+        # keep the result HERE. Nothing is sent: that is Send to Sampler /
+        # Send as New Sample. Undo and Revert make a mistake cheap, so there is
+        # no confirmation. `transform` is the core/sample_editing shape:
+        # (samples, start, loop_start, loop_end, end) -> (samples, start, ...).
+        entry = self._sample_waveform_cache.get(sample_index)
+        if entry is None or entry["samples"] is None:
+            return False
+        name = self._sample_name_at_row(sample_index)
+        # not .markers(): see _perform_sample_edit for why the loop is clamped
+        markers = self.waveform_view.markers_with_loop_in_range()
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            new_samples, *new_markers = transform(
+                entry["samples"],
+                markers["start"],
+                markers["loop_start"],
+                markers["loop_end"],
+                markers["end"],
+            )
+        except Exception:
+            transform_name = getattr(transform, "__name__", repr(transform))
+            debug_log.get_logger().error(
+                f"_apply_sample_edit: {transform_name} raised", exc_info=True
+            )
+            self.status_bar.showMessage(
+                f"{label} failed - unexpected error, see "
+                f"{debug_log.LOG_PATH} for details"
+            )
+            return False
+        finally:
+            QApplication.restoreOverrideCursor()
+        debug_log.get_logger().info(
+            f"ProgramEditor: {label} applied to {name!r}: {len(entry['samples'])} -> "
+            f"{len(new_samples)} frames, markers {tuple(markers[k] for k in _MARKER_KEYS)} "
+            f"-> {tuple(new_markers)}"
+        )
+        self._stage_working_copy(
+            sample_index, new_samples, dict(zip(_MARKER_KEYS, new_markers))
+        )
+        self.status_bar.showMessage(
+            f'{label} applied to "{name}" - not on the sampler yet'
+        )
+        return True
+
+    def _revert_staged(self):
+        name = self._sample_name_at_row(self.sample_list_widget.currentRow())
+        if name not in self._staged_edits:
+            return
+        answer = QMessageBox.question(
+            self,
+            "Revert",
+            f'Discard the unsent edits to "{name}" and go back to what is on the sampler?',
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        debug_log.get_logger().info(f"ProgramEditor: reverted {name!r} to the sampler's version")
+        self._discard_staged(name, restore_entry=True)
+        self.status_bar.showMessage(f'"{name}" is back to the sampler version')
 
     def _perform_sample_edit(self, sample_index, transform, action_label):
+        # returns True once the edited audio is on the sampler (or, in demo
+        # mode, in the view); None for every refusal and failure, which have
+        # already said why in the status bar
         # shared by _confirm_trim_sample/_confirm_reverse_sample/
         # _confirm_fade_sample/_confirm_normalize_sample/
         # _confirm_filter_sample - all five are
@@ -8255,7 +10138,7 @@ class ProgramEditorWindow(QMainWindow):
 
         try:
             if demo_mode:
-                self._perform_sample_edit_demo(
+                done = self._perform_sample_edit_demo(
                     sample_index,
                     entry,
                     new_samples,
@@ -8267,7 +10150,7 @@ class ProgramEditorWindow(QMainWindow):
                     action_label,
                 )
             else:
-                self._perform_sample_edit_real(
+                done = self._perform_sample_edit_real(
                     sample_index,
                     sampler_controller,
                     original_name,
@@ -8280,6 +10163,10 @@ class ProgramEditorWindow(QMainWindow):
                     new_end,
                     action_label,
                 )
+            if done:
+                # what the sampler holds now IS the working copy: nothing left unsent
+                self._discard_staged(original_name, restore_entry=False)
+            return done
         finally:
             self._set_hardware_busy_ui(False)
             self.waveform_view.set_loading(False)
@@ -8308,6 +10195,8 @@ class ProgramEditorWindow(QMainWindow):
         total_seconds = total * _DEMO_MS_PER_WORD / 1000
         steps = max(6, round(total_seconds / 0.2))
         step_seconds = total_seconds / steps
+        if demo_timing.is_instant():  # --instant / AKAISDS_DEMO_INSTANT: no pacing (see core/demo_timing.py)
+            steps, step_seconds = 1, 0.0
         for step in range(1, steps + 1):
             current = total * step // steps
             self._on_sample_edit_progress(
@@ -8332,6 +10221,7 @@ class ProgramEditorWindow(QMainWindow):
                 new_samples, new_start, new_loop_start, new_loop_end, new_end
             )
         self.status_bar.showMessage(f"{action_label} complete (demo)")
+        return True
 
     def _perform_sample_edit_real(
         self,
@@ -8540,11 +10430,14 @@ class ProgramEditorWindow(QMainWindow):
             # waveform_view (this sample's audio just changed shape, so
             # the view's current markers don't necessarily apply).
             loop_length_frames = new_loop_end - new_loop_start
+            new_stuno, new_sbandw = self._tuning_for_resent_sample(
+                new_index, entry["stuno"], entry.get("sbandw"), framerate
+            )
             for param_name, value in (
                 ("SPTYPE", entry["sptype"]),
                 ("SPITCH", entry["spitch"]),
                 ("SHLTO", entry["shlto"]),
-                ("STUNO", entry["stuno"]),
+                ("STUNO", new_stuno),
                 ("SSTART", new_start),
                 ("SMPEND", new_end),
                 ("LOOPAT1", new_loop_end),
@@ -8574,9 +10467,19 @@ class ProgramEditorWindow(QMainWindow):
             if which == 0:
                 final_samples = args[0]
                 if original_name in final_samples:
-                    self.sample_list_widget.setCurrentRow(
-                        final_samples.index(original_name)
+                    # Show what was just written as the sample's entry NOW, from what is known, rather than via the header fetch
+                    # a plain selection would start: that arrives later (behind every queued write and length read) and the
+                    # sample sat there with its controls off until the user clicked it again.
+                    self._show_sent_sample(
+                        final_samples.index(original_name),
+                        entry,
+                        new_samples,
+                        framerate,
+                        (new_start, new_loop_start, new_loop_end, new_end),
+                        new_stuno,
+                        new_sbandw,
                     )
+            return True
         except Exception:
             # same reasoning as _perform_duplicate_sample_real's own
             # matching except clause - this function already handles every
@@ -8596,6 +10499,31 @@ class ProgramEditorWindow(QMainWindow):
                 os.remove(temp_path)
             except OSError:
                 pass
+
+    def _show_sent_sample(self, index, source_entry, samples, framerate, markers, stuno, sbandw):
+        # The cache entry for the sample at `index` (just sent from `source_entry`'s header + `samples`, written with `markers` and `stuno`),
+        # selected so the waveform AND the controls are live at once.
+        start, loop_start, loop_end, end = markers
+        self._sample_waveform_cache[index] = {
+            "samples": samples,
+            "framerate": framerate,
+            "frame_count": len(samples),
+            "start": start,
+            "loop_start": loop_start,
+            "loop_end": loop_end,
+            "end": end,
+            "sptype": source_entry["sptype"],
+            "spitch": source_entry["spitch"],
+            "shlto": source_entry["shlto"],
+            "stuno": stuno,
+            "ldwell1": source_entry.get("ldwell1", 0),
+            "sbandw": sbandw if sbandw is not None else source_entry.get("sbandw"),
+        }
+        if self.sample_list_widget.currentRow() == index:
+            # no selection change to fire _on_sample_selected: show it by hand
+            self._on_sample_selected(self.sample_list_widget.item(index), None)
+        else:
+            self.sample_list_widget.setCurrentRow(index)
 
     def _on_waveform_marker_committed(self, which, start, loop_start, loop_end, end):
         # canvas drag release - see _on_marker_spinbox_changed/
@@ -8651,6 +10579,14 @@ class ProgramEditorWindow(QMainWindow):
         # (shouldn't normally happen, since a marker can't be edited
         # before a header/cache entry exists), in which case every field
         # is written to be safe rather than silently skipping one.
+        staged = self._staged_edits.get(self._sample_name_at_row(sample_index))
+        if staged is not None:
+            # a sample with unsent edits has audio the sampler does not: writing
+            # its markers now would put values for a different buffer on the
+            # live sample. They are kept here and go out with the audio.
+            staged.markers = dict(new_markers)
+            return
+
         def _changed(name):
             return old_markers is None or new_markers[name] != old_markers[name]
 
@@ -8704,25 +10640,12 @@ class ProgramEditorWindow(QMainWindow):
     def _on_waveform_scrollbar_moved(self, value):
         self.waveform_view.set_view_start(value)
 
-    def _on_waveform_preview_requested(self):
-        # WaveformView.preview_requested - a single click on empty
-        # waveform space. A click while something's already sounding stops
-        # it outright rather than restarting (the user's own "click again
-        # to stop" request) - this is also the ONLY way a "Hold" loop
-        # (see below) ever stops, since that mode never ends on its own.
-        if self._sample_preview_player.is_playing():
-            self._sample_preview_player.stop()
-            return
-
-        sample_index = self.sample_list_widget.currentRow()
-        entry = self._sample_waveform_cache.get(sample_index)
-        if entry is None or entry["samples"] is None:
-            return  # header-only or nothing loaded - nothing to play
-
-        samples = entry["samples"]
-        framerate = entry["framerate"]
-        markers = self.waveform_view.markers()
-
+    def _preview_pitch_shift_semitones(self, entry):
+        # How far a PC preview of this sample's audio has to be shifted to
+        # sound like the sampler playing it: shared by the Samples tab's
+        # click-to-preview and the Preview buttons of the Filter and Stretch /
+        # Pitch dialogs (which played the raw audio before, ignoring Tune and
+        # Root Note).
         # STUNO ("Tune") has to shift the WHOLE preview to match the
         # sampler, not just the loop region SHLTO already handles below -
         # but STUNO also bakes in a baseline compensation for a non-native
@@ -8751,7 +10674,7 @@ class ProgramEditorWindow(QMainWindow):
         # reported bug: such a sample previewed an octave low despite
         # playing back correctly on actual hardware.
         baseline_semitones = baseline_semitones_for_bandwidth(
-            framerate, entry["sbandw"]
+            entry["framerate"], entry["sbandw"]
         )
         stuno_semitones = self._sample_tune_offset_to_semitones(entry["stuno"])
         # transposes from the sample's own root key (SPITCH) up/down to
@@ -8765,6 +10688,28 @@ class ProgramEditorWindow(QMainWindow):
         pitch_shift_semitones = (
             stuno_semitones - baseline_semitones + root_shift_semitones
         )
+        return pitch_shift_semitones
+
+    def _on_waveform_preview_requested(self):
+        # WaveformView.preview_requested - a single click on empty
+        # waveform space. A click while something's already sounding stops
+        # it outright rather than restarting (the user's own "click again
+        # to stop" request) - this is also the ONLY way a "Hold" loop
+        # (see below) ever stops, since that mode never ends on its own.
+        if self._sample_preview_player.is_playing():
+            self._sample_preview_player.stop()
+            return
+
+        sample_index = self.sample_list_widget.currentRow()
+        entry = self._sample_waveform_cache.get(sample_index)
+        if entry is None or entry["samples"] is None:
+            return  # header-only or nothing loaded - nothing to play
+
+        samples = entry["samples"]
+        framerate = entry["framerate"]
+        markers = self.waveform_view.markers()
+
+        pitch_shift_semitones = self._preview_pitch_shift_semitones(entry)
 
         # SPTYPE (sample_loop_type_combo) and LDWELL1 (sample_loop_hold_
         # knob) aren't gated on each other anywhere in this UI (see
@@ -8957,48 +10902,3 @@ class ProgramEditorWindow(QMainWindow):
         self._schedule_write(
             "KGMUTE", "keygroup", raw, keygroup_index=self.keygroup_list.currentRow()
         )
-
-
-if __name__ == "__main__":
-    # standalone launch for UI work away from the hardware sampler - always
-    # against the demo bridge, never a real port. For the real thing, go
-    # through main.py, which wires the dashboard's "Program Editor" button to
-    # program_editor_bridge.connect() instead.
-    from PySide6.QtWidgets import QApplication
-    from s3ked.demo import DemoBridge
-    from ui import theme
-
-    class _StandaloneSamplerController:
-        # the only things _open_slice_editor/_export_slices actually need
-        # from a real SamplerController when there's no Transfer Dashboard
-        # around at all - just enough for the Slice Editor's own busy-check
-        # to pass and for its cancel_callback wiring to have something
-        # (never actually called - Export is disabled in demo mode, so
-        # SliceEditorWindow's own Cancel Transfer path is unreachable here)
-        # to bind to. send_file_queue is deliberately not stubbed - that
-        # one genuinely can't be reached this way.
-        def is_transfer_busy(self):
-            return False
-
-        def cancel_transfer(self):
-            pass
-
-    class _StandaloneHost:
-        # ProgramEditorWindow.closeEvent() calls main_window.show() to bring
-        # the dashboard back - there is none here, so close the app instead
-        def show(self):
-            QApplication.instance().quit()
-
-        sampler_controller = _StandaloneSamplerController()
-
-    # this script always constructs a DemoBridge two lines down regardless -
-    # setdefault so every demo_mode check elsewhere in this file (audio
-    # fetch path, Slice Editor Export gating, etc.) actually agrees with
-    # that, while still letting AKAISDS_DEMO_INSTANT be set alongside it on
-    # the command line the normal way
-    os.environ.setdefault("AKAISDS_DEMO_SAMPLER", "1")
-    app = QApplication(sys.argv)
-    theme.apply_to_app(app)
-    window = ProgramEditorWindow(_StandaloneHost(), bridge=DemoBridge())
-    window.show()
-    sys.exit(app.exec())

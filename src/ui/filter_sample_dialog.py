@@ -14,6 +14,7 @@ from PySide6.QtCore import Qt
 from core import sample_editing
 from core.audio_preview import SlicePreviewPlayer
 from ui.knob import LogKnob
+from ui.preview_toggle import PreviewToggle
 from ui import tooltips
 
 # dB/octave -> cascaded biquad stage count - each stage is a fixed 12dB/
@@ -85,24 +86,12 @@ class FilterSampleDialog(QDialog):
     Preview always plays the WHOLE buffer run through whichever filters
     are currently enabled, at their current settings - never just
     [start, end] (filter_samples has no [start, end]-relative behaviour
-    at all, see its own docstring). Changing any control WHILE a preview
-    is already playing re-filters and restarts it automatically, so the
-    cutoff/slope/bypass combination can be dialled in by ear without
-    repeated Preview clicks - same spirit as the loop-point live preview
-    already built for the main waveform, though (like the original
-    single-filter version of this dialog) this always reprocesses the
-    whole buffer from the top rather than truly live mid-stream, since a
-    filter has no cheap way to swap coefficients mid-buffer the way
-    swapping loop bounds is - there's no getting around a restart
-    somewhere. The knobs wire this to sliderReleased, not valueChanged
-    (see the knob-wiring loop below) - valueChanged fires on every single
-    mouse-move tick of a drag, and re-filtering the whole buffer on every
-    one of those (a real, reported bug) made the knob itself visibly lag
-    while turning AND fired off a new restarted preview many times over
-    during one drag, not just once. sliderReleased fires only once, right
-    when the user actually settles on a value - the knob stays perfectly
-    responsive while turning, and the preview restarts exactly once
-    instead of stuttering through a restart per tick.
+    at all, see its own docstring). The button reads Stop while a preview
+    plays and stops it; changing a control meanwhile does NOT restart the
+    preview (it plays out, and the next click uses the settings as they
+    are then - see ui/preview_toggle.py). It used to re-filter and
+    restart on every committed change; that was dropped as more annoying
+    than useful.
 
     Owns its own SlicePreviewPlayer (same pattern SliceEditorWindow
     already established) rather than reusing the Samples tab's own
@@ -111,13 +100,18 @@ class FilterSampleDialog(QDialog):
     doing underneath this modal dialog.
     """
 
-    def __init__(self, parent, sample_name, samples, framerate):
+    def __init__(self, parent, sample_name, samples, framerate, pitch_shift_semitones=0, allow_new_sample=False, applies_to_working_copy=False, send_name="Send to Sampler"):
         super().__init__(parent)
         self.setWindowTitle(f'Filter Sample - "{sample_name}"')
         self.setModal(True)
 
         self._samples = samples
         self._framerate = framerate
+        # Tune / Root Note, as the sampler would play it (see ProgramEditorWindow._preview_pitch_shift_semitones)
+        self._pitch_shift_semitones = pitch_shift_semitones
+        # "Send as New Sample": the caller makes a new sample instead of replacing the original - only where it can
+        self._allow_new_sample = allow_new_sample
+        self._as_new = False
         self._preview_player = SlicePreviewPlayer(self)
 
         # strictly inside (0, Nyquist) - see sample_editing._biquad_
@@ -175,12 +169,24 @@ class FilterSampleDialog(QDialog):
 
         self.preview_button = QPushButton("Preview")
         self.preview_button.setToolTip(tooltips.FILTER_PREVIEW_BUTTON)
-        self.preview_button.clicked.connect(self._preview)
+        self._preview_toggle = PreviewToggle(self.preview_button, self._preview_player, self._preview, self)
 
-        warning_label = QLabel(
-            "This overwrites the sample's audio on the sampler and cannot "
-            "be undone."
-        )
+        if applies_to_working_copy:
+            # the Program Editor: OK edits the sample HERE (its working copy); nothing reaches the sampler yet
+            warning = (
+                "OK applies the filter to the sample here. Nothing is sent until "
+                f"you click {send_name}."
+            )
+            if allow_new_sample:
+                warning += " Send as New Sample sends the result now and keeps the original."
+        elif allow_new_sample:
+            warning = (
+                "OK overwrites the sample's audio on the sampler and cannot be "
+                "undone; Send as New Sample keeps the original."
+            )
+        else:
+            warning = "This overwrites the sample's audio on the sampler and cannot be undone."
+        warning_label = QLabel(warning)
         warning_label.setWordWrap(True)
 
         self._button_box = QDialogButtonBox(
@@ -188,6 +194,13 @@ class FilterSampleDialog(QDialog):
         )
         self._button_box.accepted.connect(self.accept)
         self._button_box.rejected.connect(self.reject)
+        self.new_sample_button = None
+        if allow_new_sample:
+            self.new_sample_button = self._button_box.addButton(
+                "Send as New Sample\u2026", QDialogButtonBox.ButtonRole.ActionRole
+            )
+            self.new_sample_button.setToolTip(tooltips.SEND_AS_NEW_SAMPLE_BUTTON)
+            self.new_sample_button.clicked.connect(self._accept_as_new)
 
         layout = QVBoxLayout(self)
         layout.addLayout(sections_row)
@@ -195,18 +208,10 @@ class FilterSampleDialog(QDialog):
         layout.addWidget(warning_label)
         layout.addWidget(self._button_box)
 
-        for signal in (
-            self.hp_group.toggled,
-            self.hp_knob.sliderReleased,
-            self.hp_slope_combo.currentIndexChanged,
-            self.lp_group.toggled,
-            self.lp_knob.sliderReleased,
-            self.lp_slope_combo.currentIndexChanged,
-        ):
-            signal.connect(self._maybe_retrigger_preview)
         self.hp_group.toggled.connect(self._update_ok_enabled)
         self.lp_group.toggled.connect(self._update_ok_enabled)
         self._update_ok_enabled()
+        self._preview_toggle.claim_space_in(self)
 
     def _update_ok_enabled(self):
         # nothing to send if BOTH filters are bypassed - matches
@@ -214,7 +219,18 @@ class FilterSampleDialog(QDialog):
         # disabling OK outright rather than a popup once clicked, since
         # there's already a visible reason (both group boxes unchecked)
         ok_button = self._button_box.button(QDialogButtonBox.StandardButton.Ok)
-        ok_button.setEnabled(self.hp_group.isChecked() or self.lp_group.isChecked())
+        can_send = self.hp_group.isChecked() or self.lp_group.isChecked()
+        ok_button.setEnabled(can_send)
+        if self.new_sample_button is not None:
+            self.new_sample_button.setEnabled(can_send)
+
+    def send_as_new(self):
+        """True if the user chose "Send as New Sample" rather than OK."""
+        return self._as_new
+
+    def _accept_as_new(self):
+        self._as_new = True
+        self.accept()
 
     def highpass_enabled(self):
         return self.hp_group.isChecked()
@@ -249,16 +265,17 @@ class FilterSampleDialog(QDialog):
             lowpass_cutoff_hz=self.lowpass_cutoff_hz(),
             lowpass_slope_db_per_octave=self.lowpass_slope_db_per_octave(),
         )
-        self._preview_player.play(filtered, 0, len(filtered) - 1, self._framerate)
+        self._preview_player.play(
+            filtered,
+            0,
+            len(filtered) - 1,
+            self._framerate,
+            pitch_shift_semitones=self._pitch_shift_semitones,
+        )
 
-    def _maybe_retrigger_preview(self, *_args):
-        if self._preview_player.is_playing() and (
-            self.highpass_enabled() or self.lowpass_enabled()
-        ):
-            self._preview()
-        elif self._preview_player.is_playing():
-            # both just got bypassed mid-preview - nothing left to play
-            self._preview_player.stop()
+    def keyPressEvent(self, event):
+        if not self._preview_toggle.handle_key(event):
+            super().keyPressEvent(event)
 
     def accept(self):
         self._preview_player.stop()

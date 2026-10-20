@@ -128,9 +128,45 @@ Every write: (1) re-reads the program, (2) saves that original as a `.syx` in
 
 **Not offered, on purpose:** creating a program, deleting one (there is no MIDI delete),
 adding/removing keygroups, editing the keygroup "Options" bits (read-only - their meaning is
-inferred), and editing a sample's own parameters (loop points, replay mode, start/end - the Samples
-tab is read-only until what those fields do has been confirmed on a unit). A sample rename from the
-Dashboard does not update the programs that use it.
+inferred), and editing a sample's start, end and loop length (the Samples tab shows them but does
+not write them until what those fields do has been confirmed on a unit - see "E" below). A sample
+rename from the Dashboard does not update the programs that use it.
+
+## E. The Samples tab - what the numbers mean, and the replay mode / direction write
+
+**E1-E3 only read; do these first. They decide whether start/end/loop markers can ever be edited.**
+
+- [ ] **E1 - the numbers match the panel.** Pick two or three samples (a looped one, a one-shot,
+      a reversed one if you have it). Write down what the S950's own panel shows for **start,
+      end, loop length, replay mode and direction**, then compare with the Samples tab. They
+      should be the same numbers (the tab shows words). Report any that differ, and by how much.
+- [ ] **E2 - where the loop sits (a listening test).** Take a sample whose beginning and end sound
+      very different (a rising sweep, or a spoken count). Set its replay mode to **Loop** on the
+      panel, **Start** to a little after the beginning, **End** to a little before the real end,
+      and **Loop length** to something short (a few thousand words). Play a key and say what you
+      hear repeating: **the last stretch before End** (loop length counted back from End), **the
+      first stretch after Start**, or something else. This is the question the app and s950tools
+      disagree on, so the answer matters more than any other result here.
+- [ ] **E3 - the numbers in the tab afterwards.** For the sample in E2, say what the tab shows for
+      Start, End and Loop length, and where its (read-only) loop markers sit relative to what you
+      heard.
+
+**E4-E8 write; scratch sample only.** Samples tab, pick a sample, change **Replay mode** and/or
+**Direction**, press **Write to Sampler**. Read the one-time warning first.
+
+- [ ] **E4 - replay mode.** One-shot -> Loop. The status line should say "written and verified".
+      Look at the S950's panel: does the sample show Loop? Play it: does it loop?
+- [ ] **E5 - does it need ENT?** After E4, if the panel or the playback still shows the old mode,
+      select that sample on the panel and press **ENT**; say whether that made it follow. (s950tools
+      found this for the reverse flag; whether replay mode does too is unknown.)
+- [ ] **E6 - direction.** Forward -> Reversed, then play it. Same questions as E4 and E5.
+- [ ] **E7 - change both at once**, then back to the originals ("Revert" only undoes an unsent
+      change; use the combos and write again).
+- [ ] **E8 - the backup.** `~/.akaisds/s950_backups/sampleNN-NAME-<stamp>.syx` is the sample's
+      settings before the write; send it back with a SysEx librarian and the sample should return to
+      how it was (same assumption as D10).
+
+Please send `~/.akaisds/akaisds.log` with any report.
 
 ## What is a guess
 

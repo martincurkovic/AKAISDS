@@ -17,6 +17,13 @@ if ($LASTEXITCODE -ne 0) {
         exit 1
     }
 
+# the REX2 reader (third_party/velociloops) is a small C++ library compiled into src/core/native
+uv run python (Join-Path $RootDir "tools\build_velociloops.py")
+if ($LASTEXITCODE -ne 0) {
+        Write-Host "Building the REX2 library failed - needs a C++ compiler (cl or g++) on PATH."
+        exit 1
+    }
+
 Set-Location $SrcDir
 
 # derive version from the nearest git tag - falls back to a dev
@@ -55,7 +62,7 @@ if (-not (Test-Path "pysidedeploy.spec")) {
 
 # extra_args is regenerated on EVERY run (not just first-time setup),
 # specifically so the version stays current even on an existing spec
-(Get-Content pysidedeploy.spec) -replace '^extra_args = .*', "extra_args = --quiet --noinclude-qt-translations --assume-yes-for-downloads --windows-console-mode=disable --windows-product-name=AKAISDS --product-version=$ProductVersion --include-module=mido.backends.rtmidi --include-data-dir=ui/icons=ui/icons --include-data-files=ui/style.qss.template=ui/style.qss.template --include-data-dir=ui/help=ui/help" | Set-Content pysidedeploy.spec
+(Get-Content pysidedeploy.spec) -replace '^extra_args = .*', "extra_args = --quiet --noinclude-qt-translations --assume-yes-for-downloads --windows-console-mode=disable --windows-product-name=AKAISDS --product-version=$ProductVersion --include-module=mido.backends.rtmidi --include-data-dir=ui/icons=ui/icons --include-data-files=ui/style.qss.template=ui/style.qss.template --include-data-dir=ui/help=ui/help --include-package-data=certifi --include-data-files=core/native/velociloops.dll=core/native/velociloops.dll" | Set-Content pysidedeploy.spec
 
 Write-Host "Building AKAISDS..."
 uv run pyside6-deploy -c pysidedeploy.spec

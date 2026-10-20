@@ -53,6 +53,39 @@ QLabel#mutedLabel {
     color: ${text_disabled};
 }
 
+/* The Samples tab's Edit Sample strip: always there (so the card never changes height), quiet while the sample is as the sampler
+   holds it and a wash of the warning colour while it has edits that are not on the sampler. The property is set by the editor. */
+QFrame#workingCopyStrip {
+    background-color: transparent;
+    border: 1px solid ${border_item};
+    border-radius: 5px;
+}
+
+QFrame#workingCopyStrip[unsent="true"] {
+    background-color: ${warning_tint};
+    border-color: ${warning};
+}
+
+QLabel#workingCopyLabel {
+    color: ${text_disabled};
+}
+
+QFrame#workingCopyStrip[unsent="true"] QLabel#workingCopyLabel {
+    color: ${text_bright};
+    font-weight: bold;
+}
+
+/* the dot that marks a sample with unsent edits: in its list row and on the strip */
+QLabel#unsentDot {
+    color: ${warning};
+}
+
+/* a thin vertical rule between two groups of buttons */
+QFrame#groupDivider {
+    background-color: ${border};
+    border: none;
+}
+
 /* Qt's tooltip (QToolTip) is internally a QLabel too, so without its own
    rule here it inherits the QLabel rule above - "background: transparent"
    on a real top-level popup window, with nothing underneath for the
@@ -91,6 +124,25 @@ QPushButton:disabled {
     color: ${text_disabled};
 }
 
+/* a tiny button (the Loop Preview's zoom controls): the ordinary 12 px of side padding would leave no room for the symbol */
+QPushButton[compact="true"] {
+    padding: 0px;
+    border-radius: 3px;
+}
+
+/* the one button on a card that does the main thing (Send to Sampler, Load Edited Audio once the file was saved): filled with the
+   accent, like a dialog's default button. Only while enabled - a disabled one keeps the ordinary disabled look. */
+QPushButton[primary="true"]:enabled {
+    background-color: ${accent};
+    border-color: ${accent};
+    color: ${text_on_accent};
+}
+
+QPushButton[primary="true"]:enabled:hover {
+    background-color: ${accent};
+    border-color: ${text_on_accent};
+}
+
 /* checkable buttons used as a segmented control (e.g. the zone selector) -
    the checked one should read as "currently selected", not just "toggled on" */
 QPushButton:checked {
@@ -104,6 +156,23 @@ QPushButton:checked:hover {
 }
 
 /* ---------- Line edits (queue row names, dialog fields) ---------- */
+/* the Audition button on the keyboard bar: flat, with only a soft highlight on hover */
+QToolButton#auditionToggle {
+    background-color: transparent;
+    border: 1px solid transparent;
+    border-radius: 4px;
+    padding: 4px 8px;
+    color: ${text};
+}
+
+QToolButton#auditionToggle:hover {
+    background-color: ${bg_button_hover};
+}
+
+QToolButton#auditionToggle:pressed {
+    background-color: ${bg_button_pressed};
+}
+
 QLineEdit {
     background-color: ${bg_input};
     border: 1px solid ${accent};
@@ -346,6 +415,15 @@ QComboBox {
 
 QComboBox:hover, QSpinBox:hover, QDoubleSpinBox:hover {
     border-color: ${border_hover};
+}
+
+/* clicked, so the mouse wheel changes it now (ui/wheel_guard.py; a knob paints its own outline) */
+QComboBox[armed="true"], QSpinBox[armed="true"], QDoubleSpinBox[armed="true"] {
+    border-color: ${accent};
+}
+
+QSlider[armed="true"]::handle:horizontal {
+    border-color: ${accent};
 }
 
 /* base rule above sets an explicit background/border/color, which

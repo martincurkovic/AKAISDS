@@ -142,6 +142,29 @@ def save_s950_transfer_warning_acknowledged(acknowledged=True):
     save_config(config)
 
 
+def get_ensoniq_transfer_warning_acknowledged():
+    # whether the user has already clicked through the one-time "Ensoniq transfers are experimental" warning (shown by the Dashboard
+    # before the first Send in Ensoniq mode)
+    return bool(load_config().get("ensoniq_transfer_warning_acknowledged", False))
+
+
+def save_ensoniq_transfer_warning_acknowledged(acknowledged=True):
+    config = load_config()
+    config["ensoniq_transfer_warning_acknowledged"] = bool(acknowledged)
+    save_config(config)
+
+
+def get_asrx_transfer_warning_acknowledged():
+    # the one-time "ASR-X transfers are experimental" warning (shown by the Dashboard before the first Send in Ensoniq ASR-X mode)
+    return bool(load_config().get("asrx_transfer_warning_acknowledged", False))
+
+
+def save_asrx_transfer_warning_acknowledged(acknowledged=True):
+    config = load_config()
+    config["asrx_transfer_warning_acknowledged"] = bool(acknowledged)
+    save_config(config)
+
+
 def get_s950_program_write_warning_acknowledged():
     # the one-time "writing S900/S950 programs is experimental" warning, shown
     # before the first program write (ui/s950_program_editor.py)
@@ -151,6 +174,18 @@ def get_s950_program_write_warning_acknowledged():
 def save_s950_program_write_warning_acknowledged(acknowledged=True):
     config = load_config()
     config["s950_program_write_warning_acknowledged"] = bool(acknowledged)
+    save_config(config)
+
+
+def get_s950_sample_write_warning_acknowledged():
+    # the one-time "writing S900/S950 sample settings is experimental" warning, shown
+    # before the first sample-parameter write (ui/s950_samples_tab.py)
+    return bool(load_config().get("s950_sample_write_warning_acknowledged", False))
+
+
+def save_s950_sample_write_warning_acknowledged(acknowledged=True):
+    config = load_config()
+    config["s950_sample_write_warning_acknowledged"] = bool(acknowledged)
     save_config(config)
 
 
@@ -247,6 +282,99 @@ def get_saved_theme():
 def save_theme(theme):
     config = load_config()
     config["theme"] = theme if theme in THEME_VALUES else THEME_SYSTEM
+    save_config(config)
+
+
+def get_saved_external_editor():
+    # the audio editor app "Edit in External App" opens samples in; "" means the system default for .wav
+    editor = load_config().get("external_editor", "")
+    return editor if isinstance(editor, str) else ""
+
+
+def save_external_editor(path):
+    config = load_config()
+    config["external_editor"] = (path or "").strip()
+    save_config(config)
+
+
+def get_saved_external_auto_load():
+    # whether the edited file is loaded back by itself as soon as the external editor has saved it (off unless the user turned it on)
+    return load_config().get("external_auto_load", False) is True
+
+
+def save_external_auto_load(enabled):
+    config = load_config()
+    config["external_auto_load"] = bool(enabled)
+    save_config(config)
+
+
+SLICE_DETECTION_SIMPLE = "simple"
+SLICE_DETECTION_SUPERFLUX = "superflux"
+SLICE_DETECTION_VALUES = (SLICE_DETECTION_SIMPLE, SLICE_DETECTION_SUPERFLUX)
+
+
+def get_saved_slice_detection():
+    # the Slice Editor's detection mode, remembered from the last time it was changed; anything unrecognised is "simple"
+    mode = load_config().get("slice_detection", SLICE_DETECTION_SIMPLE)
+    return mode if mode in SLICE_DETECTION_VALUES else SLICE_DETECTION_SIMPLE
+
+
+def save_slice_detection(mode):
+    config = load_config()
+    config["slice_detection"] = mode if mode in SLICE_DETECTION_VALUES else SLICE_DETECTION_SIMPLE
+    save_config(config)
+
+
+RECEIVE_FORMAT_WAV, RECEIVE_FORMAT_S3, RECEIVE_FORMAT_BOTH = "wav", "s3", "both"
+RECEIVE_FORMAT_VALUES = (RECEIVE_FORMAT_WAV, RECEIVE_FORMAT_S3, RECEIVE_FORMAT_BOTH)
+
+
+def get_saved_receive_format():
+    # what the Dashboard's Receive saves for an Akai sampler: a WAV, the Akai sample file (.s3, header and all) or both; anything unrecognised is a WAV
+    value = load_config().get("receive_format", RECEIVE_FORMAT_WAV)
+    return value if value in RECEIVE_FORMAT_VALUES else RECEIVE_FORMAT_WAV
+
+
+def save_receive_format(value):
+    config = load_config()
+    config["receive_format"] = value if value in RECEIVE_FORMAT_VALUES else RECEIVE_FORMAT_WAV
+    save_config(config)
+
+
+def get_slice_wav_folder():
+    # the folder the Slice Editor's Save WAVs... last wrote into; the home folder if none was saved or it has gone
+    folder = load_config().get("slice_wav_folder")
+    if isinstance(folder, str) and Path(folder).is_dir():
+        return folder
+    return str(Path.home())
+
+
+def save_slice_wav_folder(folder):
+    config = load_config()
+    config["slice_wav_folder"] = str(folder)
+    save_config(config)
+
+
+def get_memory_bar_compact():
+    # the Samples tab's memory bar, double-clicked down to a thin line without text (ui/memory_bar.py)
+    return load_config().get("memory_bar_compact", False) is True
+
+
+def save_memory_bar_compact(compact):
+    config = load_config()
+    config["memory_bar_compact"] = bool(compact)
+    save_config(config)
+
+
+def get_collapsed_cards():
+    # the section cards the user collapsed in the editors, as "<editor>/<title>" keys (ui/section_card.py); anything that isn't a list of strings reads as none
+    cards = load_config().get("collapsed_cards", [])
+    return [c for c in cards if isinstance(c, str)] if isinstance(cards, list) else []
+
+
+def save_collapsed_cards(keys):
+    config = load_config()
+    config["collapsed_cards"] = sorted(set(keys))
     save_config(config)
 
 

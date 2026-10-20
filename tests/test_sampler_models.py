@@ -1,4 +1,4 @@
-# tests for core/sampler_models.py - the five Settings "Sampler Type"
+# tests for core/sampler_models.py - the seven Settings "Sampler Type"
 # choices and what each implies
 
 from core import sampler_models
@@ -10,6 +10,8 @@ def test_choices_are_alphabetical_by_label():
         "Akai S1000",
         "Akai S2000/S3000",
         "Akai S900/S950 (experimental)",
+        "Ensoniq ASR-X (untested, experimental)",
+        "Ensoniq EPS/ASR (untested, experimental)",
         "Generic SDS",
         "Yamaha A4000/A5000 (experimental)",
     ]
@@ -82,3 +84,36 @@ def test_yamaha_transfers_are_plain_sds_but_it_is_its_own_model():
     assert not sampler_models.is_yamaha("generic")
     assert not sampler_models.is_s950("yamaha_a4000") and not sampler_models.is_s1000("yamaha_a4000")
     assert sampler_models.normalize("yamaha_a4000") == "yamaha_a4000"
+
+
+def test_ensoniq_is_its_own_protocol_family_and_says_it_is_untested():
+    # NOT "akai" or "generic": an Ensoniq answers neither, so nothing keyed on those families may apply to it
+    assert sampler_models.ENSONIQ_EPS_ASR == "ensoniq_eps_asr"
+    assert sampler_models.protocol_family("ensoniq_eps_asr") == "ensoniq"
+    assert sampler_models.protocol_family("ensoniq_eps_asr") not in (
+        sampler_models.FAMILY_AKAI,
+        sampler_models.FAMILY_GENERIC,
+        sampler_models.FAMILY_S950,
+    )
+    assert sampler_models.is_ensoniq("ensoniq_eps_asr")
+    assert sampler_models.normalize("ensoniq_eps_asr") == "ensoniq_eps_asr"
+    label = dict((sel, lbl) for lbl, sel in sampler_models.CHOICES)["ensoniq_eps_asr"]
+    assert "untested" in label and "experimental" in label
+
+
+def test_the_asrx_is_the_ensoniq_family_with_its_own_dialect():
+    # the same protocol family as the EPS/ASR entry (the Dashboard branches are shared), told apart by the model
+    assert sampler_models.ENSONIQ_ASRX == "ensoniq_asrx"
+    assert sampler_models.protocol_family("ensoniq_asrx") == sampler_models.FAMILY_ENSONIQ
+    assert sampler_models.is_ensoniq("ensoniq_asrx") and sampler_models.is_ensoniq("ensoniq_eps_asr")
+    assert sampler_models.is_asrx("ensoniq_asrx") and not sampler_models.is_asrx("ensoniq_eps_asr")
+    assert sampler_models.normalize("ensoniq_asrx") == "ensoniq_asrx"
+    label = dict((sel, lbl) for lbl, sel in sampler_models.CHOICES)["ensoniq_asrx"]
+    assert "untested" in label and "experimental" in label
+    assert sampler_models.ensoniq_display_name("ensoniq_asrx") == "Ensoniq ASR-X"
+    assert sampler_models.ensoniq_display_name("ensoniq_eps_asr") == "Ensoniq EPS/ASR"
+
+
+def test_only_the_ensoniq_selection_is_ensoniq():
+    for selection in ("akai", "akai_s1000", "akai_s900_s950", "generic", "yamaha_a4000", None):
+        assert not sampler_models.is_ensoniq(selection)

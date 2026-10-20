@@ -59,8 +59,14 @@ from core import program_editor_bridge as _program_editor_bridge
 _program_editor_bridge.PROGRAM_BACKUP_DIR = _TEST_LOG_DIR / "program_backups"
 # ...and the whole-block misc-data backups made before the first Global-tab block write.
 _program_editor_bridge.MDATA_BACKUP_DIR = _TEST_LOG_DIR / "mdata_backups"
+# ...and the multi backups made before Load Multi writes.
+_program_editor_bridge.MULTI_BACKUP_DIR = _TEST_LOG_DIR / "multi_backups"
 # The settle pauses around a block write (a real second or more) must not slow the suite; tests that check the spacing replace this hook.
 _program_editor_bridge._sleep = lambda seconds: None
+# ...and the copies of audio saved before an externally edited sample replaces it.
+from core import external_edit as _external_edit
+
+_external_edit.BACKUP_DIR = _TEST_LOG_DIR / "external_edit_backups"
 
 
 # The user's real ~/.akaisds/config.json must never decide a test's outcome. It once did: the Yamaha editor's one-time
@@ -73,6 +79,19 @@ _app_config.CONFIG_PATH = _TEST_LOG_DIR / "config.json"
 
 # The Global tab's test switch must never leak in from a developer's shell: the locked-controls tests assume nothing is unlocked.
 os.environ.pop("AKAISDS_UNLOCK_GLOBAL", None)
+
+
+import pytest as _pytest
+
+
+@_pytest.fixture(autouse=True)
+def _fresh_section_card_state():
+    # which cards are collapsed is cached per process (ui/section_card.py): one test collapsing a card must not start the next one collapsed
+    from ui import section_card
+
+    section_card.reset_state()
+    yield
+    section_card.reset_state()
 
 
 def pytest_sessionfinish(session, exitstatus):

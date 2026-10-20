@@ -8,6 +8,7 @@ exactly matching how `.github/workflows/build.yml` publishes builds.
 from dataclasses import dataclass
 import json
 import re
+import ssl
 import urllib.error
 import urllib.request
 
@@ -34,6 +35,22 @@ class UpdateInfo:
     name: str  # release title, may be blank
     html_url: str  # GitHub release page to send the user to
     notes: str = ""  # release notes, as the Markdown they were written in
+
+
+def _ssl_context():
+    # A bundled Python (the Nuitka macOS build) has no system CA store, so the
+    # default context fails with CERTIFICATE_VERIFY_FAILED. certifi ships its
+    # own bundle; if it is missing, fall back to the platform default.
+    try:
+        import certifi
+
+        return ssl.create_default_context(cafile=certifi.where())
+    except Exception:
+        debug_log.get_logger().warning(
+            "update_checker: certifi CA bundle unavailable, using the system default",
+            exc_info=True,
+        )
+        return ssl.create_default_context()
 
 
 def _parse_version(version_string):
@@ -64,7 +81,9 @@ def check_for_update(current_version=APP_VERSION):
             "User-Agent": f"AKAISDS/{current_version}",
         },
     )
-    with urllib.request.urlopen(request, timeout=REQUEST_TIMEOUT) as response:
+    with urllib.request.urlopen(
+        request, timeout=REQUEST_TIMEOUT, context=_ssl_context()
+    ) as response:
         payload = json.load(response)
 
     tag = payload.get("tag_name", "")

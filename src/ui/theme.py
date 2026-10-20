@@ -49,6 +49,8 @@ DARK_PALETTE = {
     "text_on_accent": "#ffffff",
     "warning": "#d9a94a",
     "critical": "#d9544a",
+    # a faint wash of the warning colour (#AARRGGBB, which Qt style sheets accept): the strip that says a sample has unsent edits
+    "warning_tint": "#26d9a94a",
     # subtle alternating-row tint for the Program/Keygroup tabs' Modulation
     # matrix grid (program_editor_window.py's _ModMatrixGrid) - not
     # referenced by style.qss.template, same reasoning as keygroup_color_*
@@ -57,6 +59,10 @@ DARK_PALETTE = {
     # bg_selected - a stripe should read as a faint banding cue, not as an
     # editable field or a selection highlight.
     "bg_zebra": "#25252d",
+    # the audition keyboard (ui/keyboard.py)
+    "key_white": "#d8d8e0",
+    "key_black": "#14141a",
+    "key_edge": "#0c0c10",
     # categorical colors for the keygroup range bar (ui/keygroup_range_bar.py)
     # not referenced by style.qss.template - these are read directly by
     # custom-painted widgets that need a fixed, validated series order.
@@ -105,9 +111,13 @@ LIGHT_PALETTE = {
     "text_on_accent": "#ffffff",
     "warning": "#f57927",
     "critical": "#d54439",
+    "warning_tint": "#26f57927",
     # same reasoning as DARK_PALETTE's bg_zebra - close to this theme's own
     # bg_panel ("#ffffff"), just a faint step down rather than a strong tint
     "bg_zebra": "#f6f3fb",
+    "key_white": "#ffffff",
+    "key_black": "#2a2438",
+    "key_edge": "#8f86a6",
     # same 8-slot categorical set as DARK_PALETTE, stepped for the light
     # surface - see the comment there.
     "keygroup_color_1": "#2a78d6",

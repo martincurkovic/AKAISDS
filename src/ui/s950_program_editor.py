@@ -20,6 +20,8 @@ say "unverified" where even the meaning is inferred, and `control_bits` is read-
 
 import copy
 
+from functools import partial
+
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QAction
 from PySide6.QtWidgets import (
@@ -49,7 +51,9 @@ from core.midi_notes import midi_note_to_name
 from core.s950_sysex import NAME_LENGTH
 from core.s950_program import Keygroup, Program
 from ui import theme, tooltips as tt
-from ui.diagnostics_ui import add_open_log_folder_action
+from ui.audition_bar import AuditionBar, add_audition_action
+from ui.shortcuts_dialog import audition_section, dragging_section
+from ui.standard_menus import add_cancel_transfer_action, add_help_menu, build_zoom_actions
 from ui.editor_layout import (
     add_keygroup_row,
     build_centered_row,
@@ -65,12 +69,15 @@ from ui.editor_layout import (
     keygroup_row_text,
     style_card_page_layout,
 )
-from ui.envelope_graph import ADSREnvelopeGraph
+from ui.envelope_graph import GRAPH_SIZE, ADSREnvelopeGraph
 from ui.keygroup_range_bar import KeygroupRangeBar, keygroup_color
 from ui.knob import Knob
 from ui.note_spinbox import NoteSpinBox
-from ui.qt_helpers import FullWidthTabBar, build_scroll_area, build_section_card
+from ui.qt_helpers import FullWidthTabBar, build_scroll_area, build_editor_card
 from ui.s950_samples_tab import S950SamplesTab
+
+# collapsible cards, remembered as "s950_editor/<title>" (ui/section_card.py)
+_card = partial(build_editor_card, "s950_editor")
 
 
 def _log(message):
@@ -308,16 +315,26 @@ class S950ProgramEditorWindow(QMainWindow):
         self.restore_button.clicked.connect(self._restore_previous)
         self.write_button = QPushButton("Write to Sampler")
         self.write_button.clicked.connect(self._write)
+        # the Samples tab's own staged edit (replay mode / direction): these sit where the program buttons do, and only one set shows at a time
+        self.sample_dirty_label = QLabel()
+        self.sample_dirty_label.setObjectName("mutedLabel")
+        self.sample_revert_button = QPushButton("Revert")
+        self.sample_revert_button.setToolTip(tt.S950_SAMPLE_REVERT)
+        self.sample_write_button = QPushButton("Write to Sampler")
+        self.sample_write_button.setToolTip(tt.S950_SAMPLE_WRITE)
         close_button = QPushButton("Close")
         close_button.clicked.connect(self.close)
 
         bottom_row = QHBoxLayout()
         bottom_row.addWidget(self.refresh_button)
         bottom_row.addWidget(self.dirty_label)
+        bottom_row.addWidget(self.sample_dirty_label)
         bottom_row.addStretch()
         bottom_row.addWidget(self.discard_button)
         bottom_row.addWidget(self.restore_button)
         bottom_row.addWidget(self.write_button)
+        bottom_row.addWidget(self.sample_revert_button)
+        bottom_row.addWidget(self.sample_write_button)
         bottom_row.addSpacing(12)
         bottom_row.addWidget(close_button)
 
@@ -325,6 +342,11 @@ class S950ProgramEditorWindow(QMainWindow):
         programs_tab_page = QWidget()
         programs_tab_page.setLayout(content_layout)
         self.samples_tab = S950SamplesTab(self._controller)
+        self.sample_revert_button.clicked.connect(self.samples_tab.revert)
+        self.sample_write_button.clicked.connect(self.samples_tab.write)
+        self.samples_tab.state_changed.connect(self._sync_sample_buttons)
+        for widget in (self.sample_dirty_label, self.sample_revert_button, self.sample_write_button):
+            widget.setVisible(False)  # (shown on the Samples tab only)
         self.samples_tab.status_message.connect(
             lambda message: self.status_bar.showMessage(message, 8000)
         )
@@ -337,6 +359,10 @@ class S950ProgramEditorWindow(QMainWindow):
 
         main_layout = QVBoxLayout()
         main_layout.addWidget(self.main_tabs, stretch=1)
+        # the keyboard (View > Audition Keyboard, Cmd/Ctrl+K): always starts CLOSED, an open bar owns the computer keyboard. Its menu item is made in _build_menus
+        self.audition_bar = AuditionBar()
+        self.audition_bar.midi_out.connect(self._send_audition_message)
+        main_layout.addWidget(self.audition_bar)
         main_layout.addLayout(bottom_row)
         container = QWidget()
         container.setLayout(main_layout)
@@ -345,7 +371,8 @@ class S950ProgramEditorWindow(QMainWindow):
         self.status_bar = QStatusBar()
         self.status_bar.setSizeGripEnabled(False)
         self.setStatusBar(self.status_bar)
-        experimental = QLabel("Experimental - writes are untested on real hardware")
+        experimental = QLabel("Experimental")
+        experimental.setToolTip("Writing to an S900/S950 was written without a unit to test against. Every write saves a backup first and is read back.")
         experimental.setObjectName("mutedLabel")
         self.status_bar.addPermanentWidget(experimental)
 
@@ -472,13 +499,13 @@ class S950ProgramEditorWindow(QMainWindow):
             "program", "enable_midi_program", "Program Change"
         )
         respond_row.itemAt(1).widget().setText("Respond to MIDI program change")
-        program_card = build_section_card("Program", name_row, midi_row, respond_row)
+        program_card = _card("Program", name_row, midi_row, respond_row)
 
         tilt_row = self._knob_row("program", [("key_tilt", "Key Tilt")], size=56)
         tilt_row.addStretch()
         xfade_row = self._labeled_row("program", "positional_xfade", "Crossfade")
         xfade_row.itemAt(1).widget().setText("Positional crossfade")
-        keyboard_card = build_section_card("Keyboard", tilt_row, xfade_row)
+        keyboard_card = _card("Keyboard", tilt_row, xfade_row)
         equalize_card_heights(program_card, keyboard_card)
 
         layout = QVBoxLayout()
@@ -503,8 +530,8 @@ class S950ProgramEditorWindow(QMainWindow):
         switch_hint = QLabel(f"{NO_VELOCITY_SWITCH} = off")
         switch_hint.setObjectName("mutedLabel")
         switch_row.insertWidget(switch_row.count() - 1, switch_hint)
-        range_card = build_section_card("Range", note_row, switch_row)
-        filter_card = build_section_card(
+        range_card = _card("Range", note_row, switch_row)
+        filter_card = _card(
             "Filter",
             self._knob_row(
                 "kg",
@@ -521,10 +548,10 @@ class S950ProgramEditorWindow(QMainWindow):
 
         # Envelopes
         self.amp_graph = ADSREnvelopeGraph()
-        self.amp_graph.setFixedSize(200, 90)
+        self.amp_graph.setFixedSize(*GRAPH_SIZE)
         self.filter_graph = ADSREnvelopeGraph()
-        self.filter_graph.setFixedSize(200, 90)
-        amp_card = build_section_card(
+        self.filter_graph.setFixedSize(*GRAPH_SIZE)
+        amp_card = _card(
             "Amplitude Envelope",
             build_centered_row(self.amp_graph),
             self._knob_row(
@@ -537,7 +564,7 @@ class S950ProgramEditorWindow(QMainWindow):
                 ],
             ),
         )
-        env_filter_card = build_section_card(
+        env_filter_card = _card(
             "Filter Envelope",
             build_centered_row(self.filter_graph),
             self._knob_row(
@@ -551,6 +578,12 @@ class S950ProgramEditorWindow(QMainWindow):
             ),
         )
         equalize_card_heights(amp_card, env_filter_card)
+        # draggable: the knobs follow the pointer and each move is an ordinary edit of the working copy (nothing here reaches the sampler until Write)
+        self._wire_envelope_graph(self.amp_graph, {"attack": "attack", "decay": "decay", "sustain": "sustain", "release": "release"})
+        self._wire_envelope_graph(
+            self.filter_graph,
+            {"attack": "filter_attack", "decay": "filter_decay", "sustain": "filter_sustain", "release": "filter_release"},
+        )
 
         # Zone: Soft / Loud, the way the S3000 editor has Zone 1-4
         self._zone_buttons = QButtonGroup(self)
@@ -597,7 +630,7 @@ class S950ProgramEditorWindow(QMainWindow):
         zone_card = build_zone_card(selector_row, self._zone_stack)
 
         # Velocity + LFO
-        velocity_card = build_section_card(
+        velocity_card = _card(
             "Velocity",
             self._knob_row(
                 "kg",
@@ -611,7 +644,7 @@ class S950ProgramEditorWindow(QMainWindow):
         )
         # Rate and Depth are the LFO's main controls: first row, a little larger; the three
         # that shape it (build-up, aftertouch, mod wheel) sit below at the page's usual size
-        lfo_card = build_section_card(
+        lfo_card = _card(
             "LFO",
             self._centered_knob_row(
                 "kg", [("lfo_rate", "Rate"), ("lfo_depth", "Depth")], _LFO_MAIN_KNOB
@@ -628,7 +661,7 @@ class S950ProgramEditorWindow(QMainWindow):
         equalize_card_heights(velocity_card, lfo_card)
 
         # Pitch warp + Output
-        pitch_card = build_section_card(
+        pitch_card = _card(
             "Pitch Warp",
             self._knob_row(
                 "kg",
@@ -647,7 +680,7 @@ class S950ProgramEditorWindow(QMainWindow):
         options_label.setFixedWidth(110)
         options_row.addWidget(options_label)
         options_row.addWidget(options, stretch=1)
-        output_card = build_section_card(
+        output_card = _card(
             "Output",
             self._labeled_row("kg", "voice_out", "Output"),
             self._labeled_row("kg", "midi_offset", "MIDI Offset"),
@@ -689,7 +722,16 @@ class S950ProgramEditorWindow(QMainWindow):
         self._write_unchanged_action.triggered.connect(self._write_unchanged)
         hardware_menu.addAction(self._write_unchanged_action)
         hardware_menu.addSeparator()
-        add_open_log_folder_action(hardware_menu, self)
+        add_cancel_transfer_action(self, hardware_menu, self._controller.cancel_transfer)
+
+        view_menu = self.menuBar().addMenu("&View")
+        # act on the Samples tab's waveform, which is built after the menus; only on while that tab shows (_on_tab_changed)
+        self._zoom_actions = build_zoom_actions(self, lambda: self.samples_tab.waveform_view)
+        for action in self._zoom_actions:
+            action.setEnabled(False)
+            view_menu.addAction(action)
+        view_menu.addSeparator()
+        self.audition_action = add_audition_action(self, view_menu, self.audition_bar)
 
         # mirrors the Dashboard's &Window menu (main_window.py) so Ctrl+T/Ctrl+E
         # work from either window
@@ -717,9 +759,27 @@ class S950ProgramEditorWindow(QMainWindow):
         )
         window_menu.addAction(samples_tab_action)
 
+        add_help_menu(self, [audition_section(), dragging_section()])
+
+    def _sync_audition_available(self, idle):
+        # off while anything is on the wire (a catalog read, a transfer, a write): a note must not land in the middle of a SysEx exchange.
+        # Off = nothing is routed, so a dead keyboard never swallows typing.
+        available = idle and not self._controller.is_transfer_busy()
+        self.audition_bar.set_available(available, "" if available else "The keyboard is off while the sampler is busy.")
+
+    def _send_audition_message(self, message):
+        # a plain channel message straight to the output, on the GUI thread (this editor has no worker). Nothing is read back.
+        try:
+            self._controller.midi_manager.send_channel_message(message)
+        except Exception as ex:
+            debug_log.get_logger().error(f"S950Editor: couldn't send MIDI message {bytes(message).hex()}", exc_info=True)
+            self.status_bar.showMessage(f"Couldn't play the note: {ex}", 5000)
+
     def _on_tab_changed(self, index):
         on_samples = index == self._samples_tab_index
         _log(f"tab: {'Samples' if on_samples else 'Programs'}")
+        for action in self._zoom_actions:
+            action.setEnabled(on_samples)
         # the program-writing buttons only mean something on the Programs tab
         for widget in (
             self.dirty_label,
@@ -728,7 +788,20 @@ class S950ProgramEditorWindow(QMainWindow):
             self.write_button,
         ):
             widget.setVisible(not on_samples)
+        for widget in (self.sample_dirty_label, self.sample_revert_button, self.sample_write_button):
+            widget.setVisible(on_samples)
+        self._sync_sample_buttons()
         self.samples_tab.set_active(on_samples)
+
+    def _sync_sample_buttons(self):
+        """Enable the Samples tab's Write / Revert like the program ones: something staged and the wire free."""
+        tab = self.samples_tab
+        idle = self._controller.is_s950_idle() and not self._writing
+        staged = tab.can_write()
+        self.sample_write_button.setEnabled(staged and idle)
+        self.sample_revert_button.setEnabled(staged)
+        n = tab.pending_changes()
+        self.sample_dirty_label.setText(f"{n} unsaved change{'' if n == 1 else 's'}" if n else "")
 
     # -- state ----------------------------------------------------------------------------------
 
@@ -760,6 +833,8 @@ class S950ProgramEditorWindow(QMainWindow):
             f"{n} unsaved change{'' if n == 1 else 's'}" if n else ""
         )
         self.detail_stack.setEnabled(not self._writing)
+        self._sync_sample_buttons()
+        self._sync_audition_available(idle)
         self._dashboard_action.setEnabled(not busy and not self._writing)
         self._dashboard_action.setToolTip(tt.BUSY_BLOCKS_OTHER_WINDOWS if busy else "")
 
@@ -1050,7 +1125,17 @@ class S950ProgramEditorWindow(QMainWindow):
         )
         combo.setCurrentIndex(index)
 
+    def _wire_envelope_graph(self, graph, attrs):
+        # attrs: the graph's value name -> the keygroup field (and so the knob in self._editors) it is
+        graph.set_defaults({name: self._editors[("kg", attr)].defaultValue() for name, attr in attrs.items()})
+        graph.values_changed.connect(
+            lambda values: [self._set_widget(self._editors[("kg", attrs[name])], value) for name, value in values.items()]
+        )
+
     def _refresh_graphs(self, kg):
+        editable = self._working is not None
+        self.amp_graph.set_editable(editable)
+        self.filter_graph.set_editable(editable)
         self.amp_graph.set_values(kg.attack, kg.decay, kg.sustain, kg.release)
         self.filter_graph.set_values(
             kg.filter_attack, kg.filter_decay, kg.filter_sustain, kg.filter_release
@@ -1288,7 +1373,9 @@ class S950ProgramEditorWindow(QMainWindow):
             event.ignore()
             return
         _log("closed")
+        self.audition_bar.set_open(False)  # lets go of every note and gives the computer keyboard back
         self._busy_timer.stop()
+        self._update_runner.wait()
         if not self._connected:
             super().closeEvent(event)
             self._main_window.show()

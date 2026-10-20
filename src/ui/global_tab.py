@@ -1,5 +1,5 @@
 """The Program Editor's Global tab: the S2000/S3000's GLOBAL-page settings (`core/global_settings.py`) - tuning, output level, external controller,
-MIDI program change and Play button, SCSI. Settings of the whole sampler, not of a program.
+MIDI program change and Play button, SCSI, plus a read-only Memory & OS card (RSTAT: OS version, sample memory used). Settings of the whole sampler, not of a program.
 
 A view only: `ProgramEditorWindow` owns the `BridgeWorker`, so this emits `setting_chosen(key, value)` when the USER changes something and is fed with
 `set_values()` - loading a value never emits (combos use `activated`; spinboxes are `blockSignals`'d while set). A control stays disabled until a value for
@@ -10,6 +10,8 @@ The External controller combo here mirrors the one in the Program tab's Modulati
 """
 
 import os
+
+from functools import partial
 
 from PySide6.QtCore import QTimer, Signal
 from PySide6.QtWidgets import (
@@ -36,10 +38,15 @@ from ui.editor_layout import (
     equalize_card_heights,
 )
 from ui.knob import Knob
+from ui.memory_bar import MemoryBar
 from ui.note_spinbox import NoteSpinBox
-from ui.qt_helpers import build_scroll_area, build_section_card
+from ui.qt_helpers import build_scroll_area, build_editor_card
+
+# collapsible cards, remembered as "program_editor/<title>" (ui/section_card.py)
+_card = partial(build_editor_card, "program_editor")
 
 _SPINBOX_DEBOUNCE_MS = 250
+_MEMORY_BAR_MIN_WIDTH = 200
 
 # Settings the tab SHOWS (their value still reads) but never offers to change, key -> the ENTIRE tooltip (kept to a few words on purpose). Locked 2026-10-10:
 # - tune_semitones / tune_cents: they WRITE (acked, read back) but the sampler never uses them - the panel's TUNE screen and the pitch don't change, even after a real page
@@ -112,7 +119,7 @@ class GlobalSettingsTab(QWidget):
             "output_level",
             [(f"{db:+d} dB" if db else "0 dB", db) for db in range(-18, 19, 6)],
         )
-        tuning_card = build_section_card(
+        tuning_card = _card(
             "Tuning & Output",
             self._row(("Tune", tuning), ("Fine tune", fine), ("Output level", output)),
         )
@@ -127,7 +134,7 @@ class GlobalSettingsTab(QWidget):
         controller_row.addStretch()
         note_row = QHBoxLayout()
         note_row.addWidget(controller_note)
-        controller_card = build_section_card("External Controller", controller_row, note_row)
+        controller_card = _card("External Controller", controller_row, note_row)
 
         program_change = self._combo(
             "program_change_channel",
@@ -135,7 +142,7 @@ class GlobalSettingsTab(QWidget):
             + [(str(channel), channel) for channel in range(1, 17)]
             + [("Omni", PROGRAM_CHANGE_OMNI)],
         )
-        midi_card = build_section_card(
+        midi_card = _card(
             "MIDI", self._row(("Program change channel", program_change))
         )
 
@@ -146,7 +153,7 @@ class GlobalSettingsTab(QWidget):
             "play_channel", [(str(channel), channel) for channel in range(1, 17)]
         )
         play_velocity = self._spinbox("play_velocity", 0, 127)
-        play_card = build_section_card(
+        play_card = _card(
             "Play Button",
             self._row(("Note", play_note), ("Channel", play_channel), ("Velocity", play_velocity)),
         )
@@ -154,13 +161,27 @@ class GlobalSettingsTab(QWidget):
         disk_id = self._combo("scsi_disk_id", [(str(i), i) for i in range(8)])
         sector = self._combo("scsi_sector", [(label, i) for i, label in enumerate(SECTOR_SIZE_LABELS)])
         local_id = self._combo("scsi_local_id", [(str(i), i) for i in range(8)])
-        scsi_card = build_section_card(
+        scsi_card = _card(
             "SCSI",
             self._row(("Disk ID", disk_id), ("Sector size", sector), ("Local ID", local_id)),
         )
 
+        # read-only (RSTAT): the OS version and how full the sample memory is - the same bar the Samples tab has
+        self.os_version_label = QLabel("-")
+        self.os_version_label.setObjectName("mutedLabel")
+        self.memory_bar = MemoryBar()
+        self.memory_bar.setMinimumWidth(_MEMORY_BAR_MIN_WIDTH)
+        version_row = QHBoxLayout()
+        version_row.addWidget(QLabel("OS version"))
+        version_row.addWidget(self.os_version_label)
+        version_row.addStretch()
+        memory_row = QHBoxLayout()
+        memory_row.addLayout(build_labeled_combo_column("Sample memory", self.memory_bar, center=False), stretch=1)
+        system_card = _card("Memory & OS", version_row, memory_row)
+
         equalize_card_heights(tuning_card, controller_card)
         equalize_card_heights(midi_card, play_card)
+        equalize_card_heights(scsi_card, system_card)
 
         self._unavailable_label = QLabel()
         self._unavailable_label.setObjectName("mutedLabel")
@@ -173,7 +194,7 @@ class GlobalSettingsTab(QWidget):
         page_layout.addWidget(self._unavailable_label)
         page_layout.addLayout(build_paired_row(tuning_card, controller_card))
         page_layout.addLayout(build_paired_row(midi_card, play_card))
-        page_layout.addWidget(scsi_card)
+        page_layout.addLayout(build_paired_row(scsi_card, system_card))
         page_layout.addStretch()
         page = QWidget()
         page.setLayout(page_layout)
@@ -283,6 +304,15 @@ class GlobalSettingsTab(QWidget):
             else:
                 widget.setEnabled(False)
         self._unavailable_label.hide()
+
+    def set_system_status(self, info):
+        """Show the RSTAT read: `info` as `BridgeWorker.memory_status_loaded` emits it."""
+        self.os_version_label.setText(f"v{info['version']}")
+        self.memory_bar.set_status(info)
+
+    def set_system_unavailable(self, reason=""):
+        self.os_version_label.setText("-")
+        self.memory_bar.set_unknown(reason)
 
     def set_unavailable(self, text):
         """Nothing could be read: disable everything and say why (short)."""

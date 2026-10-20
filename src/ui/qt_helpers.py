@@ -1,8 +1,10 @@
 from PySide6.QtGui import QFontMetrics, QPixmap, QPainter, QColor
 from PySide6.QtCore import Qt, QRectF, QEvent
 from PySide6.QtSvg import QSvgRenderer
+
 from PySide6.QtWidgets import (
     QFormLayout,
+    QHBoxLayout,
     QLabel,
     QScrollArea,
     QSizePolicy,
@@ -10,6 +12,8 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+
+from ui.section_card import SectionCard
 
 
 class FullWidthTabBar(QTabBar):
@@ -65,7 +69,7 @@ def align_form_label_columns(*forms):
     # every QFormLayout sizes its OWN label column to its own widest label,
     # so a page of several section cards (one form each) ends up with the
     # entry fields starting at a different x in every card - "Theme:" is
-    # short, "Device ID (SysEx ch. 0-127):" is not. Giving every label in
+    # short, "SysEx Device ID (usually 0):" is not. Giving every label in
     # every form the width of the widest one lines the field columns up
     # across the whole page. Rows with no label (a note spanning the full
     # width) are skipped. Call after every row has been added, and before
@@ -96,7 +100,7 @@ def widen_popup_to_fit_items(combo):
     combo.view().setMinimumWidth(widest + 40)  # giving extra padding just in case
 
 
-def build_section_card(title, *row_layouts):
+def build_section_card(title, *row_layouts, header_widgets=(), collapse_key=None):
     # groups related rows into one visually distinct card - same surface/
     # border look as the Program Editor's own keygroup zone card (see
     # QWidget#sectionCard in style.qss.template). Originally
@@ -104,13 +108,26 @@ def build_section_card(title, *row_layouts):
     # cards, scroll areas" notes for the full history of the gotchas
     # below) - moved here, unchanged, once ui/settings_dialog.py needed the
     # exact same behaviour rather than a second hand-rolled copy of it.
+    if collapse_key:
+        # a card with a disclosure arrow (ui/section_card.py); the plain card below stays what the Settings dialog and Dashboard use
+        return SectionCard(title, row_layouts, header_widgets, collapse_key)
     header = QLabel(title)
     header.setObjectName("sectionHeader")
 
     section_layout = QVBoxLayout()
     section_layout.setContentsMargins(12, 10, 12, 12)
     section_layout.setSpacing(10)
-    section_layout.addWidget(header)
+    if header_widgets:
+        # small controls right beside the title (e.g. the Loop Preview's zoom buttons) rather than a row of their own
+        header_row = QHBoxLayout()
+        header_row.setSpacing(8)
+        header_row.addWidget(header)
+        for widget in header_widgets:
+            header_row.addWidget(widget)
+        header_row.addStretch()
+        section_layout.addLayout(header_row)
+    else:
+        section_layout.addWidget(header)
     for row in row_layouts:
         section_layout.addLayout(row)
     # without this, a card whose content is shorter than the row it's
@@ -134,6 +151,26 @@ def build_section_card(title, *row_layouts):
     # OR compress below it.
     card.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
     return card
+
+
+def build_editor_card(scope, title, *row_layouts, header_widgets=(), collapsible=True, key=None):
+    """`build_section_card` for the editors: collapsible, and remembered under "<scope>/<key or title>" (`scope` names the editor). A title must be
+    unique within its scope - pass `key` when two cards share one. `collapsible=False` for a card that must always be open."""
+    return build_section_card(
+        title, *row_layouts, header_widgets=header_widgets, collapse_key=f"{scope}/{key or title}" if collapsible else None
+    )
+
+
+def set_enabled_without_scrolling(widget, enabled):
+    """`widget.setEnabled(enabled)`, but a focused widget gives its focus up BEFORE it is disabled.
+
+    A disabled widget hands its keyboard focus to the next one in the tab order, and a QScrollArea scrolls to reveal whichever widget
+    receives it: a button that turns itself off when it is clicked (Run Hardware Test while it runs, Load Edited Audio until the next
+    save, Undo once nothing is left to undo) threw its page 100-200 px down. With no focus there is nothing to hand on. Use this for any
+    control that may be disabled while it has focus - above all one that disables ITSELF."""
+    if not enabled and widget.hasFocus():
+        widget.clearFocus()
+    widget.setEnabled(enabled)
 
 
 def build_scroll_area(page):

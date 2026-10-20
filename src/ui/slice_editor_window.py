@@ -1,10 +1,14 @@
-from PySide6.QtCore import QRegularExpression, Qt
+import os
+from concurrent.futures import ThreadPoolExecutor
+
+from PySide6.QtCore import QRegularExpression, Qt, QTimer
 from PySide6.QtGui import QKeySequence, QRegularExpressionValidator, QShortcut
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
     QComboBox,
     QDialog,
+    QFileDialog,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -19,8 +23,13 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from core import app_config
+from core import debug_log
 from core import sample_slicing
+from core import slice_wav_export
+from core import superflux
 from core import transient_detection
+from core.rx2 import Rx2Error
 from core.audio_preview import SlicePreviewPlayer
 from s3k.messages import AKAI_CHARSET, NAME_LENGTH
 from ui.fine_slider import FineSlider
@@ -49,8 +58,13 @@ _EQUAL_SLICE_DEFAULT = 8
 # threshold"
 _TRANSIENT_SENSITIVITY_DEFAULT = 0
 
+# SuperFlux redoes its whole analysis for every slider value (core/superflux.py), so while the slider is dragged it waits for a
+# pause this long, then analyses off the GUI thread; _SUPERFLUX_POLL_MS is how often the finished job is looked for
+_SUPERFLUX_DEBOUNCE_MS = 120
+_SUPERFLUX_POLL_MS = 30
 
-def slice_export_names(base_name, count):
+
+def slice_export_names(base_name, count, name_length=NAME_LENGTH):
     """The exact resident-sample names an export of *count* slices will use:
     <base>-01, <base>-02, ... - zero-padded to a FIXED width (derived once
     from *count*, not per-name) so every name in the same batch truncates
@@ -65,14 +79,19 @@ def slice_export_names(base_name, count):
     own class docstring on doubling as a trimmer) rather than "slice 1 of
     1", so it skips the numeric suffix entirely and just returns the
     base name itself, truncated/uppercased the same way.
+
+    *name_length* is shorter than NAME_LENGTH when each slice is sent as a
+    -L/-R pair (see SliceEditorWindow's channel_suffixes): the channel suffix
+    is appended to these names, so it needs room that truncating the base
+    here, not the finished name, can give.
     """
     if count == 1:
-        return [base_name.strip().upper()[:NAME_LENGTH]]
+        return [base_name.strip().upper()[:name_length]]
     width = len(str(count))
     suffixes = [f"-{i:0{width}d}" for i in range(1, count + 1)]
     max_suffix_len = max(len(s) for s in suffixes)
-    truncated_base = base_name.strip().upper()[: NAME_LENGTH - max_suffix_len]
-    return [(truncated_base + suffix)[:NAME_LENGTH] for suffix in suffixes]
+    truncated_base = base_name.strip().upper()[: name_length - max_suffix_len]
+    return [(truncated_base + suffix)[:name_length] for suffix in suffixes]
 
 
 def _akai_name_edit(default_text):
@@ -156,6 +175,9 @@ class SliceEditorWindow(QDialog):
         program_labels=None,
         max_program_slices=92,
         program_confirm_message=None,
+        initial_markers=None,
+        channel_suffixes=None,
+        preview_pitch_shift_semitones=0,
     ):
         super().__init__(parent)
         self.setWindowTitle(f'Slice Editor - "{sample_name}"')
@@ -167,10 +189,20 @@ class SliceEditorWindow(QDialog):
         # the markers are placed on) and handed to export_callback as `extra_slices=`. None for everything else, which then calls
         # export_callback exactly as before.
         self._extra_channels = [list(c) for c in extra_channels] if extra_channels else None
+        # a stereo pair is shown as two lanes (the waveform takes exactly one extra channel) and ANALYSED as its mono mix - the
+        # onset detector, preview and zero-crossing snaps all read this, so a hit that is loud on one side only still counts
+        stereo_pair = self._extra_channels[0] if self._extra_channels and len(self._extra_channels) == 1 else None
+        self._analysis = (
+            [(l + r) // 2 for l, r in zip(samples, stereo_pair)] if stereo_pair is not None else samples
+        )
+        # ("-L", "-R") when each slice goes out as TWO resident samples (the Akai editor, whose samples are mono): the names
+        # leave room for the suffix, and the clash check covers the suffixed names too. None = one sample per slice
+        self._channel_suffixes = tuple(channel_suffixes) if channel_suffixes else None
+        self._name_length = NAME_LENGTH - max((len(x) for x in self._channel_suffixes), default=0) if self._channel_suffixes else NAME_LENGTH
         # computed ONCE here, reused on every Sensitivity slider tick - see
         # transient_detection.compute_flux's own docstring on why
         self._transient_flux, self._transient_window_frames = (
-            transient_detection.compute_flux(samples, framerate)
+            transient_detection.compute_flux(self._analysis, framerate)
         )
         self._spitch = spitch
         self._stuno = stuno
@@ -224,10 +256,16 @@ class SliceEditorWindow(QDialog):
         # ProgramEditorWindow._open_slice_editor's own use of this.
         self.export_succeeded = False
 
+        # click-to-preview plays shifted by the source sample's Tune / Root Note, as the sampler would (0 for audio from a file)
+        self._preview_pitch_shift_semitones = preview_pitch_shift_semitones
         self._preview_player = SlicePreviewPlayer(self)
 
         self.waveform = SliceWaveformView()
-        self.waveform.set_waveform(samples, 0, len(samples) - 1)
+        self.waveform.set_waveform(samples, 0, len(samples) - 1, right=stereo_pair)
+        if initial_markers:
+            # e.g. an .rx2's own cut points; set before the signals below are
+            # connected so opening with them doesn't count as an edit
+            self.waveform.set_markers(initial_markers)
         self.waveform.markers_changed.connect(self._update_info_label)
         self.waveform.markers_changed.connect(self._mark_dirty)
         self.waveform.view_changed.connect(self._on_view_changed)
@@ -410,6 +448,39 @@ class SliceEditorWindow(QDialog):
         self.transient_sensitivity_slider.valueChanged.connect(
             self._on_transient_sensitivity_changed
         )
+        # which detector the slider drives. Simple is the original (instant); SuperFlux is the better one but analyses off the GUI
+        # thread. The choice is remembered (core/app_config.py), and SuperFlux is greyed out if the VelociLoops library isn't there.
+        self.detection_combo = QComboBox()
+        self.detection_combo.addItem("Simple (fast)", app_config.SLICE_DETECTION_SIMPLE)
+        self.detection_combo.addItem("SuperFlux (high quality)", app_config.SLICE_DETECTION_SUPERFLUX)
+        self.detection_combo.setToolTip(tooltips.SLICE_DETECTION_MODE)
+        saved_mode = app_config.get_saved_slice_detection()
+        if not superflux.is_available():
+            item = self.detection_combo.model().item(1)
+            item.setEnabled(False)
+            item.setToolTip(tooltips.SLICE_DETECTION_SUPERFLUX_UNAVAILABLE)
+            saved_mode = app_config.SLICE_DETECTION_SIMPLE
+        self.detection_combo.setCurrentIndex(self.detection_combo.findData(saved_mode))
+        self.detection_combo.activated.connect(self._on_detection_mode_chosen)
+        # SuperFlux's analysis runs on one worker thread, polled from the GUI thread (no cross-thread Qt signals, so closing the
+        # dialog mid-analysis can't touch a deleted object)
+        self._sf_executor = None
+        self._sf_future = None
+        self._sf_job_id = 0  # the request a running job was started for
+        self._sf_request_id = 0  # bumped by every slider change/mode switch: only the newest result is applied
+        self._sf_applied_id = 0
+        self._sf_buffer = None  # the mono mix as floats, built by the first job and reused
+        self._sf_error_shown = False
+        self._sf_debounce = QTimer(self)
+        self._sf_debounce.setSingleShot(True)
+        self._sf_debounce.setInterval(_SUPERFLUX_DEBOUNCE_MS)
+        self._sf_debounce.timeout.connect(self._superflux_pump)
+        self._sf_poll = QTimer(self)
+        self._sf_poll.setInterval(_SUPERFLUX_POLL_MS)
+        self._sf_poll.timeout.connect(self._superflux_poll)
+        transient_row.addWidget(QLabel("Detection:"))
+        transient_row.addWidget(self.detection_combo)
+        transient_row.addSpacing(12)
         transient_row.addWidget(QLabel("Sensitivity:"))
         transient_row.addWidget(self.transient_sensitivity_slider)
         transient_row.addWidget(self.transient_sensitivity_value_label)
@@ -447,6 +518,12 @@ class SliceEditorWindow(QDialog):
             self.export_button.setEnabled(False)
             self.export_button.setToolTip(tooltips.EXPORT_SLICES_DEMO_MODE)
         export_row.addWidget(self.export_button)
+
+        # unlike Export Slices this needs no sampler, so demo mode leaves it on
+        self.save_wavs_button = QPushButton("Save WAVs...")
+        self.save_wavs_button.setToolTip(tooltips.SAVE_SLICES_WAV_BUTTON)
+        self.save_wavs_button.clicked.connect(self._save_wavs)
+        export_row.addWidget(self.save_wavs_button)
 
         # only built when there's actually something to cancel - None for
         # dashboard.py's own reuse of this window (see cancel_callback's
@@ -746,7 +823,11 @@ class SliceEditorWindow(QDialog):
 
     def _preview_slice(self, slice_start, slice_end):
         self._preview_player.play(
-            self._samples, slice_start, slice_end, self._framerate
+            self._analysis,
+            slice_start,
+            slice_end,
+            self._framerate,
+            pitch_shift_semitones=self._preview_pitch_shift_semitones,
         )
 
     # --- Equal Slices ------------------------------------------------------
@@ -768,7 +849,7 @@ class SliceEditorWindow(QDialog):
             self.waveform.start(), self.waveform.end(), count
         )
         snapped = [
-            sample_slicing.find_nearest_zero_crossing(self._samples, m) for m in markers
+            sample_slicing.find_nearest_zero_crossing(self._analysis, m) for m in markers
         ]
         self.waveform.set_markers(snapped)
 
@@ -783,11 +864,15 @@ class SliceEditorWindow(QDialog):
         # (silence, too-short buffer - see compute_flux) still behaves
         # identically: no markers, full stop.
         self.transient_sensitivity_value_label.setText(f"{value}%")
+        if self._detection_mode() == app_config.SLICE_DETECTION_SUPERFLUX:
+            self._request_superflux()
+            return
+        self._cancel_superflux()
         candidates = transient_detection.markers_from_flux(
             self._transient_flux,
             self._transient_window_frames,
             value,
-            len(self._samples),
+            len(self._analysis),
         )
         # markers_from_flux works over the WHOLE buffer, not [start, end] -
         # it has no idea where the trim handles currently sit (same reason
@@ -800,9 +885,105 @@ class SliceEditorWindow(QDialog):
         start, end = self.waveform.start(), self.waveform.end()
         markers = [m for m in candidates if start < m < end]
         snapped = [
-            sample_slicing.find_nearest_zero_crossing(self._samples, m) for m in markers
+            sample_slicing.find_nearest_zero_crossing(self._analysis, m) for m in markers
         ]
         self.waveform.set_markers(snapped)
+
+    # --- detection mode / SuperFlux ------------------------------------------------
+
+    def _detection_mode(self):
+        return self.detection_combo.currentData()
+
+    def _on_detection_mode_chosen(self, _index):
+        debug_log.get_logger().info(
+            f"SliceEditor: detection mode -> {self._detection_mode()} (sensitivity {self.transient_sensitivity_slider.value()})"
+        )
+        app_config.save_slice_detection(self._detection_mode())
+        # same rule as the slider itself: with it above 0 the chosen detector takes over the markers (0 = off touches nothing)
+        value = self.transient_sensitivity_slider.value()
+        if value > 0:
+            self._on_transient_sensitivity_changed(value)
+        else:
+            self._cancel_superflux()
+
+    def _request_superflux(self):
+        """The slider (or the mode) changed: analyse for the newest value once the slider pauses; older results are dropped."""
+        self._sf_request_id += 1
+        if self.transient_sensitivity_slider.value() <= 0:
+            # off needs no analysis - clear at once, and anything still running is for a stale request
+            self._sf_debounce.stop()
+            self._sf_applied_id = self._sf_request_id
+            self.waveform.set_markers([])
+            return
+        self.transient_sensitivity_value_label.setText("...")
+        self._sf_debounce.start()
+
+    def _superflux_pump(self):
+        """Start an analysis for the newest request, unless one is already running (the poll starts the next when it finishes)."""
+        if self._sf_future is not None or self._sf_applied_id == self._sf_request_id:
+            return
+        if self._sf_executor is None:
+            self._sf_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="superflux")
+        value = self.transient_sensitivity_slider.value()
+        self._sf_job_id = self._sf_request_id
+        self._sf_future = self._sf_executor.submit(self._superflux_job, value)
+        self._sf_poll.start()
+
+    def _superflux_job(self, value):
+        # (worker thread) the float buffer is built here, on the first job, not on the GUI thread
+        if self._sf_buffer is None:
+            self._sf_buffer = superflux.to_float_buffer(self._analysis)
+        return superflux.detect(self._sf_buffer, self._framerate, value)
+
+    def _superflux_poll(self):
+        future = self._sf_future
+        if future is None or not future.done():
+            return
+        self._sf_poll.stop()
+        self._sf_future = None
+        try:
+            candidates = future.result()
+        except Rx2Error as e:
+            self._superflux_failed(str(e))
+            return
+        except Exception as e:  # a bug in the wrapper must not take the dialog down
+            debug_log.get_logger().error("SliceEditor: SuperFlux analysis failed", exc_info=True)
+            self._superflux_failed(str(e))
+            return
+        if self._sf_job_id == self._sf_request_id:
+            self._sf_applied_id = self._sf_job_id
+            self.transient_sensitivity_value_label.setText(f"{self.transient_sensitivity_slider.value()}%")
+            start, end = self.waveform.start(), self.waveform.end()
+            markers = [m for m in candidates if start < m < end]
+            self.waveform.set_markers(
+                [sample_slicing.find_nearest_zero_crossing(self._analysis, m) for m in markers]
+            )
+        else:
+            self._superflux_pump()  # the slider moved on while this ran
+
+    def _superflux_failed(self, reason):
+        # fall back to the simple detector for the rest of the session rather than leaving a slider that does nothing
+        debug_log.get_logger().warning(f"SliceEditor: SuperFlux unavailable ({reason})")
+        self.detection_combo.setCurrentIndex(self.detection_combo.findData(app_config.SLICE_DETECTION_SIMPLE))
+        self.detection_combo.model().item(1).setEnabled(False)
+        self.detection_combo.model().item(1).setToolTip(reason)
+        if not self._sf_error_shown:
+            self._sf_error_shown = True
+            QMessageBox.warning(self, "Slice Editor", f"SuperFlux couldn't analyse this sample, so Simple detection is used.\n\n{reason}")
+        self._on_transient_sensitivity_changed(self.transient_sensitivity_slider.value())
+
+    def _cancel_superflux(self):
+        """Drop any pending or running SuperFlux request (its result will not be applied)."""
+        self._sf_request_id += 1
+        self._sf_applied_id = self._sf_request_id
+        self._sf_debounce.stop()
+
+    def _stop_superflux(self):
+        self._sf_debounce.stop()
+        self._sf_poll.stop()
+        if self._sf_executor is not None:
+            self._sf_executor.shutdown(wait=False, cancel_futures=True)
+            self._sf_executor = None
 
     # --- export --------------------------------------------------------------
 
@@ -821,6 +1002,17 @@ class SliceEditorWindow(QDialog):
             f'("{names[0]}".."{names[-1]}")? This can take a while and will '
             "freeze the interface."
         )
+
+    @staticmethod
+    def _stereo_confirm_message(slice_count, names, suffixes):
+        pair = f'"{names[0]}{suffixes[0]}" / "{names[0]}{suffixes[-1]}"'
+        what = (
+            f"as a stereo pair of samples ({pair})"
+            if slice_count == 1
+            else f"{slice_count} stereo slices as {slice_count * len(suffixes)} samples ({pair} .. "
+            f'"{names[-1]}{suffixes[0]}" / "{names[-1]}{suffixes[-1]}")'
+        )
+        return f"Send {what} to the sampler? This can take a while and will freeze the interface."
 
     def _confirm_export(self):
         # slice_count == 1 (no interior markers at all) is a valid, if
@@ -841,7 +1033,7 @@ class SliceEditorWindow(QDialog):
             )
             return
 
-        names = slice_export_names(base_name, slice_count)
+        names = slice_export_names(base_name, slice_count, self._name_length)
         if len(set(names)) != len(names):
             # only reachable with a base name short enough that truncation
             # can't be the cause - i.e. never, in practice (NAME_LENGTH=12
@@ -854,7 +1046,9 @@ class SliceEditorWindow(QDialog):
             )
             return
         existing = set(self._existing_names_provider())
-        collisions = [n for n in names if n in existing]
+        # what will really be resident: the slice names, or each with a channel suffix
+        resident = [n + suffix for n in names for suffix in (self._channel_suffixes or ("",))]
+        collisions = [n for n in resident if n in existing]
         if collisions:
             QMessageBox.warning(
                 self,
@@ -912,6 +1106,8 @@ class SliceEditorWindow(QDialog):
                     return
 
         confirm_message = self._export_confirm_message(slice_count, names)
+        if self._channel_suffixes and self._export_confirm_message == self._default_export_confirm_message:
+            confirm_message = self._stereo_confirm_message(slice_count, names, self._channel_suffixes)
         if create_program and self._program_confirm_message is not None:
             confirm_message += "\n\n" + self._program_confirm_message(slice_count, self.template_program_combo.currentText())
         elif create_program:
@@ -932,6 +1128,10 @@ class SliceEditorWindow(QDialog):
         if reply != QMessageBox.StandardButton.Yes:
             return
 
+        debug_log.get_logger().info(
+            f"SliceEditor: export {slice_count} slice(s) as {names[0]!r}..{names[-1]!r}"
+            + (f", with program {program_name!r}" if create_program else "")
+        )
         bit_depth = self.bit_depth_combo.currentData()
         sample_rate = self.rate_combo.currentData()
         slices = sample_slicing.slice_samples(
@@ -1004,6 +1204,7 @@ class SliceEditorWindow(QDialog):
             self._on_export_busy(False)
             self.export_progress.setVisible(False)
 
+        debug_log.get_logger().info(f"SliceEditor: export {'done' if success else 'FAILED'}: {message}")
         self.status_bar.showMessage(message)
         if success:
             self._dirty = False  # this exact marker layout is now on the sampler
@@ -1011,6 +1212,60 @@ class SliceEditorWindow(QDialog):
             QMessageBox.information(self, "Export Slices", message)
         else:
             QMessageBox.warning(self, "Export Slices", message)
+
+    def _save_wavs(self):
+        markers = self.waveform.slice_markers()
+        slice_count = len(markers) + 1
+        base_name = self.name_edit.text().strip()
+        if not base_name:
+            QMessageBox.warning(self, "Save WAVs", "Enter a base name for the slice files.")
+            return
+
+        chosen = QFileDialog.getExistingDirectory(
+            self, "Choose a folder for the WAV files", app_config.get_slice_wav_folder()
+        )
+        if not chosen:
+            return
+        app_config.save_slice_wav_folder(chosen)
+
+        names = slice_export_names(base_name, slice_count, self._name_length)
+        folder = slice_wav_export.output_folder(chosen, base_name, slice_count)
+        paths = slice_wav_export.wav_paths(folder, names)
+        existing = [p for p in paths if os.path.exists(p)]
+        if existing:
+            reply = QMessageBox.question(
+                self,
+                "Save WAVs",
+                f"{len(existing)} of {len(paths)} file{'s' if len(paths) != 1 else ''} "
+                f'already exist in "{os.path.basename(folder)}". Replace '
+                f"{'it' if len(existing) == 1 else 'them'}?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if reply != QMessageBox.StandardButton.Yes:
+                return
+
+        self._preview_player.stop()
+        start, end = self.waveform.start(), self.waveform.end()
+        slices = sample_slicing.slice_samples(self._samples, start, end, markers)
+        # a stereo source is saved as stereo files, not the -L/-R pair the sampler needs
+        right = None
+        if self._extra_channels and len(self._extra_channels) == 1:
+            right = sample_slicing.slice_samples(self._extra_channels[0], start, end, markers)
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            slice_wav_export.write_slices(folder, paths, slices, self._framerate, right)
+        except OSError as error:
+            debug_log.get_logger().error(f"SliceEditor: saving WAVs to {folder} failed", exc_info=True)
+            QMessageBox.warning(self, "Save WAVs", f"Couldn't save the files: {error}")
+            return
+        finally:
+            QApplication.restoreOverrideCursor()
+        debug_log.get_logger().info(f"SliceEditor: saved {len(paths)} WAV file(s) to {folder}")
+        self.status_bar.setVisible(True)
+        self.status_bar.showMessage(
+            f"Saved {len(paths)} slice{'s' if len(paths) != 1 else ''} to {folder}"
+        )
 
     def _on_cancel_export_shortcut(self):
         if not self._exporting or self._cancel_callback is None:
@@ -1066,10 +1321,12 @@ class SliceEditorWindow(QDialog):
             self.equal_count_spin,
             self.equal_slices_button,
             self.transient_sensitivity_slider,
+            self.detection_combo,
             self.name_edit,
             self.bit_depth_combo,
             self.rate_combo,
             self.export_button,
+            self.save_wavs_button,
             self.close_button,
         ):
             widget.setEnabled(enabled)
@@ -1110,11 +1367,13 @@ class SliceEditorWindow(QDialog):
     def reject(self):
         if self._confirm_discard():
             self._preview_player.stop()
+            self._stop_superflux()
             super().reject()
 
     def closeEvent(self, event):
         if self._confirm_discard():
             self._preview_player.stop()
+            self._stop_superflux()
             super().closeEvent(event)
         else:
             event.ignore()

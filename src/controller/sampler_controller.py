@@ -1,5 +1,5 @@
 from PySide6.QtCore import QObject, Signal, QTimer
-from core import akai_sysex, sds_encoder, midi_identity, debug_log, sampler_models, sysex_trace
+from core import akai_sample_file, akai_sysex, sds_encoder, midi_identity, debug_log, sampler_models, sysex_trace
 import os
 import time
 
@@ -27,6 +27,9 @@ class SamplerController(QObject):
     # means "written, but the sampler shows something different" (the Program is what it
     # reports); False with None means nothing usable came back / nothing was written.
     s950_program_written = Signal(int, bool, object, str)
+    # write_s950_sample_params()'s outcome, same shape: (slot, verified, SampleParams the
+    # sampler holds now | None, message)
+    s950_sample_written = Signal(int, bool, object, str)
     status_changed = Signal(str)
     transfer_progress = Signal(int, int)  # (packets sent so far, total packets)
     unit_progress = Signal(float)
@@ -60,13 +63,17 @@ class SamplerController(QObject):
         # global SysEx device ID/channel (0-127) - NOT THE SAME AS MIDI CHANNELS (1-16)!!!
         # defaults to 0, otherwise it can be set manually for a daisy-chained setup
         self.channel = 0
-        # device_type is the PROTOCOL FAMILY ("akai"/"generic"/"s950") every
+        #: what a receive saves: "wav", "s3" (the Akai sample file, header and all) or "both". "s3" needs an Akai-mode receive (the sampler's own header
+        #: block); any other receive saves the WAV whatever this says
+        self.receive_format = "wav"
+        # device_type is the PROTOCOL FAMILY ("akai"/"generic"/"s950"/"ensoniq") every
         # transfer path below branches on; sampler_model is the full Settings choice
         # (core/sampler_models.py) - only the Program Editor cares about the
         # S1000 vs S2000/S3000 split, which transfers don't
         self.device_type = "akai"
         self.sampler_model = sampler_models.AKAI_S2000_S3000
         self._s950_engine = None  # built on first use - see _s950
+        self._ensoniq_engine = None  # built on first use - see _ensoniq
         self._yamaha_transfers_engine = None  # the Dashboard's Yamaha list/receive - see _yamaha_transfers
         self._yamaha_engine = None  # built on first use - see _yamaha
 
@@ -199,6 +206,7 @@ class SamplerController(QObject):
         # a protocol family
         self.sampler_model = sampler_models.normalize(selection)
         self.device_type = sampler_models.protocol_family(self.sampler_model)
+        debug_log.get_logger().info(f"SamplerController: sampler type {self.sampler_model} (protocol family {self.device_type})")
 
     @property
     def _s950(self):
@@ -272,7 +280,49 @@ class SamplerController(QObject):
         self.status_changed.emit(f"{what} isn't available for the Akai S900/S950")
         return True
 
+    def _is_ensoniq(self):
+        return self.device_type == sampler_models.FAMILY_ENSONIQ
+
+    @property
+    def _ensoniq(self):
+        # the Ensoniq list / receive / send engine, built the first time it is needed. Two dialects share the "ensoniq" family and its Dashboard branches:
+        # the EPS/EPS-16+/ASR-10 one (controller/ensoniq_transfers.py) and the ASR-X one (controller/asrx_transfers.py). The Sampler Type picks; a type change
+        # (Settings is blocked while a transfer runs) swaps the engine
+        want_asrx = sampler_models.is_asrx(self.sampler_model)
+        engine = self._ensoniq_engine
+        if engine is not None and bool(getattr(engine, "IS_ASRX", False)) != want_asrx:
+            engine = self._ensoniq_engine = None
+        if engine is None:
+            if want_asrx:
+                from controller.asrx_transfers import AsrxTransfers
+
+                engine = AsrxTransfers(self)
+            else:
+                from controller.ensoniq_transfers import EnsoniqTransfers
+
+                engine = EnsoniqTransfers(self)
+            self._ensoniq_engine = engine
+        return engine
+
+    def is_ensoniq_idle(self):
+        return self._ensoniq_engine is None or self._ensoniq_engine.idle
+
+    def _ensoniq_not_supported(self, what):
+        # Ensoniq's own SysEx (core/ensoniq_sysex.py) has an engine for listing, receiving and sending files only
+        # (controller/ensoniq_transfers.py, dev_docs/ensoniq-support-plan.md). Entry points without an Ensoniq version refuse, so
+        # choosing that Sampler Type can never put Akai or SDS bytes on the wire that an Ensoniq would misread. Replace a refusal
+        # by delegating to the engine
+        if not self._is_ensoniq():
+            return False
+        name = sampler_models.ensoniq_display_name(self.sampler_model)
+        debug_log.get_logger().info(f"SamplerController: refused {what} - not implemented yet for the {name}")
+        self.status_changed.emit(f"{what} isn't available for the {name} yet")
+        return True
+
     def refresh_sample_list(self, silent=False):
+        if self._is_ensoniq():
+            self._ensoniq.refresh_catalog(silent)
+            return
         if self.is_yamaha_model():
             self._yamaha_transfers.refresh_list(silent)
             return
@@ -321,6 +371,14 @@ class SamplerController(QObject):
             return
         self._s950.write_program(slot, baseline, edited)
 
+    def write_s950_sample_params(self, slot, changes):
+        # S900/S950 only: write the given sample parameter fields (a dict of SampleParams
+        # attribute -> value, today only replay_mode and reversed) onto the sample in
+        # `slot` - see S950Transfers.write_sample_params
+        if not self._is_s950():
+            return
+        self._s950.write_sample_params(slot, changes)
+
     def _yamaha_not_supported(self, what):
         # the Yamaha has no known delete/rename opcode, and the Akai commands below would be misread by it
         if not self.is_yamaha_model():
@@ -330,6 +388,8 @@ class SamplerController(QObject):
         return True
 
     def delete_sample(self, sample_number, channel=None):
+        if self._ensoniq_not_supported("Deleting samples"):
+            return
         if self._yamaha_not_supported("Deleting samples"):
             return
         if self._s950_not_supported(
@@ -345,6 +405,8 @@ class SamplerController(QObject):
         QTimer.singleShot(300, self.refresh_sample_list)
 
     def rename_sample(self, sample_number, new_name, channel=None):
+        if self._ensoniq_not_supported("Renaming samples"):
+            return
         if self._yamaha_not_supported("Renaming samples"):
             return
         if self._is_s950():
@@ -363,6 +425,8 @@ class SamplerController(QObject):
         QTimer.singleShot(300, self.refresh_sample_list)
 
     def request_sample_info(self, sample_number, channel=None):
+        if self._ensoniq_not_supported("Reading sample info"):
+            return
         if self.is_yamaha_model():
             return
         if self._is_s950():
@@ -606,8 +670,12 @@ class SamplerController(QObject):
         )
         message = (
             f"No reply from the sampler to the {label} request - check the MIDI "
-            f"input port, cabling and SysEx channel"
+            f"input port, cabling and Device ID"
         )
+        if self.device_type == sampler_models.FAMILY_AKAI and self.channel != 0:
+            # an S1100 sat on ID 0 while Settings said 1 (user log, 2026-10-16):
+            # the sampler ignores any other ID and the user never knew why
+            message += f" (it is {self.channel}; most Akais use 0)"
         if (
             self._awaiting_count_for_queue
             or self._awaiting_pre_send_slist
@@ -707,6 +775,11 @@ class SamplerController(QObject):
 
     def _on_sysex_received_impl(self, data_bytes):
         if not data_bytes:
+            return
+
+        if self._is_ensoniq():
+            # Ensoniq traffic (F0 0F ...) must not reach the Akai-family or SDS parsers below, which would misread it
+            self._ensoniq.handle_sysex(data_bytes)
             return
 
         if self._is_s950():
@@ -1011,6 +1084,8 @@ class SamplerController(QObject):
         effective_bits=16,
         target_sample_rate=None,
     ):
+        if self._ensoniq_not_supported("Sending samples this way"):
+            return
         if self._s950_not_supported("Sending samples this way"):
             return
         if channel is None:
@@ -1032,6 +1107,8 @@ class SamplerController(QObject):
         effective_bits=16,
         target_sample_rate=None,
     ):
+        if self._ensoniq_not_supported("Sending samples this way"):
+            return
         if self._s950_not_supported("Sending samples this way"):
             return
         if channel is None:
@@ -1071,6 +1148,8 @@ class SamplerController(QObject):
     def send_sample_file_generic(
         self, filepath, sample_number=0, channel=None, bit_depth=16
     ):
+        if self._ensoniq_not_supported("Sending samples this way"):
+            return
         if self._s950_not_supported("Sending samples this way"):
             return
         if channel is None:
@@ -1094,6 +1173,8 @@ class SamplerController(QObject):
     def send_sample_file_generic_and_rename(
         self, filepath, new_name, channel=None, bit_depth=16
     ):
+        if self._ensoniq_not_supported("Sending samples this way"):
+            return
         if self._s950_not_supported("Sending samples this way"):
             return
         if channel is None:
@@ -1239,6 +1320,8 @@ class SamplerController(QObject):
     # ---------------------------------------------------------
 
     def send_file_queue(self, file_entries, channel=None, starting_sample_number=None):
+        if self._is_ensoniq():
+            return self._ensoniq.send_file_queue(file_entries)
         if self._is_s950():
             return self._s950.send_file_queue(file_entries)
         if self.is_yamaha_model():
@@ -1426,6 +1509,8 @@ class SamplerController(QObject):
     # -----------------------------------------------------------------------------
 
     def receive_sample_generic(self, sample_number, save_path, channel=None):
+        if self._ensoniq_not_supported("Receiving samples by number"):
+            return
         if self._s950_not_supported("Receiving samples by number"):
             return
         # receive ONE sample from a generic SDS device
@@ -1465,6 +1550,9 @@ class SamplerController(QObject):
         self.status_changed.emit(f"Requesting sample {sample_number} (generic SDS)...")
 
     def receive_samples(self, sample_requests, channel=None):
+        if self._is_ensoniq():
+            self._ensoniq.receive_samples(sample_requests)
+            return
         if self._is_s950():
             self._s950.receive_samples(sample_requests)
             return
@@ -1710,22 +1798,15 @@ class SamplerController(QObject):
             : info["sample_length"]
         ]  # trim any padding words past the real length (ie, trailing zeroes)
 
-        sds_encoder.write_wav_file(
-            self._receive_save_path,
-            samples,
-            info["sample_rate"],
-            info["bit_depth"],
-        )
+        saved_path, note = self._save_received_sample(info, samples)
 
         debug_log.get_logger().info(
             f"SamplerController: receive finished slot={self._receive_sample_number} "
             f"packets={len(self._receive_packets)}/{self._receive_expected_packets} "
-            f"checksum_errors={self._receive_checksum_errors} samples={len(samples)}"
+            f"checksum_errors={self._receive_checksum_errors} samples={len(samples)} saved={saved_path!r}"
         )
-        self.status_changed.emit(
-            f"Saved sample {info['sample_number']} to {self._receive_save_path}"
-        )
-        self.sample_received.emit(self._receive_save_path)
+        self.status_changed.emit(f"Saved sample {info['sample_number']} to {saved_path}{note}")
+        self.sample_received.emit(saved_path)
 
         self._receiving = False
         self._receive_header_info = None
@@ -1733,10 +1814,46 @@ class SamplerController(QObject):
 
         QTimer.singleShot(300, self._receive_next_sample)
 
+    def _save_received_sample(self, info, samples):
+        """Write a finished receive as `receive_format` says. Returns (the path to report, a note for the status line - '' when all went as asked).
+
+        The Akai sample file (`core/akai_sample_file.py`) is the sampler's own header block plus the audio. It is next to the WAV path (same name, the
+        extension swapped). If it can't be made - not an Akai-mode receive, an incomplete sample, a disk error - the WAV is written instead, so a receive
+        that asked for ONLY the Akai file never ends with nothing."""
+        wav_path = self._receive_save_path
+        wanted = self.receive_format
+        log = debug_log.get_logger()
+        written = []
+        problem = None
+        if wanted in ("s3", "both"):
+            raw = info.get("raw_header")
+            if raw is None:
+                problem = "this receive has no Akai sample header"
+            else:
+                try:
+                    data = akai_sample_file.build_file(raw, samples)
+                    path = os.path.splitext(wav_path)[0] + akai_sample_file.HEADER_SIZES[len(raw)]
+                    with open(path, "wb") as handle:
+                        handle.write(data)
+                    written.append(path)
+                except (akai_sample_file.SampleFileError, OSError) as e:
+                    problem = str(e)
+            if problem:
+                log.warning(f"SamplerController: couldn't save the Akai sample file for slot {self._receive_sample_number}: {problem}")
+        if wanted in ("wav", "both") or not written:
+            sds_encoder.write_wav_file(wav_path, samples, info["sample_rate"], info["bit_depth"])
+            written.insert(0, wav_path)
+        note = f" (no Akai sample file: {problem})" if problem else ""
+        if len(written) == 2:
+            note = f" and {os.path.basename(written[1])}"
+        return written[0], note
+
     def cancel_transfer(self):
         # abort whatever is currently happening and communicate the cancel to the hardware
         # should be safe to call at any time i think
         if self._s950_engine is not None and self._s950_engine.cancel():
+            return
+        if self._ensoniq_engine is not None and self._ensoniq_engine.cancel():
             return
         if self._yamaha_transfers_engine is not None and self._yamaha_transfers_engine.cancel():
             return
@@ -1830,6 +1947,7 @@ class SamplerController(QObject):
         return bool(
             self.is_sds_transfer_busy()
             or (self._s950_engine is not None and self._s950_engine.busy)
+            or (self._ensoniq_engine is not None and self._ensoniq_engine.busy)
             or (self._yamaha_transfers_engine is not None and self._yamaha_transfers_engine.busy)
         )
 

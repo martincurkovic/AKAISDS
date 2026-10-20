@@ -364,7 +364,7 @@ class SampleParams:
 @dataclasses.dataclass
 class SampleDumpHeader:
     num: int  # sample slot (the S950 uses 0..99)
-    bits_per_word: int = 12  # S950 sends 12, accepts 8..16
+    bits_per_word: int = 12  # S950 sends 12, accepts 8..14 (ROM v1.2b/1.2a and S900 v1.2A reject 15+; static read, not run)
     period_ns: int = 0  # sample period, MIN_PERIOD_NS..MAX_PERIOD_NS
     total_words: int = 0  # MIN_TOTAL_WORDS..MAX_TOTAL_WORDS
     loop_start: int = 0  # words from sample start

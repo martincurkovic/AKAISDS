@@ -155,6 +155,49 @@ def test_stop_without_playing_is_a_noop_and_emits_nothing(qapp):
     assert received == []
 
 
+class _HoldsTheGenerator:
+    """A stand-in output device that, like miniaudio's, keeps the generator it was started with."""
+
+    def __init__(self):
+        self.generator = None
+
+    def start(self, generator):
+        self.generator = generator
+
+    def stop(self):
+        pass
+
+    def close(self):
+        pass
+
+
+@pytest.mark.parametrize("looping", [False, True])
+def test_a_playing_player_is_not_kept_alive_by_its_own_device(qapp, looping):
+    """The device (and the generator it holds) runs on miniaudio's audio thread. If the generator held the player, player and device would form a reference
+    cycle that only the garbage collector frees - on whichever thread it happens to run, and a QObject with a timer destroyed on the audio thread leaves a
+    dangling timer that crashes the GUI thread later ("Timers cannot be stopped from another thread"). Plain reference counting must be enough."""
+    import gc
+    import weakref
+
+    device = _HoldsTheGenerator()
+    player = audio_preview.SlicePreviewPlayer()
+    player._open_device_for = lambda *args, **kwargs: device
+    samples = [1000 if i % 2 == 0 else -1000 for i in range(4410)]
+    if looping:
+        player.play_loop(samples, 0, 1000, 3000, len(samples) - 1, 44100, dwell_ms=None)
+    else:
+        player.play(samples, 0, len(samples) - 1, 44100)
+    assert device.generator is not None
+    reference = weakref.ref(player)
+    gc.disable()
+    try:
+        del player
+        assert reference() is None
+    finally:
+        gc.enable()
+        audio_preview._stop_all_players()
+
+
 # --- SlicePreviewPlayer: real playback (skipped without an audio device) ---
 
 

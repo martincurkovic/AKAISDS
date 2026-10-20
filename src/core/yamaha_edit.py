@@ -16,6 +16,7 @@ import sys
 import wave
 
 from core import sample_editing as se
+from core import time_stretch as tstretch
 from core import yamaha_params as yp
 
 #: the unit's loop modes that loop (owner's manual p.123): continuous and loop-to-release
@@ -28,6 +29,8 @@ EDITS = {
     "fade": (" FADE", "Fade In/Out"),
     "normalise": (" NORM", "Normalise"),
     "filter": (" FILT", "Filter"),
+    "stretch": (" STR", "Time Stretch"),
+    "pitch": (" PITCH", "Pitch Shift"),
 }
 
 NAME_LENGTH = 16
@@ -38,8 +41,12 @@ def copy_name(name, suffix):
     return name.rstrip()[: NAME_LENGTH - len(suffix)].rstrip() + suffix
 
 
-def transform_for(kind, *, framerate=None, filter_options=None):
-    """The `core.sample_editing` function for an edit, with its extra arguments bound (all share the 5-in/5-out shape)."""
+def transform_for(kind, *, framerate=None, filter_options=None, options=None):
+    """The `core.sample_editing` function for an edit, with its extra arguments bound (all share the 5-in/5-out shape).
+    `options` are the edit's own keyword arguments (filter: the highpass/lowpass settings; stretch: factor, grain_frames);
+    `filter_options` is the older name for the same thing."""
+    if options is None:
+        options = filter_options
     if kind == "trim":
         return se.trim_samples
     if kind == "reverse":
@@ -49,16 +56,18 @@ def transform_for(kind, *, framerate=None, filter_options=None):
     if kind == "normalise":
         return se.normalize_samples
     if kind == "filter":
-        return functools.partial(se.filter_samples, framerate=framerate, **(filter_options or {}))
+        return functools.partial(se.filter_samples, framerate=framerate, **(options or {}))
+    if kind in tstretch.EDITS:
+        return tstretch.transform_for(kind, **(options or {}))
     raise ValueError(f"unknown edit {kind!r}")
 
 
-def apply_edit(kind, channels, markers, *, framerate=None, filter_options=None):
+def apply_edit(kind, channels, markers, *, framerate=None, filter_options=None, options=None):
     """Run an edit over every channel. `channels`: [left] or [left, right] (lists of int16, equal length); `markers`: (start,
     loop_start, loop_end, end) in frames, inclusive, with the loop inside [start, end]. Returns (new_channels, new_markers).
 
     Markers come out the same for every channel (they depend only on the lengths), so the left channel's are returned."""
-    transform = transform_for(kind, framerate=framerate, filter_options=filter_options)
+    transform = transform_for(kind, framerate=framerate, filter_options=filter_options, options=options)
     if kind == "normalise" and len(channels) > 1:
         # one gain for both: normalise the two channels laid end to end, then cut the result back apart
         frames = len(channels[0])

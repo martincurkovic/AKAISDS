@@ -47,7 +47,7 @@ def test_connect_opens_saved_output_port_when_not_demo(monkeypatch):
     calls = []
     sentinel = object()
 
-    def fake_standard(output_name):
+    def fake_standard(output_name, **kwargs):
         calls.append(output_name)
         return sentinel
 
@@ -58,6 +58,46 @@ def test_connect_opens_saved_output_port_when_not_demo(monkeypatch):
     assert isinstance(bridge, LoggingBridge)
     assert bridge._bridge is sentinel
     assert calls == ["Some Output"]
+
+
+def test_connect_passes_the_saved_device_id_to_a_standard_connection(monkeypatch):
+    # the Dashboard sends on Settings > Device ID; the editor used to always
+    # use s3k's default 0 (an S1100 on ID 0 worked in the editor only)
+    monkeypatch.delenv("AKAISDS_DEMO_SAMPLER", raising=False)
+    monkeypatch.setattr(
+        program_editor_bridge.app_config, "get_saved_ports", lambda: ("In", "Out")
+    )
+    monkeypatch.setattr(program_editor_bridge.app_config, "get_saved_channel", lambda: 5)
+    kwargs_seen = []
+
+    def fake_standard(output_name, **kwargs):
+        kwargs_seen.append(kwargs)
+        return object()
+
+    monkeypatch.setattr(program_editor_bridge.S3kBridge, "standard", fake_standard)
+
+    program_editor_bridge.connect()
+    program_editor_bridge.connect(exclusive_channel=9)
+
+    assert kwargs_seen == [{"exclusive_channel": 5}, {"exclusive_channel": 9}]
+
+
+def test_connect_passes_the_saved_device_id_to_the_shared_transport(monkeypatch):
+    monkeypatch.delenv("AKAISDS_DEMO_SAMPLER", raising=False)
+    monkeypatch.setenv("AKAISDS_SHARED_MIDI_TRANSPORT", "1")
+    monkeypatch.setattr(program_editor_bridge.app_config, "get_saved_channel", lambda: 7)
+    kwargs_seen = []
+
+    def fake_s3kbridge(midi_out, midi_in, description, **kwargs):
+        kwargs_seen.append(kwargs)
+        return object()
+
+    monkeypatch.setattr(program_editor_bridge, "S3kBridge", fake_s3kbridge)
+    monkeypatch.setattr(program_editor_bridge, "ThrottledOut", lambda port: port)
+
+    program_editor_bridge.connect(_FakeMidiManagerWithRawPorts(object(), object()))
+
+    assert kwargs_seen == [{"exclusive_channel": 7}]
 
 
 # --- connect(): AKAISDS_SHARED_MIDI_TRANSPORT=1 (see core/midi_transport.py) -
@@ -118,7 +158,7 @@ def test_connect_falls_back_to_standard_when_flag_set_but_ports_not_open(monkeyp
     )
     sentinel = object()
     monkeypatch.setattr(
-        program_editor_bridge.S3kBridge, "standard", lambda output_name: sentinel
+        program_editor_bridge.S3kBridge, "standard", lambda output_name, **kw: sentinel
     )
     midi_manager = _FakeMidiManagerWithRawPorts(raw_input=None, raw_output=None)
 
@@ -139,7 +179,7 @@ def test_connect_falls_back_to_standard_when_flag_set_but_no_midi_manager_given(
     )
     sentinel = object()
     monkeypatch.setattr(
-        program_editor_bridge.S3kBridge, "standard", lambda output_name: sentinel
+        program_editor_bridge.S3kBridge, "standard", lambda output_name, **kw: sentinel
     )
 
     bridge = program_editor_bridge.connect()  # no midi_manager at all
@@ -164,7 +204,7 @@ def test_connect_ignores_shared_transport_when_flag_is_off(monkeypatch):
     )
     sentinel = object()
     monkeypatch.setattr(
-        program_editor_bridge.S3kBridge, "standard", lambda output_name: sentinel
+        program_editor_bridge.S3kBridge, "standard", lambda output_name, **kw: sentinel
     )
     midi_manager = _FakeMidiManagerWithRawPorts(object(), object())
 
@@ -1187,7 +1227,7 @@ def test_worker_create_jobs_are_never_coalesced():
 
 class _MultiPartsFakeBridge:
     def __init__(self, parts=None, error=None, multi_name="DEMO MULTI"):
-        # parts: list of (name, channel, level, pan) tuples, one per part,
+        # parts: list of (name, channel, level, pan, priority, low, high, transpose, tune) tuples, one per part,
         # in order
         self._parts = parts
         self._error = error
@@ -1197,8 +1237,11 @@ class _MultiPartsFakeBridge:
         if self._error:
             raise self._error
         assert region == "multipart"
-        name, channel, level, pan = self._parts[index]
-        return {"PRNAME": name, "PMCHAN": channel, "STEREO": level, "PANPOS": pan}
+        name, channel, level, pan, priority, low, high, transpose, tune = self._parts[index]
+        return {
+            "PRNAME": name, "PMCHAN": channel, "STEREO": level, "PANPOS": pan,
+            "PRIORT": priority, "PLAYLO": low, "PLAYHI": high, "TRANSPOSE": transpose, "PTUNOCM": tune,
+        }
 
     def get_parameter(self, param, _index, **kwargs):
         if self._error:
@@ -1208,7 +1251,7 @@ class _MultiPartsFakeBridge:
 
 
 def test_worker_reads_all_sixteen_parts_in_order():
-    parts = [(f"Program {i}", i, 99, 0) for i in range(MULTI_PART_COUNT)]
+    parts = [(f"Program {i}", i, 99, 0, i % 4, 24 + i, 127 - i, i - 8, 2 * i - 16) for i in range(MULTI_PART_COUNT)]
     worker = BridgeWorker(_MultiPartsFakeBridge(parts=parts))
     loaded = []
     worker.parts_loaded.connect(loaded.append)
@@ -1221,8 +1264,8 @@ def test_worker_reads_all_sixteen_parts_in_order():
 
 def test_worker_strips_padded_program_names():
     # PRNAME is a fixed-width, space-padded text field on real hardware
-    parts = [("BASS ROUND   ", 0, 99, 0)] + [
-        ("X", i, 99, 0) for i in range(1, MULTI_PART_COUNT)
+    parts = [("BASS ROUND   ", 0, 99, 0, 1, 24, 127, 0, 0)] + [
+        ("X", i, 99, 0, 1, 24, 127, 0, 0) for i in range(1, MULTI_PART_COUNT)
     ]
     worker = BridgeWorker(_MultiPartsFakeBridge(parts=parts))
     loaded = []
@@ -1231,11 +1274,11 @@ def test_worker_strips_padded_program_names():
     worker.submit_multi_parts()
     worker.process_pending()
 
-    assert loaded[0][0] == ("BASS ROUND", 0, 99, 0)
+    assert loaded[0][0] == ("BASS ROUND", 0, 99, 0, 1, 24, 127, 0, 0)
 
 
 def test_worker_emits_multi_name_loaded_alongside_parts():
-    parts = [(f"Program {i}", i, 99, 0) for i in range(MULTI_PART_COUNT)]
+    parts = [(f"Program {i}", i, 99, 0, i % 4, 24 + i, 127 - i, i - 8, 2 * i - 16) for i in range(MULTI_PART_COUNT)]
     worker = BridgeWorker(
         _MultiPartsFakeBridge(parts=parts, multi_name="MY MULTI   ")  # padded
     )

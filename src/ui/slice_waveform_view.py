@@ -12,6 +12,7 @@ from ui.waveform_view import (
     _MIN_ZOOM,
     brighten_for_hover,
     build_envelope,
+    max_zoom_for,
     frame_for_x,
     x_for_frame,
 )
@@ -36,6 +37,9 @@ _LABEL_Y = 16  # baseline for the per-slice number label, below the marker
 # handle triangles (which occupy roughly the first _HANDLE_SIZE * 1.6 px)
 
 _PLACEHOLDER_TEXT = "No audio loaded"
+
+_MONO_MIN_HEIGHT = 220
+_STEREO_MIN_HEIGHT = 320  # two lanes of a bit over 150 px each
 
 
 class SliceWaveformView(QWidget):
@@ -83,11 +87,17 @@ class SliceWaveformView(QWidget):
         # measurement already reads self.height() dynamically (never a
         # hardcoded 220), so nothing else needed to change for this to be
         # safe.
-        self.setMinimumHeight(220)
+        self.setMinimumHeight(_MONO_MIN_HEIGHT)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.setMouseTracking(True)
         self._samples = []
         self._envelope = []
+        # a second channel is drawn in its own lane under the first, sharing every marker (a slice boundary is one frame index
+        # for both). _snap is what zero-crossing snapping reads: the mono mix when there are two channels, so a hit that is
+        # loud on one side only still snaps sensibly
+        self._right = None
+        self._envelope_right = []
+        self._snap = []
         self._frame_count = 0
         self._start = 0
         self._end = 0
@@ -151,7 +161,7 @@ class SliceWaveformView(QWidget):
     def slice_count(self):
         return len(self._markers) + 1
 
-    def set_waveform(self, samples, start, end, markers=None):
+    def set_waveform(self, samples, start, end, markers=None, right=None):
         """Full (re)load - resets zoom/pan, same as WaveformView.set_waveform
         for a genuinely new sample (there's no "preserve the view" case
         here, since a SliceWaveformView is only ever shown one sample for
@@ -159,6 +169,11 @@ class SliceWaveformView(QWidget):
         sample instead of reused).
         """
         self._samples = samples
+        self._right = right if right is not None and len(right) == len(samples) else None
+        self._snap = (
+            [(l + r) // 2 for l, r in zip(samples, self._right)] if self._right is not None else samples
+        )
+        self.setMinimumHeight(_STEREO_MIN_HEIGHT if self._right is not None else _MONO_MIN_HEIGHT)
         self._frame_count = len(samples)
         self._start = max(0, min(self._frame_count - 1, start))
         self._end = max(self._start, min(self._frame_count - 1, end))
@@ -199,7 +214,7 @@ class SliceWaveformView(QWidget):
         existing marker/edge after snapping).
         """
         snapped = find_nearest_zero_crossing(
-            self._samples, frame, _ZERO_CROSSING_SEARCH_RADIUS
+            self._snap, frame, _ZERO_CROSSING_SEARCH_RADIUS
         )
         if not (self._start < snapped < self._end) or snapped in self._markers:
             return None
@@ -239,7 +254,8 @@ class SliceWaveformView(QWidget):
         )
 
     def _max_zoom(self):
-        return max(_MIN_ZOOM, float(self._frame_count))
+        # the same ceiling as the Samples tab's main waveform: a readable view, not a single frame (waveform_view.max_zoom_for)
+        return max_zoom_for(self._frame_count)
 
     def _clamp_view_start(self):
         max_start = max(0, self._frame_count - self._view_length())
@@ -295,11 +311,28 @@ class SliceWaveformView(QWidget):
     def _rebuild_envelope(self):
         if self._frame_count == 0:
             self._envelope = []
+            self._envelope_right = []
             return
         view_start = self._view_start
         view_length = self._view_length()
         visible = self._samples[view_start : view_start + view_length]
         self._envelope = build_envelope(visible, self.width())
+        self._envelope_right = (
+            build_envelope(self._right[view_start : view_start + view_length], self.width())
+            if self._right is not None
+            else []
+        )
+
+    def _lanes(self):
+        """[(samples, envelope, mid_y, half_height)] - one lane filling the widget, or two stacked for a stereo loop."""
+        height = self.height()
+        if self._right is None:
+            return [(self._samples, self._envelope, height / 2, height / 2 - 6)]
+        lane = height / 2
+        return [
+            (self._samples, self._envelope, lane / 2, lane / 2 - 6),
+            (self._right, self._envelope_right, lane + lane / 2, lane / 2 - 6),
+        ]
 
     # --- coordinate helpers -------------------------------------------------
 
@@ -332,11 +365,13 @@ class SliceWaveformView(QWidget):
         )
 
     def _draw_zero_crossing_line(self, painter, palette):
-        mid_y = self.height() / 2
         pen = QPen(QColor(palette["border"]))
         pen.setWidthF(1.0)
         painter.setPen(pen)
-        painter.drawLine(QPointF(0, mid_y), QPointF(self.width(), mid_y))
+        for _samples, _envelope, mid_y, _half in self._lanes():
+            painter.drawLine(QPointF(0, mid_y), QPointF(self.width(), mid_y))
+        if self._right is not None:  # the divider between the two lanes
+            painter.drawLine(QPointF(0, self.height() / 2), QPointF(self.width(), self.height() / 2))
 
     def _draw_marker_line(self, painter, frame, color, target, palette):
         if not self._visible(frame):
@@ -408,43 +443,10 @@ class SliceWaveformView(QWidget):
         self._draw_playhead_highlight(painter, palette)
         self._draw_zero_crossing_line(painter, palette)
 
-        view_start = self._view_start
-        view_length = self._view_length()
-        if 0 < view_length <= self.width():
-            mid_y = self.height() / 2
-            half = self.height() / 2 - 6
-            pen = QPen()
-            pen.setWidthF(1.0)
-            current_color = None
-            prev_point = None
-            for frame in range(view_start, view_start + view_length):
-                x = self._x_for(frame)
-                y = mid_y - (self._samples[frame] / 32768) * half
-                point = QPointF(x, y)
-                color = self._zone_color(frame, palette)
-                if color != current_color:
-                    pen.setColor(color)
-                    painter.setPen(pen)
-                    current_color = color
-                if prev_point is not None:
-                    painter.drawLine(prev_point, point)
-                prev_point = point
-        else:
-            mid_y = self.height() / 2
-            half = self.height() / 2 - 6
-            pen = QPen()
-            pen.setWidthF(1.0)
-            current_color = None
-            for x, (lo, hi) in enumerate(self._envelope):
-                frame = frame_for_x(x, self.width(), view_start, view_length)
-                color = self._zone_color(frame, palette)
-                if color != current_color:
-                    pen.setColor(color)
-                    painter.setPen(pen)
-                    current_color = color
-                y_lo = mid_y - (hi / 32768) * half
-                y_hi = mid_y - (lo / 32768) * half
-                painter.drawLine(int(x), int(y_lo), int(x), int(y_hi) + 1)
+        for samples, envelope, mid_y, half in self._lanes():
+            self._draw_lane(painter, palette, samples, envelope, mid_y, half)
+        if self._right is not None:
+            self._draw_channel_labels(painter, palette)
 
         boundary_color = QColor(palette["keygroup_color_2"])
         marker_color = QColor(palette["keygroup_color_7"])
@@ -459,6 +461,47 @@ class SliceWaveformView(QWidget):
 
         self._draw_slice_labels(painter, palette)
         self._draw_playhead_line(painter, palette)
+
+    def _draw_lane(self, painter, palette, samples, envelope, mid_y, half):
+        view_start = self._view_start
+        view_length = self._view_length()
+        if 0 < view_length <= self.width():
+            pen = QPen()
+            pen.setWidthF(1.0)
+            current_color = None
+            prev_point = None
+            for frame in range(view_start, view_start + view_length):
+                x = self._x_for(frame)
+                y = mid_y - (samples[frame] / 32768) * half
+                point = QPointF(x, y)
+                color = self._zone_color(frame, palette)
+                if color != current_color:
+                    pen.setColor(color)
+                    painter.setPen(pen)
+                    current_color = color
+                if prev_point is not None:
+                    painter.drawLine(prev_point, point)
+                prev_point = point
+        else:
+            pen = QPen()
+            pen.setWidthF(1.0)
+            current_color = None
+            for x, (lo, hi) in enumerate(envelope):
+                frame = frame_for_x(x, self.width(), view_start, view_length)
+                color = self._zone_color(frame, palette)
+                if color != current_color:
+                    pen.setColor(color)
+                    painter.setPen(pen)
+                    current_color = color
+                y_lo = mid_y - (hi / 32768) * half
+                y_hi = mid_y - (lo / 32768) * half
+                painter.drawLine(int(x), int(y_lo), int(x), int(y_hi) + 1)
+
+    def _draw_channel_labels(self, painter, palette):
+        painter.setPen(QColor(palette["text_disabled"]))
+        lane = self.height() / 2
+        for index, text in enumerate(("L", "R")):
+            painter.drawText(QRectF(6, index * lane + lane - 20, 20, 16), Qt.AlignmentFlag.AlignLeft, text)
 
     def _draw_playhead_highlight(self, painter, palette):
         # a translucent tint across whichever slice is currently sounding -

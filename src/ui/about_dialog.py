@@ -23,10 +23,18 @@ except ImportError:
 GITHUB_URL = "https://github.com/martincurkovic/AKAISDS"
 # the dialog is fixed-size, so its width follows the widest label: wrap the text labels here
 _TEXT_MAX_WIDTH = 440
+# the gap between the credit blocks, on top of the layout's own spacing
+_BLOCK_GAP = 8
+# room above the logo, so it isn't against the top of the window
+_LOGO_TOP_GAP = 12
 # bundled with the rest of ui/help (pysidedeploy.spec's --include-data-dir=ui/help=ui/help)
 _NOTICES_PATH = os.path.join(
     os.path.dirname(__file__), "help", "THIRD_PARTY_NOTICES.md"
 )
+
+
+def _link(label, url):
+    return f'<a href="{url}">{label}</a>'
 
 
 class NoticesDialog(QDialog):
@@ -68,8 +76,9 @@ class AboutDialog(QDialog):
         self.setWindowTitle("About AKAISDS")
 
         layout = QVBoxLayout(self)
+        layout.addSpacing(_LOGO_TOP_GAP)
 
-        logo_label = QLabel(LOGO)
+        logo_label = QLabel(LOGO.strip("\n"))  # (the string's own leading/trailing newlines are blank lines)
         logo_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         logo_font = QFontDatabase.systemFont(QFontDatabase.SystemFont.FixedFont)
         logo_font.setPointSize(8)
@@ -77,6 +86,7 @@ class AboutDialog(QDialog):
         layout.addWidget(logo_label)
 
         version_label = QLabel(f"Version {APP_VERSION}")
+        version_label.setObjectName("mutedLabel")  # grey, and follows the theme (style.qss.template)
         version_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(version_label)
 
@@ -87,6 +97,7 @@ class AboutDialog(QDialog):
         description_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         description_label.setWordWrap(True)
         description_label.setFixedWidth(_TEXT_MAX_WIDTH)
+        description_label.ensurePolished()
         description_label.setFixedHeight(description_label.heightForWidth(_TEXT_MAX_WIDTH))
         layout.addWidget(description_label, alignment=Qt.AlignmentFlag.AlignHCenter)
 
@@ -95,18 +106,29 @@ class AboutDialog(QDialog):
         link_label.setOpenExternalLinks(True)
         layout.addWidget(link_label)
 
-        credits_label = QLabel(
-            "Built with PySide6 (Qt), mido, python-rtmidi, soundfile, miniaudio, s3ked and Nuitka.\n"
-            "Many thanks to Jan Lentfer for their hard work on s3ked, and to Frank Neumann "
-            "for transcribing the Akai SysEx documentation (lakai.sourceforge.net).\n"
-            "S900/S950 support is partly ported from s950tools by Brandon Ivers (MIT).\n"
-            "Licensed under GPL-3.0"
-        )
-        credits_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        credits_label.setWordWrap(True)
-        credits_label.setFixedWidth(_TEXT_MAX_WIDTH)
-        credits_label.setFixedHeight(credits_label.heightForWidth(_TEXT_MAX_WIDTH))
-        layout.addWidget(credits_label, alignment=Qt.AlignmentFlag.AlignHCenter)
+        # three short blocks with a gap between them, rather than one wall of text.
+        # The project names link to their repositories (the same URLs as the README).
+        for text in (
+            "Built with PySide6 (Qt), mido, python-rtmidi, soundfile, miniaudio and Nuitka.",
+            "Many thanks to Jan Lentfer for their hard work on "
+            f"{_link('s3ked', 'https://github.com/lentferj/s3ked')}, and to Frank Neumann "
+            "for transcribing the Akai SysEx documentation "
+            f"({_link('lakai.sourceforge.net', 'https://lakai.sourceforge.net/documentation.shtml.html')}).",
+            "Includes work from:<br>"
+            f"{_link('s950tools', 'https://github.com/diemonster/s950tools')} by Brandon Ivers (MIT)<br>"
+            f"{_link('potenza-time-stretch', 'https://github.com/dar-io-p/potenza-time-stretch')} by dar-io-p (GPL-3.0)<br>"
+            f"{_link('VelociLoops', 'https://github.com/kunitoki/VelociLoops')} by kunitoki (public domain)",
+            "Licensed under GPL-3.0",
+        ):
+            credits_label = QLabel(text)
+            credits_label.setOpenExternalLinks(True)
+            credits_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            credits_label.setWordWrap(True)
+            credits_label.setFixedWidth(_TEXT_MAX_WIDTH)
+            credits_label.ensurePolished()  # measure with the stylesheet's font, not the pre-polish one
+            credits_label.setFixedHeight(credits_label.heightForWidth(_TEXT_MAX_WIDTH))
+            layout.addSpacing(_BLOCK_GAP)
+            layout.addWidget(credits_label, alignment=Qt.AlignmentFlag.AlignHCenter)
 
         self._update_runner = UpdateCheckRunner(self)
 
@@ -119,6 +141,7 @@ class AboutDialog(QDialog):
         notices_button.clicked.connect(lambda: NoticesDialog(self).exec())
         check_updates_row.addWidget(notices_button)
         check_updates_row.addStretch()
+        layout.addSpacing(_BLOCK_GAP)
         layout.addLayout(check_updates_row)
 
         # indeterminate - a version check has no measurable progress to show,

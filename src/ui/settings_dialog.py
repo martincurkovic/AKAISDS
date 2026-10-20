@@ -1,10 +1,14 @@
 from PySide6.QtWidgets import (
     QApplication,
+    QCheckBox,
     QComboBox,
     QDialog,
     QDialogButtonBox,
+    QFileDialog,
     QFormLayout,
+    QHBoxLayout,
     QLabel,
+    QLineEdit,
     QMessageBox,
     QPushButton,
     QSpinBox,
@@ -19,6 +23,8 @@ from core import (
     app_config,
     audio_preview,
     debug_log,
+    asrx_sysex,
+    ensoniq_sysex,
     midi_identity,
     s950_sysex,
     sampler_models,
@@ -28,11 +34,13 @@ from ui.qt_helpers import (
     FullWidthTabBar,
     build_scroll_area,
     build_section_card,
+    set_enabled_without_scrolling,
     widen_popup_to_fit_items,
 )
 from ui import theme, tooltips
 from ui.loopback_results_dialog import LoopbackResultsDialog
 import os
+import sys
 import time
 import mido
 
@@ -51,6 +59,8 @@ _BUFFER_SIZE_OPTIONS = [32, 64, 128, 256, 512, 1024, 2048]
 
 # seconds to wait for each message to return. also used for hardware test
 _LOOPBACK_RECEIVE_TIMEOUT = 1.5
+#: how long the Ensoniq hardware test waits for the (optional) universal MIDI identity reply before asking its own question
+_ENSONIQ_IDENTITY_TIMEOUT = 0.8
 
 _MINIMUM_DIALOG_WIDTH = 560  # floor for the degenerate case - see
 # _minimum_width_for_pages's own docstring
@@ -181,7 +191,7 @@ class MidiSettingsDialog(QDialog):
         self.spin_channel.setRange(0, 127)
         self.spin_channel.setValue(self.sampler_controller.channel)
         self.spin_channel.setToolTip(tooltips.DEVICE_ID_CHANNEL)
-        midi_form.addRow(QLabel("Device ID (SysEx ch. 0-127):"), self.spin_channel)
+        midi_form.addRow(QLabel("SysEx Device ID (usually 0):"), self.spin_channel)
 
         # sampler device type - determines which protocol family gets used for each step
         # (send, receive, list, delete, rename etc)
@@ -260,16 +270,36 @@ class MidiSettingsDialog(QDialog):
         appearance_form.addRow(QLabel("Theme:"), self.combo_theme)
         appearance_card = build_section_card("Appearance", appearance_form)
 
+        # the app "Edit in External App" (Samples tabs) opens a sample in;
+        # empty = the system's default for .wav. Saved on OK like the rest.
+        editor_form = QFormLayout()
+        self.edit_external_editor = QLineEdit(app_config.get_saved_external_editor())
+        self.edit_external_editor.setPlaceholderText("System default")
+        self.edit_external_editor.setToolTip(tooltips.EXTERNAL_EDITOR_SETTING)
+        self.button_external_editor = QPushButton("Choose\u2026")
+        self.button_external_editor.clicked.connect(self._choose_external_editor)
+        editor_row = QHBoxLayout()
+        editor_row.addWidget(self.edit_external_editor, 1)
+        editor_row.addWidget(self.button_external_editor)
+        editor_form.addRow(QLabel("Audio Editor:"), editor_row)
+        # opt-in: with it off, the user clicks Load Edited Audio after saving in the editor
+        self.check_external_auto_load = QCheckBox("Load automatically when the file is saved")
+        self.check_external_auto_load.setChecked(app_config.get_saved_external_auto_load())
+        self.check_external_auto_load.setToolTip(tooltips.EXTERNAL_AUTO_LOAD)
+        editor_form.addRow(self.check_external_auto_load)
+        editor_card = build_section_card("External Audio Editor", editor_form)
+
         # one shared label-column width across all three cards, so every
         # entry field starts at the same x (each form would otherwise size
         # its own label column to its own widest label)
-        align_form_label_columns(midi_form, audio_form, appearance_form)
+        align_form_label_columns(midi_form, audio_form, appearance_form, editor_form)
 
         page = QWidget()
         page_layout = QVBoxLayout(page)
         page_layout.addWidget(midi_card)
         page_layout.addWidget(audio_card)
         page_layout.addWidget(appearance_card)
+        page_layout.addWidget(editor_card)
         page_layout.addStretch()
         return page
 
@@ -435,8 +465,21 @@ class MidiSettingsDialog(QDialog):
         app_config.save_device_type(device_type)
         app_config.save_audio_output_device(self.combo_audio_output.currentData())
         app_config.save_audio_buffer_samples(self.combo_audio_buffer.currentData())
+        app_config.save_external_editor(self.edit_external_editor.text())
+        app_config.save_external_auto_load(self.check_external_auto_load.isChecked())
 
         self.accept()
+
+    def _choose_external_editor(self):
+        # an application on macOS (a .app bundle), an executable elsewhere
+        start = self.edit_external_editor.text() or (
+            "/Applications" if sys.platform == "darwin" else ""
+        )
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Choose an audio editor", start
+        )
+        if path:
+            self.edit_external_editor.setText(path)
 
     def _on_theme_chosen(self, index):
         # saved and applied the moment the user picks an option - every open
@@ -444,6 +487,9 @@ class MidiSettingsDialog(QDialog):
         selected_theme = self.combo_theme.itemData(index)
         app_config.save_theme(selected_theme)
         theme.set_theme_preference(selected_theme)
+
+    def _selected_is_asrx(self):
+        return sampler_models.is_asrx(self.combo_device_type.currentData())
 
     def _selected_protocol_family(self):
         # the combo holds the full model selection (S1000 / S2000/S3000 /
@@ -470,7 +516,8 @@ class MidiSettingsDialog(QDialog):
         self.midi_manager.open_input(None)
         self.midi_manager.open_output(None)
 
-        self.btn_run_id_request.setEnabled(False)
+        # (not setEnabled(False) directly: the focus would move on and the page scroll - see set_enabled_without_scrolling)
+        set_enabled_without_scrolling(self.btn_run_id_request, False)
         self.btn_run_id_request.setText("Testing...")
         self.id_progress.setVisible(True)
         QApplication.processEvents()
@@ -492,6 +539,12 @@ class MidiSettingsDialog(QDialog):
                     elif device_type == sampler_models.FAMILY_S950:
                         self.id_results_label.setText(
                             self._format_s950_result(id_response)
+                        )
+                    elif device_type == sampler_models.FAMILY_ENSONIQ:
+                        self.id_results_label.setText(
+                            self._format_asrx_result(id_response)
+                            if self._selected_is_asrx()
+                            else self._format_ensoniq_result(id_response)
                         )
                     else:
                         self.id_results_label.setText(
@@ -532,6 +585,13 @@ class MidiSettingsDialog(QDialog):
 
         device_type = self._selected_protocol_family()
 
+        is_asrx = device_type == sampler_models.FAMILY_ENSONIQ and self._selected_is_asrx()
+        if device_type == sampler_models.FAMILY_ENSONIQ and not is_asrx and not 0 <= self.spin_channel.value() <= 15:
+            return (
+                False,
+                "The Ensoniq needs a Device ID of 0-15 (its base MIDI channel minus 1) - set it above",
+            )
+
         if device_type == "akai":
             output_port.send(
                 mido.Message("sysex", data=midi_identity.build_rstat_request_message())
@@ -547,26 +607,73 @@ class MidiSettingsDialog(QDialog):
                     ),
                 )
             )
+        elif is_asrx:
+            # read only: the universal identity request, then the standard "name of sample 0" request (answered with a name, or with 7F 41 when
+            # the slot is empty - both prove the ASR-X heard us on this Device ID)
+            self._ensoniq_identity_text = self._ensoniq_identity_step(input_port, output_port)
+            request = asrx_sysex.build_name_request(self.spin_channel.value(), 0)
+            debug_log.get_logger().info(f"MidiSettingsDialog: ASR-X hardware test sent {bytes(request).hex(' ')}")
+            output_port.send(mido.Message("sysex", data=request))
+        elif device_type == sampler_models.FAMILY_ENSONIQ:
+            # read only, two requests one after the other: the universal MIDI identity request (which says what and which version the unit
+            # is, but goes to every device and proves nothing about its own SysEx), then "is instrument 1 loaded?" (GET INSTRUMENT),
+            # which is the real test. The identity answer is optional: a unit may well not give one
+            self._ensoniq_identity_text = self._ensoniq_identity_step(input_port, output_port)
+            request = ensoniq_sysex.build_get_instrument(0, channel=self.spin_channel.value())
+            debug_log.get_logger().info(f"MidiSettingsDialog: Ensoniq hardware test sent {bytes(request).hex(' ')}")
+            output_port.send(mido.Message("sysex", data=request))
         else:
             output_port.send(
                 mido.Message(
                     "sysex", data=midi_identity.build_identity_request_message()
                 )
             )
-        deadline = time.monotonic() + _LOOPBACK_RECEIVE_TIMEOUT
-        response = None
-        while time.monotonic() < deadline:
-            incoming = input_port.poll()
-            if incoming is not None and incoming.type == "sysex":
-                response = incoming
-                break
-            QApplication.processEvents()
+        response = self._wait_for_answer(input_port, device_type, is_asrx)
+        if response is None and is_asrx and self.spin_channel.value() != asrx_sysex.BROADCAST_DEVICE:
+            # nothing answered the Device ID above: ask once as 127 (all devices). A unit set to another ID answers and says which
+            request = asrx_sysex.build_name_request(asrx_sysex.BROADCAST_DEVICE, 0)
+            debug_log.get_logger().info(
+                f"MidiSettingsDialog: ASR-X hardware test got no answer on Device ID {self.spin_channel.value()}, trying {bytes(request).hex(' ')}"
+            )
+            output_port.send(mido.Message("sysex", data=request))
+            response = self._wait_for_answer(input_port, device_type, is_asrx)
 
+        if response is None and is_asrx:
+            debug_log.get_logger().info("MidiSettingsDialog: ASR-X hardware test got no answer to the sample name request")
+            return (
+                False,
+                "No reply from an ASR-X - check it's on, SysEx Recv is on and its SysEx Device ID matches the Device ID above "
+                "(System/MIDI page), and both MIDI cables are connected",
+            )
+        if response is None and device_type == sampler_models.FAMILY_ENSONIQ:
+            debug_log.get_logger().info("MidiSettingsDialog: Ensoniq hardware test got no answer to GET INSTRUMENT")
+            return (
+                False,
+                "No reply from an Ensoniq - check it's on, MIDI SysEx is enabled in its MIDI settings, both "
+                "cables are connected and the Device ID matches its base MIDI channel minus 1",
+            )
         if response is None:
             return False, "Sampler hardware not found - please check your MIDI setup"
 
         if device_type == "akai":
             received_data = midi_identity.parse_stat_response(response.data)
+        elif is_asrx:
+            try:
+                received_data = asrx_sysex.parse_message(response.data)
+            except ValueError as e:
+                return False, f"Got a reply, but it doesn't look like an ASR-X answer ({e})"
+            debug_log.get_logger().info(
+                f"MidiSettingsDialog: ASR-X answered [{received_data.kind}]: {bytes(response.data[:48]).hex(' ')}"
+            )
+        elif device_type == sampler_models.FAMILY_ENSONIQ:
+            try:
+                received_data = ensoniq_sysex.parse_message(response.data)
+            except ValueError as e:
+                return False, f"Got a reply, but it doesn't look like an Ensoniq EPS/ASR answer ({e})"
+            debug_log.get_logger().info(
+                f"MidiSettingsDialog: Ensoniq answered command 0x{received_data.command:02X}, body "
+                f"{bytes(received_data.body[:16]).hex(' ')}"
+            )
         elif device_type == sampler_models.FAMILY_S950:
             try:
                 message = s950_sysex.parse_akai(response.data)
@@ -603,6 +710,96 @@ class MidiSettingsDialog(QDialog):
             f"Samples in memory: {samples}"
         )
 
+    def _wait_for_answer(self, input_port, device_type, is_asrx):
+        """The first SysEx that answers the hardware test's question, or None after the timeout."""
+        deadline = time.monotonic() + _LOOPBACK_RECEIVE_TIMEOUT
+        while time.monotonic() < deadline:
+            incoming = input_port.poll()
+            if incoming is not None and incoming.type == "sysex":
+                if device_type == sampler_models.FAMILY_ENSONIQ:
+                    debug_log.get_logger().info(
+                        f"MidiSettingsDialog: Ensoniq hardware test received {len(incoming.data)} bytes: "
+                        f"{bytes(incoming.data[:64]).hex(' ')}"
+                    )
+                    if not (self._is_asrx_answer(incoming.data) if is_asrx else self._is_ensoniq_answer(incoming.data)):
+                        # not an answer: our own request echoed back (a DAW on the same interface does this), or someone else's SysEx
+                        continue
+                return incoming
+            QApplication.processEvents()
+        return None
+
+    def _ensoniq_identity_step(self, input_port, output_port):
+        """Send the universal MIDI identity request and describe the answer in one line, or None if there is none. Read only."""
+        log = debug_log.get_logger()
+        request = midi_identity.build_identity_request_message()
+        log.info(f"MidiSettingsDialog: Ensoniq hardware test sent the MIDI identity request {bytes(request).hex(' ')}")
+        output_port.send(mido.Message("sysex", data=request))
+        deadline = time.monotonic() + _ENSONIQ_IDENTITY_TIMEOUT
+        text = None
+        while time.monotonic() < deadline and text is None:
+            incoming = input_port.poll()
+            if incoming is not None and incoming.type == "sysex":
+                data = tuple(incoming.data)
+                log.info(f"MidiSettingsDialog: identity step received {len(data)} bytes: {bytes(data[:64]).hex(' ')}")
+                if len(data) >= 13 and data[0] == 0x7E and data[2] == 0x06 and data[3] == 0x02:
+                    try:
+                        parsed = midi_identity.parse_identity_response(data)
+                        text = (
+                            f"MIDI identity: {midi_identity.lookup_manufacturer(parsed['manuf_id'])}, family {parsed['family_code']}, "
+                            f"model {parsed['model_number']}, version {parsed['version_number']:#x}"
+                        )
+                    except (IndexError, KeyError, ValueError) as ex:
+                        log.warning(f"MidiSettingsDialog: unreadable identity reply: {ex}")
+                        text = "MIDI identity: answered, but unreadable (see the log)"
+                continue
+            QApplication.processEvents()
+        if text is None:
+            log.info("MidiSettingsDialog: no MIDI identity reply (not unusual)")
+        while input_port.poll() is not None:
+            pass  # anything late belongs to the identity request, not to the question that follows
+        return text
+
+    @staticmethod
+    def _is_ensoniq_answer(data):
+        # an Ensoniq's answer to a GET is a RESPONSE or a PUT; a GET (command 03-0A) is our own request coming back
+        if not ensoniq_sysex.is_ensoniq(data) or len(data) < 4:
+            return False
+        command = data[3]
+        return command == ensoniq_sysex.CMD_RESPONSE or ensoniq_sysex.CMD_PUT_INSTRUMENT <= command <= ensoniq_sysex.CMD_PUT_PARAMETER
+
+    @staticmethod
+    def _is_asrx_answer(data):
+        # an ASR-X answers a sample name request with the name (7E dev 05 03 ...) or 7F 41 (empty slot); our own request coming back (05 04) is not an answer
+        data = bytes(data)
+        if len(data) >= 4 and data[0] == 0x7E:
+            return data[2] == 0x05 and data[3] == 0x03
+        return asrx_sysex.is_asrx(data) and len(data) >= 6 and data[4] == asrx_sysex.REPLY_ERROR
+
+    def _format_asrx_result(self, message):
+        if message.kind == "name":
+            detail = f"Sample 0 is {message.name!r}." if message.name else "Sample 0 has no name."
+        else:
+            detail = "Sample 0 is empty (a normal answer)."
+        identity = getattr(self, "_ensoniq_identity_text", None)
+        text = f"Ensoniq ASR-X SysEx answered.\n{detail}\n{identity or 'No MIDI identity reply.'}"
+        if message.device != self.spin_channel.value() and message.device != asrx_sysex.BROADCAST_DEVICE:
+            text += f"\nThe unit's SysEx Device ID is {message.device}: set the Device ID above to {message.device}."
+        return text
+
+    def _format_ensoniq_result(self, message):
+        if message.command == ensoniq_sysex.CMD_RESPONSE:
+            status = ensoniq_sysex.parse_response(message)
+            if status == ensoniq_sysex.STATUS_ACK:
+                detail = "Instrument 1 is loaded."
+            elif status == ensoniq_sysex.STATUS_INVALID_INSTRUMENT:
+                detail = "Instrument 1 isn't loaded (a normal answer)."
+            else:
+                detail = f"Status: {ensoniq_sysex.status_name(status)}."
+        else:
+            detail = "It sent instrument data."
+        identity = getattr(self, "_ensoniq_identity_text", None)
+        return f"Ensoniq EPS/ASR SysEx answered.\n{detail}\n{identity or 'No MIDI identity reply.'}"
+
     def _format_identity_result(self, data):
         manuf_name = midi_identity.lookup_manufacturer(data["manuf_id"])
         return (
@@ -634,7 +831,7 @@ class MidiSettingsDialog(QDialog):
         self.midi_manager.open_input(None)
         self.midi_manager.open_output(None)
 
-        self.btn_loopback_test.setEnabled(False)
+        set_enabled_without_scrolling(self.btn_loopback_test, False)
         self.btn_loopback_test.setText("Testing...")
         self.loopback_progress.setVisible(True)
         QApplication.processEvents()

@@ -44,10 +44,15 @@ waveform lands) only once the queue has drained.
 
 import collections
 import time
+from dataclasses import dataclass, field
+
+from functools import partial
 
 from PySide6.QtCore import Qt, QTimer, Signal
+from PySide6.QtGui import QAction
 from PySide6.QtWidgets import (
     QApplication,
+    QFrame,
     QGridLayout,
     QHBoxLayout,
     QLabel,
@@ -56,11 +61,13 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QProgressBar,
     QPushButton,
+    QSizePolicy,
     QVBoxLayout,
     QWidget,
 )
 
 from core import debug_log
+from core import preview_pitch
 from core import root_note_detection
 from core import yamaha_markers as ym
 from core import yamaha_params as yp
@@ -79,13 +86,16 @@ from ui.editor_layout import (
     style_card_page_layout,
     sync_waveform_scrollbar,
 )
-from ui.envelope_graph import ADSREnvelopeGraph, LevelEnvelopeGraph, yamaha_adsr_values
+from ui.envelope_graph import GRAPH_SIZE, ADSREnvelopeGraph, LevelEnvelopeGraph, yamaha_adsr_rates, yamaha_adsr_values
 from ui.knob import Knob
-from ui.loop_preview_view import HALF_WINDOW_FRAMES, LoopJoinPreview
-from ui.qt_helpers import build_scroll_area, build_section_card
+from ui.loop_preview_view import LoopJoinPreview, LoopPreviewZoomControls
+from ui.qt_helpers import build_scroll_area, build_editor_card, set_enabled_without_scrolling
 from ui.waveform_view import WaveformView
 from ui.yamaha_fields import Field, FieldPanel
 from ui.yamaha_sample_edit import YamahaSampleEditor
+
+# collapsible cards, remembered as "yamaha_sample/<title>" (ui/section_card.py)
+_card = partial(build_editor_card, "yamaha_sample")
 
 _SPECIAL_ORIGINAL = {-1: "Original", 128: "Original"}
 
@@ -135,7 +145,6 @@ _WAVEFORM_HINT = "Double-click to load the audio waveform"
 #: how long a "loop to release" sample's loop is held in a preview (there is no key to release)
 _RELEASE_PREVIEW_MS = 2000
 #: the waveform area is 180 px tall: one mono view, or a stereo pair at half height each
-_GRAPH_SIZE = (200, 80)  # the envelope graphs (the S3000 editor's are 200 x 90)
 _MONO_VIEW_HEIGHT = 180
 _MARKERS = (("start", "Start"), ("loop_start", "Loop Start"), ("loop_end", "Loop End"), ("end", "End"))
 _MARKER_TIPS = {
@@ -145,6 +154,47 @@ _MARKER_TIPS = {
     "end": "Wave end: the last frame that plays",
 }
 _STEREO_VIEW_HEIGHT = 90
+#: how many earlier working copies Undo can step back through (each is a whole copy of the audio)
+_UNDO_LIMIT = 10
+#: the Edit Sample card's rows: (label, what the label's tooltip says, control keys in order)
+_EDIT_SAMPLE_ROWS = (
+    (
+        "Edit audio",
+        "These change the sample here. Nothing reaches the unit until you click Send as New Sample.",
+        (("trim", "reverse", "fade", "normalise", "filter", "stretch"),),
+    ),
+    (
+        "More",
+        "The Slice Editor makes new samples on the unit (the original is not changed). The external app round trip opens the sample "
+        "in your own audio editor and brings the saved version back.",
+        (("slice",), ("external_edit", "external_load")),
+    ),
+)
+#: the width of the Edit Sample rows' labels - every row's buttons start at the same x
+_EDIT_SAMPLE_LABEL_WIDTH = 80
+#: the Sample menu / right-click menu, in order: groups are separated
+_SAMPLE_MENU_GROUPS = (
+    ("trim", "reverse", "fade", "normalise", "filter", "stretch"),
+    ("slice",),
+    ("external_edit", "external_load"),
+    ("stage_undo", "stage_send", "stage_revert"),
+    ("detect",),
+)
+
+
+@dataclass
+class _Staged:
+    """A sample's WORKING COPY: audio edited in this app (or loaded back from an external editor) that is NOT on the unit. The A4000 can't
+    overwrite a sample over MIDI, so the only way out is "Send as New Sample". `original_*` is what the unit holds (the audio was in memory
+    to be edited): Revert goes back to it. `markers` (start, loop_start, loop_end, end) are the working copy's own - marker edits stay local
+    while a sample is staged. The sample rate never changes (an edited file is resampled back to it on load)."""
+
+    channels: list
+    markers: tuple
+    original_channels: list
+    original_markers: tuple
+    #: earlier working copies, oldest first: (channels, markers) before each change, for Undo
+    history: list = field(default_factory=list)
 
 
 def sample_markers(data):
@@ -207,7 +257,7 @@ def build_sample_cards(panel):
     panel.detect_pitch_button.setToolTip(tt.YAMAHA_DETECT_PITCH_BUTTON)
     panel.detect_pitch_button.setEnabled(False)
     original_key_row.insertWidget(original_key_row.count() - 1, panel.detect_pitch_button)
-    pitch = build_section_card(
+    pitch = _card(
         "Pitch",
         original_key_row,
         knobs([k("coarse_tune", "Coarse"), k("fine_tune_l", "Fine")]),
@@ -216,7 +266,7 @@ def build_sample_cards(panel):
         row(s("pitch_bend_range", "Bend range")),
         row(s("pitch_bend_type", "Bend type")),
     )
-    key_range = build_section_card(
+    key_range = _card(
         "Key & Velocity Range",
         row(note("key_range_low", "Key low", _SPECIAL_ORIGINAL)),
         row(note("key_range_high", "Key high", _SPECIAL_ORIGINAL)),
@@ -228,7 +278,7 @@ def build_sample_cards(panel):
         row(ck("fixed_pitch_on", "Fixed pitch")),
     )
 
-    level = build_section_card(
+    level = _card(
         "Level & Pan",
         knobs([k("sample_level", "Level"), k("pan", "Pan"), k("velocity_sensitivity", "Velocity")]),
         row(s("level_key_scaling_break_1", "Scale break 1")),
@@ -237,7 +287,7 @@ def build_sample_cards(panel):
         row(s("level_key_scaling_level_2", "Scale level 2")),
     )
     # (the loop mode, the four addresses and the edit buttons live in the Loop Controls card above these cards - see the tab's _build)
-    info = build_section_card(
+    info = _card(
         "Wave",
         row(t("sampling_frequency_l", "Sample rate", format_hz)),
         row(t("wave_length", "Wave length", format_address)),
@@ -245,7 +295,7 @@ def build_sample_cards(panel):
         row(t("loop_tempo", "Loop tempo", format_tempo)),
     )
 
-    filt = build_section_card(
+    filt = _card(
         "Filter",
         row(c("filter_type", "Type")),
         knobs([k("filter_cutoff", "Cutoff"), k("filter_q", "Q / Width"), k("filter_gain", "Gain")]),
@@ -261,8 +311,8 @@ def build_sample_cards(panel):
         "peg": LevelEnvelopeGraph("#5aa9e6"),
     }
     for graph in graphs.values():
-        graph.setFixedSize(*_GRAPH_SIZE)
-    feg = build_section_card(
+        graph.setFixedSize(*GRAPH_SIZE)
+    feg = _card(
         "Filter Envelope",
         build_centered_row(graphs["feg"]),
         knobs([k("feg_attack_rate", "Attack"), k("feg_decay_rate", "Decay"), k("feg_release_rate", "Release")]),
@@ -270,14 +320,14 @@ def build_sample_cards(panel):
         knobs([k("feg_rate_key_scaling", "Key scale"), k("feg_rate_velocity_sensitivity", "Vel rate"), k("feg_attack_level_velocity_sensitivity", "Vel att"), k("feg_level_velocity_sensitivity", "Vel lvl")]),
     )
 
-    aeg = build_section_card(
+    aeg = _card(
         "Amplitude Envelope",
         row(c("aeg_attack_mode", "Attack mode")),
         build_centered_row(graphs["aeg"]),
         knobs([k("aeg_attack_rate", "Attack"), k("aeg_decay_rate", "Decay"), k("aeg_sustain_level", "Sustain"), k("aeg_release_rate", "Release")]),
         knobs([k("aeg_rate_key_scaling", "Key scale"), k("aeg_rate_velocity_sensitivity", "Vel rate")]),
     )
-    peg = build_section_card(
+    peg = _card(
         "Pitch Envelope",
         build_centered_row(graphs["peg"]),
         knobs([k("peg_attack_rate", "Attack"), k("peg_decay_rate", "Decay"), k("peg_release_rate", "Release")]),
@@ -285,7 +335,7 @@ def build_sample_cards(panel):
         knobs([k("peg_range", "Range"), k("peg_rate_key_scaling", "Key scale"), k("peg_rate_velocity_sensitivity", "Vel rate"), k("peg_level_velocity_sensitivity", "Vel lvl")]),
     )
 
-    lfo = build_section_card(
+    lfo = _card(
         "LFO",
         row(c("lfo_wave", "Wave")),
         knobs([k("lfo_speed", "Speed"), k("lfo_delay_time", "Delay")]),
@@ -294,7 +344,7 @@ def build_sample_cards(panel):
         row(ck("lfo_cutoff_mod_phase_invert", "Invert cutoff")),
         row(ck("lfo_pitch_mod_phase_invert", "Invert pitch")),
     )
-    eq = build_section_card(
+    eq = _card(
         "EQ",
         row(c("eq_type", "Type")),
         row(s("eq_frequency", "Frequency")),
@@ -302,7 +352,7 @@ def build_sample_cards(panel):
         row(s("eq_width", "Width")),
     )
 
-    out = build_section_card(
+    out = _card(
         "Output",
         row(c("output1", "Output 1")),
         row(c("output2", "Output 2")),
@@ -311,16 +361,23 @@ def build_sample_cards(panel):
     controls = _controls_card(panel)
 
     # Side-by-side pairs, each pinned to equal heights so the two cards line up top and bottom. The pairs are chosen so the
-    # cards in a row are about the same height (the least empty space inside a card): Pitch/Key, Level/Loop, Filter/Filter
-    # Envelope, the two other envelopes, then LFO/Controllers and Output/EQ.
+    # cards in a row are about the same height (the least empty space inside a card): Pitch/Key, Level/Output, Filter/Filter
+    # Envelope, the two other envelopes, then LFO/Controllers.
     layout = QVBoxLayout()
     style_card_page_layout(layout)
     # the page of cards sits inside a container that already applies the scroll-bar clearance on the right (the waveform card is
     # in it too): a second one here made every card 8 px narrower than the waveform card
     layout.setContentsMargins(0, 0, 0, 0)
-    for left, right in ((pitch, key_range), (level, info), (filt, feg), (aeg, peg), (lfo, controls), (out, eq)):
+    # The Wave card (four read-only rows) is the one that sits beside the Loop Preview, above (see the tab's _build); EQ, the shortest
+    # card, is left on its own at the end
+    panel.wave_card = info
+    for left, right in ((pitch, key_range), (level, out), (filt, feg), (aeg, peg), (lfo, controls)):
         equalize_card_heights(left, right)
         layout.addLayout(build_paired_row(left, right))
+    eq_row = QHBoxLayout()
+    eq_row.addWidget(eq, stretch=1)
+    eq_row.addStretch(1)
+    layout.addLayout(eq_row)
     layout.addStretch()
     page = QWidget()
     page.setLayout(layout)
@@ -341,7 +398,7 @@ def _controls_card(panel):
     wrapper = QHBoxLayout()
     wrapper.addLayout(grid)
     wrapper.addStretch()
-    return build_section_card("Controllers", wrapper)
+    return _card("Controllers", wrapper)
 
 
 # -- the tab ---------------------------------------------------------------------------------------------
@@ -381,6 +438,15 @@ class YamahaSamplesTab(QWidget):
         self._marker_job = None  # the marker write in progress: {"name", "steps", "index"}
         self._marker_pending = None  # the newest drag that arrived meanwhile: (sample name, view markers)
         self._preview = SlicePreviewPlayer(self)
+        # the working copies (see _Staged): name -> _Staged. And the actions: key -> (button, QAction), built by _make_control
+        self._staged = {}
+        self._sample_controls = {}
+        self._control_wanted = {}
+        self._row_labels = {}  # sample name -> the list row's name label
+        self._row_dots = {}  # sample name -> the dot that marks unsent edits
+        # sample name -> what to call the app its audio was opened in, while the external round trip waits for a save / a Load
+        self._external_waiting = {}
+        self._active = False  # the Samples tab is the one showing (the menu's actions only work there)
         #: set by the host: callable() -> [(program number, label)] of the programs that hold no sample (what the Slice Editor can fill)
         self.free_programs_provider = None
         self._edit_busy = False  # an edit's new sample is being sent to the unit
@@ -409,7 +475,9 @@ class YamahaSamplesTab(QWidget):
         if writer is not None:
             self.panel.set_editable(True)
             self.panel.edited.connect(self._on_edited)
+        self._wire_envelope_graphs()
         self.panel.detect_pitch_button.clicked.connect(self._detect_pitch)
+        self._sample_controls["detect"][1].triggered.connect(self._detect_pitch)
         self._preview.position_changed.connect(self._on_preview_position)
         self._preview.finished.connect(self._clear_playheads)
         theme.notifier.changed.connect(self._refresh_themed_swatches)
@@ -497,29 +565,43 @@ class YamahaSamplesTab(QWidget):
         # and a loop tempo, shown in the Wave card below.)
         marker_row = self._build_marker_row()
         loop_mode_row = self.panel.labeled_row(_combo("loop_mode", "Loop Mode"), label_width=70)
-        edit_row = self._build_edit_row()
-        waveform_card = build_section_card(
+        waveform_card = _card(
             "Loop Controls",
             zoom_row,
             channel_stack,
             self._row(scrollbar_container),
             marker_row,
             loop_mode_row,
-            edit_row,
+            collapsible=False,  # the waveform: the page is no use without it
         )
+        edit_sample_card = self._build_edit_sample_card()
         # what the loop makes of the audio at its join (left channel), kept live with the markers
         self.loop_preview = LoopJoinPreview()
         self.loop_preview.marker_drag_delta.connect(self._on_loop_preview_dragged)
-        loop_preview_card = build_section_card("Loop Preview", self._row(self.loop_preview))
+        # tiny zoom controls right beside the title; the zoom itself lives in the widget (it also answers Ctrl+scroll and a pinch)
+        loop_preview_zoom = LoopPreviewZoomControls(self.loop_preview)
+        self.loop_preview.zoom_changed.connect(self._refresh_loop_preview_for_zoom)
+        loop_preview_card = _card("Loop Preview", self._row(self.loop_preview), header_widgets=(loop_preview_zoom,))
         self.waveform_view.markers_changed.connect(self._update_marker_knobs)
         self.waveform_view.markers_changed.connect(lambda _s, ls, le, _e: self._refresh_loop_preview(ls, le))
         self.cards_page = build_sample_cards(self.panel)
+        # Detect Pitch lives in the Pitch card; its action (menu / right-click) is made here
+        detect_action = QAction("Detect Pitch", self)
+        detect_action.setToolTip(tt.YAMAHA_DETECT_PITCH_BUTTON)
+        detect_action.setEnabled(False)
+        self._sample_controls["detect"] = (self.panel.detect_pitch_button, detect_action)
+        self._control_wanted["detect"] = False
+        self._build_sample_actions()
+        # the Loop Preview beside the Wave card (four short read-only rows): about the same height, and both are about the loop/wave
+        wave_card = self.panel.wave_card
+        equalize_card_heights(loop_preview_card, wave_card)
 
         cards_layout = QVBoxLayout()
         style_card_page_layout(cards_layout)
         cards_layout.addLayout(header)
         cards_layout.addWidget(waveform_card)
-        cards_layout.addWidget(loop_preview_card)
+        cards_layout.addWidget(edit_sample_card)
+        cards_layout.addLayout(build_paired_row(loop_preview_card, wave_card))
         cards_layout.addWidget(self.cards_page)
         cards_container = QWidget()
         cards_container.setLayout(cards_layout)
@@ -581,30 +663,134 @@ class YamahaSamplesTab(QWidget):
         row.addStretch()
         return row
 
-    def _build_edit_row(self):
-        """Trim / Reverse / Fade / Normalise / Filter, and the Slice Editor. Each edit makes a NEW sample (the A4000 can't delete or
-        overwrite a sample over MIDI), so the original is never touched - see ui/yamaha_sample_edit.py."""
-        row = QHBoxLayout()
-        row.setSpacing(8)
-        self.edit_buttons = {}
-        for key, label, tip in (
-            ("trim", "Trim to Markers", tt.YAMAHA_TRIM_SAMPLE_BUTTON),
-            ("reverse", "Reverse sample", tt.YAMAHA_REVERSE_SAMPLE_BUTTON),
-            ("fade", "Fade In/Out", tt.YAMAHA_FADE_SAMPLE_BUTTON),
-            ("normalise", "Normalise Sample", tt.YAMAHA_NORMALISE_SAMPLE_BUTTON),
-            ("filter", "Filter Sample\u2026", tt.YAMAHA_FILTER_SAMPLE_BUTTON),
-        ):
-            button = QPushButton(label)
-            button.setToolTip(tip)
-            button.setEnabled(False)
-            self.edit_buttons[key] = button
-            row.addWidget(button)
-        row.addStretch()
-        self.slice_button = QPushButton("Slice Editor\u2026")
-        self.slice_button.setToolTip(tt.YAMAHA_SLICE_EDITOR_BUTTON)
-        self.slice_button.setEnabled(False)
-        row.addWidget(self.slice_button)
-        return row
+    def _make_control(self, key, text, tooltip):
+        """A sample action: a button (the Edit Sample card) AND a QAction (the Sample menu and the sample list's right-click menu), enabled
+        together (see update_edit_buttons). The editor connects both to its slot with `connect_control`. No shortcuts on purpose."""
+        button = QPushButton(text)
+        button.setToolTip(tooltip)
+        button.setEnabled(False)
+        action = QAction(text, self)
+        action.setToolTip(tooltip)
+        action.setEnabled(False)
+        self._sample_controls[key] = (button, action)
+        self._control_wanted[key] = False
+        return button
+
+    def connect_control(self, key, slot):
+        button, action = self._sample_controls[key]
+        button.clicked.connect(slot)
+        action.triggered.connect(slot)
+
+    def _build_edit_sample_card(self):
+        """Edit audio / New samples / External app, one labelled row per kind of action - and, while the shown sample has unsent edits, the
+        banner with Undo, Send as New Sample and Revert. Every Yamaha edit works on the sample's working copy: the unit can't overwrite a
+        sample over MIDI, so what reaches it is always a NEW sample (ui/yamaha_sample_edit.py)."""
+        make = self._make_control
+        self.edit_buttons = {
+            "trim": make("trim", "Trim to Markers", tt.YAMAHA_TRIM_SAMPLE_BUTTON),
+            "reverse": make("reverse", "Reverse", tt.YAMAHA_REVERSE_SAMPLE_BUTTON),
+            "fade": make("fade", "Fade In/Out", tt.YAMAHA_FADE_SAMPLE_BUTTON),
+            "normalise": make("normalise", "Normalise", tt.YAMAHA_NORMALISE_SAMPLE_BUTTON),
+            "filter": make("filter", "Filter\u2026", tt.YAMAHA_FILTER_SAMPLE_BUTTON),
+        }
+        self.time_stretch_button = make("stretch", "Stretch / Pitch\u2026", tt.YAMAHA_TIME_STRETCH_BUTTON)
+        self.slice_button = make("slice", "Slice Editor\u2026", tt.YAMAHA_SLICE_EDITOR_BUTTON)
+        self.external_edit_button = make("external_edit", "Edit in External App\u2026", tt.YAMAHA_EXTERNAL_EDIT_BUTTON)
+        self.external_load_button = make("external_load", "Load Edited Audio", tt.YAMAHA_EXTERNAL_LOAD_BUTTON)
+        self.undo_edits_button = make("stage_undo", "Undo", tt.STAGE_UNDO_BUTTON)
+        self.send_edits_as_new_button = make("stage_send", "Send as New Sample\u2026", tt.YAMAHA_STAGE_SEND_BUTTON)
+        self.revert_edits_button = make("stage_revert", "Revert", tt.STAGE_REVERT_BUTTON)
+        self.connect_control("stage_undo", self.undo_edit)
+        self.connect_control("stage_revert", self.revert_edits)
+
+        # The working-copy strip: ALWAYS shown, so the card never changes height. Quiet ("Original from the unit", its buttons off) until the
+        # sample has unsent edits, then tinted with the warning colour; style.qss.template keys off the "unsent" property.
+        self._staged_banner = QFrame()
+        self._staged_banner.setObjectName("workingCopyStrip")
+        self._staged_banner.setProperty("unsent", False)
+        strip = QHBoxLayout(self._staged_banner)
+        strip.setContentsMargins(10, 6, 8, 6)
+        strip.setSpacing(8)
+        self._working_copy_dot = QLabel("\u25cf")
+        self._working_copy_dot.setObjectName("unsentDot")
+        self._working_copy_dot.setVisible(False)
+        self._working_copy_label = QLabel("Original from the unit")
+        self._working_copy_label.setObjectName("workingCopyLabel")
+        strip.addWidget(self._working_copy_dot)
+        strip.addWidget(self._working_copy_label, 1)
+        self.send_edits_as_new_button.setProperty("primary", True)  # the filled one (QSS), while enabled
+        for button in (self.undo_edits_button, self.send_edits_as_new_button, self.revert_edits_button):
+            strip.addWidget(button)
+
+        grid = QGridLayout()
+        grid.setHorizontalSpacing(12)
+        grid.setVerticalSpacing(8)
+        # what the external app round trip is waiting for (see update_edit_buttons): inline at the end of the last row, so it appearing
+        # never changes the card's height - and it never sets the page's width (a long app name is clipped; the tooltip has it all)
+        self._external_hint = QLabel()
+        self._external_hint.setObjectName("mutedLabel")
+        self._external_hint.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        self._external_hint.setVisible(False)
+        for row, (label, tooltip, groups) in enumerate(_EDIT_SAMPLE_ROWS):
+            name_label = QLabel(label)
+            name_label.setFixedWidth(_EDIT_SAMPLE_LABEL_WIDTH)
+            name_label.setToolTip(tooltip)
+            buttons = QHBoxLayout()
+            buttons.setSpacing(8)
+            for group_index, keys in enumerate(groups):
+                if group_index:
+                    divider = QFrame()
+                    divider.setObjectName("groupDivider")
+                    divider.setFixedWidth(1)
+                    divider.setMinimumHeight(22)
+                    buttons.addSpacing(4)
+                    buttons.addWidget(divider)
+                    buttons.addSpacing(4)
+                for key in keys:
+                    buttons.addWidget(self._sample_controls[key][0])
+            if row == len(_EDIT_SAMPLE_ROWS) - 1:
+                # the hint takes the rest of the row (stretch 1) - with a plain trailing stretch too, an Ignored-policy label can be
+                # handed no width at all
+                buttons.addSpacing(8)
+                buttons.addWidget(self._external_hint, 1)
+            else:
+                buttons.addStretch()
+            grid.addWidget(name_label, row, 0)
+            grid.addLayout(buttons, row, 1)
+        grid.setColumnStretch(1, 1)
+        content = QVBoxLayout()
+        content.setSpacing(8)
+        content.addWidget(self._staged_banner)
+        content.addLayout(grid)
+        # collapsed, it must still say there are unsent edits (see _sync_edit_sample_card)
+        self._edit_sample_card = _card("Edit Sample", content)
+        self._edit_card_staged = False
+        return self._edit_sample_card
+
+    def _build_sample_actions(self):
+        # "Load Audio" is what a double-click on the waveform does; a right-click only selects the row, and every edit needs the audio
+        self.load_audio_action = QAction("Load Audio", self)
+        self.load_audio_action.setToolTip(tt.LOAD_AUDIO_ACTION)
+        self.load_audio_action.setEnabled(False)
+        self.load_audio_action.triggered.connect(self._load_audio)
+        self._menu_actions = self._sample_menu_items()
+        self.sample_list_widget.setContextMenuPolicy(Qt.ContextMenuPolicy.ActionsContextMenu)
+        for action in self._menu_actions:
+            self.sample_list_widget.addAction(action)
+
+    def _sample_menu_items(self):
+        """The Sample menu's actions in order, QActions only (a separator is a QAction too). The same actions go in the sample list's
+        right-click menu."""
+        items = [self.load_audio_action]
+        for group in _SAMPLE_MENU_GROUPS:
+            separator = QAction(self)
+            separator.setSeparator(True)
+            items.append(separator)
+            items.extend(self._sample_controls[key][1] for key in group)
+        return items
+
+    def sample_menu_actions(self):
+        return list(self._menu_actions)
 
     def _swatch_color(self, swatch):
         palette = theme.current_palette()
@@ -665,12 +851,18 @@ class YamahaSamplesTab(QWidget):
         self._on_marker_knob_changed(name, self.waveform_view.markers()[name] + delta)
         self._preview_commit_timer.start()
 
+    def _refresh_loop_preview_for_zoom(self, _frames):
+        # the preview's zoom changed: ask for that many frames again, around the markers as they are now
+        markers = self.waveform_view.markers()
+        self._refresh_loop_preview(markers["loop_start"], markers["loop_end"])
+
     def _refresh_loop_preview(self, loop_start, loop_end):
         if not self._loops_enabled:
             self.loop_preview.clear_no_loop()
             return
-        before = self.waveform_view.samples_before(loop_end, HALF_WINDOW_FRAMES)
-        after = self.waveform_view.samples_after(loop_start, HALF_WINDOW_FRAMES)
+        frames = self.loop_preview.half_window()  # frames each side, at the preview's own zoom
+        before = self.waveform_view.samples_before(loop_end, frames)
+        after = self.waveform_view.samples_after(loop_start, frames)
         if before is None or after is None:
             self.loop_preview.clear()
         else:
@@ -678,6 +870,9 @@ class YamahaSamplesTab(QWidget):
 
     def _markers_editable(self):
         return self._writer is not None and self._loading_name is None and not self._edit_busy
+
+    def import_audio(self):
+        self._edits.import_audio()
 
     def free_programs(self):
         return list(self.free_programs_provider()) if self.free_programs_provider is not None else []
@@ -714,6 +909,9 @@ class YamahaSamplesTab(QWidget):
         """The unit's sample names, in object-list order."""
         previous = self._selected
         self._names = list(names)
+        self._prune_staged()
+        self._row_labels = {}
+        self._row_dots = {}
         self.sample_list_widget.blockSignals(True)
         self.sample_list_widget.clear()
         for name in self._names:
@@ -722,10 +920,13 @@ class YamahaSamplesTab(QWidget):
             # blank on purpose: reading every sample's length took one full SP dump each, one at a time, over MIDI
             item = QListWidgetItem(self.sample_list_widget)
             item.setData(Qt.ItemDataRole.UserRole, name)
-            row_widget, _name_label, _duration_label = build_sample_list_row_widget(name)
+            row_widget, name_label, _duration_label = build_sample_list_row_widget(name, with_unsent_dot=True)
             item.setSizeHint(row_widget.sizeHint())
             self.sample_list_widget.setItemWidget(item, row_widget)
+            self._row_labels[name] = name_label
+            self._row_dots[name] = row_widget.unsent_dot
         self.sample_list_widget.blockSignals(False)
+        self._update_row_labels()
         if previous in self._names:
             self.select_sample(previous)
         else:
@@ -792,6 +993,11 @@ class YamahaSamplesTab(QWidget):
 
     def _show(self, name):
         data = self._cache[name]
+        staged = self._staged.get(name)
+        if staged is not None:
+            # the working copy is what is shown (and edited): its audio is "loaded", whatever was loaded before
+            self._audio_name, self._audio_samples = name, staged.channels[0]
+            self._audio_samples_right = staged.channels[1] if len(staged.channels) > 1 else None
         self._show_values(name)
         self.placeholder.setVisible(False)
         self.cards_scroll.setVisible(True)
@@ -799,7 +1005,7 @@ class YamahaSamplesTab(QWidget):
 
     def _show_values(self, name):
         """The cards and the header, from the cached payload (the waveform is left alone)."""
-        data = self._cache[name]
+        data = self._overlay(name, self._cache[name])
         self.panel.fill(data)
         rate = yp.extract(yp.get("sample", "sampling_frequency_l"), data)
         frames = yp.extract(yp.get("sample", "wave_length"), data)
@@ -815,6 +1021,43 @@ class YamahaSamplesTab(QWidget):
         self.used_label.setText(used)
         self._update_graphs()
 
+    # which knobs each envelope graph's values are, in the graph's own order (`_EditableGraph.NAMES`)
+    _GRAPH_KEYS = {
+        "aeg": ("aeg_attack_rate", "aeg_decay_rate", "aeg_sustain_level", "aeg_release_rate"),
+        "feg": tuple(f"feg_{n}" for n in ("init_level", "attack_level", "sustain_level", "release_level", "attack_rate", "decay_rate", "release_rate")),
+        "peg": tuple(f"peg_{n}" for n in ("init_level", "attack_level", "sustain_level", "release_level", "attack_rate", "decay_rate", "release_rate")),
+    }
+
+    def _wire_envelope_graphs(self):
+        """Make the three envelope graphs draggable. While the pointer drags a handle the knobs follow at once and NOTHING is sent; on release each changed
+        knob is reported as an edit, which is the ordinary write path (backup, one-time warning, read-back). The graphs are inert until `_sync_graph_editable`."""
+        graphs, panel = self.panel.envelope_graphs, self.panel
+        for kind, graph in graphs.items():
+            keys = self._GRAPH_KEYS[kind]
+            if kind == "aeg":
+                # the unit's ADSR is RATES (higher = faster) and the graph draws TIMES on 0-99: convert both ways, and read out the unit's own numbers
+                defaults = yamaha_adsr_values(*[panel.widgets[k].defaultValue() for k in keys])
+                graph.set_defaults(dict(zip(graph.NAMES, defaults)))
+
+                def to_knobs(values, graph=graph, keys=keys):
+                    rates = yamaha_adsr_rates(*[graph.values()[n] for n in graph.NAMES])
+                    return {keys[graph.NAMES.index(name)]: rates[graph.NAMES.index(name)] for name in values}
+
+            else:
+                graph.set_defaults({name: panel.widgets[key].defaultValue() for name, key in zip(graph.NAMES, keys)})
+
+                def to_knobs(values, graph=graph, keys=keys):
+                    return {keys[graph.NAMES.index(name)]: value for name, value in values.items()}
+
+            graph.values_changed.connect(lambda values, to_knobs=to_knobs: [panel.set_value_quietly(k, v) for k, v in to_knobs(values).items()])
+            graph.edit_committed.connect(lambda values, to_knobs=to_knobs: [panel.commit(k) for k in to_knobs(values)])
+
+    def _sync_graph_editable(self):
+        """A graph edits only a sample whose values are shown, through knobs the unit lets us write (not a built-in sample's, not under Bulk Protect)."""
+        shown = self._writer is not None and self._selected is not None and self._selected in self._cache
+        for kind, graph in self.panel.envelope_graphs.items():
+            graph.set_editable(shown and all(self.panel.widgets[k].isEnabled() for k in self._GRAPH_KEYS[kind]))
+
     def _update_graphs(self):
         """Redraw the three envelope graphs from the panel's current widget values (shape only - no calibrated timing)."""
         v = self.panel.value
@@ -825,6 +1068,7 @@ class YamahaSamplesTab(QWidget):
                 v(f"{prefix}_init_level"), v(f"{prefix}_attack_level"), v(f"{prefix}_sustain_level"), v(f"{prefix}_release_level"),
                 v(f"{prefix}_attack_rate"), v(f"{prefix}_decay_rate"), v(f"{prefix}_release_rate"),
             )
+        self._sync_graph_editable()
 
     # -- editing -------------------------------------------------------------------------------------------
 
@@ -868,6 +1112,7 @@ class YamahaSamplesTab(QWidget):
             self._show_waveform(name, self._cache[name])
 
     def _show_waveform(self, name, data):
+        data = self._overlay(name, data)
         views = (self.waveform_view, self.waveform_view_right)
         frames, start, loop_start, loop_end, end, loops = sample_markers(data)
         stereo = yp.is_stereo(data)
@@ -901,6 +1146,7 @@ class YamahaSamplesTab(QWidget):
         self._active = active
         if not active:
             self._preview.stop()  # nothing keeps sounding behind another tab
+        self._update_actions()
 
     def refresh(self):
         """Forget the audio read so far (the host is about to re-read everything)."""
@@ -963,6 +1209,13 @@ class YamahaSamplesTab(QWidget):
         """A drag was let go: write whatever it changed. (`markers`: start, loop_start, loop_end, end as drawn.)"""
         name, after = self._selected, tuple(markers)
         if self._writer is None or name is None or name not in self._cache or self._shown_markers is None:
+            return
+        staged = self._staged.get(name)
+        if staged is not None:
+            # a sample with unsent edits has audio the unit does not: writing its markers now would put addresses for a different wave on
+            # the real sample. They stay here and go out with the audio.
+            staged.markers = after
+            self._shown_markers = after
             return
         before, self._shown_markers = self._shown_markers, after
         if self._marker_job is not None:  # one at a time: the newest drag waits (and merges with an earlier one that waited)
@@ -1042,6 +1295,15 @@ class YamahaSamplesTab(QWidget):
 
     # -- click to preview ---------------------------------------------------------------------------------------
 
+    def preview_pitch_shift_semitones(self, data):
+        """How far a PC preview of this sample has to be shifted to sound as the unit plays it: Original key to the preview note, plus Coarse
+        and Fine tune (core/preview_pitch.py - the conventions are unverified on a unit). Shared by the click-to-preview and the Preview of
+        the edit dialogs and the Slice Editor."""
+        g = lambda key: yp.extract(yp.get("sample", key), data)  # noqa: E731
+        return preview_pitch.yamaha_shift_semitones(
+            g("original_key_l"), g("coarse_tune"), g("fine_tune_l"), FINE_TUNE_STEPS_PER_CENT
+        )
+
     def _on_preview_requested(self):
         if self._preview.is_playing():
             self._preview.stop()  # a click while something sounds stops it (the only way a held loop ends)
@@ -1055,22 +1317,24 @@ class YamahaSamplesTab(QWidget):
         m = self.waveform_view.markers_with_loop_in_range()
         rate = yp.extract(yp.get("sample", "sampling_frequency_l"), data)
         mode = yp.extract(yp.get("sample", "loop_mode"), data)
+        shift = self.preview_pitch_shift_semitones(data)  # Original key and tuning, as the unit plays it
         if mode in _LOOPING_MODES:
             self._preview_reversed = 0
             self._preview.play_loop(
                 left, m["start"], m["loop_start"], m["loop_end"], m["end"], rate,
-                dwell_ms=None if mode == 1 else _RELEASE_PREVIEW_MS, right_samples=right,
+                dwell_ms=None if mode == 1 else _RELEASE_PREVIEW_MS, pitch_shift_semitones=shift, right_samples=right,
             )
         elif mode in _REVERSE_MODES:
             # play a reversed copy, mapping its positions back for the playhead
             n = len(left)
             self._preview.play(
-                left[::-1], n - 1 - m["end"], n - 1 - m["start"], rate, right_samples=None if right is None else right[::-1]
+                left[::-1], n - 1 - m["end"], n - 1 - m["start"], rate,
+                pitch_shift_semitones=shift, right_samples=None if right is None else right[::-1],
             )
             self._preview_reversed = n if self._preview.is_playing() else 0
         else:
             self._preview_reversed = 0
-            self._preview.play(left, m["start"], m["end"], rate, right_samples=right)
+            self._preview.play(left, m["start"], m["end"], rate, pitch_shift_semitones=shift, right_samples=right)
 
     def _on_preview_position(self, frame):
         if self._preview_reversed:
@@ -1246,8 +1510,20 @@ class YamahaSamplesTab(QWidget):
             view.set_loading(False)
         self.cancel_load_button.setVisible(False)
 
+    def _sync_edit_sample_card(self, staged):
+        # The Edit Sample card holds the unsent-edits strip, so a collapsed card shows an amber dot beside its title and opens (not remembered)
+        # when a working copy APPEARS - only on that change, so collapsing it while editing isn't fought on every refresh.
+        card = getattr(self, "_edit_sample_card", None)
+        if card is None:
+            return
+        card.set_attention(staged, "Edited \u2013 not on the unit yet")
+        if staged and not self._edit_card_staged and card.is_collapsed():
+            card.set_collapsed(False, remember=False)
+        self._edit_card_staged = staged
+
     def update_edit_buttons(self):
-        """The edit buttons need the audio of the SHOWN sample in memory, no load or edit running, and a tab that can write."""
+        """The edit controls need the audio of the SHOWN sample in memory, no load or edit running, and a tab that can write. The working
+        copy's own controls (Undo, Send as New Sample, Revert and the banner) need unsent edits as well."""
         ready = (
             self._writer is not None
             and self._selected is not None
@@ -1256,10 +1532,187 @@ class YamahaSamplesTab(QWidget):
             and self._loading_name is None
             and not self._edit_busy
         )
-        for button in self.edit_buttons.values():
-            button.setEnabled(ready)
-        self.slice_button.setEnabled(ready)
-        self.panel.detect_pitch_button.setEnabled(ready)
+        staged = self._selected in self._staged
+        edits = getattr(self, "_edits", None)  # (built after the first call)
+        wanted = {key: ready for key in ("trim", "reverse", "fade", "normalise", "filter", "stretch", "slice", "external_edit", "detect")}
+        saved = edits is not None and edits.edited_audio_ready(self._selected)
+        wanted["external_load"] = ready and saved
+        for key in ("stage_undo", "stage_send", "stage_revert"):
+            wanted[key] = ready and staged
+        # the strip: its look (QSS, by property) and its words
+        if self._staged_banner.property("unsent") != staged:
+            self._staged_banner.setProperty("unsent", staged)
+            self._repolish(self._staged_banner, self._working_copy_label)
+        self._working_copy_dot.setVisible(staged)
+        self._working_copy_label.setText("Edited \u2013 not on the unit yet" if staged else "Original from the unit")
+        self._sync_edit_sample_card(staged)
+        for key, enabled in wanted.items():
+            self._control_wanted[key] = enabled
+            button = self._sample_controls[key][0]
+            # (clicking Load Edited Audio, which turns itself off until the next save, threw the page ~220 px down: see
+            # set_enabled_without_scrolling)
+            set_enabled_without_scrolling(button, enabled)
+        # Load Edited Audio is the filled (primary) button once there is something to load, and the hint says what is being waited for
+        primary = bool(wanted["external_load"])
+        if primary and edits is not None:
+            edits.maybe_auto_load(self._selected)  # Settings > "Load automatically when the file is saved"
+        if self.external_load_button.property("primary") != primary:
+            self.external_load_button.setProperty("primary", primary)
+            self._repolish(self.external_load_button)
+        app = self._external_waiting.get(self._selected)
+        if app is None:
+            self._external_hint.setVisible(False)
+        else:
+            self._external_hint.setText("Saved \u2013 ready to load" if saved else f"Waiting for you to save in {app}")
+            self._external_hint.setToolTip(self._external_hint.text())
+            self._external_hint.setVisible(True)
+        self._update_actions()
+
+    def _update_actions(self):
+        # the menu / right-click actions follow the buttons, but only while this tab is the one showing: from another tab a menu item
+        # would act on a sample the user can't see
+        on_tab = self._active
+        for key, (_button, action) in self._sample_controls.items():
+            action.setEnabled(self._control_wanted.get(key, False) and on_tab)
+        can_load = (
+            self._writer is not None
+            and self._selected is not None
+            and self._loading_name is None
+            and not self._edit_busy
+            and self.waveform_view.has_header()
+            and not self.waveform_view.has_waveform()
+        )
+        self.load_audio_action.setEnabled(can_load and on_tab)
+
+    # -- the working copy: unsent edits ---------------------------------------------------------------------------
+
+    def has_unsent_edits(self):
+        return bool(self._staged)
+
+    def unsent_names(self):
+        return list(self._staged)
+
+    def staged_markers(self, name):
+        staged = self._staged.get(name)
+        return staged.markers if staged is not None else None
+
+    def _overlay(self, name, data):
+        """`data` (the sample's payload from the unit) as it should be SHOWN: for a sample with a working copy, the wave addresses and
+        lengths of that copy (the cards, the summary and the markers all read them). A copy - the real payload is never changed."""
+        staged = self._staged.get(name)
+        if staged is None:
+            return data
+        start, loop_start, loop_end, end = staged.markers
+        looping = yp.extract(yp.get("sample", "loop_mode"), data) in _LOOPING_MODES
+        shown = bytearray(data)
+        for key, value in (
+            ("wave_length", len(staged.channels[0])),
+            ("wave_start_address", start),
+            ("wave_end_address", end + 1),
+            ("loop_start_address", loop_start if looping else end + 1),
+            ("loop_end_address", loop_end + 1 if looping else end + 1),
+            ("loop_length", loop_end + 1 - loop_start if looping else 0),
+        ):
+            yp.store(yp.get("sample", key), shown, value)
+        return shown
+
+    def stage_working_copy(self, name, channels, markers):
+        """Make `channels` (one list per channel) with `markers` (start, loop_start, loop_end, end) the shown sample's working copy. The first
+        time, what the unit holds is remembered. Nothing is sent."""
+        if name != self._selected or name not in self._cache:
+            return False
+        staged = self._staged.get(name)
+        if staged is None:
+            if self._audio_name != name or self._audio_samples is None:
+                return False
+            original = [list(self._audio_samples)]
+            if self._audio_samples_right is not None:
+                original.append(list(self._audio_samples_right))
+            _frames, start, loop_start, loop_end, end, _loops = sample_markers(self._cache[name])
+            self._staged[name] = _Staged(
+                channels=[list(c) for c in channels],
+                markers=tuple(markers),
+                original_channels=original,
+                original_markers=(start, loop_start, loop_end, end),
+            )
+        else:
+            staged.history.append((staged.channels, staged.markers))
+            del staged.history[:-_UNDO_LIMIT]
+            staged.channels, staged.markers = [list(c) for c in channels], tuple(markers)
+        self._show(name)
+        self._working_copy_changed()
+        return True
+
+    def _working_copy_changed(self):
+        self._update_row_labels()
+        self.update_edit_buttons()
+
+    def undo_edit(self):
+        name = self._selected
+        staged = self._staged.get(name)
+        if staged is None:
+            return
+        if not staged.history:
+            # nothing before the first change but the unit's own version
+            self.discard_working_copy(name)
+            self.status_message.emit(f"{name!r} is back to the unit's version")
+            return
+        staged.channels, staged.markers = staged.history.pop()
+        self._show(name)
+        self._working_copy_changed()
+        self.status_message.emit(f"Undid the last edit to {name!r}")
+
+    def revert_edits(self):
+        name = self._selected
+        if name not in self._staged:
+            return
+        answer = QMessageBox.question(
+            self,
+            "Revert",
+            f"Discard the unsent edits to {name!r} and go back to what is on the unit?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        self.discard_working_copy(name)
+        self.status_message.emit(f"{name!r} is back to the unit's version")
+
+    def discard_working_copy(self, name):
+        """Forget `name`'s working copy; if it is the shown sample, show what the unit holds again (its audio is still in memory)."""
+        staged = self._staged.pop(name, None)
+        if staged is None:
+            return None
+        if name == self._selected and name in self._cache:
+            self._audio_name, self._audio_samples = name, staged.original_channels[0]
+            self._audio_samples_right = staged.original_channels[1] if len(staged.original_channels) > 1 else None
+            self._show(name)
+        self._working_copy_changed()
+        return staged
+
+    def _prune_staged(self):
+        """A sample that is no longer on the unit takes its unsent edits with it."""
+        gone = [name for name in self._staged if name not in self._names]
+        for name in gone:
+            del self._staged[name]
+        if gone:
+            self.status_message.emit("Dropped the unsent edits of " + ", ".join(repr(n) for n in gone) + " - no longer on the unit")
+
+    def _update_row_labels(self):
+        for name, label in self._row_labels.items():
+            edited = name in self._staged
+            label.setText(name)
+            label.setToolTip("Edited - not on the unit yet" if edited else "")
+            dot = self._row_dots.get(name)
+            if dot is not None:
+                dot.setVisible(edited)
+
+    @staticmethod
+    def _repolish(*widgets):
+        # a style sheet rule keyed on a dynamic property only re-applies after an unpolish/polish
+        for widget in widgets:
+            widget.style().unpolish(widget)
+            widget.style().polish(widget)
 
     def _detect_pitch(self):
         """Estimate the loaded sample's pitch (left channel) and, if the user agrees, write Original key and Fine tune."""
