@@ -19,7 +19,7 @@ How it fits: `build.yml` builds all platforms on a pushed tag and creates a DRAF
 Why a tap: Homebrew 5.0 dropped `--no-quarantine`, and the official homebrew-cask stops supporting casks that fail Gatekeeper (1 Sept 2026);
 AKAISDS is unsigned. Don't suggest `--no-quarantine` to users.
 
-1. Public repo named exactly `homebrew-tap` (renamed from `homebrew-akaisds` on 2026-10-13: it also holds akaiutil-GUI and JV Studio) with `Casks/akaisds.rb` (start from `homebrew/akaisds.rb`; it requires macOS 15+).
+1. Public repo named exactly `homebrew-tap` (renamed from `homebrew-akaisds` on 2026-10-13: it also holds akaiutil-GUI and JV Studio) with `Casks/akaisds.rb` (start from `homebrew/akaisds.rb`; it requires macOS 14+, expressed as `:sonoma`).
 2. Test: `brew tap martincurkovic/tap && brew audit --cask --online martincurkovic/tap/akaisds && brew install --cask martincurkovic/tap/akaisds`.
 3. Gatekeeper will prompt on first launch - the cask's `caveats` say so. There is deliberately no `postflight` that strips the quarantine
    attribute: overriding a macOS security prompt silently should be a conscious decision.

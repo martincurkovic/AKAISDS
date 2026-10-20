@@ -39,7 +39,7 @@ A simple way to send and receive audio samples (WAV, AIFF, FLAC, MP3, Ogg, Opus)
 - Built in MIDI diagnostic tests
   - MIDI interface test to check if your interface can support MIDI SysEx traffic
   - Hardware connection test to check if your MIDI sampler is connected correctly
-- Native builds for macOS 15+ (Apple Silicon & Intel), Linux and Windows
+- Native builds for macOS 14+ (Apple Silicon & Intel), Linux and Windows
 
 ## Quick Start & Screenshots
 
@@ -88,7 +88,7 @@ Unzip the download and drag AKAISDS to your applications folder. See the disclai
 
 Or install with [Homebrew](https://brew.sh): `brew install --cask martincurkovic/tap/akaisds`. Gatekeeper still applies on first launch.
 
-macOS 14.4+ support only for now. There are plans to backport AKAISDS to earlier macOS versions, but that work hasn't been started yet.
+macOS 14+ support only for now. There are plans to backport AKAISDS to earlier macOS versions, but that work hasn't been started yet.
 
 #### Windows Instructions
 
@@ -122,14 +122,14 @@ Generic SDS mode has been implemented and tested via simulation but only has lim
 
 Note that some USB MIDI interfaces do not support MIDI SysEx messages. Please check your MIDI hardware supports SysEx transmission. AKAISDS contains a MIDI SysEx loopback test to assess MIDI interface compatibility. Otherwise please check the table below for a list of tested hardware. If you've tested your interface, please share your findings: the loopback test's results window has a **Share on GitHub** button that opens an issue with everything filled in (or add a row to the table below with a Pull Request).
 
-| Interface | macOS | Linux | Windows | Notes |
-| ------------------- | ----- | ----- | ----------------- | -------------------------- |
-| iCON MIDIPORT V1.01 | ❌ | ⚠️ | ⚠️ | Max SysEx 256 bytes |
-| Focusrite Saffire 6 USB | ？ | ？ | ⚠️ (max 512 bytes) | Untested on macOS or Linux |
-| MIDIPLUS MIDI 2x2 | ⚠️ | ⚠️ | ⚠️ | Max SysEx 256 bytes |
-| PreSonus Studio 26 | ✅ | ✅ | ⚠️ (max 512 bytes) | Requires driver on Windows |
-| SSL 12 | ✅ | ？ | ？ | Untested on Windows or Linux |
-| Tascam US-144 MKII | ？ | ？ | ⚠️ (max 512 bytes) | Untested on macOS or Linux |
+| Interface               | macOS | Linux | Windows            | Notes                        |
+| ----------------------- | ----- | ----- | ------------------ | ---------------------------- |
+| Focusrite Saffire 6 USB | ❔    | ❔    | ⚠️ (max 512 bytes) | Untested on macOS or Linux   |
+| iCON MIDIPORT V1.01     | ❌    | ⚠️    | ⚠️                 | Max SysEx 256 bytes          |
+| MIDIPLUS MIDI 2x2       | ⚠️    | ⚠️    | ⚠️                 | Max SysEx 256 bytes          |
+| PreSonus Studio 26      | ✅    | ✅    | ⚠️ (max 512 bytes) | Requires driver on Windows   |
+| SSL 12                  | ✅    | ❔    | ❔                 | Untested on Windows or Linux |
+| Tascam US-144 MKII      | ❔    | ❔    | ⚠️ (max 512 bytes) | Untested on macOS or Linux   |
 
 ## Reporting Problems
 
