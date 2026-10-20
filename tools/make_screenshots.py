@@ -16,7 +16,7 @@ An existing file is never replaced unless you say --overwrite: the hand-captured
 bar and shadow, and these are the window CONTENTS only (no frame), at twice their on-screen size (QT_SCALE_FACTOR=2, which is
 what ui/quickstart_dialog.py's _SCREENSHOT_PIXEL_RATIO expects).
 
-The pictures use invented sounds and demo sampler data, never anyone's real samples or settings: this tool points the app's
+The pictures use invented sounds and demo sampler data, never anyone's real samples or settings (the one exception is the Slice Editor's drum loop, `tools/screenshot_assets/breakbeat-128bpm.wav`, the owner's own sample pack): this tool points the app's
 config, log and backup folders at a throwaway directory first (same as tests/conftest.py).
 
 Adding a picture: write a function decorated with @shot("name", "what it shows") below. It gets a Context, builds and shows

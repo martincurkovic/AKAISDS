@@ -64,7 +64,6 @@ def main(smoke=False, instant=False):
     midi_manager.raw_output = _FakePort(fake, midi_manager)
     midi_manager.input_name = "Demo S900/S950 (in)"
     midi_manager.output_name = "Demo S900/S950 (out)"
-    midi_manager.is_demo = True  # the editor's keyboard says the simulated unit makes no sound
 
     controller = SamplerController(midi_manager)
     controller.set_device_type(sampler_models.AKAI_S900_S950)
