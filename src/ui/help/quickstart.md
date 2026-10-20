@@ -198,7 +198,7 @@ The working copy survives selecting other samples. AKAISDS asks before you close
 
 Click **Slice Editor…** to chop a loaded sample, ReCycle style. Add slice markers by hand (double click the waveform, drag to move), use **Generate Equal Slices**, or drag the **Sensitivity** slider to have AKAISDS find the hits for you (it replaces all markers as you drag, so use it first). The **Detection** menu picks *Simple* (instant) or *SuperFlux (high quality)*, which finds hits more reliably but takes a moment after each slider move. Loaded stereo files show both channels. Click the waveform to preview a slice.
 
-Every slice is exported to the sampler as a new one-shot sample, and the original is left alone. Tick the option to also create a **new program** and it will have one keygroup per slice on consecutive keys starting at C1, up to 92 slices.
+Every slice is exported to the sampler as a new one-shot sample, and the original is left alone. Tick the option to also create a **new program** and it will have one keygroup per slice on consecutive keys starting at C1, up to 92 slices. **Save WAVs...** saves every slice as a WAV file in a folder on your computer instead.
 
 ![Slice Editor](screenshots/slice-editor-manual.png)
 
@@ -251,7 +251,7 @@ This editor was built and tested on an A4000. The A5000 should work for the same
 
 **Edits make new samples.** The A4000 can't delete or overwrite a sample over MIDI, so the **Edit Sample** card (trim, reverse, fade, normalise, filter, stretch / pitch) works like the Akai one: each edit changes a working copy on your computer (**Undo** and **Revert** are there), and **Send as New Sample** puts it on the sampler as a *new* sample named like `<name> EDIT` (or `<name> TRIM`, `<name> PITCH` from a dialog's own button). The original is never touched. **Edit in External App...** and **File > Import Audio...** (including `.rx2` loops) work here too. The **Slice Editor** works the same way, and can also fill an **empty program** with the slices (one per key, starting at C1).
 
-**Sending and receiving samples** use the Transfer Dashboard as usual: *Currently Loaded Samples* lists the sampler's samples, and Receive saves them as WAV files (both channels of a stereo sample). Sending needs a MIDI input as well as an output, is slow (a stereo sample takes about twice as long as a mono one), and never overwrites: if the name is taken the new sample gets a ` 2` on the end.
+**Sending and receiving samples** use the Transfer Dashboard as usual: *Currently Loaded Samples* lists the sampler's samples, and Receive saves them as WAV files (both channels of a stereo sample). Sending needs a MIDI input as well as an output, is slow (a stereo sample takes about twice as long as a mono one), and never overwrites: if the name is taken the new sample gets a `2` on the end.
 
 **If the sampler goes quiet.** After samples have been sent, the sampler can show *MIDI Bulk Received* and stop answering over MIDI until you press **OK (Knob 5)** on it - most often when you assign a freshly sent sample to a program. AKAISDS tries to warn you when this happens, and tells you when to press **OK**. It's not perfect though, so always refer to your sampler's display after making an edit.
 

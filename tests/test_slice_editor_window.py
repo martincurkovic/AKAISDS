@@ -894,3 +894,110 @@ def test_stereo_export_passes_the_right_channel_slices_and_asks_about_a_pair(qap
     assert args[0] == ["LOOP-1", "LOOP-2", "LOOP-3"]
     assert len(kwargs["extra_slices"]) == 1 and len(kwargs["extra_slices"][0]) == 3
     assert "stereo" in asked[0] and "6 samples" in asked[0]
+
+
+# --- Save WAVs... (to disk, no sampler) --------------------------------------
+
+
+def _choose_folder(monkeypatch, folder):
+    monkeypatch.setattr(sew.QFileDialog, "getExistingDirectory", lambda *a, **k: str(folder))
+
+
+def test_save_wavs_is_enabled_in_demo_mode(qapp):
+    # it needs no sampler, unlike Export Slices
+    assert _build_window(demo_mode=True).save_wavs_button.isEnabled() is True
+
+
+def test_save_wavs_writes_one_file_per_slice_in_a_folder_named_after_the_base_name(qapp, monkeypatch, tmp_path):
+    calls = []
+    window = _build_window(export_calls=calls)
+    window.waveform.set_markers([2000, 5000])
+    _choose_folder(monkeypatch, tmp_path)
+    window._save_wavs()
+    assert sorted(p.name for p in (tmp_path / "SQUARE").iterdir()) == ["SQUARE-1.wav", "SQUARE-2.wav", "SQUARE-3.wav"]
+    assert calls == []  # nothing went to the sampler
+    assert "Saved 3 slices" in window.status_bar.currentMessage()
+
+
+def test_save_wavs_with_no_markers_saves_one_file_straight_into_the_folder(qapp, monkeypatch, tmp_path):
+    window = _build_window()
+    _choose_folder(monkeypatch, tmp_path)
+    window._save_wavs()
+    assert [p.name for p in tmp_path.iterdir()] == ["SQUARE.wav"]
+
+
+def test_save_wavs_cancelling_the_folder_picker_writes_nothing(qapp, monkeypatch, tmp_path):
+    window = _build_window()
+    _choose_folder(monkeypatch, "")
+    window._save_wavs()
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_save_wavs_remembers_the_folder(qapp, monkeypatch, tmp_path):
+    from core import app_config
+
+    window = _build_window()
+    _choose_folder(monkeypatch, tmp_path)
+    window._save_wavs()
+    assert app_config.get_slice_wav_folder() == str(tmp_path)
+
+
+def test_save_wavs_asks_before_replacing_and_keeps_the_old_file_on_no(qapp, monkeypatch, tmp_path):
+    (tmp_path / "SQUARE.wav").write_bytes(b"old")
+    window = _build_window()
+    _choose_folder(monkeypatch, tmp_path)
+    asked = []
+
+    def answer(*a, **k):
+        asked.append(a[2])
+        return sew.QMessageBox.StandardButton.No
+
+    monkeypatch.setattr(sew.QMessageBox, "question", answer)
+    window._save_wavs()
+    assert len(asked) == 1
+    assert (tmp_path / "SQUARE.wav").read_bytes() == b"old"
+
+
+def test_save_wavs_replaces_on_yes(qapp, monkeypatch, tmp_path):
+    (tmp_path / "SQUARE.wav").write_bytes(b"old")
+    window = _build_window()
+    _choose_folder(monkeypatch, tmp_path)
+    monkeypatch.setattr(sew.QMessageBox, "question", lambda *a, **k: sew.QMessageBox.StandardButton.Yes)
+    window._save_wavs()
+    assert (tmp_path / "SQUARE.wav").read_bytes() != b"old"
+
+
+def test_save_wavs_with_an_empty_name_warns_and_does_not_open_the_picker(qapp, monkeypatch):
+    window = _build_window()
+    window.name_edit.setText("")
+    warned = []
+    monkeypatch.setattr(sew.QMessageBox, "warning", lambda *a, **k: warned.append(a[2]))
+
+    def picker(*a, **k):
+        raise AssertionError("the picker should not open")
+
+    monkeypatch.setattr(sew.QFileDialog, "getExistingDirectory", picker)
+    window._save_wavs()
+    assert len(warned) == 1
+
+
+def test_save_wavs_reports_a_write_failure(qapp, monkeypatch, tmp_path):
+    window = _build_window()
+    _choose_folder(monkeypatch, tmp_path)
+    warned = []
+    monkeypatch.setattr(sew.QMessageBox, "warning", lambda *a, **k: warned.append(a[2]))
+
+    def fail(*a, **k):
+        raise PermissionError("denied")
+
+    monkeypatch.setattr(sew.slice_wav_export, "write_slices", fail)
+    window._save_wavs()
+    assert "denied" in warned[0]
+
+
+def test_save_wavs_is_disabled_while_the_controls_are_frozen(qapp):
+    window = _build_window()
+    window._set_controls_enabled(False)
+    assert window.save_wavs_button.isEnabled() is False
+    window._set_controls_enabled(True)
+    assert window.save_wavs_button.isEnabled() is True

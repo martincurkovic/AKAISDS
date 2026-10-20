@@ -1,3 +1,4 @@
+import os
 from concurrent.futures import ThreadPoolExecutor
 
 from PySide6.QtCore import QRegularExpression, Qt, QTimer
@@ -7,6 +8,7 @@ from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QDialog,
+    QFileDialog,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -24,6 +26,7 @@ from PySide6.QtWidgets import (
 from core import app_config
 from core import debug_log
 from core import sample_slicing
+from core import slice_wav_export
 from core import superflux
 from core import transient_detection
 from core.rx2 import Rx2Error
@@ -515,6 +518,12 @@ class SliceEditorWindow(QDialog):
             self.export_button.setEnabled(False)
             self.export_button.setToolTip(tooltips.EXPORT_SLICES_DEMO_MODE)
         export_row.addWidget(self.export_button)
+
+        # unlike Export Slices this needs no sampler, so demo mode leaves it on
+        self.save_wavs_button = QPushButton("Save WAVs...")
+        self.save_wavs_button.setToolTip(tooltips.SAVE_SLICES_WAV_BUTTON)
+        self.save_wavs_button.clicked.connect(self._save_wavs)
+        export_row.addWidget(self.save_wavs_button)
 
         # only built when there's actually something to cancel - None for
         # dashboard.py's own reuse of this window (see cancel_callback's
@@ -1199,6 +1208,60 @@ class SliceEditorWindow(QDialog):
         else:
             QMessageBox.warning(self, "Export Slices", message)
 
+    def _save_wavs(self):
+        markers = self.waveform.slice_markers()
+        slice_count = len(markers) + 1
+        base_name = self.name_edit.text().strip()
+        if not base_name:
+            QMessageBox.warning(self, "Save WAVs", "Enter a base name for the slice files.")
+            return
+
+        chosen = QFileDialog.getExistingDirectory(
+            self, "Choose a folder for the WAV files", app_config.get_slice_wav_folder()
+        )
+        if not chosen:
+            return
+        app_config.save_slice_wav_folder(chosen)
+
+        names = slice_export_names(base_name, slice_count, self._name_length)
+        folder = slice_wav_export.output_folder(chosen, base_name, slice_count)
+        paths = slice_wav_export.wav_paths(folder, names)
+        existing = [p for p in paths if os.path.exists(p)]
+        if existing:
+            reply = QMessageBox.question(
+                self,
+                "Save WAVs",
+                f"{len(existing)} of {len(paths)} file{'s' if len(paths) != 1 else ''} "
+                f'already exist in "{os.path.basename(folder)}". Replace '
+                f"{'it' if len(existing) == 1 else 'them'}?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if reply != QMessageBox.StandardButton.Yes:
+                return
+
+        self._preview_player.stop()
+        start, end = self.waveform.start(), self.waveform.end()
+        slices = sample_slicing.slice_samples(self._samples, start, end, markers)
+        # a stereo source is saved as stereo files, not the -L/-R pair the sampler needs
+        right = None
+        if self._extra_channels and len(self._extra_channels) == 1:
+            right = sample_slicing.slice_samples(self._extra_channels[0], start, end, markers)
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            slice_wav_export.write_slices(folder, paths, slices, self._framerate, right)
+        except OSError as error:
+            debug_log.get_logger().error(f"SliceEditor: saving WAVs to {folder} failed", exc_info=True)
+            QMessageBox.warning(self, "Save WAVs", f"Couldn't save the files: {error}")
+            return
+        finally:
+            QApplication.restoreOverrideCursor()
+        debug_log.get_logger().info(f"SliceEditor: saved {len(paths)} WAV file(s) to {folder}")
+        self.status_bar.setVisible(True)
+        self.status_bar.showMessage(
+            f"Saved {len(paths)} slice{'s' if len(paths) != 1 else ''} to {folder}"
+        )
+
     def _on_cancel_export_shortcut(self):
         if not self._exporting or self._cancel_callback is None:
             return
@@ -1258,6 +1321,7 @@ class SliceEditorWindow(QDialog):
             self.bit_depth_combo,
             self.rate_combo,
             self.export_button,
+            self.save_wavs_button,
             self.close_button,
         ):
             widget.setEnabled(enabled)

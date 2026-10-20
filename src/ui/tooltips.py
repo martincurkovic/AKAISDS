@@ -194,6 +194,11 @@ ZOOM_FIT = "Zoom to fit the whole sample"
 # mode/no-template messages below explain the two DISABLED cases instead
 EXPORT_SLICES_BUTTON = "Send every slice to the sampler as its own new one-shot sample."
 
+SAVE_SLICES_WAV_BUTTON = (
+    "Save each slice as a 16-bit WAV file in a folder on this computer. "
+    "Doesn't need a sampler."
+)
+
 CREATE_PROGRAM_CHECKBOX = (
     "Also create a new program with one keygroup per slice, mapped to "
     "its own key starting at C1, in Const Pitch (no key tracking) and "

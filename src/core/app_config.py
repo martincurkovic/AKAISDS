@@ -341,6 +341,20 @@ def save_receive_format(value):
     save_config(config)
 
 
+def get_slice_wav_folder():
+    # the folder the Slice Editor's Save WAVs... last wrote into; the home folder if none was saved or it has gone
+    folder = load_config().get("slice_wav_folder")
+    if isinstance(folder, str) and Path(folder).is_dir():
+        return folder
+    return str(Path.home())
+
+
+def save_slice_wav_folder(folder):
+    config = load_config()
+    config["slice_wav_folder"] = str(folder)
+    save_config(config)
+
+
 def get_memory_bar_compact():
     # the Samples tab's memory bar, double-clicked down to a thin line without text (ui/memory_bar.py)
     return load_config().get("memory_bar_compact", False) is True
