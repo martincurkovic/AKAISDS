@@ -54,15 +54,34 @@ See [Quick Start Guide](src/ui/help/quickstart.md) for a walkthrough of connecti
 
 ![Editor Keygroup Page](src/ui/help/screenshots/editor-keygroup-page.png)
 
-![Editor Multi Page](src/ui/help/screenshots/editor-multi-page.png)
-
 ![Sample Editor](src/ui/help/screenshots/editor-sample-page.png)
-
-![Sample editing on a working copy](src/ui/help/screenshots/editor-sample-edit.png)
 
 ![Audition Keyboard](src/ui/help/screenshots/editor-audition-keyboard.png)
 
-![Slice Editor](src/ui/help/screenshots/slice-editor-auto.png)
+Click a picture below for the full size.
+
+<table>
+  <tr>
+    <td width="50%" valign="top">
+      <a href="src/ui/help/screenshots/editor-multi-page.png"><img src="src/ui/help/screenshots/editor-multi-page.png" alt="Multi tab"></a>
+      <br><sub>Multi tab: programs, levels, key ranges and priority for all 16 parts</sub>
+    </td>
+    <td width="50%" valign="top">
+      <a href="src/ui/help/screenshots/editor-sample-edit.png"><img src="src/ui/help/screenshots/editor-sample-edit.png" alt="Sample editing on a working copy"></a>
+      <br><sub>Sample editing on a working copy, not yet sent to the sampler</sub>
+    </td>
+  </tr>
+  <tr>
+    <td width="50%" valign="top">
+      <a href="src/ui/help/screenshots/slice-editor-auto.png"><img src="src/ui/help/screenshots/slice-editor-auto.png" alt="Slice Editor with automatic slicing"></a>
+      <br><sub>Slice Editor: SuperFlux finds the hits in a stereo loop</sub>
+    </td>
+    <td width="50%" valign="top">
+      <a href="src/ui/help/screenshots/slice-editor-manual.png"><img src="src/ui/help/screenshots/slice-editor-manual.png" alt="Slice Editor with hand-placed markers"></a>
+      <br><sub>Slice Editor: markers placed by hand</sub>
+    </td>
+  </tr>
+</table>
 
 ## Download & Installation
 
