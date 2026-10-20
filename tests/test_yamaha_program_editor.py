@@ -74,9 +74,8 @@ class _Main(QMainWindow):
     pass
 
 
-def build_window(qapp, fake, demo=False):  # noqa: F811
+def build_window(qapp, fake):  # noqa: F811
     midi = _Midi(fake)
-    midi.is_demo = demo
     controller = SamplerController(midi)
     controller.set_device_type("yamaha_a4000")
     session = controller.yamaha_session()
@@ -999,10 +998,3 @@ def test_closing_the_editor_gives_the_computer_keyboard_back(win):
     assert not win.audition_bar.is_open() and not win._audition_timer.isActive()
 
 
-def test_the_demo_flag_on_the_midi_manager_makes_the_bar_say_so(qapp, fake):
-    window = build_window(qapp, fake, demo=True)
-    try:
-        window.audition_bar.set_available(True)
-        assert "Demo" in window.audition_bar.note.text()
-    finally:
-        dispose(window)

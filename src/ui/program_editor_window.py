@@ -2347,7 +2347,6 @@ class ProgramEditorWindow(QMainWindow):
         # the keyboard along the bottom (View > Audition Keyboard, Cmd/Ctrl+K). Always starts CLOSED: an open bar takes over the computer keyboard.
         # It sends through the BridgeWorker's queue, so a note never overlaps a SysEx exchange.
         self.audition_bar = AuditionBar()
-        self.audition_bar.set_demo(bool(os.environ.get("AKAISDS_DEMO_SAMPLER")))
         self.audition_bar.midi_out.connect(self._worker.submit_midi)
 
         main_layout = QVBoxLayout()
@@ -7442,7 +7441,7 @@ class ProgramEditorWindow(QMainWindow):
     # Priority is raw 0-3 on the wire; widths keep the header labels above the controls
     _MULTI_PRIORITIES = (("Low", 0), ("Norm", 1), ("High", 2), ("Hold", 3))
     _MULTI_PRIORITY_WIDTH = 70
-    _MULTI_RANGE_WIDTH = 150
+    _MULTI_RANGE_WIDTH = 160
 
     @staticmethod
     def _signed(value):

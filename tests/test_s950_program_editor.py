@@ -775,19 +775,3 @@ def test_closing_the_editor_gives_the_computer_keyboard_back(win):
     win._working = None
     win.close()
     assert not win.audition_bar.is_open()
-
-
-def test_the_demo_flag_on_the_midi_manager_makes_the_bar_say_so(qapp, monkeypatch, tmp_path):
-    rig = _build(qapp, monkeypatch, FakeS950())
-    rig.midi.is_demo = True
-    window = S950ProgramEditorWindow(_Main(), rig.controller)
-    try:
-        window._busy_timer.stop()
-        window.audition_bar.set_available(True)
-        assert "Demo" in window.audition_bar.note.text()
-    finally:
-        rig.engine.cancel()
-        window._working = None
-        window.close()
-        window.deleteLater()
-        QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete.value)

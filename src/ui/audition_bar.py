@@ -68,7 +68,6 @@ class AuditionBar(QWidget):
         self._available = False
         self._locked = False
         self._availability = None  # the last (available, why) set_available was given
-        self._demo = False
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 4, 0, 4)
         outer.setSpacing(6)
@@ -156,17 +155,9 @@ class AuditionBar(QWidget):
         )  # always starts closed: an open bar takes over the computer keyboard
         self.set_available(False)
 
-    def _idle_note(self):
-        return "Demo: the simulated sampler makes no sound." if self._demo else ""
-
     def _set_note(self, text):
         self.note.setText(text)
         self.note.setVisible(bool(text))  # (an empty line would still take up room)
-
-    def set_demo(self, demo):
-        self._demo = demo
-        if self._available:
-            self._set_note(self._idle_note())
 
     # -- open / closed ---------------------------------------------------------------------------------------------------
 
@@ -259,7 +250,7 @@ class AuditionBar(QWidget):
             self.keyboard.release_all()
         self.body.setEnabled(available)
         self._update_routing()
-        self._set_note(self._idle_note() if available else why or self.note.text())
+        self._set_note("" if available else why or self.note.text())
 
     # -- the keyboard ----------------------------------------------------------------------------------------------------
 

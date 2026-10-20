@@ -309,7 +309,6 @@ class YamahaProgramEditorWindow(QMainWindow):
         # the keyboard (View > Audition Keyboard, Cmd/Ctrl+K): always starts CLOSED, an open bar owns the computer keyboard. Its menu item is made in _build_menus.
         # Notes go straight out on the GUI thread (no worker here), only while nothing is on the unit's wire: see _sync_audition_available
         self.audition_bar = AuditionBar()
-        self.audition_bar.set_demo(bool(getattr(self._controller.midi_manager, "is_demo", False)))
         self.audition_bar.midi_out.connect(self._send_audition_message)
         self._audition_timer = QTimer(self)
         self._audition_timer.timeout.connect(self._sync_audition_available)

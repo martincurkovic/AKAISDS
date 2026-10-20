@@ -360,7 +360,6 @@ class S950ProgramEditorWindow(QMainWindow):
         main_layout.addWidget(self.main_tabs, stretch=1)
         # the keyboard (View > Audition Keyboard, Cmd/Ctrl+K): always starts CLOSED, an open bar owns the computer keyboard. Its menu item is made in _build_menus
         self.audition_bar = AuditionBar()
-        self.audition_bar.set_demo(bool(getattr(self._controller.midi_manager, "is_demo", False)))
         self.audition_bar.midi_out.connect(self._send_audition_message)
         main_layout.addWidget(self.audition_bar)
         main_layout.addLayout(bottom_row)
