@@ -248,6 +248,18 @@ def test_resample_downsampling_produces_fewer_samples():
     assert len(out) < len(samples)
 
 
+@pytest.mark.parametrize("count,source,target", [(7821, 44100, 8000), (5400, 44100, 22050), (100, 22050, 44100), (1, 44100, 8000)])
+def test_resampled_length_matches_what_the_resampler_returns(count, source, target):
+    out, _ = sds_encoder.resample_to_target_rate(list(range(count)), source, target)
+    assert sds_encoder.resampled_length(count, source, target) == len(out)
+
+
+def test_resampled_length_is_unchanged_without_a_target_or_for_the_same_rate():
+    assert sds_encoder.resampled_length(500, 44100, None) == 500
+    assert sds_encoder.resampled_length(500, 44100, 44100) == 500
+    assert sds_encoder.resampled_length(0, 44100, 8000) == 0
+
+
 # -----------------------
 # WAV WRITING
 # -----------------------

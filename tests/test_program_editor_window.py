@@ -4127,6 +4127,38 @@ def test_slice_export_at_a_different_bit_depth_does_not_retain_the_slices(
     assert "BREAK-1" not in editor._retained_sample_audio
 
 
+def test_slice_export_end_marker_follows_the_resampled_length(editor, qapp, monkeypatch):
+    # the sampler holds the slice at the TARGET rate, so SMPEND from the cut length ran 5.5x past an 8 kHz sample
+    # (real S2000 image, 2026-10-28: scount 1424, end 7821)
+    monkeypatch.delenv("AKAISDS_DEMO_SAMPLER", raising=False)
+    bridge = editor._bridge
+    editor._main_window.sampler_controller = FakeSamplerController(bridge)
+
+    editor._export_slices(
+        ["BREAK-1", "BREAK-2"], [list(range(7821)), list(range(5400))], 44100, 12, 8000, 60, 0, 0,
+        lambda *a: None, lambda *a: None,
+    )
+
+    ends = {
+        name: next(c[2] for c in bridge.set_parameter_calls if c[0] == "SMPEND" and c[1] == bridge.sample_list().index(name))
+        for name in ("BREAK-1", "BREAK-2")
+    }
+    assert ends == {"BREAK-1": round(7821 * 8000 / 44100) - 1, "BREAK-2": round(5400 * 8000 / 44100) - 1}
+
+
+def test_slice_export_end_marker_is_the_cut_length_without_resampling(editor, qapp, monkeypatch):
+    monkeypatch.delenv("AKAISDS_DEMO_SAMPLER", raising=False)
+    bridge = editor._bridge
+    editor._main_window.sampler_controller = FakeSamplerController(bridge)
+
+    editor._export_slices(
+        ["BREAK-1"], [list(range(300))], 44100, 16, None, 60, 0, 0, lambda *a: None, lambda *a: None
+    )
+
+    index = bridge.sample_list().index("BREAK-1")
+    assert next(c[2] for c in bridge.set_parameter_calls if c[0] == "SMPEND" and c[1] == index) == 299
+
+
 def test_duplicate_sample_refuses_a_name_already_in_use(editor, qapp, monkeypatch):
     # two resident samples sharing a name is the exact hazard
     # _perform_sample_edit_real's own temp-name dance exists to avoid -

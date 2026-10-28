@@ -5618,7 +5618,11 @@ class ProgramEditorWindow(QMainWindow):
                 if name not in samples_after_send:
                     continue
                 new_index = samples_after_send.index(name)
-                slice_frame_count = len(item_samples)
+                # the length the sampler holds: a resampled send is shorter (or longer) than the slice
+                # we cut; an end marker from the cut length ran 5.5x past an 8 kHz sample (2026-10-28)
+                slice_frame_count = sds_encoder.resampled_length(
+                    len(item_samples), framerate, sample_rate
+                )
                 # SPTYPE forced to one-shot (3, matching
                 # _SAMPLE_PLAYBACK_TYPE_OPTIONS' own raw-byte-order) - a
                 # chopped slice isn't meant to loop, regardless of what
@@ -5922,10 +5926,12 @@ class ProgramEditorWindow(QMainWindow):
         status_callback("Verifying keygroups...")
         _set_busy(True)
         try:
+            # this read queues behind every create/write above (~1.1 s per keygroup on a real S2000; a flat 20 s gave up
+            # on 21 and 23 keygroups while they were still being written, 2026-10-28)
             which, args = self._wait_for_any_signal(
                 [self._worker.keygroups_loaded, self._worker.keygroups_load_failed],
                 start=lambda: self._worker.submit_keygroups(new_index),
-                timeout_ms=20000,
+                timeout_ms=20000 + 3000 * slice_count,
             )
             self._worker.submit_program_list()
         finally:

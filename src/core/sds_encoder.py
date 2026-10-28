@@ -232,6 +232,14 @@ def _lowpass_filter(samples, width):
     return filtered
 
 
+def resampled_length(frame_count, source_rate, target_rate):
+    # how many frames resample_to_target_rate returns for frame_count in; callers that
+    # mirror the sent length in a sampler header field (SMPEND) must use this, not len()
+    if not frame_count or target_rate in (None, source_rate):
+        return frame_count
+    return max(1, round(frame_count * target_rate / source_rate))
+
+
 def resample_to_target_rate(samples, source_rate, target_rate):
     # convert 'samples' from source_rate to ANY target_rate
     # (up or down-sampling supported)
@@ -253,7 +261,7 @@ def resample_to_target_rate(samples, source_rate, target_rate):
         filter_width = max(1, round(1 / ratio))
         samples = _lowpass_filter(samples, filter_width)
 
-    out_length = max(1, round(len(samples) * ratio))
+    out_length = resampled_length(len(samples), source_rate, target_rate)
     last_index = len(samples) - 1
 
     resampled = []
