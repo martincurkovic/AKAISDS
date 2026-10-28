@@ -1563,7 +1563,7 @@ class YamahaSamplesTab(QWidget):
         if app is None:
             self._external_hint.setVisible(False)
         else:
-            self._external_hint.setText("Saved \u2013 ready to load" if saved else f"Waiting for you to save in {app}")
+            self._external_hint.setText("Saved \u2013 ready to load" if saved else f"Opened in {app}")
             self._external_hint.setToolTip(self._external_hint.text())
             self._external_hint.setVisible(True)
         self._update_actions()

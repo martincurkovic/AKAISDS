@@ -8301,7 +8301,7 @@ class ProgramEditorWindow(QMainWindow):
             self._external_hint.setText(
                 "Saved \u2013 ready to load"
                 if saved
-                else f"Waiting for you to save in {app}"
+                else f"Opened in {app}"
             )
             self._external_hint.setToolTip(self._external_hint.text())
             self._external_hint.setVisible(True)

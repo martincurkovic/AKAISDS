@@ -359,7 +359,7 @@ def test_the_external_hint_follows_the_round_trip(window, monkeypatch, tmp_path)
     monkeypatch.setattr(ee, "launch", lambda path, editor=None: opened.append(path))
     monkeypatch.setattr(app_config, "get_saved_external_editor", lambda: "/Applications/iZotope RX 10 Audio Editor.app/")
     tab.external_edit_button.click()
-    assert tab._external_hint.text() == "Waiting for you to save in iZotope RX 10 Audio Editor" and not tab._external_hint.isHidden()
+    assert tab._external_hint.text() == "Opened in iZotope RX 10 Audio Editor" and not tab._external_hint.isHidden()
     rate = sds_encoder.read_wav_info(opened[0])[1]
     sds_encoder.write_wav_file(opened[0], [1000] * 500, rate, bit_depth=16)
     stat = os.stat(opened[0])
