@@ -40,3 +40,24 @@ def control_change(channel, controller, value):
 def panic(channel):
     """Silence a channel: hold pedal up, All Sound Off, All Notes Off (CC 64, 120, 123)."""
     return [control_change(channel, 64, 0), control_change(channel, 120, 0), control_change(channel, 123, 0)]
+
+
+#: the controllers a MIDI input may pass on: mod wheel, sustain pedal, All Sound Off, All Notes Off
+INPUT_CONTROLLERS = (1, 64, 120, 123)
+
+
+def from_input(message):
+    """What to send the sampler for a message that came in on the keyboard bar's MIDI input, or None to drop it.
+
+    Only notes and INPUT_CONTROLLERS get through, on the channel they arrived on. Everything else (SysEx above all, a DAW's clock, program changes, pitch bend) is dropped: this
+    input must never be able to put anything but a note on the sampler's wire. A note-on with velocity 0 is the note-off it means."""
+    if len(message) != 3 or message[0] < 0x80 or any(b > 0x7F for b in message[1:]):
+        return None
+    kind, channel = message[0] & 0xF0, message[0] & 0x0F
+    if kind == 0x90 and message[2] > 0:
+        return note_on(channel, message[1], message[2])
+    if kind == 0x80 or kind == 0x90:
+        return note_off(channel, message[1])
+    if kind == 0xB0 and message[1] in INPUT_CONTROLLERS:
+        return control_change(channel, message[1], message[2])
+    return None

@@ -5,9 +5,13 @@ Nothing here writes to the sampler. It only emits what to send (`midi_out`, one 
 While the bar is OPEN (and available) it owns the computer keyboard, as Ableton's computer MIDI keyboard does: every key press that is not a shortcut (Ctrl/Cmd/Alt) or a
 navigation key (Tab, arrows, Esc, Enter, F-keys) is routed to the piano, whatever has the focus, so nothing can be typed into a text box. It stands aside while another window is
 in front (a dialog, the Slice Editor) or a drop-down is open. Cmd+K closes the bar and gives the keys back. The bar always starts closed.
+
+The Input drop-down forwards a second MIDI input to the sampler through the same `midi_out` (a keyboard, or a loopback port a DAW plays into, for an interface whose driver lets only one
+program use it). Only notes and a few controllers get through (`audition.from_input`), on the channel they arrived on. The port is open only while the bar is open and available, so
+closing the bar gives the device back, and the sampler's own ports are never offered (a port echoing back into itself is how the 2026-10-10 incident started).
 """
 
-from PySide6.QtCore import QEvent, Qt, Signal
+from PySide6.QtCore import QEvent, QObject, Qt, Signal
 from PySide6.QtGui import QAction
 from PySide6.QtWidgets import (
     QApplication,
@@ -21,7 +25,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from core import audition
+from core import app_config, audition, debug_log, midi_transport
 from core.midi_notes import midi_note_to_name
 from ui.keyboard import TYPING_KEYS, PianoKeyboard, ScrollableKeyboard
 
@@ -55,6 +59,31 @@ _SHORTCUT_MODIFIERS = (
 )  # (Control is Cmd on a Mac)
 
 
+class _InputFeed(QObject):
+    """One open MIDI input. rtmidi calls back on its own thread; the signal hands each message (a list of ints) to the GUI thread."""
+
+    message = Signal(object)
+
+    def __init__(self, name, opener):
+        super().__init__()
+        self._port = opener(name)
+        self._port.set_message_callback(self.message.emit)
+
+    def close(self):
+        self._port.set_message_callback(None)
+        self._port.close_port()
+
+
+class _InputCombo(QComboBox):
+    """Lists the devices when it is opened, so one plugged in after the window appeared is there."""
+
+    about_to_show = Signal()
+
+    def showPopup(self):
+        self.about_to_show.emit()
+        super().showPopup()
+
+
 class AuditionBar(QWidget):
     midi_out = Signal(object)  # one complete channel message (bytes)
     open_changed = Signal(
@@ -68,6 +97,13 @@ class AuditionBar(QWidget):
         self._available = False
         self._locked = False
         self._availability = None  # the last (available, why) set_available was given
+        self._list_inputs = midi_transport.list_input_names  # (tests swap these two for fakes)
+        self._open_input = midi_transport.SharedMidiInput
+        self._feed = None
+        self._feed_name = ""
+        self._input_name = app_config.get_saved_audition_input()  # "" = none
+        self._input_sounding = set()  # (channel, note) the input holds: its note-offs must follow even if the bar closes first
+        self._keys_held = []
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 4, 0, 4)
         outer.setSpacing(6)
@@ -99,7 +135,7 @@ class AuditionBar(QWidget):
         self.channel_combo = QComboBox()
         for number in range(1, 17):
             self.channel_combo.addItem(str(number))
-        self.channel_combo.setToolTip("The MIDI channel the notes go out on.")
+        self.channel_combo.setToolTip("The MIDI channel the notes go out on. Notes from a MIDI input keep the channel they arrive on.")
         self.velocity = QSlider(Qt.Orientation.Horizontal)
         self.velocity.setRange(1, 127)
         self.velocity.setValue(audition.DEFAULT_VELOCITY)
@@ -117,6 +153,23 @@ class AuditionBar(QWidget):
         )  # the notes held right now (mouse or computer keys)
         self.playing_label.setMinimumWidth(150)
         self.playing_label.setToolTip("The notes being played")
+        self.input_combo = _InputCombo()
+        self.input_combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+        self.input_combo.setMinimumContentsLength(14)
+        self.input_combo.setMaximumWidth(220)
+        self.input_combo.setToolTip(
+            "Also play the sampler from a MIDI input: a keyboard, or a virtual port (loopMIDI, IAC) that a DAW plays into. Only notes, mod wheel and sustain are passed on, on the "
+            "channel they arrive on. Never the sampler's own port. The device is only held open while this keyboard is open."
+        )
+        self.input_combo.addItem("None", "")
+        if self._input_name:
+            self.input_combo.addItem(self._input_name, self._input_name)
+            self.input_combo.setCurrentIndex(1)
+        self.input_combo.about_to_show.connect(self.refresh_inputs)
+        self.input_combo.activated.connect(self._on_input_chosen)
+        self.input_status = QLabel()
+        self.input_status.setObjectName("mutedLabel")
+        self.input_status.setVisible(False)
         self.panic_button = QPushButton("Panic")
         self.panic_button.setToolTip(
             "Silence the channel: hold pedal up, All Sound Off, All Notes Off."
@@ -135,6 +188,10 @@ class AuditionBar(QWidget):
         row.addSpacing(12)
         row.addWidget(self.playing_label)
         row.addStretch()
+        row.addWidget(QLabel("Input"))
+        row.addWidget(self.input_combo)
+        row.addWidget(self.input_status)
+        row.addSpacing(12)
         row.addWidget(self.panic_button)
         body.addLayout(row)
 
@@ -185,6 +242,7 @@ class AuditionBar(QWidget):
                 app.removeEventFilter(self)
             self.keyboard.release_all()
         self._update_routing()
+        self._sync_input()
         if changed:
             self.open_changed.emit(opened)
 
@@ -250,6 +308,7 @@ class AuditionBar(QWidget):
             self.keyboard.release_all()
         self.body.setEnabled(available)
         self._update_routing()
+        self._sync_input()
         self._set_note("" if available else why or self.note.text())
 
     # -- the keyboard ----------------------------------------------------------------------------------------------------
@@ -276,9 +335,12 @@ class AuditionBar(QWidget):
         self.playing_label.setText(f"Channel {index + 1}")
 
     def _show_playing(self, notes):
-        self.playing_label.setText(
-            "   ".join(midi_note_to_name(n) for n in notes) if notes else ""
-        )
+        self._keys_held = list(notes)
+        self._refresh_playing()
+
+    def _refresh_playing(self):
+        notes = sorted(set(self._keys_held) | {note for _channel, note in self._input_sounding})
+        self.playing_label.setText("   ".join(midi_note_to_name(n) for n in notes) if notes else "")
 
     def _note_on(self, note):
         if not self._available:
@@ -295,8 +357,109 @@ class AuditionBar(QWidget):
 
     def panic(self):
         self.keyboard.release_all()
+        self._release_input_notes()
         for message in audition.panic(self.channel()):
             self.midi_out.emit(message)
+
+    # -- the MIDI input --------------------------------------------------------------------------------------------------
+
+    def input_name(self):
+        """The device chosen in the Input box ("" = none), whether or not it is open right now."""
+        return self._input_name
+
+    def input_is_open(self):
+        return self._feed is not None
+
+    def _sampler_ports(self):
+        return {name for name in app_config.get_saved_ports() if name}
+
+    def refresh_inputs(self):
+        """Fill the Input box with the devices there are now (not the sampler's own ports), keeping the choice, listed as not connected if it has gone."""
+        try:
+            names = [name for name in self._list_inputs() if name not in self._sampler_ports()]
+        except Exception:
+            debug_log.get_logger().error("AuditionBar: couldn't list MIDI inputs", exc_info=True)
+            return
+        self.input_combo.blockSignals(True)
+        self.input_combo.clear()
+        self.input_combo.addItem("None", "")
+        for name in names:
+            self.input_combo.addItem(name, name)
+        if self._input_name and self._input_name not in names:
+            self.input_combo.addItem(f"{self._input_name} (not connected)", self._input_name)
+        self.input_combo.setCurrentIndex(max(0, self.input_combo.findData(self._input_name)))
+        self.input_combo.blockSignals(False)
+
+    def _on_input_chosen(self, _index):
+        self._input_name = self.input_combo.currentData() or ""
+        app_config.save_audition_input(self._input_name)
+        debug_log.get_logger().info(f"AuditionBar: MIDI input {self._input_name or 'none'!r}")
+        self._set_input_status("")
+        self._sync_input()
+
+    def _set_input_status(self, text):
+        self.input_status.setText(text)
+        self.input_status.setVisible(bool(text))
+
+    def _sync_input(self):
+        # open only while the bar is open and nothing is on the sampler's wire: a held device is one a DAW can't have, and a note must not land in a SysEx exchange
+        wanted = self._input_name if self.routing_keys() else ""
+        if wanted == self._feed_name:
+            return
+        self._close_input()
+        if wanted:
+            self._open_feed(wanted)
+
+    def _open_feed(self, name):
+        if name in self._sampler_ports():
+            self._set_input_status("Sampler's port")
+            self.input_status.setToolTip("That is the port the sampler is on. Its own replies would come back as notes.")
+            return
+        try:
+            feed = _InputFeed(name, self._open_input)
+        except Exception as e:
+            debug_log.get_logger().error(f"AuditionBar: couldn't open MIDI input {name!r}", exc_info=True)
+            self._set_input_status("Not found" if "no input port" in str(e) else "Couldn't open")
+            self.input_status.setToolTip(str(e))
+            return
+        feed.message.connect(self._on_input_message)
+        self._feed, self._feed_name = feed, name
+        self._set_input_status("")
+        debug_log.get_logger().info(f"AuditionBar: opened MIDI input {name!r}")
+
+    def _close_input(self):
+        feed, self._feed, self._feed_name = self._feed, None, ""
+        if feed is not None:
+            try:
+                feed.close()
+            except Exception:
+                debug_log.get_logger().error("AuditionBar: couldn't close the MIDI input", exc_info=True)
+            feed.deleteLater()
+        self._release_input_notes()
+
+    def _release_input_notes(self):
+        held, self._input_sounding = self._input_sounding, set()
+        for channel, note in sorted(held):
+            self.midi_out.emit(audition.note_off(channel, note))
+        self.keyboard.set_external_notes(())
+        self._refresh_playing()
+
+    def _on_input_message(self, raw):
+        if self._feed is None or not self.routing_keys():
+            return  # (a message already queued when the input closed)
+        message = audition.from_input(raw)
+        if message is None:
+            return
+        kind, channel, data = message[0] & 0xF0, message[0] & 0x0F, message[1]
+        if kind == 0x90:
+            self._input_sounding.add((channel, data))
+        elif kind == 0x80:
+            self._input_sounding.discard((channel, data))
+        elif kind == 0xB0 and data in (120, 123):  # (the sampler lets go of that channel's notes)
+            self._input_sounding = {held for held in self._input_sounding if held[0] != channel}
+        self.midi_out.emit(message)
+        self.keyboard.set_external_notes({note for _channel, note in self._input_sounding})
+        self._refresh_playing()
 
 
 def add_audition_action(window, view_menu, bar):

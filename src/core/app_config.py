@@ -297,6 +297,18 @@ def save_external_editor(path):
     save_config(config)
 
 
+def get_saved_audition_input():
+    # the MIDI input the audition keyboard forwards to the sampler (a keyboard, or a loopback port a DAW writes to); "" = none
+    name = load_config().get("audition_midi_input", "")
+    return name if isinstance(name, str) else ""
+
+
+def save_audition_input(name):
+    config = load_config()
+    config["audition_midi_input"] = name or ""
+    save_config(config)
+
+
 def get_saved_external_auto_load():
     # whether the edited file is loaded back by itself as soon as the external editor has saved it (off unless the user turned it on)
     return load_config().get("external_auto_load", False) is True

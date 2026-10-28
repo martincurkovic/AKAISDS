@@ -225,6 +225,8 @@ Greyed-out controls explain themselves in their tooltip.
 
 **View > Audition Keyboard** (Command/Ctrl + K), or the **Keyboard** arrow along the bottom of the window, opens a piano for playing your sampler from the computer. Click the keys, or play them from your computer keyboard: `A W S E D F T G Y H U J K O L P ;` play a chord-friendly octave starting at C3, **Z** and **X** move the octave, **C** and **V** change the velocity, and **[** and **]** change the MIDI channel. Set the channel to the one your program or Multi part listens on. **Panic** stops every note.
 
+**Input** (right of the keyboard) also plays the sampler from a MIDI keyboard, or from a virtual port such as loopMIDI or IAC that your DAW plays into. This is for an interface whose driver lets only one program use it: the app already holds the interface, so the DAW plays into the virtual port and the app passes the notes on. Notes, mod wheel and sustain go through, on the channel they arrive on; everything else is dropped, and the sampler's own port isn't offered. The device is only held open while the keyboard is open.
+
 While the keyboard is open it takes over the computer keyboard, so typing into a text box won't work until you close it (it starts closed every time). It sends plain MIDI notes only, and is switched off while a sample is loading or a transfer is running. The S900/S950 and Yamaha editors have the same keyboard (not tried on a real S900/S950 or A4000 yet).
 
 ### Refreshing Sampler Data

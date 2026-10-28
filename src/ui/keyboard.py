@@ -51,6 +51,7 @@ class PianoKeyboard(QWidget):
         self._whites = _white_notes(first, last)
         self._down = {}  # note -> how many sources hold it (mouse, typing key)
         self._mouse_note = None
+        self._external = set()  # notes a MIDI input holds: drawn pressed, never emitted (they are already on their way to the sampler)
         self._typed = {}  # Qt key -> the note it started
         self._live = False  # the computer keyboard is routed here (the audition bar is open): the range bar is drawn solid
 
@@ -117,6 +118,16 @@ class PianoKeyboard(QWidget):
         else:
             self._down[note] = count - 1
         self.update()
+
+    def _lit(self, note):
+        return note in self._down or note in self._external
+
+    def set_external_notes(self, notes):
+        """Draw `notes` as held by something outside the widget (a MIDI input). Nothing is emitted."""
+        notes = set(notes)
+        if notes != self._external:
+            self._external = notes
+            self.update()
 
     def release_all(self):
         """Let go of everything (focus lost, disabled, Panic)."""
@@ -237,22 +248,22 @@ class PianoKeyboard(QWidget):
         tint.setAlpha(46)
         for note in self._whites:
             rect = self._key_rect(note)
-            colour = accent if self.is_down(note) else QColor(palette["key_white"])
-            if not enabled or (note in self._dimmed and not self.is_down(note)):
+            colour = accent if self._lit(note) else QColor(palette["key_white"])
+            if not enabled or (note in self._dimmed and not self._lit(note)):
                 colour = QColor(palette["bg_disabled"])
             painter.setBrush(colour)
             painter.drawRect(rect)
-            if enabled and note in in_range and not self.is_down(note):
+            if enabled and note in in_range and not self._lit(note):
                 painter.setBrush(tint)
                 painter.drawRect(rect)
             if note % 12 == 0:  # the C of each octave carries its name
-                painter.setPen(QColor(palette["key_black"] if not self.is_down(note) else palette["text_on_accent"]))
+                painter.setPen(QColor(palette["key_black"] if not self._lit(note) else palette["text_on_accent"]))
                 painter.drawText(rect.adjusted(2, 0, 0, -3), Qt.AlignmentFlag.AlignBottom | Qt.AlignmentFlag.AlignLeft, midi_note_to_name(note))
                 painter.setPen(edge)
         for note in range(self._first, self._last + 1):
             if note % 12 in BLACK:
-                dim = not enabled or (note in self._dimmed and not self.is_down(note))
-                painter.setBrush(accent if self.is_down(note) else QColor(palette["border_disabled"] if dim else palette["key_black"]))
+                dim = not enabled or (note in self._dimmed and not self._lit(note))
+                painter.setBrush(accent if self._lit(note) else QColor(palette["border_disabled"] if dim else palette["key_black"]))
                 painter.drawRect(self._key_rect(note))
         if enabled and self._typing:  # the bar under the keys: which keys the computer keyboard plays (solid while the computer keyboard is routed here)
             left, right = self._typing_span()
