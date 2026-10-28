@@ -8,7 +8,7 @@
 [![Platforms: macOS, Windows, Linux](https://img.shields.io/badge/platforms-macOS%20%7C%20Windows%20%7C%20Linux-lightgrey)](#download--installation)
 [![License: GPLv3](https://img.shields.io/badge/license-GPLv3-blue)](LICENSE)
 
-A simple way to send and receive audio samples (WAV, AIFF, FLAC, MP3, Ogg, Opus) to an Akai S1000/S2000/S3000 series sampler over MIDI using the sample dump standard (MIDI SDS), plus an editor for its programs, keygroups, multis and samples. Also supports generic MIDI SDS transmission for non-Akai samplers.
+A simple way to send and receive audio samples to an Akai S900/S1000/S2000/S3000 series sampler over MIDI using the sample dump standard (MIDI SDS), plus an editor for its programs, keygroups, multis and samples. Also supports generic MIDI SDS transmission for non-Akai samplers.
 
 **Need help? Read the [Quick Start Guide](src/ui/help/quickstart.md).**
 
@@ -17,22 +17,21 @@ A simple way to send and receive audio samples (WAV, AIFF, FLAC, MP3, Ogg, Opus)
 ## Features
 
 - Akai-native sample browsing & management (list, rename, delete) as well as universal generic SDS support for non-Akai hardware
-- Program, Keygroup, Multi and Sample editor for Akai S1000 and S2000/S3000 series samplers, with draggable envelope graphs and collapsible cards
-- Sample editing features: trim, reverse, fade, normalise, filter, time stretch / pitch shift and reverb, with Undo and Revert
-- Edit in External App: open a sample in your audio editor of choice and send it back to the sampler
+- Program, Keygroup, Multi and Sample editor for Akai S900/S1000/S2000/S3000 series samplers
+- Sample editing features: trim, reverse, fade, normalise, filter, time stretch / pitch shift and reverb
+- Edit in External App: open a sample in your audio editor of choice
 - Audition Keyboard (Cmd/Ctrl+K): play your sampler from the on-screen piano or the computer keyboard
 - Per-part key range, transpose, tune and priority on the Multi tab, and save/load Multis as `.m3` files (S2000/S3000)
-- Save and load Akai sample files (`.s3`/`.s1`), and save received samples as Akai files
+- Save and load Akai sample files (`.s3`/`.s1`)
 - Experimental Yamaha A4000/A5000 editor support
 - Experimental Akai S900/S950 support: sample send/receive plus a program editor
-- Experimental Ensoniq sampler support: list, receive and send samples, written from the ASR-X's firmware (it has no MIDI Sample Dump Standard, so Generic SDS cannot work). It has never been tried on a real unit, so back up the sampler first and please report what you find (the log can be found under `Help > Show log folder`)
+- Experimental Ensoniq sampler support: list, receive and send samples. See [Disclaimer](#disclaimer).
 - ReCycle style sample slicing
-  - Transient detection: a fast simple detector, or SuperFlux (high quality) for drum loops
+  - Transient detection
   - Audio preview
   - Generate new Program with slices
-- Import ReCycle `.rx2` loops: each slice becomes a sample, optionally with a program built from them
-- File > Import Audio in the editors: open any audio file (or `.rx2`) in the Slice Editor to trim, slice and send it, optionally as a program
-- Drag program files (.p1/.p3) onto the Akai editor to load them, or drag a program out of the list to save it
+- Import ReCycle `.rx2` loops
+- Save/Load program files (.p1/.p3)
 - WAV/AIFF/FLAC/MP3/Ogg Vorbis/Opus support
 - Audio preview for samples
 - Light and dark themes
@@ -45,17 +44,29 @@ A simple way to send and receive audio samples (WAV, AIFF, FLAC, MP3, Ogg, Opus)
 
 See [Quick Start Guide](src/ui/help/quickstart.md) for a walkthrough of connecting your sampler, queuing up files and sending your first sample dump, along with approximate transfer times per sample rate/bit depth. The same guide is also available in-app via **Help > Quick Start Guide**.
 
-![Editor Program Page](src/ui/help/screenshots/editor-program-page.png)
-
-![Editor Keygroup Page](src/ui/help/screenshots/editor-keygroup-page.png)
-
-![Sample Editor](src/ui/help/screenshots/editor-sample-page.png)
-
-![Audition Keyboard](src/ui/help/screenshots/editor-audition-keyboard.png)
-
-Click a picture below for the full size.
+Click a picture for the full size.
 
 <table>
+  <tr>
+    <td width="50%" valign="top">
+      <a href="src/ui/help/screenshots/editor-program-page.png"><img src="src/ui/help/screenshots/editor-program-page.png" alt="Program tab"></a>
+      <br><sub>Program tab: pitch, LFOs, portamento and the modulation matrix</sub>
+    </td>
+    <td width="50%" valign="top">
+      <a href="src/ui/help/screenshots/editor-keygroup-page.png"><img src="src/ui/help/screenshots/editor-keygroup-page.png" alt="Keygroup tab"></a>
+      <br><sub>Keygroup tab: range, filter, draggable envelopes and four zones</sub>
+    </td>
+  </tr>
+  <tr>
+    <td width="50%" valign="top">
+      <a href="src/ui/help/screenshots/editor-sample-page.png"><img src="src/ui/help/screenshots/editor-sample-page.png" alt="Samples tab"></a>
+      <br><sub>Samples tab: waveform, loop points, editing and root note</sub>
+    </td>
+    <td width="50%" valign="top">
+      <a href="src/ui/help/screenshots/editor-audition-keyboard.png"><img src="src/ui/help/screenshots/editor-audition-keyboard.png" alt="Audition keyboard"></a>
+      <br><sub>Audition keyboard: play the sampler from the on-screen piano</sub>
+    </td>
+  </tr>
   <tr>
     <td width="50%" valign="top">
       <a href="src/ui/help/screenshots/editor-multi-page.png"><img src="src/ui/help/screenshots/editor-multi-page.png" alt="Multi tab"></a>
@@ -120,6 +131,8 @@ To bypass Windows SmartScreen & Defender you will need to do the following:
 
 Generic SDS mode has been implemented and tested via simulation but only has limited verification on real hardware. Bugs will likely be present, so if you encounter one please log an issue on GitHub and be as descriptive as possible :) See [CONTRIBUTING.md](CONTRIBUTING.md#reporting-bugs) for what's helpful to include.
 
+Ensoniq sampler support is experimental and has never been tried on a real unit. It was written from the ASR-X's firmware: the ASR-X has no MIDI Sample Dump Standard, so Generic SDS cannot work with it. Back up your sampler before using it, and please report what you find (the log is under `Help > Open Log Folder`). See [CONTRIBUTING.md](CONTRIBUTING.md#reporting-bugs) for what's helpful to include.
+
 Note that some USB MIDI interfaces do not support MIDI SysEx messages. Please check your MIDI hardware supports SysEx transmission. AKAISDS contains a MIDI SysEx loopback test to assess MIDI interface compatibility. Otherwise please check the table below for a list of tested hardware. If you've tested your interface, please share your findings: the loopback test's results window has a **Share on GitHub** button that opens an issue with everything filled in (or add a row to the table below with a Pull Request).
 
 | Interface               | macOS | Linux | Windows            | Notes                        |
@@ -133,7 +146,7 @@ Note that some USB MIDI interfaces do not support MIDI SysEx messages. Please ch
 
 ## Reporting Problems
 
-If something goes wrong, open **Help > Open Log Folder** (in the S900/S950 and Yamaha editors: **Hardware > Open Log Folder**) and attach `akaisds.log` to your bug report, along with which sampler and MIDI interface you're using. Send it straight after the problem happens - it rotates at 8 MB. If the app crashed outright, `crash.log` in the same folder is useful too.
+If something goes wrong, open **Help > Open Log Folder** and attach `akaisds.log` to your bug report, along with which sampler and MIDI interface you're using. If the app crashed completely, `crash.log` in the same folder is useful too.
 
 ## Building From Source
 
