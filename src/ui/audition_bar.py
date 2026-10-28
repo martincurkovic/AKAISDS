@@ -7,11 +7,11 @@ navigation key (Tab, arrows, Esc, Enter, F-keys) is routed to the piano, whateve
 in front (a dialog, the Slice Editor) or a drop-down is open. Cmd+K closes the bar and gives the keys back. The bar always starts closed.
 
 The Input drop-down forwards a second MIDI input to the sampler through the same `midi_out` (a keyboard, or a loopback port a DAW plays into, for an interface whose driver lets only one
-program use it). Only notes and a few controllers get through (`audition.from_input`), on the channel they arrived on. The port is open only while the bar is open and available, so
+program use it). Only notes, pitch bend and a few controllers get through (`audition.from_input`), on the channel they arrived on. The port is open only while the bar is open and available, so
 closing the bar gives the device back, and the sampler's own ports are never offered (a port echoing back into itself is how the 2026-10-10 incident started).
 """
 
-from PySide6.QtCore import QEvent, QObject, Qt, Signal
+from PySide6.QtCore import QEvent, QObject, Qt, QTimer, Signal
 from PySide6.QtGui import QAction
 from PySide6.QtWidgets import (
     QApplication,
@@ -59,6 +59,10 @@ _SHORTCUT_MODIFIERS = (
 )  # (Control is Cmd on a Mac)
 
 
+#: a pitch wheel sends hundreds of messages a second; the sampler gets at most one a channel per this many ms (the last value always follows)
+_BEND_INTERVAL_MS = 15
+
+
 class _InputFeed(QObject):
     """One open MIDI input. rtmidi calls back on its own thread; the signal hands each message (a list of ints) to the GUI thread."""
 
@@ -104,6 +108,12 @@ class AuditionBar(QWidget):
         self._input_name = app_config.get_saved_audition_input()  # "" = none
         self._input_sounding = set()  # (channel, note) the input holds: its note-offs must follow even if the bar closes first
         self._keys_held = []
+        self._pending_bend = {}  # channel -> the newest pitch bend not sent yet
+        self._sampler_bent = set()  # channels whose last pitch bend went out off centre: put back when the input goes
+        self._bend_timer = QTimer(self)
+        self._bend_timer.setSingleShot(True)
+        self._bend_timer.setInterval(_BEND_INTERVAL_MS)
+        self._bend_timer.timeout.connect(self._flush_bends)
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 4, 0, 4)
         outer.setSpacing(6)
@@ -158,7 +168,7 @@ class AuditionBar(QWidget):
         self.input_combo.setMinimumContentsLength(14)
         self.input_combo.setMaximumWidth(220)
         self.input_combo.setToolTip(
-            "Also play the sampler from a MIDI input: a keyboard, or a virtual port (loopMIDI, IAC) that a DAW plays into. Only notes, mod wheel and sustain are passed on, on the "
+            "Also play the sampler from a MIDI input: a keyboard, or a virtual port (loopMIDI, IAC) that a DAW plays into. Only notes, pitch bend, mod wheel and sustain are passed on, on the "
             "channel they arrive on. Never the sampler's own port. The device is only held open while this keyboard is open."
         )
         self.input_combo.addItem("None", "")
@@ -441,6 +451,13 @@ class AuditionBar(QWidget):
         held, self._input_sounding = self._input_sounding, set()
         for channel, note in sorted(held):
             self.midi_out.emit(audition.note_off(channel, note))
+        self._bend_timer.stop()
+        for channel in sorted(self._pending_bend):  # (so the last wheel position is the one the sampler has, then it is put back)
+            self._emit_bend(self._pending_bend[channel])
+        self._pending_bend.clear()
+        for channel in sorted(self._sampler_bent):
+            self.midi_out.emit(audition.pitch_bend(channel, *audition.PITCH_CENTER))
+        self._sampler_bent.clear()
         self.keyboard.set_external_notes(())
         self._refresh_playing()
 
@@ -451,6 +468,9 @@ class AuditionBar(QWidget):
         if message is None:
             return
         kind, channel, data = message[0] & 0xF0, message[0] & 0x0F, message[1]
+        if kind == 0xE0:
+            self._send_bend(channel, message)
+            return
         if kind == 0x90:
             self._input_sounding.add((channel, data))
         elif kind == 0x80:
@@ -460,6 +480,29 @@ class AuditionBar(QWidget):
         self.midi_out.emit(message)
         self.keyboard.set_external_notes({note for _channel, note in self._input_sounding})
         self._refresh_playing()
+
+    def _send_bend(self, channel, message):
+        # the first bend goes out at once, then at most one per channel every _BEND_INTERVAL_MS, newest value only
+        if self._bend_timer.isActive():
+            self._pending_bend[channel] = message
+            return
+        self._emit_bend(message)
+        self._bend_timer.start()
+
+    def _flush_bends(self):
+        pending, self._pending_bend = self._pending_bend, {}
+        for channel in sorted(pending):
+            self._emit_bend(pending[channel])
+        if pending:
+            self._bend_timer.start()
+
+    def _emit_bend(self, message):
+        channel = message[0] & 0x0F
+        if (message[1], message[2]) == audition.PITCH_CENTER:
+            self._sampler_bent.discard(channel)
+        else:
+            self._sampler_bent.add(channel)
+        self.midi_out.emit(message)
 
 
 def add_audition_action(window, view_menu, bar):

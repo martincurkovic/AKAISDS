@@ -281,10 +281,22 @@ def test_send_channel_message_sends_a_note_and_a_control_change(manager):
     assert (sent.type, sent.control, sent.value) == ("control_change", 123, 0)
 
 
+def test_send_channel_message_sends_pitch_bend_as_mido_expects_it(manager):
+    mgr, _fake_mido = manager
+    mgr.open_output("Fake Out A")
+    mgr.send_channel_message([0xE2, 0, 64])  # (the wheel at rest)
+    sent = mgr.output_port.sent[-1]
+    assert (sent.type, sent.channel, sent.pitch) == ("pitchwheel", 2, 0)
+    mgr.send_channel_message([0xE0, 127, 127])
+    assert mgr.output_port.sent[-1].pitch == 8191
+    mgr.send_channel_message([0xE0, 0, 0])
+    assert mgr.output_port.sent[-1].pitch == -8192
+
+
 def test_send_channel_message_refuses_anything_else(manager):
     mgr, _fake_mido = manager
     mgr.open_output("Fake Out A")
-    for bad in ([0xF0, 1, 2], [0x90, 60], [0x90, 200, 1], [0xE0, 0, 64]):
+    for bad in ([0xF0, 1, 2], [0x90, 60], [0x90, 200, 1], [0xE0, 0, 200], [0xC0, 1, 2]):
         with pytest.raises(ValueError):
             mgr.send_channel_message(bad)
     assert mgr.output_port.sent == []

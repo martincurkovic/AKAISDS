@@ -185,10 +185,11 @@ class MidiManager(QObject):
         0x80: ("note_off", ("note", "velocity")),
         0x90: ("note_on", ("note", "velocity")),
         0xB0: ("control_change", ("control", "value")),
+        0xE0: ("pitchwheel", None),  # (mido has one signed `pitch` field, not LSB and MSB)
     }
 
     def send_channel_message(self, message):
-        """One note on / note off / control change (3 bytes) on the open output. Never SysEx."""
+        """One note on / note off / control change / pitch bend (3 bytes) on the open output. Never SysEx."""
         message = list(message)
         kind = self._CHANNEL_MESSAGES.get(message[0] & 0xF0) if len(message) == 3 else None
         if kind is None or any(b > 0x7F for b in message[1:]):
@@ -200,8 +201,12 @@ class MidiManager(QObject):
             return
         if self.output_port is None:
             raise RuntimeError("No MIDI output port is open")
-        name, (first, second) = kind
-        self.output_port.send(mido.Message(name, channel=message[0] & 0x0F, **{first: message[1], second: message[2]}))
+        name, fields = kind
+        if fields is None:
+            data = {"pitch": ((message[2] << 7) | message[1]) - 8192}
+        else:
+            data = {fields[0]: message[1], fields[1]: message[2]}
+        self.output_port.send(mido.Message(name, channel=message[0] & 0x0F, **data))
 
     def send_control_change(self, channel, control, value):
         if shared_transport_enabled():

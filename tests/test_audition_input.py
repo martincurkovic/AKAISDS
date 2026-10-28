@@ -64,7 +64,8 @@ def choose(bar, name):
 # -- what gets through -----------------------------------------------------------------------------------------------------
 
 
-def test_notes_and_a_few_controllers_pass_on_the_channel_they_arrived_on():
+def test_notes_pitch_bend_and_a_few_controllers_pass_on_the_channel_they_arrived_on():
+    assert audition.from_input([0xE4, 5, 100]) == audition.pitch_bend(4, 5, 100)
     assert audition.from_input([0x93, 60, 90]) == audition.note_on(3, 60, 90)
     assert audition.from_input([0x83, 60, 40]) == audition.note_off(3, 60)
     assert audition.from_input([0x90, 60, 0]) == audition.note_off(0, 60)  # (note-on with velocity 0 is a note-off)
@@ -78,7 +79,8 @@ def test_notes_and_a_few_controllers_pass_on_the_channel_they_arrived_on():
         [0xF0, 0x47, 0x00, 0x04, 0x48, 0xF7],  # SysEx never gets through: this input must not be able to put anything but a note on the sampler's wire
         [0xF0, 0x7E, 0x00],
         [0xC0, 5],  # program change
-        [0xE0, 0, 64],  # pitch bend
+        [0xE0, 0],  # truncated pitch bend
+        [0xE0, 0, 200],
         [0xD0, 50],  # channel pressure
         [0xB0, 7, 100],  # volume
         [0xB0, 0, 1],  # bank select
@@ -175,7 +177,7 @@ def test_input_messages_that_are_not_notes_never_reach_the_sampler(bar):
     bar.set_open(True)
     choose(bar, "Master Keys")
     port = FakePort.opened[0]
-    for message in ([0xF0, 0x47, 0x00, 0x04, 0x48, 0xF7], [0xC1, 3], [0xE0, 0, 0x40], [0xB0, 7, 0], [0xF8]):
+    for message in ([0xF0, 0x47, 0x00, 0x04, 0x48, 0xF7], [0xC1, 3], [0xD0, 9], [0xB0, 7, 0], [0xF8]):
         port.play(*message)
     assert bar.sent == []
 
@@ -219,3 +221,71 @@ def test_a_message_that_arrives_after_the_input_closed_is_ignored(bar):
     bar.sent.clear()
     bar._on_input_message([0x90, 60, 100])
     assert bar.sent == [] and port.closed
+
+
+# -- pitch bend --------------------------------------------------------------------------------------------------------------
+
+
+def bends(bar):
+    return [m for m in bar.sent if m[0] & 0xF0 == 0xE0]
+
+
+def test_the_first_bend_goes_out_at_once_and_a_sweep_is_thinned_to_the_newest_value(bar, qapp):
+    from PySide6.QtTest import QTest
+
+    bar.set_open(True)
+    choose(bar, "Master Keys")
+    port = FakePort.opened[0]
+    for value in range(1, 200):
+        port.play(0xE0, value & 0x7F, 64 + (value >> 7))
+    assert bends(bar) == [audition.pitch_bend(0, 1, 64)]  # (the rest wait for the interval)
+    QTest.qWait(80)
+    sent = bends(bar)
+    assert 1 < len(sent) < 20 and sent[-1] == audition.pitch_bend(0, 199 & 0x7F, 64 + (199 >> 7))
+
+
+def test_each_channel_keeps_its_own_newest_bend(bar, qapp):
+    from PySide6.QtTest import QTest
+
+    bar.set_open(True)
+    choose(bar, "Master Keys")
+    port = FakePort.opened[0]
+    port.play(0xE0, 1, 70)
+    port.play(0xE1, 2, 71)
+    port.play(0xE2, 3, 72)
+    QTest.qWait(60)
+    assert audition.pitch_bend(1, 2, 71) in bends(bar) and audition.pitch_bend(2, 3, 72) in bends(bar)
+
+
+def test_a_bent_channel_is_put_back_when_the_input_goes(bar):
+    bar.set_open(True)
+    choose(bar, "Master Keys")
+    port = FakePort.opened[0]
+    port.play(0xE3, 0, 100)
+    port.play(0xE3, 9, 110)  # (still waiting for the interval)
+    bar.sent.clear()
+    bar.set_open(False)
+    assert bends(bar) == [audition.pitch_bend(3, 9, 110), audition.pitch_bend(3, 0, 64)]
+
+
+def test_a_wheel_at_rest_is_not_reset_again(bar, qapp):
+    from PySide6.QtTest import QTest
+
+    bar.set_open(True)
+    choose(bar, "Master Keys")
+    port = FakePort.opened[0]
+    port.play(0xE0, 0, 100)
+    port.play(0xE0, 0, 64)  # back to centre
+    QTest.qWait(60)
+    bar.sent.clear()
+    bar.set_open(False)
+    assert bends(bar) == []
+
+
+def test_panic_puts_a_bent_wheel_back(bar):
+    bar.set_open(True)
+    choose(bar, "Master Keys")
+    FakePort.opened[0].play(0xE5, 0, 90)
+    bar.sent.clear()
+    bar.panic()
+    assert audition.pitch_bend(5, 0, 64) in bar.sent
