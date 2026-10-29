@@ -123,7 +123,7 @@ while Settings is up, unfreeze only after the bridge is swapped in. Every early 
 ## Menus and shortcuts (`ui/standard_menus.py`, `ui/shortcuts_dialog.py`)
 
 Menu bars are kept the same across the Dashboard and the three editors wherever an item applies. Add to the shared helpers, not to one window.
-- **Help** (`add_help_menu`, last on every bar): Quick Start Guide..., Keyboard Shortcuts..., Open Log Folder, About, Check for Updates. It sets `window._update_runner`; the window's `closeEvent` must `wait()` on it (the Akai, S950 and Yamaha editors and the Dashboard do). Open Log Folder lives ONLY here.
+- **Help** (`add_help_menu`, last on every bar): Quick Start Guide..., Keyboard Shortcuts..., Open Log Folder, About, Third-Party Notices... (the same `NoticesDialog` as the About window's Licences button), Check for Updates. It sets `window._update_runner`; the window's `closeEvent` must `wait()` on it (the Akai, S950 and Yamaha editors and the Dashboard do). Open Log Folder lives ONLY here.
 - **Hardware > Cancel Transfer** (Ctrl+.; `add_cancel_transfer_action`) in the Akai, S950 and Yamaha editors; it's Transfer > Cancel Transfer on the Dashboard. Always enabled: the handler is a no-op when idle.
 - **View > Zoom In / Zoom Out / Zoom to Fit** (`build_zoom_actions`: Ctrl+=, Ctrl+-, Ctrl+0) in the three editors, acting on the Samples tab's waveform and enabled only while that tab shows (the S950/Yamaha build the menus BEFORE the tab exists, so the actions take a `get_view` callable). Not on the Dashboard (no waveform).
 - Window menu: Ctrl+T / Ctrl+E, and Ctrl+1-4 for the tabs the window has. Top-level titles carry `&` mnemonics.

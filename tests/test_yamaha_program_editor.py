@@ -1014,6 +1014,7 @@ def test_help_menu_is_the_standard_one(win):
         "Keyboard Shortcuts...",
         "Open Log Folder",
         "About AKAISDS...",
+        "Third-Party Notices...",
         "Check for Updates...",
     ]
     assert "Open Log Folder" not in _texts(_menu(win, "Hardware"))

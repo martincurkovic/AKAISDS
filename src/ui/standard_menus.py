@@ -1,10 +1,10 @@
 """Menu pieces every window shares, so the menu bars stay the same wherever an item applies:
-Help (Quick Start, Keyboard Shortcuts, Open Log Folder, About, Check for Updates), Hardware > Cancel Transfer and View > Zoom.
+Help (Quick Start, Keyboard Shortcuts, Open Log Folder, About, Third-Party Notices, Check for Updates), Hardware > Cancel Transfer and View > Zoom.
 """
 
 from PySide6.QtGui import QAction, QKeySequence
 
-from ui.about_dialog import AboutDialog
+from ui.about_dialog import AboutDialog, NoticesDialog
 from ui.diagnostics_ui import add_open_log_folder_action
 from ui.quickstart_dialog import show_quickstart_dialog
 from ui.shortcuts_dialog import show_shortcuts_dialog
@@ -32,6 +32,10 @@ def add_help_menu(window, extra_shortcut_sections=()):
     about_action.setMenuRole(QAction.MenuRole.AboutRole)
     about_action.triggered.connect(lambda: AboutDialog(window).exec())
     menu.addAction(about_action)
+
+    notices_action = QAction("Third-Party Notices...", window)  # (also behind the About window's Licences button)
+    notices_action.triggered.connect(lambda: NoticesDialog(window).exec())
+    menu.addAction(notices_action)
 
     check_for_updates_action = QAction("Check for Updates...", window)
     check_for_updates_action.triggered.connect(lambda: window._update_runner.start(manual=True))
