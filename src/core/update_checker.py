@@ -1,8 +1,11 @@
 """Checks GitHub Releases for a newer AKAISDS version.
 
-Uses the unauthenticated GitHub REST API (`/releases/latest`), which only
-ever returns the latest *published* (non-draft, non-prerelease) release -
-exactly matching how `.github/workflows/build.yml` publishes builds.
+Uses the unauthenticated GitHub REST API (`/releases`, the most recent
+ones). Only published (non-draft, non-prerelease) releases count, exactly
+matching how `.github/workflows/build.yml` publishes builds. The newest of
+them is the update; the notes shown are those of every release newer than the
+installed version, newest first, so someone several versions behind reads
+everything they missed.
 """
 
 from dataclasses import dataclass
@@ -22,7 +25,8 @@ except ImportError:
     APP_VERSION = "0.0.0-dev"  # matches the build scripts' own dev fallback
 
 REPO = "martincurkovic/AKAISDS"
-RELEASES_API_URL = f"https://api.github.com/repos/{REPO}/releases/latest"
+RELEASES_PER_PAGE = 30  # how many recent releases are asked for: more than anyone is behind by
+RELEASES_API_URL = f"https://api.github.com/repos/{REPO}/releases?per_page={RELEASES_PER_PAGE}"
 REQUEST_TIMEOUT = 5  # seconds - this must never hang app startup
 
 _VERSION_RE = re.compile(r"^v?(\d+)\.(\d+)\.(\d+)$")
@@ -34,7 +38,7 @@ class UpdateInfo:
     tag: str  # e.g. "v1.1.0"
     name: str  # release title, may be blank
     html_url: str  # GitHub release page to send the user to
-    notes: str = ""  # release notes, as the Markdown they were written in
+    notes: str = ""  # release notes as Markdown: those of every release newer than the installed one, newest first
 
 
 def _ssl_context():
@@ -62,6 +66,17 @@ def _parse_version(version_string):
     return tuple(int(part) for part in match.groups())
 
 
+def _combined_notes(newer):
+    """The notes of the releases newer than the installed one, as
+    [(name, body)] newest first. One release's notes are its own, as written;
+    several get a heading each (the release's title) and a rule between them."""
+    if len(newer) == 1:
+        return newer[0][1]
+    return "\n\n---\n\n".join(
+        f"# {name}\n\n{body.strip()}".rstrip() for name, body in newer
+    )
+
+
 def check_for_update(current_version=APP_VERSION):
     """Returns an UpdateInfo if a newer release exists, else None.
 
@@ -86,18 +101,37 @@ def check_for_update(current_version=APP_VERSION):
     ) as response:
         payload = json.load(response)
 
-    tag = payload.get("tag_name", "")
-    latest = _parse_version(tag)
-    if latest is None or latest <= current:
+    if not isinstance(payload, list):
+        raise ValueError("GitHub's answer wasn't a list of releases")
+
+    # (version, release) for each published release newer than this one
+    newer = []
+    for release in payload:
+        if (
+            not isinstance(release, dict)
+            or release.get("draft")
+            or release.get("prerelease")
+        ):
+            continue
+        version = _parse_version(release.get("tag_name") or "")
+        if version is not None and version > current:
+            newer.append((version, release))
+    if not newer:
         return None
+    # GitHub lists by date, not by version
+    newer.sort(key=lambda pair: pair[0], reverse=True)
+    latest, release = newer[0]
+    tag = release["tag_name"]
 
     return UpdateInfo(
         version=".".join(str(part) for part in latest),
         tag=tag,
-        name=payload.get("name") or tag,
-        html_url=payload.get("html_url", f"https://github.com/{REPO}/releases"),
+        name=release.get("name") or tag,
+        html_url=release.get("html_url", f"https://github.com/{REPO}/releases"),
         # "body" is null for a release with no description
-        notes=payload.get("body") or "",
+        notes=_combined_notes(
+            [(r.get("name") or r["tag_name"], r.get("body") or "") for _v, r in newer]
+        ),
     )
 
 

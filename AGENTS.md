@@ -263,7 +263,7 @@ One application-level filter (`spinbox_drag.install(app)` beside `wheel_guard`; 
 
 ## Update checker
 
-`check_for_update` uses `ssl.create_default_context(cafile=certifi.where())`: the Nuitka macOS build has no system CA store and failed silently with `CERTIFICATE_VERIFY_FAILED` (S1100 user's log, 2026-10-16); the three `scripts/build_*` add `--include-package-data=certifi`. Verified 2026-10-20: the 1.3.0 arm64 `.app` contains `Contents/MacOS/certifi/cacert.pem` (not checked on a Windows/Linux build). It polls GitHub `/releases/latest`, which ignores drafts (an unpublished tagged build reports the previous release: not a bug). `UpdateCheckRunner` is a `QThread`: `.wait()` before closing.
+`check_for_update` uses `ssl.create_default_context(cafile=certifi.where())`: the Nuitka macOS build has no system CA store and failed silently with `CERTIFICATE_VERIFY_FAILED` (S1100 user's log, 2026-10-16); the three `scripts/build_*` add `--include-package-data=certifi`. Verified 2026-10-20: the 1.3.0 arm64 `.app` contains `Contents/MacOS/certifi/cacert.pem` (not checked on a Windows/Linux build). It reads GitHub's 30 most recent `/releases`, ignoring drafts and prereleases (an unpublished tagged build reports the previous release: not a bug); the update is the newest by version, and the notes shown are those of every release newer than the installed one, newest first, under a heading each (one newer release: its notes as written). `UpdateCheckRunner` is a `QThread`: `.wait()` before closing.
 
 ## PRGNUM and Program Change (Multi tab)
 

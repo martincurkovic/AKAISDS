@@ -24,7 +24,11 @@ class _FakeResponse:
         return self._data
 
 
-def _fake_urlopen(payload):
+def _fake_urlopen(payload, raw=False):
+    # GitHub's /releases answers with a list; a single release dict stands for a list of one
+    if isinstance(payload, dict) and not raw:
+        payload = [payload]
+
     def _urlopen(request, timeout=None, context=None):
         return _FakeResponse(payload)
 
@@ -168,3 +172,87 @@ def test_falls_back_to_the_default_context_without_certifi(monkeypatch):
     monkeypatch.setattr(builtins, "__import__", no_certifi)
 
     assert update_checker._ssl_context() is not None
+
+
+# --- several releases ---------------------------------------------------------
+
+
+def _release(tag, name=None, body="", **flags):
+    return {"tag_name": tag, "name": name or tag, "body": body, "html_url": f"https://x/{tag}", **flags}
+
+
+def test_every_release_newer_than_the_installed_one_has_its_notes_shown_newest_first(monkeypatch):
+    monkeypatch.setattr(
+        update_checker.urllib.request,
+        "urlopen",
+        _fake_urlopen(
+            [
+                _release("v0.3.0", "Version 0.3.0", "- third"),
+                _release("v0.2.0", "Version 0.2.0", "- second"),
+                _release("v0.1.0", "Version 0.1.0", "- first"),
+            ]
+        ),
+    )
+    result = check_for_update(current_version="0.1.0")
+    assert (result.version, result.html_url) == ("0.3.0", "https://x/v0.3.0")  # the update is the newest
+    assert result.notes == "# Version 0.3.0\n\n- third\n\n---\n\n# Version 0.2.0\n\n- second"  # nothing from 0.1.0 or older
+
+
+def test_one_newer_release_keeps_its_notes_exactly_as_written(monkeypatch):
+    monkeypatch.setattr(
+        update_checker.urllib.request,
+        "urlopen",
+        _fake_urlopen([_release("v0.3.0", body="## Notes\n\n- x"), _release("v0.2.0")]),
+    )
+    assert check_for_update(current_version="0.2.0").notes == "## Notes\n\n- x"
+
+
+def test_releases_are_ordered_by_version_not_by_the_order_github_lists_them(monkeypatch):
+    monkeypatch.setattr(
+        update_checker.urllib.request,
+        "urlopen",
+        _fake_urlopen([_release("v1.1.1", "Patch"), _release("v1.2.0", "Minor"), _release("v1.10.0", "Ten")]),
+    )
+    result = check_for_update(current_version="1.0.0")
+    assert result.version == "1.10.0"
+    assert result.notes.index("# Ten") < result.notes.index("# Minor") < result.notes.index("# Patch")
+
+
+def test_drafts_prereleases_and_odd_tags_are_left_out(monkeypatch):
+    monkeypatch.setattr(
+        update_checker.urllib.request,
+        "urlopen",
+        _fake_urlopen(
+            [
+                _release("v3.0.0", "Beta", "- beta", prerelease=True),
+                _release("v2.5.0", "Draft", "- draft", draft=True),
+                _release("nightly", "Nightly", "- n"),
+                _release("v1.1.0", "Real", "- real"),
+            ]
+        ),
+    )
+    result = check_for_update(current_version="1.0.0")
+    assert (result.version, result.notes) == ("1.1.0", "- real")
+    monkeypatch.setattr(
+        update_checker.urllib.request, "urlopen", _fake_urlopen([_release("v2.0.0", prerelease=True)])
+    )
+    assert check_for_update(current_version="1.0.0") is None
+
+
+def test_a_release_with_no_description_still_gets_its_heading(monkeypatch):
+    monkeypatch.setattr(
+        update_checker.urllib.request,
+        "urlopen",
+        _fake_urlopen([_release("v1.2.0", "Two", None), _release("v1.1.0", "One", "- one")]),
+    )
+    assert check_for_update(current_version="1.0.0").notes == "# Two\n\n---\n\n# One\n\n- one"
+
+
+def test_an_error_object_instead_of_a_list_is_a_failure_not_an_update(monkeypatch):
+    monkeypatch.setattr(
+        update_checker.urllib.request,
+        "urlopen",
+        _fake_urlopen({"message": "API rate limit exceeded"}, raw=True),
+    )
+    with pytest.raises(ValueError, match="list of releases"):
+        check_for_update(current_version="1.0.0")
