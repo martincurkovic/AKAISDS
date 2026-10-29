@@ -10,7 +10,9 @@ The same filter gives the lists whose rows are widgets (a QListWidget with `setI
 the dynamic property `rowSelected` and the stylesheet turns its labels white. The property is only set when the theme asks for it.
 
 Wider text also makes the editors' pages wider than their windows, which then open with a horizontal scroll bar. In a theme that asks for it
-(`grow_window_for_scroll`) a window whose page needs more width is made that much wider, up to the screen (`grow_window`).
+(`grow_window_for_scroll`) a window whose page needs more width is made that much wider, up to the screen, and its minimum width is raised to
+match (`grow_window`): the minimums the windows work out when they are built are measured before the theme's font is applied. The check re-runs
+after every layout change of a scroll area or its page, so a vertical scroll bar appearing late is caught too.
 """
 
 import shiboken6
@@ -61,7 +63,9 @@ def sync_row_selection(list_widget) -> None:
 
 
 def grow_window(scroll_area) -> bool:
-    """Widen the window holding `scroll_area` by what its horizontal scroll bar lacks, no wider than the screen. True if it changed the window."""
+    """Make the window holding `scroll_area` wide enough for its page: widen it by what the horizontal scroll bar lacks, no wider than the screen, and
+    raise its MINIMUM width to that too (a window sized by hand before the theme's font was applied has a minimum that is now too small: the user
+    could shrink it back into a scroll bar). True if it changed the window."""
     window = scroll_area.window()
     if window is None or window.isMaximized() or window.isFullScreen() or not window.isVisible():
         return False
@@ -73,23 +77,59 @@ def grow_window(scroll_area) -> bool:
     width = min(window.width() + missing, limit)
     if width <= window.width():
         return False
+    if window.minimumWidth() < width:
+        window.setMinimumWidth(width)
     window.resize(width, window.height())
     return True
 
 
-def _grow_later(scroll_area) -> None:
-    # (the page only has its final width once the window has laid out, and a tab's page again when its tab is first shown)
-    for delay in (0, 150):
-        QTimer.singleShot(delay, lambda s=scroll_area: shiboken6.isValid(s) and grow_window(s))
+def _scroll_area_of(widget):
+    """The QScrollArea `widget` is (or is the page of), or None."""
+    if isinstance(widget, QScrollArea):
+        return widget
+    viewport = widget.parentWidget()
+    area = viewport.parentWidget() if viewport is not None else None
+    return area if isinstance(area, QScrollArea) and area.widget() is widget else None
+
+
+def _schedule_grow(scroll_area) -> None:
+    # (debounced: a page reaches its final width over several layout passes - the font, the fitted widths, a vertical scroll bar appearing -
+    # and a tab's page again when its tab is first shown, so this runs after any of them, not once at a fixed time)
+    if scroll_area.property("growPending"):
+        return
+    scroll_area.setProperty("growPending", True)
+
+    def run(area=scroll_area):
+        if shiboken6.isValid(area):
+            area.setProperty("growPending", False)
+            grow_window(area)
+
+    QTimer.singleShot(30, run)
+
+
+def _watch_scroll_area(scroll_area) -> None:
+    if scroll_area.property("growWatched"):
+        return
+    scroll_area.setProperty("growWatched", True)
+    scroll_area.installEventFilter(_filter)
+    if scroll_area.widget() is not None:
+        scroll_area.widget().installEventFilter(_filter)
 
 
 class _FitFilter(QObject):
     def eventFilter(self, obj, event):
-        if event.type() != QEvent.Type.Show:
+        kind = event.type()
+        if kind in (QEvent.Type.Resize, QEvent.Type.LayoutRequest):
+            area = _scroll_area_of(obj) if isinstance(obj, QWidget) else None
+            if area is not None and area.property("growWatched") and theme.current_palette().get("grow_window_for_scroll"):
+                _schedule_grow(area)
+            return False
+        if kind != QEvent.Type.Show:
             return False
         if isinstance(obj, QScrollArea):
             if theme.current_palette().get("grow_window_for_scroll"):
-                _grow_later(obj)
+                _watch_scroll_area(obj)
+                _schedule_grow(obj)
             return False
         if isinstance(obj, _FITTED):
             if theme.current_palette().get("fit_fixed_widths"):

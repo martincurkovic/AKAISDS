@@ -901,13 +901,27 @@ class WaveformView(QWidget):
         # loop_end entirely (see set_loop_enabled) rather than drawing them
         # in a greyed color, so this dict's loop entries just go unused.
         boundary = QColor(palette["text_disabled"])
-        loop = QColor(palette["keygroup_color_3"])
+        loop = QColor(palette.get("loop_color", palette["keygroup_color_3"]))  # (System 6: black, with a wash between the two - see paintEvent)
         return {
             "start": boundary,
             "end": boundary,
             "loop_start": loop,
             "loop_end": loop,
         }
+
+    def _draw_loop_wash(self, painter, palette):
+        """A theme without colour (System 6, palette key `loop_shade_alpha`) shows the loop region as a light wash behind the waveform instead of colouring
+        the trace; the loop markers' dashed edges are drawn by the marker pass. Same look as akaiutil-GUI's waveform."""
+        alpha = palette.get("loop_shade_alpha")
+        if alpha is None or not self._loop_enabled or self._frame_count == 0:
+            return
+        x0, x1 = self._x_for("loop_start"), self._x_for("loop_end")
+        left, right = max(0.0, min(x0, x1)), min(float(self.width()), max(x0, x1))
+        if right <= left:
+            return
+        shade = QColor(palette.get("loop_color", palette["text"]))
+        shade.setAlpha(alpha)
+        painter.fillRect(QRectF(left, 1, max(1.0, right - left), self.height() - 2), shade)
 
     def _draw_zero_crossing_line(self, painter, palette):
         # a plain horizontal guide at zero amplitude - border colour, not
@@ -977,7 +991,7 @@ class WaveformView(QWidget):
         # no loop - see set_loop_enabled - the whole [start, end] span just
         # reads as ordinary accent-coloured playback instead of implying a
         # loop region the hardware won't actually use
-        if self._loop_enabled and m["loop_start"] <= frame <= m["loop_end"]:
+        if self._loop_enabled and m["loop_start"] <= frame <= m["loop_end"] and "loop_shade_alpha" not in palette:
             return QColor(palette["keygroup_color_3"])
         return QColor(palette["accent"])
 
@@ -1005,6 +1019,7 @@ class WaveformView(QWidget):
             self._draw_hint(painter, _LOADING_TEXT if self._loading else self._placeholder_text)
             return
 
+        self._draw_loop_wash(painter, palette)
         self._draw_zero_crossing_line(painter, palette)
 
         if self._samples is not None:

@@ -182,6 +182,8 @@ SYSTEM6_PALETTE = {
     "graph_line": "#000000",
     "key_down_white": "#a8a8a8",  # a pressed key goes grey, not black (a black pressed key shows, a white one must not turn solid black)
     "key_down_black": "#707070",
+    "loop_color": "#000000",  # the loop region of the waveform views: a light wash between two dashed black edges, as in akaiutil-GUI
+    "loop_shade_alpha": 38,
     "hard_edges": True,  # painted widgets are drawn without anti-aliasing
     "mono_icons": True,  # message box icons are drawn in black and white (ui/mono_icons.py)
     "text_pressed": "#ffffff",
@@ -195,6 +197,7 @@ SYSTEM6_PALETTE = {
     "font_size_dense": "13px",
     "link": "#101010",  # links in the manual and the notes: black links are told from the text by their underline
     "invert_selected_rows": True,  # the labels in a selected list row turn white with the row (ui/theme_fit.py)
+    "card_titlebar": True,  # section cards draw a striped title bar and a close-box-style arrow (ui/section_card.py)
     "grow_window_for_scroll": True,  # a window whose page is wider than it is grows to show it (ui/theme_fit.py)
     "fit_fixed_widths": True,  # a control pinned to a width that is too narrow for this font grows to fit (ui/theme_fit.py)
     "square_corners": True,  # every border-radius in the shared stylesheet becomes 0

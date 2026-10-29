@@ -236,6 +236,9 @@ Done, by checklist item (offscreen pictures of all 22 `tools/make_screenshots.py
 - [x] `QMessageBox` icons via the proxy style, once per app.
 - [x] Markdown: code font and underlined links in the Quick Start, notices and update notes; the ASCII logos keep a monospace font (`monoText`).
 - [x] Tests: `tests/test_system6_theme.py`; notices credit the font; `AGENTS.md` points here.
+- [x] Second pass (same day, after the owner's first look at a real window): windows now raise their minimum width as well as growing (the Settings dialog with a long device name was the case), push buttons got more side padding, every tab has a bottom edge, and the editors' section cards are JV Studio's striped title bars.
+- [x] Waveform loop region in akaiutil-GUI's style (wash + dashed edges).
+- [x] **Loop Preview card header** was taller than the other cards' (its zoom buttons are taller than the title). Done as option (a), chosen by the owner: -/+/1:1 are small title-bar boxes like a System 6 window's zoom box, at the right end of the striped bar (14 px high, `1:1` wider); other themes unchanged. (b) a row in the card body, and (c) an overlay in the preview's corner, were the alternatives.
 - [ ] Each dialog looked at: all 22 recipes were rendered, and I looked at the Dashboard, the Program Editor's four tabs, the keyboard bar, Settings, Slice Editor, Reverb, the stray-MIDI box and the Yamaha Samples tab (clean at that size). Not rendered: the S950 editor, Ensoniq / ASR-X dashboards, Yamaha Programs tab, Sample Info, About, Quick Start. Known nits: the Multi tab's key-range spin boxes show a clipped right edge; a selected keygroup row's swatch vanishes. The owner's real-screen screenshots are still needed (lesson 33).
 - [ ] The window-grows-to-fit step (`grow_window_for_scroll`) is unit tested only: offscreen's screen is 800 px wide.
 - [ ] README / manual mention and gallery.

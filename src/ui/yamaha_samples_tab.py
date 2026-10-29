@@ -796,7 +796,7 @@ class YamahaSamplesTab(QWidget):
         palette = theme.current_palette()
         if swatch.property("swatchKind") == "marker_boundary" or not self._loops_enabled:
             return palette["text_disabled"]  # (a loop swatch greys out with its loop, like the S3000's)
-        return palette["keygroup_color_3"]
+        return palette.get("loop_color", palette["keygroup_color_3"])
 
     def _refresh_swatch(self, swatch):
         swatch.setStyleSheet(f"background-color: {self._swatch_color(swatch)}; border-radius: 2px;")

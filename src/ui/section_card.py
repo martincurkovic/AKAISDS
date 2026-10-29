@@ -14,7 +14,7 @@
   `qt_helpers.set_enabled_without_scrolling`).
 """
 
-from PySide6.QtCore import QEvent, QPointF, Qt, Signal
+from PySide6.QtCore import QEvent, QPointF, QRect, Qt, Signal
 from PySide6.QtGui import QColor, QPainter, QPen, QPolygonF
 from PySide6.QtWidgets import (
     QAbstractButton,
@@ -22,6 +22,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QSizePolicy,
+    QSpacerItem,
     QVBoxLayout,
     QWidget,
 )
@@ -87,6 +88,21 @@ class DisclosureArrow(QAbstractButton):
     def paintEvent(self, _event):
         palette = theme.current_palette()
         painter = QPainter(self)
+        if palette.get("card_titlebar"):  # System 6: a small white box with the triangle inside, like a window's close box (hard edges: no anti-aliasing)
+            box = QRect(1, 1, self.SIZE - 3, self.SIZE - 3)
+            painter.fillRect(box, QColor(palette["bg"]))
+            painter.setPen(QPen(QColor(palette["border"]), 1))
+            painter.drawRect(box.adjusted(0, 0, -1, -1))
+            c = self.SIZE / 2 - 0.5
+            points = [QPointF(c - 1.5, c - 3), QPointF(c + 2.5, c), QPointF(c - 1.5, c + 3)] if self._collapsed else [QPointF(c - 3, c - 1.5), QPointF(c + 3, c - 1.5), QPointF(c, c + 2.5)]
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor(palette["border"]))
+            painter.drawPolygon(QPolygonF(points))
+            if self.hasFocus():
+                painter.setBrush(Qt.BrushStyle.NoBrush)
+                painter.setPen(QPen(QColor(palette["border"]), 1, Qt.PenStyle.DotLine))
+                painter.drawRect(self.rect().adjusted(0, 0, -1, -1))
+            return
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, theme.antialiasing())
         color = QColor(palette["text_bright"] if self.underMouse() else palette["text"])
         c = self.SIZE / 2
@@ -132,10 +148,14 @@ class SectionCard(QWidget):
         header_row.addWidget(self._arrow)
         header_row.addWidget(self._title_label)
         header_row.addWidget(self._attention_dot)
-        header_row.addSpacing(2)
+        # (the two spacers are what addSpacing(2) and addStretch() were; System 6 swaps their roles so the small controls sit at the bar's right end)
+        self._header_row = header_row
+        self._lead_spacer = QSpacerItem(2, 0, QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Minimum)
+        self._trail_spacer = QSpacerItem(0, 0, QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
+        header_row.addItem(self._lead_spacer)
         for widget in self._header_widgets:
             header_row.addWidget(widget)
-        header_row.addStretch()
+        header_row.addItem(self._trail_spacer)
 
         # the rows live in a widget so they can be hidden (a layout can't be). Not the page colour inside a card; Maximum vertically so it never takes
         # the height a pair pins on a shorter card - the stretch below does, as in a plain card
@@ -158,11 +178,50 @@ class SectionCard(QWidget):
         self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
 
         self._apply(bool(key) and key in _keys())
+        theme.notifier.changed.connect(self._theme_changed)
+        self._theme_changed()
 
     # -- state -------------------------------------------------------------------------------------
 
     def title(self):
         return self._title
+
+    def _theme_changed(self):
+        # System 6 draws the heading as a striped title bar flush with the card's top edge: less room above it
+        titlebar = bool(theme.current_palette().get("card_titlebar"))
+        self.layout().setContentsMargins(12, 3 if titlebar else 10, 12, 12)
+        # in a title bar the small controls (a zoom box, like a System 6 window's) sit at its right end, as tall as the arrow
+        fixed, expanding = QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Expanding
+        self._lead_spacer.changeSize(2, 0, expanding if titlebar else fixed, QSizePolicy.Policy.Minimum)
+        self._trail_spacer.changeSize(0, 0, fixed if titlebar else expanding, QSizePolicy.Policy.Minimum)
+        self._header_row.invalidate()
+        self.update()
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        if not theme.current_palette().get("card_titlebar"):
+            return
+        # the System 6 title bar: horizontal black lines every other pixel, with a white patch behind the title and anything else in the heading
+        palette = theme.current_palette()
+        header = self.layout().itemAt(0).geometry()
+        bar = QRect(1, 1, self.width() - 2, header.bottom() + 3)
+        painter = QPainter(self)
+        painter.setPen(QPen(QColor(palette["border"]), 1))
+        for y in range(bar.top() + 1, bar.bottom(), 2):
+            painter.drawLine(bar.left(), y, bar.right(), y)
+        painter.fillRect(QRect(bar.left(), bar.bottom(), bar.width(), 1), QColor(palette["border"]))
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(palette["bg"]))
+        # one patch per item, but all as tall as the tallest (the title's label is taller than the 14 px arrow, and patches of different heights
+        # left a stripe showing under the arrow and a step where they met)
+        shown = [w for w in (self._title_label, self._attention_dot, self._arrow, *self._header_widgets) if w.isVisibleTo(self)]
+        if shown:
+            top = min(w.geometry().top() for w in shown) - 1
+            bottom = max(w.geometry().bottom() for w in shown) + 1
+            for widget in shown:
+                margin = 2 if widget is self._arrow else 4
+                geometry = widget.geometry()
+                painter.drawRect(QRect(geometry.left() - margin, top, geometry.width() + 2 * margin, bottom - top + 1))
 
     def key(self):
         return self._key

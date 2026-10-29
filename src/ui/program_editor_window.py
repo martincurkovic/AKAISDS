@@ -2822,7 +2822,7 @@ class ProgramEditorWindow(QMainWindow):
             return palette["text_disabled"]
         # a marker_loop swatch greys out with its loop (SPTYPE with no loop)
         return (
-            palette["keygroup_color_3"]
+            palette.get("loop_color", palette["keygroup_color_3"])
             if self._loop_markers_enabled
             else palette["text_disabled"]
         )

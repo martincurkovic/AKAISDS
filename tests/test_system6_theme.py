@@ -359,7 +359,43 @@ def test_a_window_is_widened_by_what_its_scroll_bar_lacks_but_not_past_the_scree
     before = window.width()
     assert theme_fit.grow_window(scroll) is True
     assert window.width() == min(before + missing, screen_width)
+    assert window.minimumWidth() == window.width()  # (and it can't be shrunk back into a scroll bar)
     window.close()
+
+
+def test_a_page_that_grows_after_the_window_is_shown_still_widens_the_window(s6, qapp):
+    import time
+
+    from PySide6.QtWidgets import QScrollArea, QVBoxLayout
+
+    theme_fit.install(qapp)
+    window = QWidget()
+    outer = QVBoxLayout(window)
+    scroll = QScrollArea()
+    page = QWidget()
+    scroll.setWidget(page)
+    outer.addWidget(scroll)
+    window.resize(300, 200)
+    window.show()
+    qapp.processEvents()
+    page.setMinimumWidth(500)  # (the font, a fitted width or a vertical scroll bar arriving later)
+    deadline = time.monotonic() + 2
+    while scroll.horizontalScrollBar().maximum() > 0 and time.monotonic() < deadline:
+        qapp.processEvents()
+        time.sleep(0.01)
+    assert scroll.horizontalScrollBar().maximum() == 0
+    assert window.width() >= 500 and window.minimumWidth() >= 500
+    window.close()
+
+
+def test_push_buttons_have_roomier_padding_in_system6(monkeypatch, tmp_path):
+    sheet = _sheet(monkeypatch, tmp_path, theme.SYSTEM6_PALETTE)
+    assert re.search(r"QPushButton \{[^}]*padding: 5px 18px", sheet)
+
+
+def test_every_tab_has_a_bottom_edge_in_system6(monkeypatch, tmp_path):
+    sheet = _sheet(monkeypatch, tmp_path, theme.SYSTEM6_PALETTE)
+    assert re.search(r"QTabBar::tab \{\s*border-bottom: 1px solid #000000", sheet)
 
 
 # -- Markdown ---------------------------------------------------------------------------------------------------------------------------
@@ -409,3 +445,157 @@ def test_other_themes_leave_a_markdown_document_alone(s6, qapp):
     before = document.toHtml()
     update_dialog.apply_theme_to_markdown(document)
     assert document.toHtml() == before
+
+
+# -- section cards (ported from JV Studio) ------------------------------------------------------------------------------------------------
+
+
+def _card(qapp):
+    from PySide6.QtWidgets import QHBoxLayout
+
+    from ui.section_card import SectionCard
+
+    row = QHBoxLayout()
+    row.addWidget(QLabel("a row"))
+    card = SectionCard("Filter", [row], key=None)
+    card.resize(300, 120)
+    card.show()
+    qapp.processEvents()
+    return card
+
+
+def test_a_section_card_has_a_striped_title_bar_in_system6(s6, qapp):
+    card = _card(qapp)
+    image = card.grab().toImage()
+    right = image.width() - 10  # (right of the title's white patch: only stripes there)
+    column = [image.pixelColor(right, y).name() for y in range(1, 20)]
+    assert column.count("#000000") >= 5  # (a black line every other pixel)
+    assert all(column[i] != column[i + 1] for i in range(3, 12))
+    body = [image.pixelColor(right, y).name() for y in range(card.height() - 40, card.height() - 10)]
+    assert "#000000" not in body  # (the body is plain)
+    card.close()
+
+
+def test_the_title_and_arrow_sit_on_white_patches_with_no_stripe_showing_through(s6, qapp):
+    card = _card(qapp)
+    image = card.grab().toImage()
+    title = card._title_label.geometry()
+    patch = [image.pixelColor(title.left() - 2, y).name() for y in range(title.top(), title.bottom())]
+    assert set(patch) == {"#ffffff"}  # (nothing but the patch just left of the title, all the way down it)
+    arrow = card._arrow.geometry()
+    left_of_arrow = [image.pixelColor(arrow.left() - 1, y).name() for y in range(arrow.top(), arrow.bottom())]
+    assert set(left_of_arrow) == {"#ffffff"}  # (and no step between the arrow's patch and the title's: same height)
+    assert [image.pixelColor(title.left() - 2, y).name() for y in (title.top() - 1, title.bottom() + 1)] == ["#ffffff", "#ffffff"]
+    card.close()
+
+
+def test_other_themes_keep_the_plain_card(s6, qapp):
+    theme.set_theme_preference("dark")
+    card = _card(qapp)
+    image = card.grab().toImage()
+    assert not any(image.pixelColor(image.width() - 10, y).name() == "#000000" for y in range(1, 20))
+    card.close()
+
+
+# -- the loop region of the waveform view (as akaiutil-GUI draws it) --------------------------------------------------------------------------
+
+
+def _loop_view(qapp):
+    from ui.waveform_view import WaveformView
+
+    view = WaveformView()
+    view.resize(400, 120)
+    view.set_waveform([0] * 1000, 0, 400, 800, 999)  # (silence: nothing but the wash and the markers can colour a pixel)
+    view.show()
+    qapp.processEvents()
+    return view
+
+
+def test_the_loop_region_is_a_light_grey_wash_between_dashed_black_edges_in_system6(s6, qapp):
+    view = _loop_view(qapp)
+    image = view.grab().toImage()
+    y = 20  # (clear of the zero line in the middle and of the handles)
+    outside, inside = image.pixelColor(100, y), image.pixelColor(240, y)
+    assert outside.name() == "#ffffff"
+    assert inside.name() != "#ffffff" and 190 <= inside.lightness() <= 245 and inside.saturation() == 0  # (black at ~15%)
+    assert view._marker_colors(theme.current_palette())["loop_start"] == QColor("#000000")
+    column = [image.pixelColor(round(view._x_for("loop_start")), yy).name() for yy in range(5, 100)]
+    assert "#000000" in column and any(c != "#000000" for c in column)  # (dashed: black with gaps)
+    view.close()
+
+
+def test_the_trace_stays_black_inside_the_loop_in_system6(s6, qapp):
+    view = _loop_view(qapp)
+    view.set_waveform([20000, -20000] * 500, 0, 400, 800, 999)
+    qapp.processEvents()
+    assert view._waveform_zone_color(600, theme.current_palette()) == QColor(theme.SYSTEM6_PALETTE["accent"])
+    view.close()
+
+
+def test_other_themes_have_no_wash_and_keep_the_loop_colour_on_the_trace(s6, qapp):
+    theme.set_theme_preference("dark")
+    view = _loop_view(qapp)
+    image = view.grab().toImage()
+    assert image.pixelColor(240, 20).name() == image.pixelColor(100, 20).name()  # (no wash)
+    assert view._waveform_zone_color(600, theme.DARK_PALETTE) == QColor(theme.DARK_PALETTE["keygroup_color_3"])
+    view.close()
+
+
+# -- the Loop Preview card's zoom boxes ---------------------------------------------------------------------------------------------------------
+
+
+def _zoom_card(qapp):
+    from PySide6.QtWidgets import QHBoxLayout
+
+    from ui.loop_preview_view import LoopJoinPreview, LoopPreviewZoomControls
+    from ui.section_card import SectionCard
+
+    preview = LoopJoinPreview()
+    zoom = LoopPreviewZoomControls(preview)
+    row = QHBoxLayout()
+    row.addWidget(QLabel("a row"))
+    card = SectionCard("Loop Preview", [row], header_widgets=(zoom,))
+    plain = SectionCard("Root Note", [QHBoxLayout()])
+    for c in (card, plain):
+        c.resize(400, 120)
+        c.show()
+    qapp.processEvents()
+    return card, plain, zoom, preview
+
+
+def test_the_zoom_buttons_are_title_bar_boxes_that_keep_the_header_as_tall_as_the_others(s6, qapp):
+    card, plain, zoom, _preview = _zoom_card(qapp)
+    assert zoom.zoom_out_button.height() == zoom.zoom_in_button.height() == zoom.reset_button.height() == 14  # (the disclosure arrow's height)
+    assert card.layout().itemAt(0).geometry().height() == plain.layout().itemAt(0).geometry().height()
+    assert zoom.geometry().right() >= card.width() - 12 - 2  # (at the right end of the bar)
+    assert card._title_label.geometry().right() < zoom.geometry().left()
+    card.close()
+    plain.close()
+
+
+def test_the_one_to_one_box_is_wider_than_the_other_two(s6, qapp):
+    from ui.loop_preview_view import LoopJoinPreview, LoopPreviewZoomControls
+
+    zoom = LoopPreviewZoomControls(LoopJoinPreview())  # (not shown: theme_fit would widen a box to what an unstyled button needs here)
+    assert (zoom.zoom_out_button.width(), zoom.zoom_in_button.width(), zoom.reset_button.width()) == (16, 16, 30)
+
+
+def test_other_themes_keep_18_px_zoom_buttons_beside_the_title(s6, qapp):
+    theme.set_theme_preference("dark")
+    card, plain, zoom, _preview = _zoom_card(qapp)
+    assert zoom.zoom_out_button.height() == 18 and zoom.zoom_out_button.width() == 22 and zoom.reset_button.width() == 30
+    assert zoom.geometry().left() < card.width() // 2  # (left, beside the title)
+    card.close()
+    plain.close()
+
+
+def test_the_zoom_buttons_follow_a_live_theme_switch(s6, qapp):
+    card, plain, zoom, _preview = _zoom_card(qapp)
+    theme.set_theme_preference("light")
+    qapp.processEvents()
+    assert zoom.zoom_out_button.height() == 18
+    theme.set_theme_preference("system6")
+    qapp.processEvents()
+    assert zoom.zoom_out_button.height() == 14
+    card.close()
+    plain.close()

@@ -553,6 +553,8 @@ class LoopPreviewZoomControls(QWidget):
             layout.addWidget(button)
         preview.zoom_changed.connect(self._sync)
         self._sync()
+        theme.notifier.changed.connect(self._restyle)
+        self._restyle()
 
     @staticmethod
     def _button(text, width):
@@ -561,6 +563,17 @@ class LoopPreviewZoomControls(QWidget):
         button.setFixedSize(width, 18)
         button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         return button
+
+    def _restyle(self):
+        """In a theme whose section cards have a title bar (System 6) these are small boxes the height of the card's disclosure arrow, so the bar is no
+        taller than the other cards' (18 px buttons made it taller); `1:1` is wider than the other two. Other themes keep 18 px buttons."""
+        boxes = bool(theme.current_palette().get("card_titlebar"))
+        for button, width in ((self.zoom_out_button, 22), (self.zoom_in_button, 22), (self.reset_button, 30)):
+            button.setProperty("titleBox", boxes)
+            button.setFixedSize((30 if button is self.reset_button else 16) if boxes else width, 14 if boxes else 18)
+            style = button.style()
+            style.unpolish(button)
+            style.polish(button)
 
     def _sync(self, *_args):
         preview = self._preview

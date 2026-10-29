@@ -21,6 +21,7 @@ QTextBrowser {
 QPushButton {
     border-radius: 6px;
     min-height: 20px;
+    padding: 5px 18px;
 }
 
 /* ---------- Selection is inverted video: the row turns black, so its text has to turn white ---------- */
@@ -35,6 +36,11 @@ QTreeView::item:selected, QTableView::item:selected, QListWidget::item:selected 
 
 QTabBar::tab:selected {
     color: ${text_tab_selected};
+}
+
+/* the shared rule drops each tab's bottom border and the pane's top border sits under the strip, so an unselected tab had no bottom edge */
+QTabBar::tab {
+    border-bottom: 1px solid ${border};
 }
 
 /* ---------- Menus (popup menus; the in-window menu bar offscreen and on Windows / Linux) ---------- */
@@ -92,7 +98,7 @@ QPushButton[primary="true"]:enabled {
     background-color: ${bg_button};
     color: ${text};
     border: 3px solid ${border};
-    padding: 3px 10px;
+    padding: 3px 16px;
 }
 
 QPushButton[primary="true"]:enabled:hover {
@@ -108,7 +114,7 @@ QPushButton[primary="true"]:enabled:pressed {
 /* a dialog's default button (Overwrite, OK): the same heavy ring */
 QPushButton:default:enabled {
     border: 3px solid ${border};
-    padding: 3px 10px;
+    padding: 3px 16px;
 }
 
 /* ---------- Check boxes and radio buttons: a white box, an X ---------- */
@@ -336,4 +342,12 @@ QWidget[rowSelected="true"] QLabel, QWidget[rowSelected="true"] QCheckBox {
 QProgressBar[memoryLevel]::chunk {
     background: ${border};
     border-right: none;
+}
+
+/* ---------- The Loop Preview's zoom buttons in a card's title bar: small square boxes, as tall as the disclosure arrow (ui/loop_preview_view.py) ---------- */
+QPushButton[titleBox="true"] {
+    border-radius: 0px;
+    padding: 0px;
+    min-height: 0px;
+    font-size: 12px;
 }
