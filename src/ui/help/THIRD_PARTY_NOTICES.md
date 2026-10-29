@@ -87,7 +87,6 @@ under GPL v3.0, which the "or later" allows, so no further notice text is needed
 ## ChiKareGo2
 
 The "Macintosh System 6" theme (Settings > Appearance) draws its text in **ChiKareGo2** by Giles Booth, a recreation of the Chicago 12
-bitmap font, released under the Creative Commons Attribution licence (CC BY 4.0,
-<https://creativecommons.org/licenses/by/4.0/>). It was obtained from [system.css](https://github.com/sakofchit/system.css) as a
+bitmap font, released under the Creative Commons Attribution licence (CC BY). It was obtained from [system.css](https://github.com/sakofchit/system.css) as a
 `.woff` and converted to `.ttf`; the file is `src/ui/fonts/ChiKareGo2.ttf`. The theme is a homage and is not affiliated with Apple:
 Chicago itself is Apple's and is not shipped.
