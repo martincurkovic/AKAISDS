@@ -599,3 +599,239 @@ def test_the_zoom_buttons_follow_a_live_theme_switch(s6, qapp):
     assert zoom.zoom_out_button.height() == 14
     card.close()
     plain.close()
+
+
+# -- switching to the theme while windows are open ------------------------------------------------------------------------------------------------
+
+
+def _wait(qapp, until, seconds=2.0):
+    import time
+
+    deadline = time.monotonic() + seconds
+    while not until() and time.monotonic() < deadline:
+        qapp.processEvents()
+        time.sleep(0.01)
+    return until()
+
+
+def test_widgets_already_shown_are_refitted_when_the_theme_switches_to_system6_and_restored_when_it_leaves(s6, qapp):
+    theme_fit.install(qapp)
+    theme.set_theme_preference("dark")
+    label = QLabel("A fairly long label for a narrow box")
+    label.setFixedWidth(20)
+    label.show()
+    qapp.processEvents()
+    assert label.maximumWidth() == 20  # (dark leaves it alone)
+    theme.set_theme_preference("system6")
+    assert _wait(qapp, lambda: label.maximumWidth() > 20)
+    assert label.minimumWidth() == label.maximumWidth()
+    theme.set_theme_preference("dark")
+    assert _wait(qapp, lambda: label.maximumWidth() == 20)
+    assert label.minimumWidth() == 20
+    label.close()
+
+
+def test_a_window_already_open_gets_a_wider_minimum_when_the_theme_switches_and_its_old_one_back_when_it_leaves(s6, qapp):
+    from PySide6.QtWidgets import QScrollArea, QVBoxLayout
+
+    theme_fit.install(qapp)
+    theme.set_theme_preference("dark")
+    window = QWidget()
+    outer = QVBoxLayout(window)
+    scroll = QScrollArea()
+    page = QWidget()
+    scroll.setWidget(page)
+    outer.addWidget(scroll)
+    window.setMinimumWidth(300)
+    window.resize(300, 200)
+    window.show()
+    qapp.processEvents()
+    page.setMinimumWidth(500)  # (what the new theme's font does to the page)
+    qapp.processEvents()
+    assert window.width() == 300  # (nothing watches it in dark)
+    theme.set_theme_preference("system6")
+    assert _wait(qapp, lambda: scroll.horizontalScrollBar().maximum() == 0)
+    assert window.width() >= 500 and window.minimumWidth() >= 500
+    theme.set_theme_preference("dark")
+    assert _wait(qapp, lambda: window.minimumWidth() == 300)
+    window.close()
+
+
+# -- a pressed button --------------------------------------------------------------------------------------------------------------------------
+
+
+def test_a_pressed_button_shows_white_text_on_its_black_background_in_system6(monkeypatch, tmp_path, qapp):
+    from PySide6.QtWidgets import QPushButton
+
+    sheet = _sheet(monkeypatch, tmp_path, theme.SYSTEM6_PALETTE)
+    assert re.search(r"QPushButton:pressed, QToolButton:pressed \{\s*color: #ffffff", sheet)
+    button = QPushButton("Open Editor...")
+    button.setStyleSheet(sheet)  # (just this widget: never restyle the real application)
+    button.resize(button.sizeHint())
+    button.show()
+    button.setDown(True)
+    qapp.processEvents()
+    image = button.grab().toImage()
+    names = {image.pixelColor(x, y).name() for x in range(image.width()) for y in range(image.height())}
+    assert "#000000" in names and any(QColor(n).lightness() > 200 for n in names)  # (a black face with light text pixels on it)
+    inside = {image.pixelColor(x, image.height() // 2).name() for x in range(8, image.width() - 8)}
+    assert any(QColor(n).lightness() > 200 for n in inside)
+    button.close()
+
+
+def test_a_window_with_a_pinned_minimum_grows_to_what_its_layout_needs_in_system6(s6, qapp):
+    from PySide6.QtWidgets import QDialog, QHBoxLayout
+
+    theme_fit.install(qapp)
+    dialog = QDialog()
+    layout = QHBoxLayout(dialog)
+    wide = QLabel("x")
+    wide.setFixedWidth(500)
+    layout.addWidget(wide)
+    dialog.setMinimumSize(300, 100)  # (like the Dashboard's 1030 x 600: Qt lets this win over the layout's own minimum)
+    dialog.resize(300, 100)
+    dialog.show()
+    assert _wait(qapp, lambda: dialog.width() >= 500)
+    assert dialog.minimumWidth() >= 500
+    theme.set_theme_preference("dark")
+    assert _wait(qapp, lambda: dialog.minimumWidth() == 300)
+    dialog.close()
+
+
+def test_list_rows_take_the_height_their_widgets_need_when_the_theme_changes(s6, qapp):
+    from PySide6.QtWidgets import QVBoxLayout
+
+    theme_fit.install(qapp)
+    theme.set_theme_preference("dark")
+    lw = QListWidget()
+    item = QListWidgetItem()
+    row = QWidget()
+    QVBoxLayout(row).addWidget(QLabel("a row"))
+    item.setSizeHint(row.sizeHint())
+    lw.addItem(item)
+    lw.setItemWidget(item, row)
+    lw.show()
+    qapp.processEvents()
+    row.layout().itemAt(0).widget().setMinimumHeight(60)  # (what a taller font does to the row)
+    theme.set_theme_preference("system6")
+    assert _wait(qapp, lambda: item.sizeHint().height() >= 60)
+    lw.close()
+
+
+# -- widths that must stay equal ------------------------------------------------------------------------------------------------------------------
+
+
+def test_grouped_widgets_are_widened_to_the_widest_so_they_stay_one_width(s6, qapp):
+    from PySide6.QtWidgets import QPushButton, QVBoxLayout
+
+    theme_fit.install(qapp)
+    theme.set_theme_preference("dark")
+    window = QWidget()
+    layout = QVBoxLayout(window)
+    short, long_ = QPushButton("Settings"), QPushButton("Open Editor With A Long Name")
+    for button in (short, long_):
+        button.setFixedWidth(40)
+        layout.addWidget(button)
+    theme_fit.group("stacked", short, long_)
+    window.show()
+    qapp.processEvents()
+    assert short.width() == long_.width() == 40  # (dark leaves them alone)
+    theme.set_theme_preference("system6")
+    assert _wait(qapp, lambda: short.minimumWidth() == long_.minimumWidth() > 40)
+    assert short.minimumWidth() >= long_.sizeHint().width()
+    theme.set_theme_preference("dark")
+    assert _wait(qapp, lambda: short.minimumWidth() == long_.minimumWidth() == 40)
+    window.close()
+
+
+def test_a_fixed_width_container_and_its_header_grow_with_what_is_inside_it(s6, qapp):
+    from PySide6.QtWidgets import QHBoxLayout, QSpinBox
+
+    theme_fit.install(qapp)
+    window = QWidget()
+    outer = QHBoxLayout(window)
+    header = QLabel("Key range")
+    header.setFixedWidth(120)
+    cell = QWidget()
+    cell.setFixedWidth(120)
+    inside = QHBoxLayout(cell)
+    inside.setContentsMargins(0, 0, 0, 0)
+    for _ in range(2):
+        spin = QSpinBox()
+        spin.setFixedWidth(100)
+        inside.addWidget(spin)
+    theme_fit.group("range", header, cell)
+    outer.addWidget(header)
+    outer.addWidget(cell)
+    window.show()
+    assert _wait(qapp, lambda: cell.minimumWidth() >= 200)  # (two 100 px spin boxes cannot sit in 120 px)
+    assert header.minimumWidth() == cell.minimumWidth()
+    window.close()
+
+
+def test_the_dashboards_two_top_buttons_and_the_multi_columns_are_grouped(qapp):
+    import inspect
+
+    from ui import dashboard, program_editor_window
+
+    assert 'theme_fit.group("dashboard_top_buttons"' in inspect.getsource(dashboard)
+    source = inspect.getsource(program_editor_window)
+    for name in ("multi_part", "multi_channel", "multi_range", "multi_priority"):
+        assert source.count(f'theme_fit.group("{name}"') == 2  # (the header and the cell)
+
+
+# -- buttons inside list rows ---------------------------------------------------------------------------------------------------------------------
+
+
+def test_the_dashboards_row_buttons_take_the_compact_style_in_system6(monkeypatch, tmp_path):
+    import inspect
+
+    from ui import dashboard
+
+    assert inspect.getsource(dashboard).count('row_button.setProperty("rowButton", True)') == 2  # (the queue's rows and the sampler's)
+    sheet = _sheet(monkeypatch, tmp_path, theme.SYSTEM6_PALETTE)
+    assert re.search(r'QPushButton\[rowButton="true"\] \{\s*border-radius: 0px;\s*padding: 0px 14px;\s*min-height: 24px', sheet)
+    assert 'rowButton' not in _sheet(monkeypatch, tmp_path, theme.DARK_PALETTE)
+
+
+def test_a_row_button_keeps_the_24_px_the_code_asks_for_as_its_minimum_in_system6(monkeypatch, tmp_path, qapp):
+    # a style sheet's min-height REPLACES the widget's own: with 0 here the buttons of the sampler's rows shrank to ~16 px and those rows to 21 px,
+    # while the queue's rows (sized from their name field) stayed 28
+    from PySide6.QtWidgets import QPushButton
+
+    sheet = _sheet(monkeypatch, tmp_path, theme.SYSTEM6_PALETTE)
+    button = QPushButton("Delete")
+    button.setFixedHeight(24)
+    button.setProperty("rowButton", True)
+    button.setStyleSheet(sheet)  # (just this widget: never restyle the real application)
+    button.ensurePolished()
+    assert button.minimumHeight() >= 24
+
+
+# -- font families --------------------------------------------------------------------------------------------------------------------------------
+
+
+def test_only_installed_font_families_are_named_in_the_stylesheet(qapp, monkeypatch, tmp_path):
+    # (naming one that is not installed makes Qt print "Replace uses of missing font family" and take ~100 ms)
+    from PySide6.QtGui import QFontDatabase
+
+    sheet = _sheet(monkeypatch, tmp_path, theme.SYSTEM6_PALETTE)
+    have = {f.lower() for f in QFontDatabase.families()} | theme._GENERIC_FAMILIES
+    rules = re.findall(r"font-family:\s*([^;]+);", sheet)
+    assert rules
+    for rule in rules:
+        for name in (n.strip().strip('"') for n in rule.split(",")):
+            assert name.lower() in have, name
+    assert any("ChiKareGo2" in rule for rule in rules)  # (the bundled font is registered before the list is cut down)
+
+
+def test_installed_families_drops_the_missing_and_keeps_generic_names(qapp):
+    theme._load_bundled_fonts()
+    assert theme.installed_families(["ChiKareGo2", "No Such Font Anywhere", "monospace"]) == ["ChiKareGo2", "monospace"]
+    assert theme.installed_families(["No Such Font Anywhere"]) == []
+
+
+def test_the_logos_keep_a_monospace_rule_made_only_of_installed_families(qapp, monkeypatch, tmp_path):
+    sheet = _sheet(monkeypatch, tmp_path, theme.SYSTEM6_PALETTE)
+    rule = re.search(r"QLabel#monoText \{\s*font-family:\s*([^;]+);", sheet).group(1)
+    assert "monospace" in rule and "ChiKareGo2" not in rule

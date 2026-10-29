@@ -161,7 +161,7 @@ _EDIT_SAMPLE_ROWS = (
     (
         "Edit audio",
         "These change the sample here. Nothing reaches the unit until you click Send as New Sample.",
-        (("trim", "reverse", "fade", "normalise", "filter", "stretch"),),
+        (("trim", "reverse", "fade", "normalise", "filter", "stretch", "reverb"),),
     ),
     (
         "More",
@@ -174,7 +174,7 @@ _EDIT_SAMPLE_ROWS = (
 _EDIT_SAMPLE_LABEL_WIDTH = 80
 #: the Sample menu / right-click menu, in order: groups are separated
 _SAMPLE_MENU_GROUPS = (
-    ("trim", "reverse", "fade", "normalise", "filter", "stretch"),
+    ("trim", "reverse", "fade", "normalise", "filter", "stretch", "reverb"),
     ("slice",),
     ("external_edit", "external_load"),
     ("stage_undo", "stage_send", "stage_revert"),
@@ -694,6 +694,7 @@ class YamahaSamplesTab(QWidget):
             "filter": make("filter", "Filter\u2026", tt.YAMAHA_FILTER_SAMPLE_BUTTON),
         }
         self.time_stretch_button = make("stretch", "Stretch / Pitch\u2026", tt.YAMAHA_TIME_STRETCH_BUTTON)
+        self.reverb_button = make("reverb", "Reverb\u2026", tt.YAMAHA_REVERB_BUTTON)
         self.slice_button = make("slice", "Slice Editor\u2026", tt.YAMAHA_SLICE_EDITOR_BUTTON)
         self.external_edit_button = make("external_edit", "Edit in External App\u2026", tt.YAMAHA_EXTERNAL_EDIT_BUTTON)
         self.external_load_button = make("external_load", "Load Edited Audio", tt.YAMAHA_EXTERNAL_LOAD_BUTTON)
@@ -1534,7 +1535,7 @@ class YamahaSamplesTab(QWidget):
         )
         staged = self._selected in self._staged
         edits = getattr(self, "_edits", None)  # (built after the first call)
-        wanted = {key: ready for key in ("trim", "reverse", "fade", "normalise", "filter", "stretch", "slice", "external_edit", "detect")}
+        wanted = {key: ready for key in ("trim", "reverse", "fade", "normalise", "filter", "stretch", "reverb", "slice", "external_edit", "detect")}
         saved = edits is not None and edits.edited_audio_ready(self._selected)
         wanted["external_load"] = ready and saved
         for key in ("stage_undo", "stage_send", "stage_revert"):

@@ -41,7 +41,7 @@ from ui.sample_info_dialog import SampleInfoDialog
 from s3k.messages import NAME_LENGTH
 from ui.slice_editor_window import SliceEditorWindow, slice_export_names
 from ui.ascii_logo import LOGO
-from ui import tooltips
+from ui import theme_fit, tooltips
 
 SETTINGS_ROLE = Qt.ItemDataRole.UserRole + 1
 # a queued ReCycle loop: the frames (in the row's WAV, the slices laid end to end) where each slice after the first begins. Present =
@@ -164,6 +164,7 @@ class TransferDashboard(QWidget):
         )
         self.btn_settings.setFixedWidth(button_width)
         self.btn_open_editor.setFixedWidth(button_width)
+        theme_fit.group("dashboard_top_buttons", self.btn_settings, self.btn_open_editor)  # (stay one width when a theme's font needs more)
         top_bar.addLayout(settings_editor_column)
         # without this, top_bar (a QHBoxLayout) stretches this nested
         # column to the row's full height - set by the tall multi-line
@@ -1690,6 +1691,8 @@ class TransferDashboard(QWidget):
         # right components - small control buttons
         btn_edit = QPushButton("Edit")
         btn_del = QPushButton("Delete")
+        for row_button in (btn_edit, btn_del):
+            row_button.setProperty("rowButton", True)  # (System 6: a flatter button that fits the row - style_system6.qss.template)
 
         # make buttons compact so they dont look fucken massive hey
         btn_edit.setFixedHeight(24)
@@ -1826,6 +1829,8 @@ class TransferDashboard(QWidget):
         # right components - action buttons
         btn_edit = QPushButton("Edit")
         btn_del = QPushButton("Delete")
+        for row_button in (btn_edit, btn_del):
+            row_button.setProperty("rowButton", True)  # (System 6: a flatter button that fits the row - style_system6.qss.template)
         btn_edit.setFixedHeight(24)
         btn_del.setFixedHeight(24)
 

@@ -124,3 +124,48 @@ def test_write_wav_clamps_instead_of_wrapping(tmp_path):
     with wave.open(str(path), "rb") as f:
         raw = f.readframes(3)
     assert [int.from_bytes(raw[i : i + 2], "little", signed=True) for i in range(0, 6, 2)] == [32767, -32768, 5]
+
+
+# -- reverb (the same dialog and engine as the S2000/S3000 editor's) -----------------------------------------------------------------------------
+
+
+_REVERB = dict(decay=40, size=50, damping=2, mix=40, framerate=22050)
+
+
+def _burst(frames=2000, tail=0):
+    """A short loud noise-like burst, then `tail` frames of silence."""
+    return [int(20000 * (-1) ** (i // 3)) if i < frames else 0 for i in range(frames + tail)]
+
+
+def test_reverb_is_an_edit_with_its_own_suffix_not_reverses():
+    assert ye.EDITS["reverb"][0] == " RVB" and ye.EDITS["reverb"][0] != ye.EDITS["reverse"][0]
+    name = ye.copy_name("A SAMPLE NAME OF 16", " RVB")
+    assert len(name) <= ye.NAME_LENGTH and name.endswith(" RVB")  # (the name is cut, never the suffix)
+
+
+def test_reverb_makes_the_sample_longer_by_its_tail_and_moves_the_end_with_it():
+    channel = _burst()
+    channels, markers = ye.apply_edit("reverb", [channel], (0, 500, 1500, len(channel) - 1), framerate=22050, options=_REVERB)
+    assert len(channels) == 1 and len(channels[0]) > len(channel)
+    assert markers[3] == len(channels[0]) - 1  # (End was on the last frame, so it follows the tail)
+    assert markers[0] == 0 and markers[1] == 500 and markers[2] == 1500  # (Start and the loop stay)
+
+
+def test_reverb_takes_the_rate_from_the_edit_when_the_options_have_none():
+    channel = _burst()
+    options = {k: v for k, v in _REVERB.items() if k != "framerate"}
+    with_rate, _ = ye.apply_edit("reverb", [channel], (0, 0, 0, len(channel) - 1), framerate=22050, options=options)
+    explicit, _ = ye.apply_edit("reverb", [channel], (0, 0, 0, len(channel) - 1), framerate=22050, options=_REVERB)
+    assert with_rate == explicit
+
+
+def test_a_stereo_reverb_pads_the_shorter_channel_so_both_stay_the_same_length():
+    loud, quiet = _burst(), [v // 400 for v in _burst()]  # (the quiet one's tail dies away sooner)
+    channels, markers = ye.apply_edit("reverb", [loud, quiet], (0, 0, 0, len(loud) - 1), framerate=22050, options=_REVERB)
+    assert len(channels) == 2 and len(channels[0]) == len(channels[1])
+    alone, _ = ye.apply_edit("reverb", [loud], (0, 0, 0, len(loud) - 1), framerate=22050, options=_REVERB)
+    quiet_alone, _ = ye.apply_edit("reverb", [quiet], (0, 0, 0, len(loud) - 1), framerate=22050, options=_REVERB)
+    assert len(quiet_alone[0]) < len(alone[0])  # (the two really do differ, or this test proves nothing)
+    assert len(channels[0]) == len(alone[0]) and channels[0] == alone[0]  # (the loud one is untouched by the padding)
+    assert channels[1][: len(quiet_alone[0])] == quiet_alone[0] and not any(channels[1][len(quiet_alone[0]):])
+    assert markers[3] == len(channels[0]) - 1

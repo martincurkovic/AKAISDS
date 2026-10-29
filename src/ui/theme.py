@@ -192,7 +192,8 @@ SYSTEM6_PALETTE = {
     "scroll_track": "#ffffff",
     "scroll_handle": "#ffffff",
     "scroll_handle_border": "1px solid #000000",
-    "font_family": '"ChiKareGo2", "Chicago", "Geneva", "Monaco", monospace',
+    "font_family": '"ChiKareGo2", "Chicago", "Geneva", "Monaco", monospace',  # (only the installed ones reach the style sheet: font_family_css)
+    "mono_font_family": '"Menlo", "Monaco", "Courier New", monospace',  # the ASCII logos and the loopback report
     "font_size": "16px",
     "font_size_dense": "13px",
     "link": "#101010",  # links in the manual and the notes: black links are told from the text by their underline
@@ -279,15 +280,39 @@ def _write_checker(filename, orientation=None):
 
 _loaded_fonts = False
 
+_GENERIC_FAMILIES = {"monospace", "serif", "sans-serif", "cursive", "fantasy"}
+
+
+def installed_families(names):
+    """The families in `names` that this machine has (a generic one such as `monospace` always stays). A stylesheet naming a family that is not
+    installed costs Qt ~100 ms to find that out and prints "Replace uses of missing font family" once, so the font lists are cut down to what exists."""
+    from PySide6.QtGui import QFontDatabase, QGuiApplication
+
+    if QGuiApplication.instance() is None:  # (no application yet: nothing can be asked)
+        return list(names)
+    have = {family.lower() for family in QFontDatabase.families()}
+    return [name for name in names if name.lower() in _GENERIC_FAMILIES or name.lower() in have]
+
+
+def font_family_names(palette, key="font_family"):
+    """The palette's font list (`"A", "B", monospace`) as plain names, in order, only those installed."""
+    return installed_families([name.strip().strip('"') for name in palette[key].split(",")])
+
+
+def font_family_css(palette, key="font_family"):
+    """`font_family_names` as the value of a `font-family` rule: quoted names, generic ones bare."""
+    return ", ".join(name if name.lower() in _GENERIC_FAMILIES else f'"{name}"' for name in font_family_names(palette, key))
+
 
 def _load_bundled_fonts():
     """Register the font files in ui/fonts/ with Qt, once (the System 6 theme's bitmap-style font). A missing file is fine: the
     stylesheet's font list falls back to Geneva / Monaco / any monospace."""
     global _loaded_fonts
-    if _loaded_fonts:
+    from PySide6.QtGui import QFontDatabase, QGuiApplication
+
+    if _loaded_fonts or QGuiApplication.instance() is None:
         return
     _loaded_fonts = True
-    from PySide6.QtGui import QFontDatabase
 
     if os.path.isdir(_FONTS_DIR):
         for name in sorted(os.listdir(_FONTS_DIR)):
@@ -316,6 +341,10 @@ def render_stylesheet(palette):
         "up", palette["text"], f"up_arrow_{text_hex}.svg"
     )
 
+    if palette.get("font_family"):
+        _load_bundled_fonts()  # (before the list is cut down to what is installed: it names the bundled font)
+        values["font_family"] = font_family_css(palette)
+        values["mono_font_family"] = font_family_css(palette, "mono_font_family")
     values["s6_icon_dir"] = _ICONS_DIR.replace(os.sep, "/")
     if palette.get("scroll_track_pattern"):
         values["scroll_track"] = f"url({_write_checker('scroll_track_checker.png')})"

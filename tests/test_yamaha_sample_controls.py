@@ -715,3 +715,55 @@ def test_importing_a_plain_audio_file_sends_it_as_one_stereo_sample(window, monk
     assert shown["markers"] == 0 and shown["extra_channels"] == 1 and shown["succeeded"] is True
     assert yp.is_stereo(window.fake.samples["PAD"])
     settle_edit(window.samples_tab)
+
+
+class _ReverbStub:
+    send_new = False
+
+    def __init__(self, parent, name, samples, rate, pitch_shift_semitones=0, allow_new_sample=False,
+                 applies_to_working_copy=False, send_name=""):
+        self.seen = (name, len(samples), rate, allow_new_sample, applies_to_working_copy, send_name)
+        type(self).last = self
+
+    def exec(self): return True
+    def send_as_new(self): return type(self).send_new
+    def options(self): return dict(decay=30, size=50, damping=2, mix=40, framerate=self.seen[2])
+    def summary(self): return "decay 0.4 s, mix 40 %"
+
+
+def test_the_reverb_button_applies_the_reverb_to_the_working_copy_and_sends_nothing(window, monkeypatch):
+    monkeypatch.setattr(edit_module, "ReverbDialog", _ReverbStub)
+    _ReverbStub.send_new = False
+    tab = user_sample(window, mode=4, end=4000)
+    before_frames = len(tab._audio_samples[0]) if isinstance(tab._audio_samples[0], (list, tuple)) else len(tab._audio_samples)
+    before = set(window.fake.samples)
+    tab.reverb_button.click()
+    assert _ReverbStub.last.seen[3:] == (True, True, "Send as New Sample")  # (the dialog is told what the Yamaha editor can do)
+    assert set(window.fake.samples) == before and "UM" in tab._staged  # applied here, sent nowhere
+    staged = tab._staged["UM"]
+    assert len(staged.channels[0]) > before_frames  # (the tail makes it longer)
+    tab.send_edits_as_new_button.click()
+    new_sample(window, "UM EDIT")
+    settle_edit(tab)
+
+
+def test_the_reverb_dialogs_own_send_as_new_sample_makes_the_unit_copy_with_the_rvb_suffix(window, monkeypatch):
+    monkeypatch.setattr(edit_module, "ReverbDialog", _ReverbStub)
+    _ReverbStub.send_new = True
+    tab = user_sample(window, mode=4, end=4000)
+    tab.reverb_button.click()
+    new_sample(window, "UM RVB")
+    assert tab._staged == {}
+    settle_edit(tab)
+
+
+def test_a_cancelled_reverb_dialog_changes_nothing(window, monkeypatch):
+    class Cancel:
+        def __init__(self, *a, **k): pass
+        def exec(self): return False
+
+    monkeypatch.setattr(edit_module, "ReverbDialog", Cancel)
+    tab = user_sample(window, mode=4, end=4000)
+    before = set(window.fake.samples)
+    tab.reverb_button.click()
+    assert set(window.fake.samples) == before and not tab._edit_busy and tab._staged == {}

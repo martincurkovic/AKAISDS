@@ -186,7 +186,7 @@ The working copy survives selecting other samples. AKAISDS asks before you close
 
 ![Reverb dialog](screenshots/reverb-dialog.png)
 
-**Reverb** has settings for *Decay*, *Size*, *Damping* and *Mix* (with four presets). It makes the sample longer by the length of the tail, up to five seconds. **Stretch / Pitch** is a port of an Akai-style grain time stretcher: great on drums and loops, but a sustained tone can warble.
+**Reverb** (also in the Yamaha editor, where the result is always a new sample) has settings for *Decay*, *Size*, *Damping* and *Mix* (with four presets). It makes the sample longer by the length of the tail, up to five seconds. **Stretch / Pitch** is a port of an Akai-style grain time stretcher: great on drums and loops, but a sustained tone can warble.
 
 **Edit in External App...** exports the loaded audio to a WAV and opens it in your audio editor (choose one in Settings > External Audio Editor, or it uses your computer's default). When you save in the editor, **Load Edited Audio** brings the file back as the working copy; nothing is sent until you send it. Tick *Load automatically when the file is saved* in the same Settings section to skip that button.
 

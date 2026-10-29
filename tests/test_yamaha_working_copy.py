@@ -228,7 +228,7 @@ def test_the_sample_menu_lists_every_action_in_groups(window):  # noqa: F811
     menu = window._sample_menu
     assert _texts(menu.actions()) == [
         "Load Audio", "-",
-        "Trim to Markers", "Reverse", "Fade In/Out", "Normalise", "Filter…", "Stretch / Pitch…", "-",
+        "Trim to Markers", "Reverse", "Fade In/Out", "Normalise", "Filter…", "Stretch / Pitch…", "Reverb…", "-",
         "Slice Editor…", "-",
         "Edit in External App…", "Load Edited Audio", "-",
         "Undo", "Send as New Sample…", "Revert", "-",
@@ -248,7 +248,7 @@ def test_the_actions_follow_their_buttons_but_only_on_the_samples_tab(window):  
     window.main_tabs.setCurrentIndex(0)  # the Programs tab
     assert not any(a.isEnabled() for _b, a in tab._sample_controls.values())  # a destructive-looking item must not act unseen
     window.main_tabs.setCurrentIndex(window._samples_tab_index)
-    for key in ("trim", "reverse", "fade", "normalise", "filter", "stretch", "slice", "external_edit", "detect"):
+    for key in ("trim", "reverse", "fade", "normalise", "filter", "stretch", "reverb", "slice", "external_edit", "detect"):
         button, action = tab._sample_controls[key]
         assert button.isEnabled() and action.isEnabled(), key
     for key in ("external_load", "stage_undo", "stage_send", "stage_revert"):

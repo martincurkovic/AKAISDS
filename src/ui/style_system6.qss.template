@@ -330,7 +330,7 @@ QSlider::handle:horizontal:hover {
 
 /* ---------- Text that must stay monospace: the ASCII logo and the loopback report (the base font rule above would replace it) ---------- */
 QLabel#monoText {
-    font-family: Menlo, Monaco, "Courier New", monospace;
+    font-family: ${mono_font_family};
 }
 
 /* ---------- A selected row built from widgets turns black, so its labels turn white (ui/theme_fit.py sets the property) ---------- */
@@ -350,4 +350,19 @@ QPushButton[titleBox="true"] {
     padding: 0px;
     min-height: 0px;
     font-size: 12px;
+}
+
+/* ---------- A pressed button turns black (inverted video), so its text has to turn white: the shared rule only sets the background, and a button the
+   mouse is still holding down while the window is busy (Open Editor while the editor loads) looked solid black ---------- */
+QPushButton:pressed, QToolButton:pressed {
+    color: ${text_pressed};
+}
+
+/* ---------- Buttons inside list rows (the Dashboard's Edit / Delete): the code pins them to 24 px, which the ordinary padding plus the taller font
+   overflows (the text sat against the bottom edge), so they take no vertical padding, and square corners like the rest of the list. The minimum is the 24 px the code asks for: a style sheet's
+   min-height REPLACES the widget's own, and 0 here let the buttons (and so the loaded samples' rows) shrink to ~16 px while the queue's rows stayed 28 ---------- */
+QPushButton[rowButton="true"] {
+    border-radius: 0px;
+    padding: 0px 14px;
+    min-height: 24px;
 }

@@ -15,6 +15,7 @@ import functools
 import sys
 import wave
 
+from core import reverb
 from core import sample_editing as se
 from core import time_stretch as tstretch
 from core import yamaha_params as yp
@@ -31,6 +32,7 @@ EDITS = {
     "filter": (" FILT", "Filter"),
     "stretch": (" STR", "Time Stretch"),
     "pitch": (" PITCH", "Pitch Shift"),
+    "reverb": (" RVB", "Reverb"),  # (not " REV": that is Reverse's)
 }
 
 NAME_LENGTH = 16
@@ -59,6 +61,8 @@ def transform_for(kind, *, framerate=None, filter_options=None, options=None):
         return functools.partial(se.filter_samples, framerate=framerate, **(options or {}))
     if kind in tstretch.EDITS:
         return tstretch.transform_for(kind, **(options or {}))
+    if kind == "reverb":
+        return reverb.transform_for(**{"framerate": framerate, **(options or {})})
     raise ValueError(f"unknown edit {kind!r}")
 
 
@@ -74,6 +78,13 @@ def apply_edit(kind, channels, markers, *, framerate=None, filter_options=None, 
         joined, *rest = transform(list(channels[0]) + list(channels[1]), *markers)
         return [joined[:frames], joined[frames:]], tuple(markers)
     results = [transform(list(channel), *markers) for channel in channels]
+    if kind == "reverb" and len(results) > 1:
+        # each channel's tail stops where ITS reverb dies away, so the two can differ in length: pad the shorter with silence and take the markers
+        # from the longer (End moved to its new last frame, which is then the last frame of both)
+        longest = max(results, key=lambda r: len(r[0]))
+        frames = len(longest[0])
+        padded = [list(r[0]) + [0] * (frames - len(r[0])) for r in results]
+        return padded, tuple(longest[1:])
     return [r[0] for r in results], tuple(results[0][1:])
 
 

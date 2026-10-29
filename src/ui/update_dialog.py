@@ -74,11 +74,11 @@ def restyle_code_runs(document) -> None:
     """In a theme with a font of its own (System 6), give inline code the same font and size as the text around it: Markdown marks a code
     span "monospace" at the document's own point size, which is the system's fixed font and bigger than the theme's text."""
     palette = theme.current_palette()
-    family, size = palette.get("font_family"), palette.get("font_size_dense")
-    if not family or not size:
+    size = palette.get("font_size_dense")
+    if not palette.get("font_family") or not size:
         return
     fmt = QTextCharFormat()
-    fmt.setFontFamilies([name.strip().strip('"') for name in family.split(",")])
+    fmt.setFontFamilies(theme.font_family_names(palette))
     fmt.setFontFixedPitch(False)
     fmt.setProperty(QTextFormat.Property.FontPixelSize, int(size.removesuffix("px")))
     cursor = QTextCursor(document)

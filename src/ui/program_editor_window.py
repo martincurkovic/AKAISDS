@@ -54,6 +54,7 @@ from core import external_edit
 from ui.external_edit_tracker import ExternalEditTracker
 from ui.knob import Knob
 from ui.program_list_widget import ProgramListWidget
+from ui import theme_fit
 from ui.note_spinbox import NoteSpinBox
 from ui.editor_layout import (
     add_keygroup_row,
@@ -7247,6 +7248,10 @@ class ProgramEditorWindow(QMainWindow):
         header_row.addWidget(tune_header)
         header_row.addWidget(priority_header)
         layout.addLayout(header_row)
+        theme_fit.group("multi_part", part_header)  # (a column and its header stay one width when a theme's font needs more room)
+        theme_fit.group("multi_channel", channel_header)
+        theme_fit.group("multi_range", range_header)
+        theme_fit.group("multi_priority", priority_header)
 
         for part_index in range(MULTI_PART_COUNT):
             row = QHBoxLayout()
@@ -7304,6 +7309,11 @@ class ProgramEditorWindow(QMainWindow):
             row.addWidget(tune_widget)
             row.addWidget(priority_combo)
             layout.addLayout(row)
+
+            theme_fit.group("multi_part", part_label)
+            theme_fit.group("multi_channel", channel_combo)
+            theme_fit.group("multi_range", range_widget)
+            theme_fit.group("multi_priority", priority_combo)
 
             self._multi_priority_combos.append(priority_combo)
             self._multi_low_spins.append(low_spin)

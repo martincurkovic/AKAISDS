@@ -645,6 +645,10 @@ YAMAHA_TIME_STRETCH_BUTTON = (
     "Change the length without the pitch, or the pitch without the length, with a preview. Nothing is sent "
     "until Send as New Sample. Needs the audio loaded."
 )
+YAMAHA_REVERB_BUTTON = (
+    "Bake a reverb into the sample, with a preview. A stereo sample's two channels each go through it. Nothing is sent until Send as New "
+    "Sample. Needs the audio loaded."
+)
 YAMAHA_FILTER_SAMPLE_BUTTON = (
     "Apply a highpass and/or lowpass filter, with a preview. Nothing is sent until Send as New Sample. Needs "
     "the audio loaded."

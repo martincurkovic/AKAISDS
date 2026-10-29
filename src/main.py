@@ -1,3 +1,4 @@
+import os
 import platform
 import sys
 
@@ -29,6 +30,9 @@ def _log_startup():
     diagnostics.log_session_config("startup")
 
 if __name__ == "__main__":
+    if "--instant" in sys.argv:  # no MIDI-speed emulation in the demo samplers (core/demo_timing.py; the same as AKAISDS_DEMO_INSTANT=1)
+        sys.argv.remove("--instant")
+        os.environ["AKAISDS_DEMO_INSTANT"] = "1"
     diagnostics.install_crash_handlers()
     _log_startup()
     app = QApplication(sys.argv)

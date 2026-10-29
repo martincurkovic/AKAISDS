@@ -36,6 +36,7 @@ from core import yamaha_sysex as ysx
 from ui import import_audio
 from ui.external_edit_tracker import ExternalEditTracker
 from ui.filter_sample_dialog import FilterSampleDialog
+from ui.reverb_dialog import ReverbDialog
 from ui.slice_editor_window import SliceEditorWindow
 from ui.time_stretch_dialog import TimeStretchDialog
 
@@ -84,6 +85,7 @@ class YamahaSampleEditor(QObject):
             ("normalise", self.normalise),
             ("filter", self.filter),
             ("stretch", self.time_stretch),
+            ("reverb", self.reverb),
             ("slice", self.open_slicer),
             ("external_edit", self.edit_externally),
             ("external_load", self.load_edited),
@@ -222,6 +224,28 @@ class YamahaSampleEditor(QObject):
                 self._run(kind, ctx, options)
             return
         self._apply(kind, ctx, options)
+
+    def reverb(self):
+        """Reverb: a dialog with a Preview, then the edit goes to the working copy (or out as a new sample). The reverb is mono: a stereo sample's
+        channels are each run through it, and the dialog previews the left (or only) one."""
+        ctx = self._context()
+        if ctx is None:
+            return
+        dialog = ReverbDialog(
+            self._tab, ctx["name"], ctx["channels"][0], ctx["rate"],
+            pitch_shift_semitones=self._tab.preview_pitch_shift_semitones(ctx["data"]),
+            allow_new_sample=True, applies_to_working_copy=True, send_name="Send as New Sample",
+        )
+        if not dialog.exec():
+            return
+        options = dialog.options()
+        _log(f"Reverb of {ctx['name']!r}: {dialog.summary()} ({len(ctx['channels'][0]):,} frames at {ctx['rate']} Hz, {len(ctx['channels'])} ch)")
+        if dialog.send_as_new():
+            name = ye.copy_name(ctx["name"], ye.EDITS["reverb"][0])
+            if self._confirm("Reverb", f'Make "{name}" from "{ctx["name"]}", {dialog.summary()}?' + _NOT_CHANGED):
+                self._run("reverb", ctx, options)
+            return
+        self._apply("reverb", ctx, options)
 
     def _apply(self, kind, ctx, options=None):
         """Run an edit over the shown sample's channels and keep the result as its working copy. Nothing is sent: Undo and Revert make a

@@ -13,11 +13,26 @@ Wider text also makes the editors' pages wider than their windows, which then op
 (`grow_window_for_scroll`) a window whose page needs more width is made that much wider, up to the screen, and its minimum width is raised to
 match (`grow_window`): the minimums the windows work out when they are built are measured before the theme's font is applied. The check re-runs
 after every layout change of a scroll area or its page, so a vertical scroll bar appearing late is caught too.
+
+A theme switched WHILE windows are open (Settings > Appearance) is handled by `refit_all`: widgets already shown get no Show event, so everything is fitted again when the theme changes, and the widths this module replaced are put back when the theme is left.
 """
+
+import weakref
 
 import shiboken6
 from PySide6.QtCore import QEvent, QObject, QTimer
-from PySide6.QtWidgets import QAbstractSpinBox, QApplication, QComboBox, QLabel, QListWidget, QPushButton, QScrollArea, QWidget
+from PySide6.QtWidgets import (
+    QAbstractSpinBox,
+    QApplication,
+    QComboBox,
+    QDialog,
+    QLabel,
+    QListWidget,
+    QMainWindow,
+    QPushButton,
+    QScrollArea,
+    QWidget,
+)
 
 from ui import theme
 
@@ -25,6 +40,22 @@ _FITTED = (QLabel, QPushButton, QComboBox, QAbstractSpinBox)
 _UNLIMITED = 16777215
 
 _filter = None
+
+# Every widget this module acts on, once it has been shown (weak: a closed window drops out). `refit_all` walks THIS, never QApplication.allWidgets():
+# that returns a snapshot of raw pointers, and the garbage collector can delete a parentless widget (a window a test or a dialog left behind) while the
+# snapshot is still being wrapped, which crashed (segmentation fault) inside the loop. A widget never shown needs nothing: it is fitted when shown.
+_seen = weakref.WeakSet()
+
+
+def _remember_seen(widget) -> None:
+    try:
+        _seen.add(widget)
+    except TypeError:  # (not weak-referenceable: nothing to track)
+        pass
+
+
+def _live():
+    return [w for w in list(_seen) if shiboken6.isValid(w)]
 
 
 def fit(widget) -> bool:
@@ -35,12 +66,33 @@ def fit(widget) -> bool:
     lo, hi = widget.minimumWidth(), widget.maximumWidth()
     changed = False
     if lo == hi and 0 < hi < needed:  # fixed
+        _remember_widths(widget, lo, hi)
         widget.setFixedWidth(needed)
         changed = True
     elif lo < hi < _UNLIMITED and hi < needed:  # capped
+        _remember_widths(widget, lo, hi)
         widget.setMaximumWidth(needed)
         changed = True
     return changed
+
+
+def _remember_widths(widget, lo, hi) -> None:
+    """Keep the widths the widget was built with, so leaving the theme can put them back."""
+    if widget.property("fitOrigMin") is None:
+        widget.setProperty("fitOrigMin", lo)
+        widget.setProperty("fitOrigMax", hi)
+
+
+def restore(widget) -> bool:
+    """Put back the widths `fit` replaced. True if there was something to put back."""
+    lo, hi = widget.property("fitOrigMin"), widget.property("fitOrigMax")
+    if lo is None:
+        return False
+    widget.setMinimumWidth(lo)
+    widget.setMaximumWidth(hi)
+    widget.setProperty("fitOrigMin", None)
+    widget.setProperty("fitOrigMax", None)
+    return True
 
 
 def _repolish(widget) -> None:
@@ -78,9 +130,75 @@ def grow_window(scroll_area) -> bool:
     if width <= window.width():
         return False
     if window.minimumWidth() < width:
+        if window.property("fitOrigMinWidth") is None:
+            window.setProperty("fitOrigMinWidth", window.minimumWidth())
         window.setMinimumWidth(width)
     window.resize(width, window.height())
     return True
+
+
+def grow_for_layout(window) -> bool:
+    """Make a window at least as wide as its own layout needs. A window that pins its minimum size in code (the Dashboard: 1030 px) keeps that minimum
+    even when the theme's wider buttons and labels need more, and Qt lets the explicit minimum win over the layout's, so labels got cut. Raises the
+    minimum too, and widens the window, no wider than the screen. True if it changed the window."""
+    if window is None or not window.isVisible() or window.isMaximized() or window.isFullScreen():
+        return False
+    needed = window.minimumSizeHint().width()
+    if needed <= window.minimumWidth() and needed <= window.width():
+        return False
+    screen = window.screen()
+    needed = min(needed, screen.availableGeometry().width()) if screen is not None else needed
+    changed = False
+    if window.minimumWidth() < needed:
+        if window.property("fitOrigMinWidth") is None:
+            window.setProperty("fitOrigMinWidth", window.minimumWidth())
+        window.setMinimumWidth(needed)
+        changed = True
+    if window.width() < needed:
+        window.resize(needed, window.height())
+        changed = True
+    return changed
+
+
+def _grow_later(window) -> None:
+    for delay in (0, 150):
+        QTimer.singleShot(delay, lambda w=window: shiboken6.isValid(w) and grow_for_layout(w))
+
+
+def group(name, *widgets) -> None:
+    """Declare widgets that must stay the same width as one another (a column of cells and its header, two stacked buttons). In a theme that fits
+    widths, each is first fitted to its own text and then all are widened to the widest of them: fitting one at a time would let them drift apart."""
+    for widget in widgets:
+        widget.setProperty("fitGroup", name)
+
+
+def _need(widget) -> int:
+    """The width a widget asks for now (a container: what its layout asks for)."""
+    return max(widget.sizeHint().width(), widget.minimumSizeHint().width())
+
+
+def fit_groups() -> None:
+    groups = {}
+    for widget in _live():
+        if widget.property("fitGroup") is not None:
+            groups.setdefault((id(widget.window()), widget.property("fitGroup")), []).append(widget)
+    for members in groups.values():
+        for member in members:
+            member.ensurePolished()
+        fixed = [m for m in members if m.minimumWidth() == m.maximumWidth() > 0]
+        if not fixed:
+            continue
+        target = max(max(_need(m) for m in fixed), max(m.minimumWidth() for m in fixed))
+        for member in fixed:
+            if member.minimumWidth() < target:
+                _remember_widths(member, member.minimumWidth(), member.maximumWidth())
+                member.setFixedWidth(target)
+
+
+def _fit_groups_later() -> None:
+    # (after the group's members have been shown and fitted, which happens a moment after the first of them is shown)
+    for delay in (0, 150):
+        QTimer.singleShot(delay, fit_groups)
 
 
 def _scroll_area_of(widget):
@@ -116,6 +234,61 @@ def _watch_scroll_area(scroll_area) -> None:
         scroll_area.widget().installEventFilter(_filter)
 
 
+def resize_rows(list_widget) -> None:
+    """Give each row of a list built from row widgets the height its widget needs NOW: the lists set each item's size hint from its widget when the row is
+    built, so rows built under another theme's font keep that theme's height (the buttons in them are cut off)."""
+    for i in range(list_widget.count()):
+        item = list_widget.item(i)
+        row = list_widget.itemWidget(item)
+        if row is not None:
+            row.ensurePolished()
+            if row.layout() is not None:
+                row.layout().invalidate()
+            item.setSizeHint(row.sizeHint())
+
+
+def refit_all() -> None:
+    """Bring every widget in line with the theme now in effect. Widgets already on screen when the theme changes get no Show event, so a switch to
+    System 6 would leave their widths (and the Settings dialog's minimum width) as the old theme's font made them: fit them all, watch every scroll
+    area, mark the row lists. A switch away puts back the widths this module replaced."""
+    palette = theme.current_palette()
+    fit_on = bool(palette.get("fit_fixed_widths"))
+    grow_on = bool(palette.get("grow_window_for_scroll"))
+    rows_on = bool(palette.get("invert_selected_rows"))
+    for widget in _live():
+        if isinstance(widget, _FITTED):
+            if fit_on:
+                widget.ensurePolished()
+                fit(widget)
+            else:
+                restore(widget)
+        elif isinstance(widget, QScrollArea) and grow_on:
+            _watch_scroll_area(widget)
+            _schedule_grow(widget)
+        elif isinstance(widget, (QMainWindow, QDialog)) and widget.isWindow() and grow_on:
+            grow_for_layout(widget)
+        elif isinstance(widget, QListWidget):
+            resize_rows(widget)
+            if rows_on:
+                if not widget.property("rowSelectionTracked"):
+                    widget.setProperty("rowSelectionTracked", True)
+                    widget.itemSelectionChanged.connect(lambda lw=widget: sync_row_selection(lw))
+                sync_row_selection(widget)
+        if not fit_on and widget.property("fitGroup") is not None:
+            restore(widget)
+        if not grow_on and widget.isWindow() and widget.property("fitOrigMinWidth") is not None:
+            widget.setMinimumWidth(widget.property("fitOrigMinWidth"))
+            widget.setProperty("fitOrigMinWidth", None)
+    if fit_on:
+        fit_groups()
+
+
+def _theme_changed() -> None:
+    # (after the application style sheet has been applied and the widgets re-polished; again a little later for what lays out late)
+    for delay in (0, 150):
+        QTimer.singleShot(delay, refit_all)
+
+
 class _FitFilter(QObject):
     def eventFilter(self, obj, event):
         kind = event.type()
@@ -126,10 +299,19 @@ class _FitFilter(QObject):
             return False
         if kind != QEvent.Type.Show:
             return False
+        if isinstance(obj, QWidget):
+            if isinstance(obj, (*_FITTED, QScrollArea, QListWidget)) or obj.isWindow() or obj.property("fitGroup") is not None:
+                _remember_seen(obj)
+            if obj.property("fitGroup") is not None and theme.current_palette().get("fit_fixed_widths"):
+                _fit_groups_later()
         if isinstance(obj, QScrollArea):
             if theme.current_palette().get("grow_window_for_scroll"):
                 _watch_scroll_area(obj)
                 _schedule_grow(obj)
+            return False
+        if isinstance(obj, (QMainWindow, QDialog)) and obj.isWindow():
+            if theme.current_palette().get("grow_window_for_scroll"):
+                _grow_later(obj)
             return False
         if isinstance(obj, _FITTED):
             if theme.current_palette().get("fit_fixed_widths"):
@@ -149,4 +331,5 @@ def install(app=None):
     if _filter is None or not shiboken6.isValid(_filter):
         _filter = _FitFilter(app)
         app.installEventFilter(_filter)
+        theme.notifier.changed.connect(_theme_changed)
     return _filter
