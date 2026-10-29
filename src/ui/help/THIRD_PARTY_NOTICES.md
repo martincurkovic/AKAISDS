@@ -83,3 +83,11 @@ The Akai S1000/S2000/S3000 Program Editor is built on [s3ked](https://github.com
 s3ked contributors (`s3k.bridge`, `s3k.params` and `s3ked.demo`), released under the GNU General Public License v2.0 or
 later. AKAISDS uses it unmodified, as a dependency pinned to one commit in `pyproject.toml`, and is itself released
 under GPL v3.0, which the "or later" allows, so no further notice text is needed here.
+
+## ChiKareGo2
+
+The "Macintosh System 6" theme (Settings > Appearance) draws its text in **ChiKareGo2** by Giles Booth, a recreation of the Chicago 12
+bitmap font, released under the Creative Commons Attribution licence (CC BY 4.0,
+<https://creativecommons.org/licenses/by/4.0/>). It was obtained from [system.css](https://github.com/sakofchit/system.css) as a
+`.woff` and converted to `.ttf`; the file is `src/ui/fonts/ChiKareGo2.ttf`. The theme is a homage and is not affiliated with Apple:
+Chicago itself is Apple's and is not shipped.

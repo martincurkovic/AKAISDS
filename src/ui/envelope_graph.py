@@ -294,14 +294,18 @@ class _EditableGraph(QWidget):
 
     # -- painting --------------------------------------------------------------------------------------------
 
+    def _line_color(self):
+        # a theme without colour (System 6) draws every graph in its own ink
+        return QColor(theme.current_palette().get("graph_line", self._color))
+
     def paintEvent(self, event):
         painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, theme.antialiasing())
         _draw_border(painter, self.width(), self.height())
         w, h = self._inner_size()
         painter.translate(_INSET, _INSET)
         self._paint_background(painter, w, h)
-        pen = QPen(QColor(self._color))
+        pen = QPen(self._line_color())
         pen.setWidth(2)
         painter.setPen(pen)
         painter.drawPolyline(QPolygonF([QPointF(x, y) for x, y in self._curve_points(w, h)]))
@@ -313,7 +317,7 @@ class _EditableGraph(QWidget):
             index = len(self.CURVE_INDEX_OF_HANDLE) + k
             if index == self._hover or (self._drag is not None and self._drag.index == index):
                 # the line that is about to move (or is moving) shows it: thicker and brighter
-                bright = QPen(QColor(self._color).lighter(135))
+                bright = QPen(self._line_color().lighter(135))
                 bright.setWidth(4)
                 bright.setCapStyle(Qt.PenCapStyle.RoundCap)
                 painter.setPen(bright)
@@ -322,7 +326,7 @@ class _EditableGraph(QWidget):
             x, y = points[point_index]
             active = index == self._hover or (self._drag is not None and self._drag.index == index)
             radius = _HANDLE_RADIUS + (1.5 if active else 0)
-            painter.setBrush(QColor(self._color))
+            painter.setBrush(self._line_color())
             ring = QPen(QColor(palette["text_bright"] if active else palette["bg"]))
             ring.setWidthF(1.5)
             painter.setPen(ring)

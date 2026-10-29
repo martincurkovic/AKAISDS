@@ -11,6 +11,7 @@ Run it again whenever the UI changes, so the manual doesn't drift behind it.
     uv run python tools/make_screenshots.py --only main-window-dark --overwrite
     uv run python tools/make_screenshots.py --overwrite         # redo every one (replaces hand-captured ones!)
     uv run python tools/make_screenshots.py --out /tmp/shots    # somewhere else (then nothing is "skipped")
+    uv run python tools/make_screenshots.py --out DIR --scheme system6   # every picture in another theme, to look at it
 
 An existing file is never replaced unless you say --overwrite: the hand-captured screenshots in the manual have the macOS title
 bar and shadow, and these are the window CONTENTS only (no frame), at twice their on-screen size (QT_SCALE_FACTOR=2, which is
@@ -34,7 +35,7 @@ from screenshot_kit import SHOTS, Context, theme
 from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import QApplication
 
-def run(names: list[str], out: Path, overwrite: bool) -> int:
+def run(names: list[str], out: Path, overwrite: bool, scheme: str | None = None) -> int:
     app = QApplication.instance() or QApplication(sys.argv)
     out.mkdir(parents=True, exist_ok=True)
     made = skipped = failed = 0
@@ -45,7 +46,7 @@ def run(names: list[str], out: Path, overwrite: bool) -> int:
             print(f"skip  {name}.png (exists; --overwrite to replace)")
             skipped += 1
             continue
-        theme.apply_to_app(app, s.scheme)
+        theme.apply_to_app(app, scheme or s.scheme)
         ctx = Context(app, Path(tempfile.mkdtemp(dir=kit._SCRATCH, prefix=name + "-")))
         try:
             result = s.recipe(ctx)
@@ -72,6 +73,7 @@ def main(argv=None) -> int:
     parser.add_argument("--only", nargs="+", metavar="NAME", help="just these pictures (names as in --list, with or without .png)")
     parser.add_argument("--overwrite", action="store_true", help="replace pictures that already exist (default: leave them)")
     parser.add_argument("--out", type=Path, default=kit.DEFAULT_OUT, help=f"where to write them (default {kit.DEFAULT_OUT.relative_to(kit.REPO)})")
+    parser.add_argument("--scheme", help="photograph every picture in this theme (dark, light, system6) instead of the recipe's own: for looking at a theme, use with --out")
     parser.add_argument("--list", action="store_true", help="list the pictures and whether each exists, then stop")
     args = parser.parse_args(argv)
 
@@ -91,7 +93,7 @@ def main(argv=None) -> int:
             return 2
         names = wanted
     try:
-        return run(names, args.out, args.overwrite)
+        return run(names, args.out, args.overwrite, args.scheme)
     finally:
         shutil.rmtree(kit._SCRATCH, ignore_errors=True)
 

@@ -341,7 +341,7 @@ class Knob(QDial):
 
     def paintEvent(self, event):
         painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, theme.antialiasing())
         rect = self.rect().adjusted(4, 4, -4, -4)
         palette = theme.current_palette()
         enabled = self.isEnabled()
@@ -363,7 +363,11 @@ class Knob(QDial):
             painter.setPen(armed_pen)
             painter.drawLines(armed_corner_marks(QRectF(self.rect())))
         track_pen = QPen(
-            QColor(palette["border_hover"] if enabled else palette["border_disabled"])
+            QColor(
+                palette.get("knob_track", palette["border_hover"])
+                if enabled
+                else palette["border_disabled"]
+            )
         )
         track_pen.setWidth(_RING_WIDTH)
         track_pen.setCapStyle(Qt.PenCapStyle.FlatCap)
@@ -379,7 +383,7 @@ class Knob(QDial):
         # too) - a knob painting itself with QPainter rather than through
         # the stylesheet needed its own explicit check here for the same
         # reason those did
-        value_pen = QPen(QColor("#3aa88a" if enabled else palette["text_disabled"]))
+        value_pen = QPen(QColor(palette.get("knob_arc", "#3aa88a") if enabled else palette["text_disabled"]))
         value_pen.setWidth(_RING_WIDTH)
         value_pen.setCapStyle(Qt.PenCapStyle.FlatCap)
         painter.setPen(value_pen)

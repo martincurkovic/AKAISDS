@@ -248,7 +248,7 @@ class PianoKeyboard(QWidget):
         tint.setAlpha(46)
         for note in self._whites:
             rect = self._key_rect(note)
-            colour = accent if self._lit(note) else QColor(palette["key_white"])
+            colour = QColor(palette.get("key_down_white", palette["accent"])) if self._lit(note) else QColor(palette["key_white"])
             if not enabled or (note in self._dimmed and not self._lit(note)):
                 colour = QColor(palette["bg_disabled"])
             painter.setBrush(colour)
@@ -257,13 +257,13 @@ class PianoKeyboard(QWidget):
                 painter.setBrush(tint)
                 painter.drawRect(rect)
             if note % 12 == 0:  # the C of each octave carries its name
-                painter.setPen(QColor(palette["key_black"] if not self._lit(note) else palette["text_on_accent"]))
+                painter.setPen(QColor(palette["key_black"] if not self._lit(note) or "key_down_white" in palette else palette["text_on_accent"]))
                 painter.drawText(rect.adjusted(2, 0, 0, -3), Qt.AlignmentFlag.AlignBottom | Qt.AlignmentFlag.AlignLeft, midi_note_to_name(note))
                 painter.setPen(edge)
         for note in range(self._first, self._last + 1):
             if note % 12 in BLACK:
                 dim = not enabled or (note in self._dimmed and not self._lit(note))
-                painter.setBrush(accent if self._lit(note) else QColor(palette["border_disabled"] if dim else palette["key_black"]))
+                painter.setBrush(QColor(palette.get("key_down_black", palette["accent"])) if self._lit(note) else QColor(palette["border_disabled"] if dim else palette["key_black"]))
                 painter.drawRect(self._key_rect(note))
         if enabled and self._typing:  # the bar under the keys: which keys the computer keyboard plays (solid while the computer keyboard is routed here)
             left, right = self._typing_span()

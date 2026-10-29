@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
 )
 
 from ui import tooltips
+from ui.update_dialog import apply_theme_to_markdown
 
 _HELP_DIR = os.path.join(os.path.dirname(__file__), "help")
 _QUICKSTART_PATH = os.path.join(_HELP_DIR, "quickstart.md")
@@ -107,6 +108,7 @@ class QuickStartDialog(QDialog):
         try:
             with open(_QUICKSTART_PATH, "r", encoding="utf-8") as f:
                 self.viewer.setMarkdown(f.read())
+            apply_theme_to_markdown(self.viewer.document())
             self._markdown_loaded = True
             self._constrain_image_widths(self._target_image_width())
             self._add_heading_anchors()

@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QFontDatabase
 from ui.ascii_logo import LOGO
+from ui.update_dialog import apply_theme_to_markdown
 from ui.update_helper import UpdateCheckRunner
 
 try:
@@ -49,6 +50,7 @@ class NoticesDialog(QDialog):
         try:
             with open(_NOTICES_PATH, "r", encoding="utf-8") as f:
                 viewer.setMarkdown(f.read())
+            apply_theme_to_markdown(viewer.document())
         except OSError as e:
             viewer.setPlainText(f"Couldn't load the notices: {e}")
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
@@ -83,6 +85,7 @@ class AboutDialog(QDialog):
         logo_font = QFontDatabase.systemFont(QFontDatabase.SystemFont.FixedFont)
         logo_font.setPointSize(8)
         logo_label.setFont(logo_font)
+        logo_label.setObjectName("monoText")  # keeps a monospace font in the System 6 theme (style_system6.qss.template)
         layout.addWidget(logo_label)
 
         version_label = QLabel(f"Version {APP_VERSION}")

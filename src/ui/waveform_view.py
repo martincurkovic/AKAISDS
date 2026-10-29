@@ -983,7 +983,7 @@ class WaveformView(QWidget):
 
     def paintEvent(self, event):
         painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, theme.antialiasing())
         palette = theme.current_palette()
 
         rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)

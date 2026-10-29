@@ -87,7 +87,7 @@ class DisclosureArrow(QAbstractButton):
     def paintEvent(self, _event):
         palette = theme.current_palette()
         painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, theme.antialiasing())
         color = QColor(palette["text_bright"] if self.underMouse() else palette["text"])
         c = self.SIZE / 2
         if self._collapsed:  # pointing right

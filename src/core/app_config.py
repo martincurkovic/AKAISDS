@@ -269,7 +269,8 @@ def save_skipped_update_version(version):
 THEME_SYSTEM = "system"
 THEME_LIGHT = "light"
 THEME_DARK = "dark"
-THEME_VALUES = (THEME_SYSTEM, THEME_LIGHT, THEME_DARK)
+THEME_SYSTEM6 = "system6"  # the Macintosh System 6 look (ui/theme.py SYSTEM6_PALETTE)
+THEME_VALUES = (THEME_SYSTEM, THEME_LIGHT, THEME_DARK, THEME_SYSTEM6)
 
 
 def get_saved_theme():

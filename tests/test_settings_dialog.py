@@ -434,15 +434,15 @@ def test_troubleshooting_tests_each_show_their_cabling_diagram(qapp):
     assert all(p.sizeHint().width() <= _MINIMUM_DIALOG_WIDTH - 80 for p in pictures)
 
 
-def test_appearance_card_offers_system_light_dark_defaulting_to_system(qapp, monkeypatch, tmp_path):
+def test_appearance_card_offers_the_themes_defaulting_to_system(qapp, monkeypatch, tmp_path):
     from core import app_config
     from PySide6.QtWidgets import QLabel
 
     monkeypatch.setattr(app_config, "CONFIG_PATH", tmp_path / "config.json")
     dialog = MidiSettingsDialog(_FakeMidiManager(["In A"], ["Out A"]), _FakeSamplerController())
     combo = dialog.combo_theme
-    assert [combo.itemText(i) for i in range(combo.count())] == ["System", "Light", "Dark"]
-    assert [combo.itemData(i) for i in range(combo.count())] == ["system", "light", "dark"]
+    assert [combo.itemText(i) for i in range(combo.count())] == ["System", "Light", "Dark", "Macintosh System 6"]
+    assert [combo.itemData(i) for i in range(combo.count())] == ["system", "light", "dark", "system6"]
     assert combo.currentData() == "system"
     headers = [l.text() for l in dialog.findChildren(QLabel) if l.objectName() == "sectionHeader"]
     assert "Appearance" in headers

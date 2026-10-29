@@ -123,6 +123,7 @@ class TransferDashboard(QWidget):
         top_bar = QHBoxLayout()
 
         self.lbl_logo = QLabel(LOGO)
+        self.lbl_logo.setObjectName("monoText")  # keeps a monospace font in the System 6 theme (style_system6.qss.template)
         logo_font = QFont("Menlo")
         logo_font.setStyleHint(QFont.StyleHint.Monospace)
         logo_font.setPointSize(8)

@@ -21,6 +21,7 @@ Long-form working documents for people and agents developing AKAISDS - not user 
 | `ensoniq-spec-crosscheck.md` | The EPS spec's text layer checked against the plan: what matched, and the corrections (parameter numbers, the 20-bit range limit, the memory parameters, the rate code). Read before touching `core/ensoniq_sysex.py`. |
 | `s3000-multi-file-format.md` | The S2000/S3000XL multi file (4096 bytes) and what a Save/Load Multi would need. Research only - no code. |
 | `akai-stereo-link-editing.md` | Showing `-L`/`-R` pairs as one stereo row in the Akai Samples tab and editing both halves together: what is reusable, the row == index refactor, the paired-send risk, a phased plan. Research only, nothing built. |
+| `system6-theme-roadmap.md` | Plan for a Macintosh System 6 theme (ported from akaiutil-GUI and jv-studio, where it is built): what to copy, what is bigger in AKAISDS, and the lessons from both ports. Not started. |
 | `macos12-support-handoff.md` | What blocks macOS 12 (Qt 6.11, NumPy wheel), the experiments and the plan. Not started. |
 | `packaging/` | Draft Homebrew / AUR packaging and a publish workflow with `PACKAGING.md`. Not active. |
 

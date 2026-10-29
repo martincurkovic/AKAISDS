@@ -161,8 +161,8 @@ def test_apply_to_app_uses_the_saved_theme_by_default(qapp, themed, monkeypatch)
     assert theme.current_palette() is theme.LIGHT_PALETTE
 
 
-def test_theme_choices_are_system_light_dark_in_that_order():
-    assert theme.CHOICES == [("System", "system"), ("Light", "light"), ("Dark", "dark")]
+def test_theme_choices_are_system_light_dark_system6_in_that_order():
+    assert theme.CHOICES == [("System", "system"), ("Light", "light"), ("Dark", "dark"), ("Macintosh System 6", "system6")]
 
 
 def test_muted_labels_are_themed_by_the_stylesheet_not_baked_in(

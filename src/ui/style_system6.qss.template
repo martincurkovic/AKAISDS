@@ -1,0 +1,339 @@
+/* ============================================================
+   AKAI SDS - the Macintosh System 6 theme's EXTRA rules (from akaiutil-GUI's, which came from JV Studio's)
+   ------------------------------------------------------------
+   Appended after style.qss.template ONLY when the palette has "extra_template" (SYSTEM6_PALETTE), so the dark and light themes never see
+   any of it. Same dollar-brace placeholders, filled from the palette. Rules here override the shared ones of equal specificity because they
+   come later; nothing here is for another theme.
+   ============================================================ */
+
+/* ---------- Font, and the one rounded thing: push buttons ---------- */
+QWidget {
+    font-family: ${font_family};
+    font-size: ${font_size};
+}
+
+QTextBrowser {
+    font-size: ${font_size_dense};
+}
+
+/* the font's ellipsis (...) is taller than its line, so a button whose text ends in one came out taller than the rest: every button is at least that tall
+   (a fixed height would cut the descenders off: the g in "Image") */
+QPushButton {
+    border-radius: 6px;
+    min-height: 20px;
+}
+
+/* ---------- Selection is inverted video: the row turns black, so its text has to turn white ---------- */
+QTreeView, QTableView {
+    selection-color: ${text_selected};
+}
+
+QTreeView::item:selected, QTableView::item:selected, QListWidget::item:selected {
+    background-color: ${bg_selected};
+    color: ${text_selected};
+}
+
+QTabBar::tab:selected {
+    color: ${text_tab_selected};
+}
+
+/* ---------- Menus (popup menus; the in-window menu bar offscreen and on Windows / Linux) ---------- */
+QMenuBar {
+    background-color: ${bg};
+    border-bottom: 1px solid ${border};
+}
+
+QMenuBar::item {
+    background: transparent;
+    padding: 3px 10px;
+}
+
+QMenuBar::item:selected {
+    background-color: ${bg_selected};
+    color: ${text_selected};
+}
+
+QMenu {
+    background-color: ${bg};
+    border: 1px solid ${border};
+    padding: 2px 0px;
+}
+
+QMenu::item {
+    padding: 3px 28px 3px 22px;
+    background: transparent;
+}
+
+QMenu::item:selected {
+    background-color: ${bg_selected};
+    color: ${text_selected};
+}
+
+QMenu::item:disabled {
+    color: ${text_disabled};
+    background: transparent;
+}
+
+QMenu::separator {
+    height: 1px;
+    background: ${border};
+    margin: 3px 0px;
+}
+
+QMenu::indicator {
+    width: 14px;
+    height: 14px;
+    left: 4px;
+}
+
+/* ---------- Push buttons ---------- */
+/* the one button that does the main thing: System 6's heavy ring round the default button, white inside (not the accent fill the other themes use) */
+QPushButton[primary="true"]:enabled {
+    background-color: ${bg_button};
+    color: ${text};
+    border: 3px solid ${border};
+    padding: 3px 10px;
+}
+
+QPushButton[primary="true"]:enabled:hover {
+    background-color: ${bg_button};
+    border-color: ${border};
+}
+
+QPushButton[primary="true"]:enabled:pressed {
+    background-color: ${bg_button_pressed};
+    color: ${text_pressed};
+}
+
+/* a dialog's default button (Overwrite, OK): the same heavy ring */
+QPushButton:default:enabled {
+    border: 3px solid ${border};
+    padding: 3px 10px;
+}
+
+/* ---------- Check boxes and radio buttons: a white box, an X ---------- */
+QCheckBox::indicator, QRadioButton::indicator {
+    width: 14px;
+    height: 14px;
+    border: 1px solid ${border_checkbox};
+    background: ${bg_input};
+}
+
+QCheckBox::indicator:checked {
+    background: ${bg_input};
+    border: 1px solid ${border_checkbox};
+    image: url(${s6_icon_dir}/s6_check_x.svg);
+}
+
+QCheckBox::indicator:disabled {
+    border-color: ${border_disabled};
+}
+
+QRadioButton {
+    background: transparent;
+    spacing: 6px;
+}
+
+QRadioButton::indicator {
+    border-radius: 8px;
+}
+
+QRadioButton::indicator:checked {
+    image: url(${s6_icon_dir}/s6_radio_dot.svg);
+}
+
+/* ---------- Combo boxes and spin boxes: a ruled-off arrow box, a solid triangle ---------- */
+QComboBox::drop-down {
+    subcontrol-origin: padding;
+    subcontrol-position: top right;
+    width: 20px;
+    border: none;
+    border-left: 1px solid ${border};
+    background: transparent;
+}
+
+QComboBox::down-arrow {
+    image: url(${s6_icon_dir}/s6_arrow_down.svg);
+    width: 14px;
+    height: 14px;
+}
+
+QComboBox::down-arrow:disabled {
+    image: url(${s6_icon_dir}/s6_arrow_down_grey.svg);
+}
+
+/* inside the box's own outline (the shared stylesheet puts them over it, which hid the outline's right, top and bottom) */
+QSpinBox::up-button, QDoubleSpinBox::up-button {
+    subcontrol-origin: padding;
+    subcontrol-position: top right;
+    width: 16px;
+    border-left: 1px solid ${border};
+    background: ${bg_input};
+}
+
+QSpinBox::down-button, QDoubleSpinBox::down-button {
+    subcontrol-origin: padding;
+    subcontrol-position: bottom right;
+    width: 16px;
+    border-left: 1px solid ${border};
+    background: ${bg_input};
+}
+
+QSpinBox::up-arrow, QDoubleSpinBox::up-arrow {
+    image: url(${s6_icon_dir}/s6_arrow_up_small.svg);
+    width: 12px;
+    height: 12px;
+}
+
+QSpinBox::down-arrow, QDoubleSpinBox::down-arrow {
+    image: url(${s6_icon_dir}/s6_arrow_down_small.svg);
+    width: 12px;
+    height: 12px;
+}
+
+/* ---------- Scroll bars: 16 px, outlined on both sides, a dithered track, an arrow box at each end, a white thumb ---------- */
+/* the track's outline is in its image (scroll_track_v / _h) and each arrow box's outline in its icon (s6_scroll_*.svg): a QSS border on
+   either was drawn over or clipped */
+QScrollBar:vertical {
+    width: 16px;
+    margin: 16px 0px 16px 0px;
+    background: ${scroll_track_v};
+    border: none;
+}
+
+QScrollBar::handle:vertical {
+    background: ${scroll_handle};
+    border: ${scroll_handle_border};
+    min-height: 18px;
+}
+
+QScrollBar::handle:vertical:hover {
+    background: ${scroll_handle};
+}
+
+QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {
+    background: transparent;
+}
+
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+    height: 16px;
+    width: 16px;
+    background: transparent;
+    border: none;
+    subcontrol-origin: margin;
+}
+
+QScrollBar::add-line:vertical {
+    subcontrol-position: bottom;
+    image: url(${s6_icon_dir}/s6_scroll_down.svg);
+}
+
+QScrollBar::sub-line:vertical {
+    subcontrol-position: top;
+    image: url(${s6_icon_dir}/s6_scroll_up.svg);
+}
+
+QScrollBar::add-line:vertical:pressed {
+    image: url(${s6_icon_dir}/s6_scroll_down_pressed.svg);
+}
+
+QScrollBar::sub-line:vertical:pressed {
+    image: url(${s6_icon_dir}/s6_scroll_up_pressed.svg);
+}
+
+QScrollBar:horizontal {
+    height: 16px;
+    margin: 0px 16px 0px 16px;
+    background: ${scroll_track_h};
+    border: none;
+}
+
+QScrollBar::handle:horizontal {
+    background: ${scroll_handle};
+    border: ${scroll_handle_border};
+    min-width: 18px;
+}
+
+QScrollBar::handle:horizontal:hover {
+    background: ${scroll_handle};
+}
+
+QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal {
+    background: transparent;
+}
+
+QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {
+    height: 16px;
+    width: 16px;
+    background: transparent;
+    border: none;
+    subcontrol-origin: margin;
+}
+
+QScrollBar::add-line:horizontal {
+    subcontrol-position: right;
+    image: url(${s6_icon_dir}/s6_scroll_right.svg);
+}
+
+QScrollBar::sub-line:horizontal {
+    subcontrol-position: left;
+    image: url(${s6_icon_dir}/s6_scroll_left.svg);
+}
+
+QScrollBar::add-line:horizontal:pressed {
+    image: url(${s6_icon_dir}/s6_scroll_right_pressed.svg);
+}
+
+QScrollBar::sub-line:horizontal:pressed {
+    image: url(${s6_icon_dir}/s6_scroll_left_pressed.svg);
+}
+
+/* ---------- Progress bar: a dithered bar (no text on it: it would not read on the dither) ---------- */
+QProgressBar {
+    background-color: ${bg};
+    border: 1px solid ${border};
+    color: transparent;
+    text-align: center;
+}
+
+QProgressBar::chunk {
+    background: ${scroll_track};
+    border-right: 1px solid ${border};
+}
+
+/* ---------- Status bar: a rule over it, as the menu bar has one under it ---------- */
+QStatusBar {
+    border-top: 1px solid ${border};
+}
+
+/* ---------- Tool tips: the plain black-bordered box ---------- */
+QToolTip {
+    background-color: ${bg};
+    border: 1px solid ${border};
+    padding: 2px 4px;
+}
+
+/* ---------- Sliders: black, not the shared stylesheet's green ---------- */
+QSlider::sub-page:horizontal {
+    background: ${border};
+}
+
+QSlider::handle:horizontal:hover {
+    background: ${text_bright};
+}
+
+/* ---------- Text that must stay monospace: the ASCII logo and the loopback report (the base font rule above would replace it) ---------- */
+QLabel#monoText {
+    font-family: Menlo, Monaco, "Courier New", monospace;
+}
+
+/* ---------- A selected row built from widgets turns black, so its labels turn white (ui/theme_fit.py sets the property) ---------- */
+QWidget[rowSelected="true"] QLabel, QWidget[rowSelected="true"] QCheckBox {
+    color: ${text_selected};
+}
+
+/* ---------- The memory bar: black for used, white for free (the warning and critical fills of the other themes are only for text here) ---------- */
+QProgressBar[memoryLevel]::chunk {
+    background: ${border};
+    border-right: none;
+}

@@ -44,6 +44,7 @@ class LoopbackResultsDialog(QDialog):
         body = QLabel(self._results_html())
         body.setTextFormat(Qt.TextFormat.RichText)
         body.setFont(QFontDatabase.systemFont(QFontDatabase.SystemFont.FixedFont))
+        body.setObjectName("monoText")  # keeps a monospace font in the System 6 theme (style_system6.qss.template)
         body.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
 
         verdict = QLabel(loopback_report.verdict(results))

@@ -15,6 +15,7 @@ and plans: `dev_docs/`.
 | multi files | `dev_docs/multi-save-load-progress.md`, `dev_docs/s3000-multi-file-format.md` |
 | sending samples, Slice Editor, sample edits | "Sample send hardening", "Sample edits and the working copy", "Slice Editor" |
 | menus, shortcuts | "Menus and shortcuts" |
+| the Macintosh System 6 theme | "Macintosh System 6 theme", `dev_docs/system6-theme-roadmap.md` |
 | logs, bug reports | "Debug logging" |
 | running with no hardware | "Developing without hardware" (`tools/demo.py`) |
 | tests | `TESTING.md` |
@@ -260,6 +261,18 @@ One application-level filter (`spinbox_drag.install(app)` beside `wheel_guard`; 
 ## Theme preference (Settings > Appearance)
 
 `config.json` `"theme"`: `system` (default, live OS), `light`, `dark` (`ui/theme.py`; saved and applied when an option is PICKED, so Cancel doesn't undo it). **A pinned theme follows the preference, never `colorScheme()`** (Qt's override is best-effort; offscreen ignores it). Colours baked in at construction can't follow a live switch: use a QSS rule or `theme.notifier.changed` (chevron SVGs are named per colour: Qt caches stylesheet images by path). **Tests that switch theme must not restyle the real `QApplication`** (the suite went from 20 s to minutes): pass a stand-in to `apply_to_app`.
+
+## Macintosh System 6 theme (Settings > Appearance; started 2026-10-29, offscreen only, NOT seen on a real screen)
+
+Plan, lessons from the two sibling ports and the checklist: `dev_docs/system6-theme-roadmap.md` (read it before touching the theme). Third pinned theme `"system6"` (`app_config.THEME_SYSTEM6`, `theme.SYSTEM6_PALETTE`), picked from the preference, never the OS scheme. **The shared `style.qss.template` is untouched**: `ui/style_system6.qss.template` is appended for this palette only (`extra_template`), and `square_corners` rewrites every `border-radius` in the shared text at render time. Dark and light were compared pixel for pixel against the previous commit on all 22 screenshot recipes (`tools/make_screenshots.py --scheme dark|light --out DIR`, a `git worktree` at HEAD for the old side): only the version string differed. **Re-do that comparison after changing any painter, dialog or shared QSS.**
+- Palette keys only System 6 has are read with `.get()` by painters (`knob_track`, `knob_arc`, `graph_line`, `key_down_white/black`, `hard_edges` via `theme.antialiasing()`), so the other palettes are untouched. A missing key the template needs still raises at start-up.
+- Font ChiKareGo2 (CC BY, credited in `THIRD_PARTY_NOTICES.md` and `ui/fonts/README.txt`), icons `ui/icons/s6_*.svg`; all three build scripts ship the extra template and `ui/fonts` (there is no `pysidedeploy.spec` in the repo: the scripts write it). **A missing data file only shows in a built app; no build was made.**
+- **`ui/theme_fit.py`** is one application-level filter, installed by `theme.apply_to_app`, doing three things only when the palette asks: (1) a label/button/combo/spin box pinned to a width below its size hint grows to it (`fit_fixed_widths`; the editors have dozens of `setFixedWidth` that fit the 13 px font, "Velocity Low" clipped to "Velocity Lou"); (2) a window whose scroll area needs horizontal scrolling is widened by what is missing, never past the screen (`grow_window_for_scroll`; **offscreen's 800 px screen can't show this, so it is only unit tested**); (3) the labels in a selected row of a list built with `setItemWidget` turn white (`invert_selected_rows`: property `rowSelected`, rule in the extra template). Dark and light are not touched by any of it.
+- Monospace text (the ASCII logo, About logo, loopback report) carries the object name `monoText`, which the extra template gives a monospace font: the base font rule would replace it otherwise.
+- `QMessageBox` icons come from `theme._Style` (a `QProxyStyle` over Fusion, set once per app) and `ui/mono_icons.py`. Markdown viewers (Quick Start, notices, update notes) call `update_dialog.apply_theme_to_markdown` (code font, underlined links).
+- Painted widgets: knobs, envelope graphs and the keyboard use palette keys; the keygroup range bar and swatches use `keygroup_color_1..8`, which are eight greys in this palette (dark and light taking turns). The memory bar is a plain `QProgressBar` (solid black fill; its text is transparent, the tooltip says what is free).
+- Known gaps: a SELECTED keygroup row's black swatch vanishes on the black row (the swatch has an inline stylesheet); the Dashboard, Yamaha, S950 and Slice Editor were looked at in offscreen pictures only; wide editors depend on item (2); Windows and Linux unseen.
+- Tests: `tests/test_system6_theme.py` (use its `_StandInApp`, never restyle the real `QApplication`).
 
 ## Update checker
 
