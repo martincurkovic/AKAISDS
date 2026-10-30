@@ -54,6 +54,37 @@ jobs:
           name: AKAISDS-macos-intel
           path: AKAISDS-macos-intel.dmg
 
+  # The macOS 12 build: Qt 6.8, see dev_docs/macos12-support-handoff.md. continue-on-error while it is new, so a failure here can't stop the
+  # ordinary release (the release job still attaches whichever DMGs were built). check_minos.sh fails the job if any file needs macOS > 12.
+  build-macos-legacy:
+    needs: test
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { arch: arm, runner: macos-15 }
+          - { arch: intel, runner: macos-15-intel }
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version-file: ".python-version"
+      - uses: astral-sh/setup-uv@v6
+      - name: Build
+        run: |
+          chmod +x scripts/build_macos.sh scripts/check_minos.sh
+          AKAISDS_FLAVOR=legacy ./scripts/build_macos.sh  # syncs the qt-legacy environment itself, and builds AKAISDS-macos-{arm,intel}-legacy.dmg
+      - name: Check nothing needs a newer macOS than 12
+        run: ./scripts/check_minos.sh 12.0
+      - uses: actions/upload-artifact@v4
+        with:
+          name: AKAISDS-macos-${{ matrix.arch }}-legacy
+          path: AKAISDS-macos-${{ matrix.arch }}-legacy.dmg
+
   build-linux:
     needs: test
     runs-on: ubuntu-24.04
@@ -123,7 +154,7 @@ jobs:
           path: AKAISDS-Setup.exe
 
   release:
-    needs: [build-macos-arm, build-macos-intel, build-linux, build-windows]
+    needs: [build-macos-arm, build-macos-intel, build-macos-legacy, build-linux, build-windows]
     if: github.ref_type == 'tag'
     runs-on: ubuntu-latest
     permissions:

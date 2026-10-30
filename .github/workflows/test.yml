@@ -32,3 +32,27 @@ jobs:
           AKAISDS_CI_NO_AUDIO_DEVICE: "1"
         # -v names every test; faulthandler_timeout dumps all thread stacks if one test runs over 90 s (a hang shows where it is stuck)
         run: uv run pytest tests/ -v -ra -o faulthandler_timeout=90
+
+  # The same suite on the Qt 6.8 dependency set the macOS 12 build uses (dev_docs/macos12-support-handoff.md): catches a Qt 6.10+ API creeping in,
+  # which nothing else can see (no macOS 12 runner). continue-on-error while it is new, so it can't hold up the ordinary release gate.
+  test-legacy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version-file: ".python-version"
+      - uses: astral-sh/setup-uv@v6
+      - name: Install Qt runtime libraries
+        run: sudo apt-get update && sudo apt-get install -y qt6-qpa-plugins libegl1 libgl1 libfontconfig1 libnss3 libasound2t64 libpulse0 libxcb-cursor0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-randr0 libxcb-render-util0 libxcb-shape0 libxcb-shm0 libxcb-sync1 libxcomposite1 libxdamage1 libxi6 libxtst6
+      - name: Sync environment (Qt 6.8)
+        run: uv sync --no-group qt-current --group qt-legacy
+      # --no-sync from here on: a plain `uv run` would sync back to the default groups (Qt 6.11)
+      - name: Build the REX2 reader
+        run: uv run --no-sync python tools/build_velociloops.py
+      - name: Run tests
+        env:
+          AKAISDS_CI_NO_AUDIO_DEVICE: "1"
+        run: uv run --no-sync pytest tests/ -v -ra -o faulthandler_timeout=90

@@ -96,6 +96,31 @@ plus "macOS 12 and 13" in the README, or name it for what it was built for.
 `--python-platform`, VelociLoops built with `-mmacosx-version-min=13.0`, cask `:sonoma` -> `:ventura`). Held back until the macOS 13 user's
 direct-run test says whether 13 really works. AGENTS.md's "14+" rests on 1.3.0 running on 14.8.9, which shows 14 works, not that 13 doesn't.
 
+## Progress (2026-10-31)
+
+**Phase 1 done** (`pyproject.toml`, `uv.lock`): `qt-current` (PySide6 6.11.2, default) and `qt-legacy` (6.8.3) are conflicting dependency groups; one
+lock covers both, and plain `uv sync` is unchanged. Legacy: `uv sync --no-group qt-current --group qt-legacy`. NumPy is now a real dependency.
+- Full suite on Qt 6.8.3 (macOS, arm64, 16m39s, with a macOS VM installing at the time): 3717 passed, 11 failed. **10 were one PySide 6.8 quirk**: the
+  QMenu returned by `QAction.menu()` goes "already deleted" once the temporary QAction wrapper is released (the menu is still in the bar; reproduced
+  standalone; the app's own two `.menu()` loops keep the action alive, so the app is fine). Tests now use `tests/menu_lookup.top_menu()`. The 8
+  affected files pass on both Qt versions (473 each). The 11th, `test_changing_the_replay_mode_writes_it_verifies_and_backs_up_the_original`,
+  passed alone 3x on both: probably load-sensitive. **A full legacy re-run since the fix hasn't been done.**
+- **`--python-platform` + `MACOSX_DEPLOYMENT_TARGET=12.0` picks the old wheels** (uv reads the variable with `--python-platform`): arm64 NumPy
+  `macosx_11_0_arm64`, Intel `macosx_10_13_x86_64`; Qt 12_0; the other native wheels <= 11_0 (arm) / 10_15 (Intel). Intel checked by installing into a scratch env, never run.
+
+**Phase 2 done** (`scripts/build_macos.sh`, `scripts/check_minos.sh`): `AKAISDS_FLAVOR=legacy` uses its own `.venv-legacy`, exports the deployment target
+(VelociLoops and Nuitka's C compile for 12), runs everything after the sync with `--no-sync`, rewrites the spec's `python_path` on every run (it was
+hard-coded to `.venv`), writes `LSMinimumSystemVersion` 12.0 and names the DMG `AKAISDS-macos-{arm,intel}-legacy.dmg`. `check_minos.sh MAX [APP_OR_DMG]` fails on any slice newer than MAX.
+- **Measured: the arm64 legacy build (built on macOS 26) has every one of its 113 slices at minos <= 12.0** (70 at 11.0, 43 at 12.0): no Nuitka or openssl surprise. Plist 12.0, `codesign --verify` passes.
+  Launched offscreen on macOS 26: stays up, log says `PySide6 6.8.3, Qt 6.8.3`, VelociLoops loads. **Not run on macOS 12; real windows and theme not looked at; Intel not built.**
+- For contrast, an older locally built CURRENT app had 57 slices above 12.0, one of them at 26.0 (a local compile on macOS 26 with no target set).
+- **The Qt 6.8 `pyside6-deploy` reinstalls Nuitka 4.1.1** over our pinned 4.1.3 during the build, so the legacy app is compiled by 4.1.1. Works; pin the legacy group to 4.1.1 if the swap bothers you.
+
+**Phase 3 written, NOT run on GitHub** (`build.yml`, `test.yml`): `build-macos-legacy` (matrix `macos-15` / `macos-15-intel`; build, `check_minos.sh 12.0`, upload)
+and `test-legacy` (Qt 6.8 suite on ubuntu), both `continue-on-error` while new so a failure can't hold up the ordinary release; the release job lists
+`build-macos-legacy` in `needs` and its `release-files/**/*` glob attaches whatever legacy DMGs exist. `publish-packages.yml` is untouched (it fetches the
+current DMGs by exact name). **Assumed, not checked: that a `continue-on-error` job still lets `release` run when it fails.** First real test: run Build by hand from the Actions tab on a pushed branch.
+
 ## Scan a build
 
 ```bash
