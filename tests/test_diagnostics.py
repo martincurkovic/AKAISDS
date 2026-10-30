@@ -83,17 +83,31 @@ def test_session_config_line_names_the_sampler_type(monkeypatch, captured):
 
 
 def test_session_config_line_names_the_build_flavor(monkeypatch, captured):
-    from ui import _version
+    # ui/_version.py is written by the build script and git-ignored, so a clean checkout (CI) has none: stand in for it, never import the real one
+    import sys
+    import types
+
+    import ui
 
     monkeypatch.setattr(diagnostics.app_config, "get_saved_ports", lambda: ("IN", "OUT"))
-    monkeypatch.setattr(_version, "BUILD_FLAVOR", "legacy", raising=False)  # only the macOS build writes it
-    diagnostics.log_session_config("test")
-    assert "flavor=legacy" in next(l for l in captured if "config (test)" in l)
 
-    captured.clear()
-    monkeypatch.delattr(_version, "BUILD_FLAVOR")  # the Linux and Windows builds never write it
-    diagnostics.log_session_config("test")
-    assert "flavor=current" in next(l for l in captured if "config (test)" in l)
+    def config_line():
+        captured.clear()
+        diagnostics.log_session_config("test")
+        return next(l for l in captured if "config (test)" in l)
+
+    stand_in = types.ModuleType("ui._version")
+    stand_in.BUILD_FLAVOR = "legacy"  # only the macOS build writes it
+    monkeypatch.setitem(sys.modules, "ui._version", stand_in)
+    monkeypatch.setattr(ui, "_version", stand_in, raising=False)
+    assert "flavor=legacy" in config_line()
+
+    del stand_in.BUILD_FLAVOR  # the Linux and Windows builds write a _version.py without it
+    assert "flavor=current" in config_line()
+
+    monkeypatch.setitem(sys.modules, "ui._version", None)  # no _version.py at all
+    monkeypatch.delattr(ui, "_version", raising=False)
+    assert "flavor=unknown" in config_line()
 
 
 def test_dialog_logging_records_text_and_the_answer(monkeypatch, captured):
