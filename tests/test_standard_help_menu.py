@@ -7,6 +7,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
 from PySide6.QtWidgets import QApplication, QMainWindow
+from menu_lookup import top_menu
 
 from ui import standard_menus
 
@@ -17,7 +18,7 @@ def qapp():
 
 
 def _help_menu(window):
-    return next(a.menu() for a in window.menuBar().actions() if a.text().replace("&", "") == "Help")
+    return top_menu(window, "Help")
 
 
 def test_the_help_menu_lists_third_party_notices_between_about_and_updates(qapp):

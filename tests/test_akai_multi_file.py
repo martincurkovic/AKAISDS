@@ -6,6 +6,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
 from PySide6.QtWidgets import QMessageBox, QWidget
+from menu_lookup import top_menu
 from s3ked.demo import DemoBridge
 
 from core import akai_multi_file as amf
@@ -294,7 +295,7 @@ def editor(qapp):
 
 def test_the_multi_tab_has_a_save_button_and_the_file_menu_an_entry(editor):
     assert editor.save_multi_button.text() == "Save to File..." and editor.save_multi_button.isEnabled()
-    file_menu = next(a.menu() for a in editor.menuBar().actions() if a.text() == "&File")
+    file_menu = top_menu(editor, "&File")
     assert editor._save_multi_action in file_menu.actions()
     assert editor._save_multi_action.isEnabled()
 

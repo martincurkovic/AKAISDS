@@ -12,6 +12,7 @@ import s3k.messages as s3k_messages
 import s3k.params as s3k_params
 from PySide6.QtCore import Qt, QObject, QTimer, Signal
 from PySide6.QtWidgets import QApplication, QLabel, QWidget
+from menu_lookup import top_menu
 from ui import tooltips as tt
 from ui.global_tab import DISABLED_SETTINGS
 from ui.loop_preview_view import HALF_WINDOW_FRAMES
@@ -5312,7 +5313,7 @@ def test_import_audio_opens_a_plain_stereo_file_with_no_markers(editor, monkeypa
 
 
 def _menu(window, title):
-    return next(a.menu() for a in window.menuBar().actions() if a.text().replace("&", "") == title)
+    return top_menu(window, title)
 
 
 def _texts(menu):

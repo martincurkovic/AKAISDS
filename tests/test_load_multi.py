@@ -7,6 +7,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
 from PySide6.QtWidgets import QMessageBox, QWidget
+from menu_lookup import top_menu
 from s3k import params as p
 
 from core import akai_multi_file as amf
@@ -337,7 +338,7 @@ def editor(qapp):  # noqa: F811
 
 def test_the_multi_tab_has_a_load_button_and_the_file_menu_an_entry(editor):
     assert editor.load_multi_button.text() == "Load from File..." and editor.load_multi_button.isEnabled()
-    file_menu = next(a.menu() for a in editor.menuBar().actions() if a.text() == "&File")
+    file_menu = top_menu(editor, "&File")
     assert editor._load_multi_action in file_menu.actions() and editor._load_multi_action.isEnabled()
 
 

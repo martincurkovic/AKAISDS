@@ -41,7 +41,7 @@ def _texts(actions):
 
 
 def test_the_sample_menu_lists_every_action_in_groups(editor):
-    menu = next(a.menu() for a in editor.menuBar().actions() if a.menu() is editor._sample_menu)
+    menu = editor._sample_menu
     assert _texts(menu.actions()) == [
         "Load Audio", "-",
         "Trim to Markers", "Reverse", "Fade In/Out", "Normalise", "Filter…", "Stretch / Pitch…", "Reverb…", "-",

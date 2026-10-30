@@ -13,6 +13,7 @@ import dataclasses
 import pytest
 from PySide6.QtCore import QCoreApplication, QEvent, Qt
 from PySide6.QtWidgets import QMainWindow
+from menu_lookup import top_menu
 
 from core import s950_program as prog
 from core import s950_sysex as s
@@ -778,7 +779,7 @@ def test_closing_the_editor_gives_the_computer_keyboard_back(win):
 
 
 def _menu(window, title):
-    return next(a.menu() for a in window.menuBar().actions() if a.text().replace("&", "") == title)
+    return top_menu(window, title)
 
 
 def _texts(menu):
