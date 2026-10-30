@@ -93,9 +93,18 @@ Only two dependencies differ (PySide6 and NumPy); everything else is already min
 **Open decisions:** Intel legacy from day one (leaning yes: old Intel Macs are the likely audience; doubles CI minutes), and the name: `-legacy`
 plus "macOS 12 and 13" in the README, or name it for what it was built for.
 
-**Separate question, current build:** its floor could drop from 14 to 13 cheaply (`MIN_MACOS` 13.0, the `11_0` NumPy wheel via
-`--python-platform`, VelociLoops built with `-mmacosx-version-min=13.0`, cask `:sonoma` -> `:ventura`). Held back until the macOS 13 user's
-direct-run test says whether 13 really works. AGENTS.md's "14+" rests on 1.3.0 running on 14.8.9, which shows 14 works, not that 13 doesn't.
+**Current build's floor: 14 -> 13 (decided 2026-10-31, built, NOT run on a macOS 13 Mac).** The trigger was a macOS 13 user whose 1.4.0 stopped opening: the 14.0 plist
+key blocked it, and 1.3.0 had no key. `build_macos.sh` now syncs BOTH flavors with `--python-platform` and `MACOSX_DEPLOYMENT_TARGET` (13.0 for current), so NumPy is its
+`macosx_11_0`/`10_13` wheel and VelociLoops is compiled for 13; plist 13.0. **Measured: arm64 current build, 116 slices, `check_minos.sh 13.0` reports only the 7 PySide6/shiboken
+binding files stamped 15.0** (inside the `13_0`-tagged wheels; 1.3.0 ran with the same stamps on 14.8.9, but 13 is two majors lower and untried), NumPy and VelociLoops are now clean
+(no 26.0 slice). Launched offscreen on macOS 26: Qt 6.11.2, `flavor=current`. The macOS 13 user's direct-run test (`.../Contents/MacOS/main` from Terminal) or a real 13 Mac decides it.
+Because the current build now covers 13, the legacy build is meant for **macOS 12 and later** (owner, 2026-10-31: it runs fine on macOS 26 too, so it stays on offer as a FALLBACK for any Mac where the current build misbehaves; Qt itself lists 6.8 only for macOS 12-15, so 26 is works-in-practice): labels are `AKAISDS (macOS 13+)` and `AKAISDS Legacy (macOS 12+)`; README, cask and release notes say the same.
+CI does not gate the current build with `check_minos.sh` (it would fail on those 7 stamps).
+
+**Homebrew (2026-10-31):** the tap's `Casks/akaisds.rb` is now `depends_on macos: :ventura`, and a new `Casks/akaisds-legacy.rb` (`:monterey`, `conflicts_with` the main cask, `brew style` clean) has
+placeholder checksums for 1.4.2. `publish-packages.yml` hashes the `-legacy` DMGs if they exist and bumps the legacy cask too; a release without them (v1.4.1 style) or a tap without the file just skips it
+(the bump logic was dry-run against copies of both casks). **Push the tap's changes only around the 1.4.2 release**: before it, the main cask would let macOS 13 users install 1.4.1, which won't open there, and
+the legacy cask would 404.
 
 ## Progress (2026-10-31)
 
@@ -118,8 +127,11 @@ hard-coded to `.venv`), writes `LSMinimumSystemVersion` 12.0 and names the DMG `
 - **The Qt 6.8 `pyside6-deploy` reinstalls Nuitka 4.1.1** over our pinned 4.1.3 during the build, so the legacy app is compiled by 4.1.1. Works; pin the legacy group to 4.1.1 if the swap bothers you.
 
 **Phase 4 mostly done:** `_version.py` gets `BUILD_FLAVOR` (macOS build only) and the `config (...)` log line carries `flavor=`. DMG volume names say the
-macOS range: `AKAISDS (macOS 14+)` and `AKAISDS Legacy (macOS 12-13)` (built and mounted to check, from the legacy app). README: a two-line note on which DMG to use. The
-background picture does NOT mention the range (one picture for both). **README now says macOS 12+, ahead of any test on macOS 12: revert if the Monterey test fails.**
+macOS range: `AKAISDS (macOS 13+)` and `AKAISDS Legacy (macOS 12+)` (first `14+` / `12-13`, changed with the floors) (built and mounted to check, from the legacy app). README: a two-line note on which DMG to use. The
+background picture does NOT mention the range (one picture for both). **README says macOS 12+; the legacy build has since run in a macOS 12 VM (below), but not on real hardware.**
+
+**Reported by the owner, 2026-10-31: the legacy build runs in a macOS 12 VM on the owner's M1 MacBook Air (so arm64, Apple Silicon, virtualised).** Details
+not recorded (which DMG, how far they got: launch only, the editors, the theme?). Still untested: Intel, real hardware (the 2015 Air), CoreMIDI with a real interface, a macOS 13 machine.
 
 **Phase 3 written, NOT run on GitHub** (`build.yml`, `test.yml`): `build-macos-legacy` (matrix `macos-15` / `macos-15-intel`; build, `check_minos.sh 12.0`, upload)
 and `test-legacy` (Qt 6.8 suite on ubuntu), both `continue-on-error` while new so a failure can't hold up the ordinary release; the release job lists

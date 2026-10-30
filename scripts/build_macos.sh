@@ -4,9 +4,11 @@ set -e
 # build_macos.sh - builds the AKAISDS.app bundle and its DMG
 # Can be run from anywhere. Handles uv sync
 #
-# AKAISDS_FLAVOR=legacy builds the macOS 12 variant (Qt 6.8, see dev_docs/macos12-support-handoff.md): its own environment (.venv-legacy, so the
-# ordinary .venv is left alone), wheels picked for macOS 12 (the older NumPy), VelociLoops and Nuitka compiled for 12, and AKAISDS-macos-{arm,intel}-legacy.dmg.
-# Anything else (the default) is the current build, unchanged. Check a result with scripts/check_minos.sh.
+# Two builds, both with their own floor (dev_docs/macos12-support-handoff.md):
+#   current (default): Qt 6.11, macOS 13 and later, AKAISDS-macos-{arm,intel}.dmg, the ordinary .venv.
+#   AKAISDS_FLAVOR=legacy: Qt 6.8, macOS 12 and later (it runs on newer ones too, so it is also a fallback where the current build won't), AKAISDS-macos-{arm,intel}-legacy.dmg, its own .venv-legacy (the ordinary .venv is left alone).
+# Both pick wheels for their floor (NumPy's macosx_11_0 / 10_13, not its macosx_14_0) and compile VelociLoops and Nuitka's C code for it.
+# Check a result with scripts/check_minos.sh <floor>.
 
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 SRC_DIR="$ROOT_DIR/src"
@@ -19,19 +21,18 @@ esac
 FLAVOR="${AKAISDS_FLAVOR:-current}"
 case "$FLAVOR" in
 current)
-    MIN_MACOS="14.0"
+    MIN_MACOS="13.0"
     DMG_SUFFIX=""
-    DMG_VOLUME="AKAISDS (macOS 14+)"
+    DMG_VOLUME="AKAISDS (macOS 13+)"
     VENV_DIR="$ROOT_DIR/.venv"
+    SYNC_GROUPS=""
     ;;
 legacy)
     MIN_MACOS="12.0"
     DMG_SUFFIX="-legacy"
-    DMG_VOLUME="AKAISDS Legacy (macOS 12-13)"
+    DMG_VOLUME="AKAISDS Legacy (macOS 12+)"
     VENV_DIR="$ROOT_DIR/.venv-legacy"
-    # uv's --python-platform reads this, and picks wheels for that macOS (NumPy's macosx_11_0 / 10_13 instead of its macosx_14_0); clang
-    # and Nuitka's C compiler read it too, so what we compile targets 12 as well
-    export MACOSX_DEPLOYMENT_TARGET="$MIN_MACOS"
+    SYNC_GROUPS="--no-group qt-current --group qt-legacy"
     export UV_PROJECT_ENVIRONMENT="$VENV_DIR"
     ;;
 *)
@@ -39,18 +40,15 @@ legacy)
     exit 1
     ;;
 esac
+# uv's --python-platform reads this and picks wheels for that macOS; clang and Nuitka's C compiler read it too
+export MACOSX_DEPLOYMENT_TARGET="$MIN_MACOS"
 echo "Flavor: $FLAVOR (macOS $MIN_MACOS and later)"
 
 cd "$ROOT_DIR"
 echo "Syncing environment with uv..."
-if [ "$FLAVOR" = "legacy" ]; then
-    uv sync --no-group qt-current --group qt-legacy --python-platform "$UV_PLATFORM"
-    # --no-sync from here on: a plain `uv run` would sync again, back to the default groups and wheels
-    UV_RUN="uv run --no-sync"
-else
-    uv sync
-    UV_RUN="uv run"
-fi
+uv sync $SYNC_GROUPS --python-platform "$UV_PLATFORM"
+# --no-sync from here on: a plain `uv run` would sync again, back to the default wheels
+UV_RUN="uv run --no-sync"
 uv pip install --python "$VENV_DIR/bin/python" pip
 
 # the REX2 reader (third_party/velociloops) is a small C++ library, compiled for THIS machine's architecture into src/core/native

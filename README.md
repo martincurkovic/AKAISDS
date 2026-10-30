@@ -99,7 +99,7 @@ Unzip the download and drag AKAISDS to your applications folder. See the disclai
 
 Or install with [Homebrew](https://brew.sh): `brew install --cask martincurkovic/tap/akaisds`. Gatekeeper still applies on first launch.
 
-macOS 12 and 13 users should download the legacy version (`AKAISDS-macos-*-legacy.dmg`). Anyone on macOS 14 or later should use the regular version.
+macOS 12 users should download the legacy version (`AKAISDS-macos-*-legacy.dmg`, or `brew install --cask martincurkovic/tap/akaisds-legacy`). It runs on newer macOS versions too, so try it if the regular version doesn't work on your Mac. Everyone else should use the regular version.
 
 #### Windows Instructions
 

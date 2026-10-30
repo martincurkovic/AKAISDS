@@ -28,6 +28,8 @@ jobs:
       version: ${{ steps.resolve.outputs.version }}
       sha_macos_arm: ${{ steps.hash.outputs.sha_macos_arm }}
       sha_macos_intel: ${{ steps.hash.outputs.sha_macos_intel }}
+      sha_macos_arm_legacy: ${{ steps.hash.outputs.sha_macos_arm_legacy }}
+      sha_macos_intel_legacy: ${{ steps.hash.outputs.sha_macos_intel_legacy }}
       sha_linux_zip: ${{ steps.hash.outputs.sha_linux_zip }}
     steps:
       - name: Resolve which release to package
@@ -53,6 +55,9 @@ jobs:
           curl -sL -f -o macos-arm.dmg   "$BASE/AKAISDS-macos-arm.dmg"
           curl -sL -f -o macos-intel.dmg "$BASE/AKAISDS-macos-intel.dmg"
           curl -sL -f -o linux.zip       "$BASE/AKAISDS-linux.zip"
+          # the macOS 12 build is optional: a release made without it (or before it existed) just leaves the legacy cask alone
+          curl -sL -f -o macos-arm-legacy.dmg   "$BASE/AKAISDS-macos-arm-legacy.dmg"   || rm -f macos-arm-legacy.dmg
+          curl -sL -f -o macos-intel-legacy.dmg "$BASE/AKAISDS-macos-intel-legacy.dmg" || rm -f macos-intel-legacy.dmg
 
       - name: Compute checksums
         id: hash
@@ -60,9 +65,15 @@ jobs:
           echo "sha_macos_arm=$(sha256sum macos-arm.dmg | cut -d' ' -f1)"     >> "$GITHUB_OUTPUT"
           echo "sha_macos_intel=$(sha256sum macos-intel.dmg | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
           echo "sha_linux_zip=$(sha256sum linux.zip | cut -d' ' -f1)"         >> "$GITHUB_OUTPUT"
+          # only when BOTH legacy DMGs exist; the outputs stay empty otherwise
+          if [ -f macos-arm-legacy.dmg ] && [ -f macos-intel-legacy.dmg ]; then
+            echo "sha_macos_arm_legacy=$(sha256sum macos-arm-legacy.dmg | cut -d' ' -f1)"     >> "$GITHUB_OUTPUT"
+            echo "sha_macos_intel_legacy=$(sha256sum macos-intel-legacy.dmg | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+          fi
 
   # Bumps ONLY the version and the two sha256 lines in the tap's existing
-  # Casks/akaisds.rb (the cask itself, caveats included, lives in the tap repo).
+  # Casks/akaisds.rb (the cask itself, caveats included, lives in the tap repo), and the same three lines of
+  # Casks/akaisds-legacy.rb when the release has the legacy macOS builds and the tap has that cask.
   # Needs a fine-grained PAT with Contents read/write on ONLY martincurkovic/homebrew-tap,
   # saved as the TAP_REPO_TOKEN secret.
   homebrew:
@@ -79,6 +90,8 @@ jobs:
           VERSION: ${{ needs.checksums.outputs.version }}
           SHA_ARM: ${{ needs.checksums.outputs.sha_macos_arm }}
           SHA_INTEL: ${{ needs.checksums.outputs.sha_macos_intel }}
+          SHA_ARM_LEGACY: ${{ needs.checksums.outputs.sha_macos_arm_legacy }}
+          SHA_INTEL_LEGACY: ${{ needs.checksums.outputs.sha_macos_intel_legacy }}
         run: |
           set -euo pipefail
           CASK=Casks/akaisds.rb
@@ -93,6 +106,21 @@ jobs:
           grep -q "\"${SHA_INTEL}\"" "$CASK"
           git diff "$CASK"
 
+          LEGACY=Casks/akaisds-legacy.rb
+          if [ -n "$SHA_ARM_LEGACY" ] && [ -n "$SHA_INTEL_LEGACY" ] && [ -f "$LEGACY" ]; then
+            sed -i \
+              -e "s|^\(  version \)\".*\"|\1\"${VERSION}\"|" \
+              -e "s|^\(  sha256 arm: *\)\"[0-9a-f]*\"|\1\"${SHA_ARM_LEGACY}\"|" \
+              -e "s|^\( *intel: *\)\"[0-9a-f]*\"|\1\"${SHA_INTEL_LEGACY}\"|" \
+              "$LEGACY"
+            grep -q "^  version \"${VERSION}\"" "$LEGACY"
+            grep -q "\"${SHA_ARM_LEGACY}\"" "$LEGACY"
+            grep -q "\"${SHA_INTEL_LEGACY}\"" "$LEGACY"
+            git diff "$LEGACY"
+          else
+            echo "legacy cask not bumped: no legacy macOS builds in this release, or no $LEGACY in the tap"
+          fi
+
       - name: Commit and push
         env:
           VERSION: ${{ needs.checksums.outputs.version }}
@@ -101,6 +129,7 @@ jobs:
           git config user.name "akaisds-release-bot"
           git config user.email "actions@users.noreply.github.com"
           git add Casks/akaisds.rb
+          if [ -f Casks/akaisds-legacy.rb ]; then git add Casks/akaisds-legacy.rb; fi
           if git diff --cached --quiet; then
             echo "No changes to publish"
             exit 0
