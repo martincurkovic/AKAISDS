@@ -38,7 +38,7 @@ A simple way to send and receive audio samples to an Akai S900/S1000/S2000/S3000
 - Built in MIDI diagnostic tests
   - MIDI interface test to check if your interface can support MIDI SysEx traffic
   - Hardware connection test to check if your MIDI sampler is connected correctly
-- Native builds for macOS 14+ (Apple Silicon & Intel), Linux and Windows
+- Native builds for macOS 12+ (Apple Silicon & Intel), Linux and Windows
 
 ## Quick Start & Screenshots
 
@@ -99,7 +99,7 @@ Unzip the download and drag AKAISDS to your applications folder. See the disclai
 
 Or install with [Homebrew](https://brew.sh): `brew install --cask martincurkovic/tap/akaisds`. Gatekeeper still applies on first launch.
 
-macOS 14+ support only for now. There are plans to backport AKAISDS to earlier macOS versions, but that work hasn't been started yet.
+macOS 12 and 13 users should download the legacy version (`AKAISDS-macos-*-legacy.dmg`). Anyone on macOS 14 or later should use the regular version.
 
 #### Windows Instructions
 

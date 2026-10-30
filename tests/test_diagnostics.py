@@ -82,6 +82,20 @@ def test_session_config_line_names_the_sampler_type(monkeypatch, captured):
     assert "in='IN'" in line and "channel=3" in line
 
 
+def test_session_config_line_names_the_build_flavor(monkeypatch, captured):
+    from ui import _version
+
+    monkeypatch.setattr(diagnostics.app_config, "get_saved_ports", lambda: ("IN", "OUT"))
+    monkeypatch.setattr(_version, "BUILD_FLAVOR", "legacy", raising=False)  # only the macOS build writes it
+    diagnostics.log_session_config("test")
+    assert "flavor=legacy" in next(l for l in captured if "config (test)" in l)
+
+    captured.clear()
+    monkeypatch.delattr(_version, "BUILD_FLAVOR")  # the Linux and Windows builds never write it
+    diagnostics.log_session_config("test")
+    assert "flavor=current" in next(l for l in captured if "config (test)" in l)
+
+
 def test_dialog_logging_records_text_and_the_answer(monkeypatch, captured):
     for kind in diagnostics_ui._KINDS:  # restored at teardown
         monkeypatch.setattr(QMessageBox, kind, staticmethod(lambda *a, **k: QMessageBox.StandardButton.Ok))

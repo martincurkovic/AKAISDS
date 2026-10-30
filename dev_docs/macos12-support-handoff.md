@@ -82,8 +82,9 @@ Only two dependencies differ (PySide6 and NumPy); everything else is already min
 
 **Phase 4 - the app knows its flavor**
 10. The build writes the flavor into `ui/_version.py`; the startup `config (...)` log line gains `flavor=` and the Qt version.
-11. The update checker must point a legacy user at the `-legacy` DMG, not the modern one (it currently reports the newest release; the asset
-    choice hasn't been read yet).
+11. ~~The update checker must point a legacy user at the `-legacy` DMG~~ Not needed (checked 2026-10-31): `UpdateAvailableDialog` only shows the
+    version and notes and opens the release page (`html_url`); it never chooses an asset. What remains is the release page itself listing four
+    macOS DMGs: say which is which in the release notes and README. A legacy user who grabs the wrong DMG gets macOS's own "requires macOS 14" refusal.
 12. README and download docs say which Mac gets which DMG.
 
 **Phase 5 - proof**
@@ -115,6 +116,10 @@ hard-coded to `.venv`), writes `LSMinimumSystemVersion` 12.0 and names the DMG `
   Launched offscreen on macOS 26: stays up, log says `PySide6 6.8.3, Qt 6.8.3`, VelociLoops loads. **Not run on macOS 12; real windows and theme not looked at; Intel not built.**
 - For contrast, an older locally built CURRENT app had 57 slices above 12.0, one of them at 26.0 (a local compile on macOS 26 with no target set).
 - **The Qt 6.8 `pyside6-deploy` reinstalls Nuitka 4.1.1** over our pinned 4.1.3 during the build, so the legacy app is compiled by 4.1.1. Works; pin the legacy group to 4.1.1 if the swap bothers you.
+
+**Phase 4 mostly done:** `_version.py` gets `BUILD_FLAVOR` (macOS build only) and the `config (...)` log line carries `flavor=`. DMG volume names say the
+macOS range: `AKAISDS (macOS 14+)` and `AKAISDS Legacy (macOS 12-13)` (built and mounted to check, from the legacy app). README: a two-line note on which DMG to use. The
+background picture does NOT mention the range (one picture for both). **README now says macOS 12+, ahead of any test on macOS 12: revert if the Monterey test fails.**
 
 **Phase 3 written, NOT run on GitHub** (`build.yml`, `test.yml`): `build-macos-legacy` (matrix `macos-15` / `macos-15-intel`; build, `check_minos.sh 12.0`, upload)
 and `test-legacy` (Qt 6.8 suite on ubuntu), both `continue-on-error` while new so a failure can't hold up the ordinary release; the release job lists

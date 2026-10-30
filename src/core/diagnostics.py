@@ -83,6 +83,13 @@ def log_session_config(reason):
         from core import rx2
         from core.midi_manager import shared_transport_enabled
 
+        try:
+            from ui import _version
+
+            flavor = getattr(_version, "BUILD_FLAVOR", "current")  # only the macOS build writes it (current | legacy)
+        except Exception:
+            flavor = "unknown"
+
         input_name, output_name = app_config.get_saved_ports()
         log.info(
             f"config ({reason}): sampler_type={app_config.get_saved_device_type()} "
@@ -91,7 +98,8 @@ def log_session_config(reason):
             f"shared_midi_transport={shared_transport_enabled()} "
             f"theme={app_config.get_saved_theme()} "
             f"slice_detection={app_config.get_saved_slice_detection()} "
-            f"rx2_library={'ok' if rx2.is_available() else 'MISSING'}"
+            f"rx2_library={'ok' if rx2.is_available() else 'MISSING'} "
+            f"flavor={flavor}"
         )
     except Exception:
         log.error(f"couldn't read the config for the log ({reason})", exc_info=True)

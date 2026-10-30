@@ -21,11 +21,13 @@ case "$FLAVOR" in
 current)
     MIN_MACOS="14.0"
     DMG_SUFFIX=""
+    DMG_VOLUME="AKAISDS (macOS 14+)"
     VENV_DIR="$ROOT_DIR/.venv"
     ;;
 legacy)
     MIN_MACOS="12.0"
     DMG_SUFFIX="-legacy"
+    DMG_VOLUME="AKAISDS Legacy (macOS 12-13)"
     VENV_DIR="$ROOT_DIR/.venv-legacy"
     # uv's --python-platform reads this, and picks wheels for that macOS (NumPy's macosx_11_0 / 10_13 instead of its macosx_14_0); clang
     # and Nuitka's C compiler read it too, so what we compile targets 12 as well
@@ -65,6 +67,7 @@ else
 fi
 echo "Building version: $VERSION"
 echo "APP_VERSION = \"$VERSION\"" >"$SRC_DIR/ui/_version.py"
+echo "BUILD_FLAVOR = \"$FLAVOR\"" >>"$SRC_DIR/ui/_version.py"  # logged at start-up (core/diagnostics.py); the Linux and Windows builds don't write it
 
 if [ ! -f "pysidedeploy.spec" ]; then
     echo "No spec file found - generating from defaults"
@@ -95,7 +98,8 @@ plutil -replace LSMinimumSystemVersion -string "$MIN_MACOS" AKAISDS.app/Contents
 # The DMG: dmgbuild (a dev dependency, pure Python) writes the window layout directly - no Finder/AppleScript, so it works on a
 # headless CI runner. It opens as a window with AKAISDS.app, an Applications shortcut and a background image with an arrow and
 # "Drag AKAISDS to the Applications folder". Layout: scripts/dmg_settings.py; background: assets/dmg/dmg_background.tiff
-# (regenerate with assets/dmg/create_dmg_background.py). The name is what the workflows upload and the Homebrew cask downloads.
+# (regenerate with assets/dmg/create_dmg_background.py). The file name is what the workflows upload and the Homebrew cask downloads; the volume
+# name is what Finder shows when it is open, and says which macOS the build is for.
 DMG_NAME="AKAISDS-macos-$DMG_ARCH$DMG_SUFFIX.dmg"
 echo "Creating $DMG_NAME..."
 rm -f "$ROOT_DIR/$DMG_NAME"
@@ -103,7 +107,7 @@ $UV_RUN dmgbuild \
     -s "$ROOT_DIR/scripts/dmg_settings.py" \
     -D app="AKAISDS.app" \
     -D background="$ROOT_DIR/assets/dmg/dmg_background.tiff" \
-    "AKAISDS" "$ROOT_DIR/$DMG_NAME"
+    "$DMG_VOLUME" "$ROOT_DIR/$DMG_NAME"
 
 echo ""
 echo "Done - check the output above for exactly where the .app landed."
