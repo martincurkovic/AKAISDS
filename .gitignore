@@ -4,6 +4,7 @@ __pycache__/
 *$py.class
 *.egg-info/
 .venv/
+.venv-legacy/
 venv/
 .env
 .mypy_cache/
