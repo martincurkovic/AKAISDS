@@ -11,7 +11,7 @@ MAX="${1:?usage: check_minos.sh MAX_VERSION [APP_OR_DMG]}"
 TARGET="${2:-$(cd "$(dirname "$0")/.." && pwd)/src/AKAISDS.app}"
 
 MOUNT=""
-cleanup() { [ -n "$MOUNT" ] && hdiutil detach -quiet "$MOUNT" || true; }
+cleanup() { if [ -n "$MOUNT" ]; then hdiutil detach -quiet "$MOUNT" && rmdir "$MOUNT"; fi; }
 trap cleanup EXIT
 case "$TARGET" in
 *.dmg)
@@ -31,8 +31,9 @@ SUMMARY="$(mktemp)"
 # `file` takes many paths per run: far faster than one process per file
 find "$APP" -type f -print0 | xargs -0 file | grep "Mach-O" | sed 's/: *Mach-O.*//' | while IFS= read -r f; do
     for arch in $(lipo -archs "$f" 2>/dev/null); do
-        # LC_BUILD_VERSION has `minos`; very old binaries have LC_VERSION_MIN_MACOSX with `version`
-        v="$(vtool -arch "$arch" -show-build "$f" 2>/dev/null | awk '/minos/ {print $2; exit} /cmd LC_VERSION_MIN_MACOSX/ {old=1} old && /version/ {print $2; exit}')"
+        # LC_BUILD_VERSION has `minos`; very old binaries have LC_VERSION_MIN_MACOSX with `version`. Match the FIELD NAME, not the word anywhere: vtool's
+        # first line is the file's path, and a mount point called ..._minos... once made every slice read as "(architecture"
+        v="$(vtool -arch "$arch" -show-build "$f" 2>/dev/null | awk '$1 == "minos" {print $2; exit} /cmd LC_VERSION_MIN_MACOSX/ {old=1} old && $1 == "version" {print $2; exit}')"
         [ -n "$v" ] || continue
         echo "$v" >>"$SUMMARY"
         if newer "$v" "$MAX"; then
