@@ -94,5 +94,44 @@ def _fresh_section_card_state():
     section_card.reset_state()
 
 
+_exit_status = None
+
+
 def pytest_sessionfinish(session, exitstatus):
+    global _exit_status
+    _exit_status = int(exitstatus)
     shutil.rmtree(_TEST_LOG_DIR, ignore_errors=True)
+
+
+def pytest_terminal_summary(terminalreporter):
+    # Opt-in (AKAISDS_TEST_WIDGET_COUNT=1): how many windows and dialogs the tests left alive, which is what the exit below skips destroying, and what every
+    # theme switch while the suite runs has to restyle. Counts Python wrappers only (gc + shiboken6.isValid): QApplication.allWidgets() makes PySide wrap EVERY
+    # widget Qt knows about, and segfaulted on one that was half destroyed (2026-10-31, at the end of a full run), so never use it here.
+    if not os.environ.get("AKAISDS_TEST_WIDGET_COUNT"):
+        return
+    try:
+        import gc
+        from collections import Counter
+
+        import shiboken6
+        from PySide6.QtWidgets import QDialog, QMainWindow
+
+        alive = Counter(type(o).__name__ for o in gc.get_objects() if isinstance(o, (QMainWindow, QDialog)) and shiboken6.isValid(o))
+        common = ", ".join(f"{n} x {name}" for name, n in alive.most_common(6))
+        terminalreporter.write_line(f"Windows and dialogs still alive: {sum(alive.values())} ({common})")
+    except Exception:
+        pass
+
+
+@_pytest.hookimpl(trylast=True)
+def pytest_unconfigure(config):
+    # Leave the moment the summary is out. Python's own shutdown destroys every Qt widget the tests left alive, and PySide's
+    # SenderSignalDeletionTracker::senderDestroyed makes that slow in proportion to how many there are: 3 minutes on Qt 6.11 and about 9 on 6.8 after the
+    # last test on the owner's Mac (sampled 2026-10-31: the main thread in destroyQCoreApplication), 6 minutes on a CI runner with 6.11, and the Qt 6.8 CI job
+    # never finished (cancelled at its 40-minute limit, 16 minutes after its summary). Nothing a test checks happens at exit.
+    # AKAISDS_TEST_NORMAL_EXIT=1 gives the ordinary shutdown back (to debug an exit-time problem).
+    if _exit_status is None or os.environ.get("AKAISDS_TEST_NORMAL_EXIT"):
+        return
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(_exit_status)

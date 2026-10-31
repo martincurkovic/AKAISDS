@@ -135,7 +135,9 @@ not recorded (which DMG, how far they got: launch only, the editors, the theme?)
 
 **First CI run (2026-10-31):** the regular suite failed on ONE test of mine (`test_session_config_line_names_the_build_flavor` imported the git-ignored, build-generated
 `ui/_version.py`; fixed with stand-in modules, checked with the file hidden). `test-legacy` hit its 25-minute limit at 99%: **the Qt 6.8 suite is ~1.6x slower than 6.11**
-(local, no other load: 3729 passed in 9m24s on 6.11; 15m23s on 6.8; no outlier tests, 1.2-1.9x spread across the S1000 window tests etc.), so its limit is now 40 minutes and it prints `--durations=30`.
+(local, no other load: 3729 passed in 9m24s on 6.11; 15m23s on 6.8; no outlier tests, 1.2-1.9x spread across the S1000 window tests etc.); its limit is now 40 minutes and it prints `--durations=30`.
+**The 40-minute cancel was NOT the tests (23m07s, all passed): the pytest process never exited.** Python's shutdown destroys the ~550-650 windows the tests leave alive and PySide's `senderDestroyed` makes that take minutes
+(180 s on 6.11 and ~560 s on 6.8 locally; 6 min on the CI runner with 6.11). `tests/conftest.py` now exits right after the summary (0.1-0.2 s on both Qt versions, exit code kept: see TESTING.md).
 **The S950 write-test "flake" was real and Qt 6.8 only** (it failed in both full 6.8 runs, never on 6.11): `S950ProgramEditorWindow` (and the Yamaha editor) did
 `QTimer.singleShot(0, self._refresh)` in the constructor; a test that closed the window before the event loop ran left that call queued, and on PySide 6.8 it then ran `_refresh` on the
 deleted window during the NEXT test's event loop ("QStatusBar already deleted"; 6.11 drops it with the receiver). Bisected to `test_the_bottom_bar_has_refresh_on_the_left_and_close_on_the_right` +
