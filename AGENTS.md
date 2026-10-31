@@ -13,6 +13,7 @@ and plans: `dev_docs/`.
 | S1000 / S900-S950 / Yamaha A4000 | their own sections, then `dev_docs/s950-notes.md` / `yamaha-a4000-notes.md` |
 | Ensoniq EPS/ASR/ASR-X | their sections, `dev_docs/ensoniq-notes.md`, `dev_docs/asrx-notes.md` |
 | multi files | `dev_docs/multi-save-load-progress.md`, `dev_docs/s3000-multi-file-format.md` |
+| a wrong Device ID / "scan for the sampler" | `dev_docs/device-id-scan-plan.md` (planned, not built) |
 | sending samples, Slice Editor, sample edits | "Sample send hardening", "Sample edits and the working copy", "Slice Editor" |
 | menus, shortcuts | "Menus and shortcuts" |
 | the Macintosh System 6 theme | "Macintosh System 6 theme", `dev_docs/system6-theme-roadmap.md` |
