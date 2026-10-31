@@ -133,6 +133,15 @@ background picture does NOT mention the range (one picture for both). **README s
 **Reported by the owner, 2026-10-31: the legacy build runs in a macOS 12 VM on the owner's M1 MacBook Air (so arm64, Apple Silicon, virtualised).** Details
 not recorded (which DMG, how far they got: launch only, the editors, the theme?). Still untested: Intel, real hardware (the 2015 Air), CoreMIDI with a real interface, a macOS 13 machine.
 
+**First CI run (2026-10-31):** the regular suite failed on ONE test of mine (`test_session_config_line_names_the_build_flavor` imported the git-ignored, build-generated
+`ui/_version.py`; fixed with stand-in modules, checked with the file hidden). `test-legacy` hit its 25-minute limit at 99%: **the Qt 6.8 suite is ~1.6x slower than 6.11**
+(local, no other load: 3729 passed in 9m24s on 6.11; 15m23s on 6.8; no outlier tests, 1.2-1.9x spread across the S1000 window tests etc.), so its limit is now 40 minutes and it prints `--durations=30`.
+**The S950 write-test "flake" was real and Qt 6.8 only** (it failed in both full 6.8 runs, never on 6.11): `S950ProgramEditorWindow` (and the Yamaha editor) did
+`QTimer.singleShot(0, self._refresh)` in the constructor; a test that closed the window before the event loop ran left that call queued, and on PySide 6.8 it then ran `_refresh` on the
+deleted window during the NEXT test's event loop ("QStatusBar already deleted"; 6.11 drops it with the receiver). Bisected to `test_the_bottom_bar_has_refresh_on_the_left_and_close_on_the_right` +
+the write test. Both constructors now use a window-owned single-shot `QTimer`. Not changed: `QTimer.singleShot(0, self._pump)` in `s950_samples_tab.py` (same shape, mid-transfer) and the controller's
+`_send_next_queued_file`. **Lesson: on PySide 6.8 a bound-method `singleShot` is not cancelled when its QObject dies; give a deferred call to a widget a timer the widget owns.**
+
 **Phase 3 written, NOT run on GitHub** (`build.yml`, `test.yml`): `build-macos-legacy` (matrix `macos-15` / `macos-15-intel`; build, `check_minos.sh 12.0`, upload)
 and `test-legacy` (Qt 6.8 suite on ubuntu), both `continue-on-error` while new so a failure can't hold up the ordinary release; the release job lists
 `build-macos-legacy` in `needs` and its `release-files/**/*` glob attaches whatever legacy DMGs exist. `publish-packages.yml` is untouched (it fetches the

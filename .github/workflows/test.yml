@@ -37,7 +37,7 @@ jobs:
   # which nothing else can see (no macOS 12 runner). continue-on-error while it is new, so it can't hold up the ordinary release gate.
   test-legacy:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 40  # the Qt 6.8 run needed more than 25 on 2026-10-31 (still at 99% when it was cut off); --durations below shows where the time goes
     continue-on-error: true
     steps:
       - uses: actions/checkout@v4
@@ -55,4 +55,4 @@ jobs:
       - name: Run tests
         env:
           AKAISDS_CI_NO_AUDIO_DEVICE: "1"
-        run: uv run --no-sync pytest tests/ -v -ra -o faulthandler_timeout=90
+        run: uv run --no-sync pytest tests/ -v -ra -o faulthandler_timeout=90 --durations=30

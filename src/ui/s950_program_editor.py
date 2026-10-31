@@ -243,7 +243,12 @@ class S950ProgramEditorWindow(QMainWindow):
 
         self._show_placeholder("Reading the program list...")
         self._update_buttons()
-        QTimer.singleShot(0, self._refresh)
+        # a timer the window owns goes away with it: QTimer.singleShot(0, self._refresh) outlived a window that was closed before the event loop
+        # ran, and on PySide 6.8 (the macOS 12 build) then called _refresh on the deleted window, from whichever test or event loop came next
+        self._first_refresh = QTimer(self)
+        self._first_refresh.setSingleShot(True)
+        self._first_refresh.timeout.connect(self._refresh)
+        self._first_refresh.start(0)
 
     # -- construction -------------------------------------------------------------------
     #
