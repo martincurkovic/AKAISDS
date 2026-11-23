@@ -1044,6 +1044,74 @@ def test_the_slot_stays_the_one_asked_for_after_a_reply_labelled_0(rig):
     assert [m.num for m in seen] == [1]
 
 
+def test_a_stray_reply_for_a_request_for_slot_0_is_checked_too(rig):
+    # the unit's header always says 0, so for slot 0 the number proves nothing either
+    _catalog_loaded(rig)
+    rec = _ProgramRecorder(rig.controller)
+    rig.controller.request_program(0)
+    stray = s.build_akai_data(s.FUNC_PRGM, 0, rig.fake.programs[1].to_payload())
+    rig.engine.handle_sysex(bytes(stray))
+    assert rec.received == []
+    assert rig.engine._pending is not None
+    assert wait_until(lambda: rec.received)
+    assert rec.received[0][1].name == "DRUMS"
+
+
+def test_a_reply_the_check_rejects_is_logged_as_a_warning_and_not_counted_as_a_stray(rig, caplog):
+    import logging
+
+    caplog.set_level(logging.DEBUG, logger="akaisds")
+    _catalog_loaded(rig)
+    rig.engine.programs = [(n, "RENAMED" if n == 1 else name) for n, name in rig.engine.programs]  # the catalog is stale
+    rec = _ProgramRecorder(rig.controller)
+    rig.engine.reply_timeout_ms = 50
+    rig.controller.request_program(1)
+    assert wait_until(lambda: rec.received)
+    assert rec.received == [(1, None)]  # the reply was dropped, so this ends as a timeout
+    assert rig.rec.status_has("No reply")
+    assert any(
+        r.levelno == logging.WARNING and "dropped a reply to program 1" in r.getMessage() for r in caplog.records
+    )
+    assert rig.engine._unexpected_akai == 0
+
+
+def test_a_sample_settings_read_back_checks_whose_reply_it_is(rig, monkeypatch):
+    # the handler compares only the fields that were changed, so the reply's name decides
+    seen = []
+    monkeypatch.setattr(rig.engine, "_on_sample_write_readback", seen.append)
+    rig.engine._op = "sample_write"
+    rig.engine._program_slot = 1
+    rig.engine._write_merged = rig.fake.samples[1]["params"]
+    rig.engine._read_back_sample()
+    other = s.build_akai_data(s.FUNC_SPRM, 0, rig.fake.samples[0]["params"].to_payload())
+    rig.engine.handle_sysex(bytes(other))
+    assert seen == []
+    assert rig.engine._pending is not None
+    mine = s.build_akai_data(s.FUNC_SPRM, 0, rig.fake.samples[1]["params"].to_payload())
+    rig.engine.handle_sysex(bytes(mine))
+    assert [m.num for m in seen] == [1]
+    rig.engine._reset()
+
+
+def test_the_post_upload_read_takes_the_length_that_was_sent_or_the_catalogs_name(rig):
+    import dataclasses
+
+    _catalog_loaded(rig)
+    params = rig.fake.samples[0]["params"]
+    rig.engine._slot = 0
+    rig.engine._words = [s.SILENCE_WORD] * params.total_words
+
+    def reply(p):
+        return s.parse_akai(bytes(s.build_akai_data(s.FUNC_SPRM, 0, p.to_payload())))
+
+    assert rig.engine._is_the_uploaded_sample(reply(params))
+    padded = dataclasses.replace(params, total_words=params.total_words + 37)
+    assert rig.engine._is_the_uploaded_sample(reply(padded))  # another length, but the catalog's name for the slot
+    other = dataclasses.replace(rig.fake.samples[1]["params"], total_words=params.total_words + 37)
+    assert not rig.engine._is_the_uploaded_sample(reply(other))
+    rig.engine._words = None
+
+
 # --- logging: operation start, and the stream of unexpected messages that points at something echoing replies ---
 
 

@@ -617,18 +617,29 @@ class S950Transfers(QObject):
         if pending is None or message.function != pending.function:
             self._note_unexpected(message)
             return
-        if pending.num is not None and message.num != pending.num:
-            # A real S950 puts 0 in the number of EVERY reply header, whatever was asked for (issue #7, 2026-11-16: the
-            # data was the requested item's, only the header said 0). So the header can't tell which item a reply is;
-            # the request's own `verify` looks at the contents instead. Without one, a different number is still a stray.
-            if pending.verify is None or not pending.verify(message):
+        # A real S950 puts 0 in the number of EVERY reply header, whatever was asked for (issue #7, 2026-11-16: the data was
+        # the requested item's, only the header said 0). So a header number that differs from the request's, or is 0 on a
+        # request that has a `verify`, proves nothing; the request's own `verify` looks at the contents instead. Without
+        # one, a different number is still a stray.
+        if pending.num is not None and (
+            message.num != pending.num or (message.num == 0 and pending.verify is not None)
+        ):
+            if pending.verify is None:
                 self._note_unexpected(message)
                 return
-            debug_log.get_logger().debug(
-                f"S950Transfers: reply header says item {message.num}, asked for {pending.num}; "
-                "the contents fit the request, so it is taken"
-            )
-            message = dataclasses.replace(message, num=pending.num)
+            if not pending.verify(message):
+                # not counted as a stray: it may be a valid reply this check is wrong about (a stale catalog, a renamed item)
+                debug_log.get_logger().warning(
+                    f"S950Transfers: dropped a reply to {pending.label}: header says item {message.num}, "
+                    "and its contents don't fit the request"
+                )
+                return
+            if message.num != pending.num:
+                debug_log.get_logger().debug(
+                    f"S950Transfers: reply header says item {message.num}, asked for {pending.num}; "
+                    "the contents fit the request, so it is taken"
+                )
+                message = dataclasses.replace(message, num=pending.num)
         self._pending = None
         self._reply_timer.stop()
         pending.callback(message)
@@ -645,31 +656,41 @@ class S950Transfers(QObject):
                 "sending the sampler's replies back to it (see AGENTS.md's incident notes)"
             )
 
-    def _named_in_catalog(self, kind, slot):
-        """A `verify` for `_request`: the reply's own name must be the one the last catalog gave `slot`.
-        A slot the catalog doesn't list, or a payload that doesn't parse (the handler reports that), has nothing
-        to compare, so the reply to the one outstanding request is taken. Two items with one name can't be told apart."""
-        table, parse = (
-            (lambda: self.programs, s950_program.Program.from_payload)
-            if kind == "program"
-            else (lambda: self.samples, s.SampleParams.from_payload)
-        )
+    @staticmethod
+    def _same_name(a, b):
+        # compared as the catalog and a block spell them: case and padding ignored, a non-ASCII character is just '?'
+        return a.strip().upper().encode("ascii", "replace") == b.strip().upper().encode("ascii", "replace")
+
+    def _named(self, kind, expected):
+        """A `verify` for `_request`: the reply's own name must be `expected()`. When that is None, or the payload
+        doesn't parse (the handler reports that), there is nothing to compare, so the reply is taken."""
+        parse = s950_program.Program.from_payload if kind == "program" else s.SampleParams.from_payload
 
         def verify(message):
-            names = [name for num, name in table() if num == slot]
-            if not names:
+            want = expected()
+            if want is None:
                 return True
             try:
                 held = parse(message.payload).name
             except ValueError:
                 return True
-            return held.strip().upper() == names[0].strip().upper()
+            return self._same_name(held, want)
 
         return verify
 
+    def _named_in_catalog(self, kind, slot):
+        """The reply's name must be the one the last catalog gave `slot` (taken if the catalog doesn't list it).
+        Two items with one name can't be told apart."""
+        table = (lambda: self.programs) if kind == "program" else (lambda: self.samples)
+
+        def catalog_name():
+            return next((name for num, name in table() if num == slot), None)
+
+        return self._named(kind, catalog_name)
+
     @staticmethod
     def _any_reply(_message):
-        # for a read-back: the handler compares the whole contents with what was sent, which is the stronger check
+        # for a PROGRAM read-back: the handler compares the whole program with what was sent, which is the stronger check
         return True
 
     def _on_handshake(self, code):
@@ -829,11 +850,14 @@ class S950Transfers(QObject):
         )
 
     def _is_the_uploaded_sample(self, message):
-        # the new sample has no name of its own yet, but it has the length that was just sent
+        # the new sample has no name of its own yet, but it should have the length that was just sent. Whether the unit
+        # stores exactly that length is unmeasured, so a reply naming the slot's catalog entry passes too.
         try:
-            return s.SampleParams.from_payload(message.payload).total_words == len(self._words)
+            if s.SampleParams.from_payload(message.payload).total_words == len(self._words):
+                return True
         except ValueError:
             return True  # _write_name reports it
+        return self._named_in_catalog("sample", self._slot)(message)
 
     def _write_name(self, message):
         params = s.SampleParams.from_payload(message.payload)
@@ -1106,7 +1130,8 @@ class S950Transfers(QObject):
             s.FUNC_SPRM,
             self._on_sample_write_readback,
             f"sample {self._program_slot}'s parameters (to check the write)",
-            self._any_reply,
+            # the handler only compares the fields that were changed, so the name (never written) says whose reply it is
+            self._named("sample", lambda: self._write_merged.name if self._write_merged else None),
         )
 
     def _on_sample_write_readback(self, message):
