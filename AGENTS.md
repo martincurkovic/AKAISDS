@@ -29,7 +29,7 @@ and plans: `dev_docs/`.
 - Real hardware: read "Real-hardware safety" first. Back up before writing. Close other MIDI software.
 - Keep user-facing text short (a line or two). Detail goes in the log.
 - Record what was measured versus guessed, dated, with the unit it was measured on.
-- Tests: `uv run pytest tests/ -q` (~8 min, ~3600 tests). The traps (offscreen Qt, threads) are in `TESTING.md`.
+- Tests: `uv run pytest tests/ -q` (~5 min, ~3700 tests). The traps (offscreen Qt, threads) are in `TESTING.md`.
 
 ## What this app is
 

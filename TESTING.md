@@ -6,7 +6,7 @@ uv run python tools/build_velociloops.py   # the REX2 reader; needs a C++ compil
 uv run pytest tests/ -q
 ```
 
-The whole suite takes about 3-4 minutes. CI runs the same command with `AKAISDS_CI_NO_AUDIO_DEVICE=1`, which skips the tests that
+The whole suite takes about 5 minutes (3741 tests in 5:12 and 5:16 on the dev Mac, 2026-11-23). CI runs the same command with `AKAISDS_CI_NO_AUDIO_DEVICE=1`, which skips the tests that
 need a real audio output device. Without the library built, the `.rx2` tests are skipped, not failed. When you fix a bug, add a test that would have caught it.
 
 ## What's covered
@@ -64,5 +64,12 @@ Looking at the app by hand instead of through a test: the demo samplers (fake un
   destroys every window the tests left alive, and PySide's `SenderSignalDeletionTracker::senderDestroyed` makes that take minutes (2026-10-31, `sample` of the lingering process: 94% in it, under
   `destroyQCoreApplication`): 180 s on Qt 6.11 and ~560 s on 6.8 on the dev Mac, 6 minutes on a CI runner with 6.11, and the Qt 6.8 CI job never finished (cancelled at its limit, 16 minutes after its summary).
   After the change the exit takes 0.1-0.2 s on both. `AKAISDS_TEST_WIDGET_COUNT=1` prints how many windows are still alive at the end (554 on 6.11: 399 `ProgramEditorWindow`, 78 `SliceEditorWindow`; 645 on 6.8),
-  which is the leak itself, still there. **Never count widgets with `QApplication.allWidgets()`** (it wraps every widget Qt knows about and segfaulted on a half-destroyed one).
+  which was the leak itself (it is fixed: see the next entry, and the count is 0 now). **Never count widgets with `QApplication.allWidgets()`** (it wraps every widget Qt knows about and segfaulted on a half-destroyed one).
+- **Windows are deleted after every test, and the run fails if many survive** (`tests/conftest.py`, `_release_windows` and the end-of-run check). The editor fixtures only stopped their `BridgeWorker`, so
+  ~540 windows lived to the end of a run and every later test paid for them (the theme tests restyle every live widget). Measured 2026-11-23, dev Mac: the same 3 window-heavy files took 88 s
+  in one process and 28 s with the fix; the whole suite went from 9:17 to 5:12 and 5:16 (two runs, 3741 tests, 0 windows left). Every `QMainWindow`/`QDialog` subclass built is remembered (`QMainWindow.__init__`
+  and `QDialog.__init__` are wrapped in conftest, so a bare `QMessageBox` or `QWidget` is NOT seen), its `_worker` stopped, and `deleteLater()` called after the test's own fixtures have torn down. **Not `close()`**: that
+  runs `closeEvent`, and an "unsent edits" question blocks offscreen forever (a try with `close()` hung past 10 minutes). If the run ends with more than 25 windows alive
+  (`AKAISDS_TEST_WINDOW_LIMIT` changes it) it prints `FAILED: N windows and dialogs are still alive` and exits 1: a window kept in a module global, or a fixture wider than a test, would do it. A scan of
+  every live object after each test would find the leaks too, but costs more than it saves (a diagnostic plugin that did it was ~8x slower over a full run).
 - One harmless warning: `Wave_write.__del__` from the stdlib `wave`, from a test that writes to an unwritable path.

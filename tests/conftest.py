@@ -94,16 +94,92 @@ def _fresh_section_card_state():
     section_card.reset_state()
 
 
+# Every window and dialog a test builds is remembered (weakly), and deleted when that test ends. The editor fixtures only stopped
+# their worker thread, so ~540 windows lived to the end of a run (2026-11-23: 399 ProgramEditorWindow) and every later test paid for
+# them: the theme tests restyle every live widget, and the suite took 557 s where the same files each run alone took 377 s in all.
+# Only QMainWindow and QDialog subclasses that call QMainWindow/QDialog.__init__ are seen (a bare QMessageBox is not, nor a QWidget).
+import weakref as _weakref
+
+_windows_made = []
+
+
+def _remember_new_windows():
+    from PySide6.QtWidgets import QDialog, QMainWindow
+
+    for cls in (QMainWindow, QDialog):
+        original = cls.__init__
+
+        def remembering(self, *args, _original=original, **kwargs):
+            _original(self, *args, **kwargs)
+            _windows_made.append(_weakref.ref(self))
+
+        cls.__init__ = remembering
+
+
+_remember_new_windows()
+
+
+@_pytest.fixture(autouse=True)
+def _release_windows():
+    # Set up first, so it is torn down AFTER the test's own fixtures (they stop their workers and close what they need to).
+    yield
+    import shiboken6
+    from PySide6.QtCore import QCoreApplication, QEvent
+
+    made = [w for w in (ref() for ref in _windows_made) if w is not None and shiboken6.isValid(w)]
+    _windows_made.clear()
+    for window in made:
+        # a window deleted under a running BridgeWorker aborts Qt ("Destroyed while thread is still running"); stop() and wait() can repeat
+        worker = getattr(window, "_worker", None)
+        if worker is not None:
+            worker.stop()
+            worker.wait()
+    for window in made:
+        if shiboken6.isValid(window):
+            window.deleteLater()  # not close(): that would run closeEvent, and its "unsent edits" question blocks offscreen
+    QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete.value)
+
+
+# The leak above came back easily (one fixture without cleanup), so the run fails when many windows are still alive at the end.
+# AKAISDS_TEST_WINDOW_LIMIT changes the limit.
+_WINDOW_LIMIT = int(os.environ.get("AKAISDS_TEST_WINDOW_LIMIT", "25"))
+_windows_alive = None
+
+
+def _count_live_windows():
+    # Python wrappers only (gc + shiboken6.isValid), never QApplication.allWidgets(): see pytest_terminal_summary
+    import gc
+    from collections import Counter
+
+    import shiboken6
+    from PySide6.QtWidgets import QDialog, QMainWindow
+
+    return Counter(type(o).__name__ for o in gc.get_objects() if isinstance(o, (QMainWindow, QDialog)) and shiboken6.isValid(o))
+
+
 _exit_status = None
 
 
 def pytest_sessionfinish(session, exitstatus):
-    global _exit_status
+    global _exit_status, _windows_alive
+    try:
+        _windows_alive = _count_live_windows()
+    except Exception:
+        _windows_alive = None
+    if _windows_alive is not None and sum(_windows_alive.values()) > _WINDOW_LIMIT and int(exitstatus) == 0:
+        exitstatus = session.exitstatus = 1
     _exit_status = int(exitstatus)
     shutil.rmtree(_TEST_LOG_DIR, ignore_errors=True)
 
 
 def pytest_terminal_summary(terminalreporter):
+    if _windows_alive is not None and sum(_windows_alive.values()) > _WINDOW_LIMIT:
+        common = ", ".join(f"{n} x {name}" for name, n in _windows_alive.most_common(6))
+        terminalreporter.write_line(
+            f"FAILED: {sum(_windows_alive.values())} windows and dialogs are still alive after the run (limit {_WINDOW_LIMIT}): {common}. "
+            "A test or fixture keeps them alive; see tests/conftest.py _release_windows.",
+            red=True,
+        )
     # Opt-in (AKAISDS_TEST_WIDGET_COUNT=1): how many windows and dialogs the tests left alive, which is what the exit below skips destroying, and what every
     # theme switch while the suite runs has to restyle. Counts Python wrappers only (gc + shiboken6.isValid): QApplication.allWidgets() makes PySide wrap EVERY
     # widget Qt knows about, and segfaulted on one that was half destroyed (2026-10-31, at the end of a full run), so never use it here.
