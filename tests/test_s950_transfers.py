@@ -969,6 +969,81 @@ def test_an_unreadable_sprm_answers_none(rig, monkeypatch):
     assert rig.engine.idle
 
 
+# --- the unit labels every reply with item 0 (issue #7, a real S950, 2026-11-16) --------------------------------
+
+
+def _catalog_loaded(rig):
+    rig.controller.refresh_sample_list()
+    assert wait_until(lambda: rig.engine.idle and rig.engine.programs)
+
+
+def test_a_program_other_than_the_first_is_read_though_its_reply_says_item_0(rig):
+    rec = _ProgramRecorder(rig.controller)
+    rig.controller.request_program(1)
+    assert wait_until(lambda: rec.received)
+    slot, program = rec.received[0]
+    assert slot == 1 and program.name == "PAD PROG"
+    assert rig.engine.idle
+
+
+def test_a_sample_other_than_the_first_is_read_though_its_reply_says_item_0(rig):
+    received = []
+    rig.controller.s950_sample_params_received.connect(lambda slot, p: received.append((slot, p)))
+    rig.controller.request_sample_params(2)
+    assert wait_until(lambda: received)
+    slot, params = received[0]
+    assert slot == 2 and params.name == "PAD"
+
+
+def test_a_unit_that_echoes_the_item_number_still_works(qapp, monkeypatch):
+    r = _build(qapp, monkeypatch, FakeS950(echo_item_number=True))
+    try:
+        rec = _ProgramRecorder(r.controller)
+        r.controller.request_program(1)
+        assert wait_until(lambda: rec.received)
+        assert rec.received[0][1].name == "PAD PROG"
+    finally:
+        r.engine.cancel()
+
+
+def test_a_stray_reply_for_another_program_is_not_taken_for_the_one_asked_for(rig):
+    _catalog_loaded(rig)
+    rec = _ProgramRecorder(rig.controller)
+    rig.controller.request_program(1)
+    # program 0's data, header number 0: what a late reply for another request looks like. The real reply is still queued.
+    stray = s.build_akai_data(s.FUNC_PRGM, 0, rig.fake.programs[0].to_payload())
+    rig.engine.handle_sysex(bytes(stray))
+    assert rec.received == []
+    assert rig.engine._pending is not None  # still waiting for the right one
+    assert wait_until(lambda: rec.received)
+    assert rec.received[0][1].name == "PAD PROG"
+
+
+def test_a_reply_with_another_item_number_and_no_content_check_is_still_a_stray(rig):
+    # the plain catalog request has nothing to compare, so only its own number (0) counts
+    rig.engine._request(s.FUNC_CAT, 0, s.FUNC_CAT, lambda m: None, "x")
+    rig.engine.handle_sysex(bytes(s.build_akai_data(s.FUNC_CAT, 5, b"")))
+    assert rig.engine._pending is not None
+    rig.engine._pending = None
+    rig.engine._reply_timer.stop()
+
+
+def test_the_slot_stays_the_one_asked_for_after_a_reply_labelled_0(rig):
+    # handlers read message.num as the slot, so it is put back to the requested one
+    _catalog_loaded(rig)
+    seen = []
+    rig.engine._request(
+        s.FUNC_RPRGM,
+        1,
+        s.FUNC_PRGM,
+        seen.append,
+        "program 1",
+        rig.engine._named_in_catalog("program", 1),
+    )
+    rig.engine.handle_sysex(bytes(s.build_akai_data(s.FUNC_PRGM, 0, rig.fake.programs[1].to_payload())))
+    assert [m.num for m in seen] == [1]
+
+
 # --- logging: operation start, and the stream of unexpected messages that points at something echoing replies ---
 
 

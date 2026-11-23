@@ -26,6 +26,11 @@ Behaviour that comes from s950tools' hardware-verified comments:
    (`stale_params_on_overwrite`)
  - no reply to SPRM / PRGM writes
 
+Behaviour MEASURED on a real S950 (a tester's log, 2026-11-16, issue #7):
+ - every data reply (SPRM, PRGM) carries 0 in its header's number, whatever
+   was asked for; the contents are the requested item's. A fake that echoed
+   the number hid this (`echo_item_number` brings that behaviour back)
+
 Behaviour that is GUESSED (nothing measured - the first real S950 report
 will confirm or refute each): the order of the catalog (programs first),
 the default name of an uploaded sample (the dump carries none), a NAK for an
@@ -103,8 +108,12 @@ class FakeS950:
         dump_acks_required=None,
         stale_params_on_overwrite=True,
         split_header_envelope=False,
+        echo_item_number=False,
     ):
         self.channel = channel
+        #: a real S950 puts 0 in the number of every reply header (measured);
+        #: True makes the fake echo the requested number instead
+        self.echo_item_number = echo_item_number
         #: ACK handshakes needed before a requested dump is released. None =
         #: one per block (a guess - s950tools only knows the unit stalls
         #: between blocks without them). 0 = send immediately.
@@ -167,6 +176,8 @@ class FakeS950:
         self._outbox.append([SOX, *data, EOX])
 
     def _reply_akai(self, function, num, payload):
+        if not self.echo_item_number:
+            num = 0
         self._send(s.build_akai_data(function, num, payload, channel=self.channel))
 
     def handle(self, frame):

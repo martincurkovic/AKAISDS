@@ -125,13 +125,15 @@ def prepare_words(channels, framerate, *, target_rate=None, force_mono=False):
 
 
 class _Pending:
-    def __init__(self, function, num, callback, label):
+    def __init__(self, function, num, callback, label, verify=None):
         self.function, self.num, self.callback, self.label = (
             function,
             num,
             callback,
             label,
         )
+        # decides whether a reply whose header number differs from `num` is still ours (see _on_akai)
+        self.verify = verify
 
 
 class S950Transfers(QObject):
@@ -251,7 +253,12 @@ class S950Transfers(QObject):
             return
         self._c.status_changed.emit(f"Requesting info for sample {slot}...")
         self._request(
-            s.FUNC_RSPRM, slot, s.FUNC_SPRM, self._publish_info, f"sample {slot}'s parameters"
+            s.FUNC_RSPRM,
+            slot,
+            s.FUNC_SPRM,
+            self._publish_info,
+            f"sample {slot}'s parameters",
+            self._named_in_catalog("sample", slot),
         )
 
     def rename_sample(self, slot, new_name):
@@ -270,7 +277,12 @@ class S950Transfers(QObject):
             return
         self._rename_to = name
         self._request(
-            s.FUNC_RSPRM, slot, s.FUNC_SPRM, self._apply_rename, f"sample {slot}'s parameters"
+            s.FUNC_RSPRM,
+            slot,
+            s.FUNC_SPRM,
+            self._apply_rename,
+            f"sample {slot}'s parameters",
+            self._named_in_catalog("sample", slot),
         )
 
     def request_program(self, slot):
@@ -283,7 +295,12 @@ class S950Transfers(QObject):
         self._program_slot = slot
         self._c.status_changed.emit(f"Reading program {slot}...")
         self._request(
-            s.FUNC_RPRGM, slot, s.FUNC_PRGM, self._publish_program, f"program {slot}"
+            s.FUNC_RPRGM,
+            slot,
+            s.FUNC_PRGM,
+            self._publish_program,
+            f"program {slot}",
+            self._named_in_catalog("program", slot),
         )
 
     def request_sample_params(self, slot):
@@ -300,6 +317,7 @@ class S950Transfers(QObject):
             s.FUNC_SPRM,
             self._publish_sample_params,
             f"sample {slot}'s parameters",
+            self._named_in_catalog("sample", slot),
         )
 
     def write_program(self, slot, baseline, edited):
@@ -336,6 +354,7 @@ class S950Transfers(QObject):
             s.FUNC_PRGM,
             self._on_write_preread,
             f"program {slot} (before writing it)",
+            self._named_in_catalog("program", slot),
         )
 
     def write_sample_params(self, slot, changes):
@@ -374,6 +393,7 @@ class S950Transfers(QObject):
             s.FUNC_SPRM,
             self._on_sample_write_preread,
             f"sample {slot}'s parameters (before writing them)",
+            self._named_in_catalog("sample", slot),
         )
 
     def _sample_write_refused(self, slot, message):
@@ -523,8 +543,8 @@ class S950Transfers(QObject):
         except Exception:
             debug_log.get_logger().warning("S950Transfers: send failed", exc_info=True)
 
-    def _request(self, function, num, expect, callback, label):
-        self._pending = _Pending(expect, num, callback, label)
+    def _request(self, function, num, expect, callback, label, verify=None):
+        self._pending = _Pending(expect, num, callback, label, verify)
         self._reply_timer.start(self.reply_timeout_ms)
         if not self._send(s.build_akai_request(function, num, self._c.channel)):
             self._reply_timer.stop()
@@ -594,25 +614,63 @@ class S950Transfers(QObject):
 
     def _on_akai(self, message):
         pending = self._pending
-        if (
-            pending is None
-            or message.function != pending.function
-            or (pending.num is not None and message.num != pending.num)
-        ):
-            self._unexpected_akai += 1
-            debug_log.get_logger().debug(
-                f"S950Transfers: ignoring unexpected Akai message "
-                f"(function {message.function}, num {message.num}) (#{self._unexpected_akai})"
-            )
-            if self._unexpected_akai == self._UNEXPECTED_WARNING_COUNT:
-                debug_log.get_logger().warning(
-                    f"S950Transfers: {self._unexpected_akai} unexpected Akai messages this session - late replies do this, but so does another MIDI program "
-                    "sending the sampler's replies back to it (see AGENTS.md's incident notes)"
-                )
+        if pending is None or message.function != pending.function:
+            self._note_unexpected(message)
             return
+        if pending.num is not None and message.num != pending.num:
+            # A real S950 puts 0 in the number of EVERY reply header, whatever was asked for (issue #7, 2026-11-16: the
+            # data was the requested item's, only the header said 0). So the header can't tell which item a reply is;
+            # the request's own `verify` looks at the contents instead. Without one, a different number is still a stray.
+            if pending.verify is None or not pending.verify(message):
+                self._note_unexpected(message)
+                return
+            debug_log.get_logger().debug(
+                f"S950Transfers: reply header says item {message.num}, asked for {pending.num}; "
+                "the contents fit the request, so it is taken"
+            )
+            message = dataclasses.replace(message, num=pending.num)
         self._pending = None
         self._reply_timer.stop()
         pending.callback(message)
+
+    def _note_unexpected(self, message):
+        self._unexpected_akai += 1
+        debug_log.get_logger().debug(
+            f"S950Transfers: ignoring unexpected Akai message "
+            f"(function {message.function}, num {message.num}) (#{self._unexpected_akai})"
+        )
+        if self._unexpected_akai == self._UNEXPECTED_WARNING_COUNT:
+            debug_log.get_logger().warning(
+                f"S950Transfers: {self._unexpected_akai} unexpected Akai messages this session - late replies do this, but so does another MIDI program "
+                "sending the sampler's replies back to it (see AGENTS.md's incident notes)"
+            )
+
+    def _named_in_catalog(self, kind, slot):
+        """A `verify` for `_request`: the reply's own name must be the one the last catalog gave `slot`.
+        A slot the catalog doesn't list, or a payload that doesn't parse (the handler reports that), has nothing
+        to compare, so the reply to the one outstanding request is taken. Two items with one name can't be told apart."""
+        table, parse = (
+            (lambda: self.programs, s950_program.Program.from_payload)
+            if kind == "program"
+            else (lambda: self.samples, s.SampleParams.from_payload)
+        )
+
+        def verify(message):
+            names = [name for num, name in table() if num == slot]
+            if not names:
+                return True
+            try:
+                held = parse(message.payload).name
+            except ValueError:
+                return True
+            return held.strip().upper() == names[0].strip().upper()
+
+        return verify
+
+    @staticmethod
+    def _any_reply(_message):
+        # for a read-back: the handler compares the whole contents with what was sent, which is the stronger check
+        return True
 
     def _on_handshake(self, code):
         if self._op in ("send", "program_write", "sample_write") and self._phase in ("draining", "naks"):
@@ -767,7 +825,15 @@ class S950Transfers(QObject):
             s.FUNC_SPRM,
             self._write_name,
             f"slot {self._slot}'s parameters after the upload",
+            self._is_the_uploaded_sample,
         )
+
+    def _is_the_uploaded_sample(self, message):
+        # the new sample has no name of its own yet, but it has the length that was just sent
+        try:
+            return s.SampleParams.from_payload(message.payload).total_words == len(self._words)
+        except ValueError:
+            return True  # _write_name reports it
 
     def _write_name(self, message):
         params = s.SampleParams.from_payload(message.payload)
@@ -816,6 +882,7 @@ class S950Transfers(QObject):
             s.FUNC_SPRM,
             self._start_dump,
             f"sample {self._rx_slot}'s parameters",
+            self._named_in_catalog("sample", self._rx_slot),
         )
 
     def _start_dump(self, message):
@@ -1039,6 +1106,7 @@ class S950Transfers(QObject):
             s.FUNC_SPRM,
             self._on_sample_write_readback,
             f"sample {self._program_slot}'s parameters (to check the write)",
+            self._any_reply,
         )
 
     def _on_sample_write_readback(self, message):
@@ -1101,6 +1169,7 @@ class S950Transfers(QObject):
             s.FUNC_PRGM,
             self._on_write_readback,
             f"program {self._program_slot} (to check the write)",
+            self._any_reply,
         )
 
     def _on_write_readback(self, message):

@@ -63,6 +63,22 @@ def test_replies_use_the_requests_channel_only():
     assert s.parse_akai(reply).channel == 5
 
 
+def test_data_replies_carry_item_number_0_like_a_real_s950(fake):
+    # measured on a real S950 (issue #7): the header number of every data reply is 0, whatever was asked
+    (sprm,) = send(fake, s.build_akai_request(s.FUNC_RSPRM, 1))
+    (prgm,) = send(fake, s.build_akai_request(s.FUNC_RPRGM, 1))
+    assert s.parse_akai(sprm).num == 0
+    assert s.parse_akai(prgm).num == 0
+    assert s.SampleParams.from_payload(s.parse_akai(sprm).payload).name == "SNARE"  # the contents are slot 1's
+    assert prog.Program.from_payload(s.parse_akai(prgm).payload).name == "PAD PROG"
+
+
+def test_echo_item_number_brings_the_old_behaviour_back():
+    fake = FakeS950(echo_item_number=True)
+    (sprm,) = send(fake, s.build_akai_request(s.FUNC_RSPRM, 1))
+    assert s.parse_akai(sprm).num == 1
+
+
 def test_sprm_read_modify_write_round_trip_and_no_reply(fake):
     (reply,) = send(fake, s.build_akai_request(s.FUNC_RSPRM, 1))
     params = s.SampleParams.from_payload(s.parse_akai(reply).payload)
