@@ -937,9 +937,9 @@ def test_s950_send_is_enabled_with_files_and_an_input(s950_dashboard):
     assert d.btn_send.toolTip() == ""
 
 
-def test_s950_enables_the_editor_with_an_experimental_tooltip(s950_dashboard):
+def test_s950_enables_the_editor(s950_dashboard):
     assert s950_dashboard.btn_open_editor.isEnabled() is True
-    assert "experimental" in s950_dashboard.btn_open_editor.toolTip()
+    assert "experimental" not in s950_dashboard.btn_open_editor.toolTip()
 
 
 def test_s950_editor_needs_both_ports(s950_dashboard):
@@ -1050,61 +1050,6 @@ def test_s950_editor_refuses_without_a_midi_input_and_never_touches_a_bridge(
     s950_dashboard.midi_manager.input_name = None  # the unit answers on the input
     s950_dashboard.open_program_editor()
     assert "MIDI input" in s950_dashboard.status_bar.currentMessage()
-
-
-def test_s950_experimental_warning_is_shown_once_then_remembered(
-    s950_dashboard, monkeypatch
-):
-    from PySide6.QtWidgets import QMessageBox
-
-    from core import app_config
-
-    state = {"acknowledged": False, "asked": 0}
-    monkeypatch.setattr(
-        app_config,
-        "get_s950_transfer_warning_acknowledged",
-        lambda: state["acknowledged"],
-    )
-    monkeypatch.setattr(
-        app_config,
-        "save_s950_transfer_warning_acknowledged",
-        lambda value=True: state.update(acknowledged=value),
-    )
-
-    def _warning(*_a, **_k):
-        state["asked"] += 1
-        return QMessageBox.StandardButton.Ok
-
-    monkeypatch.setattr(QMessageBox, "warning", _warning)
-    assert s950_dashboard._confirm_s950_experimental() is True
-    assert s950_dashboard._confirm_s950_experimental() is True
-    assert state == {"acknowledged": True, "asked": 1}
-
-
-def test_s950_experimental_warning_cancel_blocks_the_send(s950_dashboard, monkeypatch):
-    from PySide6.QtWidgets import QMessageBox
-
-    from core import app_config
-
-    saved = []
-    monkeypatch.setattr(app_config, "get_s950_transfer_warning_acknowledged", lambda: False)
-    monkeypatch.setattr(
-        app_config, "save_s950_transfer_warning_acknowledged", lambda v=True: saved.append(v)
-    )
-    monkeypatch.setattr(
-        QMessageBox, "warning", lambda *a, **k: QMessageBox.StandardButton.Cancel
-    )
-    assert s950_dashboard._confirm_s950_experimental() is False
-    assert saved == []
-
-
-def test_other_sampler_types_never_see_the_s950_warning(dashboard, monkeypatch):
-    from PySide6.QtWidgets import QMessageBox
-
-    monkeypatch.setattr(
-        QMessageBox, "warning", lambda *a, **k: pytest.fail("warned a non-S950 user")
-    )
-    assert dashboard._confirm_s950_experimental() is True
 
 
 # --- Yamaha A4000/A5000: SDS transfers (the generic family) + its own editor -------------------------

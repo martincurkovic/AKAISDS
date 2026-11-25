@@ -46,7 +46,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from core import app_config, debug_log, s950_params
+from core import debug_log, s950_params
 from core.midi_notes import midi_note_to_name
 from core.s950_sysex import NAME_LENGTH
 from core.s950_program import Keygroup, Program
@@ -376,10 +376,6 @@ class S950ProgramEditorWindow(QMainWindow):
         self.status_bar = QStatusBar()
         self.status_bar.setSizeGripEnabled(False)
         self.setStatusBar(self.status_bar)
-        experimental = QLabel("Experimental")
-        experimental.setToolTip("Writing to an S900/S950 was written without a unit to test against. Every write saves a backup first and is read back.")
-        experimental.setObjectName("mutedLabel")
-        self.status_bar.addPermanentWidget(experimental)
 
     # -- field widgets ------------------------------------------------------------------------
 
@@ -1264,9 +1260,6 @@ class S950ProgramEditorWindow(QMainWindow):
                 "Nothing was written:\n\n" + "\n".join(problems),
             )
             return
-        if not self._confirm_first_write():
-            _log("write cancelled at the experimental warning")
-            return
         _log(
             f"write requested: program {self._slot}, {len(changes)} change(s)"
             f"{', restoring' if restoring else ''}"
@@ -1295,27 +1288,6 @@ class S950ProgramEditorWindow(QMainWindow):
                 f"Another program (slot {clash[0]}) is already called '{program.name.strip()}'."
             ]
         return []
-
-    def _confirm_first_write(self):
-        if app_config.get_s950_program_write_warning_acknowledged():
-            return True
-        answer = QMessageBox.warning(
-            self,
-            "Akai S900/S950 - experimental",
-            "Writing programs to the Akai S900/S950 is experimental.\n\n"
-            "It was written from s950tools' documentation without an S900/S950 to test "
-            "against. Before every write the program's original is saved to "
-            "~/.akaisds/s950_backups as a .syx file, and afterwards it is read back and "
-            "compared.\n\n"
-            "Try a scratch program first, and please report problems along with "
-            "~/.akaisds/akaisds.log.",
-            QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel,
-            QMessageBox.StandardButton.Cancel,
-        )
-        if answer != QMessageBox.StandardButton.Ok:
-            return False
-        app_config.save_s950_program_write_warning_acknowledged(True)
-        return True
 
     def _on_program_written(self, slot, verified, held, message):
         if not self._writing:

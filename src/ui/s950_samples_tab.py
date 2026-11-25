@@ -29,7 +29,7 @@ import tempfile
 
 from functools import partial
 
-from PySide6.QtCore import QObject, Qt, QTimer, Signal
+from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtWidgets import (
     QComboBox,
     QGridLayout,
@@ -37,13 +37,12 @@ from PySide6.QtWidgets import (
     QLabel,
     QListWidget,
     QListWidgetItem,
-    QMessageBox,
     QPushButton,
     QVBoxLayout,
     QWidget,
 )
 
-from core import app_config, debug_log, s950_sysex as s, sds_encoder
+from core import debug_log, s950_sysex as s, sds_encoder
 from ui import tooltips as tt
 from ui.editor_layout import (
     build_list_column,
@@ -238,8 +237,8 @@ class S950SamplesTab(QWidget):
             self._values[key] = value
         grid.setColumnStretch(1, 1)
         note = QLabel(
-            "Replay mode and direction can be written (experimental). Start, end, loop and pitch are "
-            "shown as read; what they mean is not verified on a unit."
+            "Replay mode and direction can be written (the S950 may only follow a changed direction once you "
+            "press ENT on the sample). Start, end, loop and pitch are shown as read."
         )
         note.setObjectName("mutedLabel")
         note.setWordWrap(True)
@@ -474,26 +473,6 @@ class S950SamplesTab(QWidget):
         """Put the combos back to what the sampler holds."""
         self._show_sample()
 
-    def _confirm_first_write(self):
-        if app_config.get_s950_sample_write_warning_acknowledged():
-            return True
-        answer = QMessageBox.warning(
-            self,
-            "Akai S900/S950 - experimental",
-            "Writing a sample's settings to the Akai S900/S950 is experimental.\n\n"
-            "It was written from s950tools' notes without an S900/S950 to test against. Before every "
-            "write the sample's settings are saved to ~/.akaisds/s950_backups as a .syx file, and "
-            "afterwards they are read back and compared. The S950 may only follow a changed direction "
-            "once you press ENT on the sample.\n\n"
-            "Try a scratch sample first, and please report problems along with ~/.akaisds/akaisds.log.",
-            QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel,
-            QMessageBox.StandardButton.Cancel,
-        )
-        if answer != QMessageBox.StandardButton.Ok:
-            return False
-        app_config.save_s950_sample_write_warning_acknowledged(True)
-        return True
-
     def write(self):
         """Write the staged replay mode / direction (after the one-time warning, and only if the wire is free)."""
         slot, changes = self._slot, self._changes()
@@ -502,9 +481,6 @@ class S950SamplesTab(QWidget):
         log = debug_log.get_logger()
         if not self._controller.is_s950_idle():
             self.status_message.emit("A MIDI operation is already in progress - try again in a moment")
-            return
-        if not self._confirm_first_write():
-            log.info("S950Samples: write cancelled at the experimental warning")
             return
         log.info(f"S950Samples: write requested for sample {slot}: {changes}")
         self._writing = True

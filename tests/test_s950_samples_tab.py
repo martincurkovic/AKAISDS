@@ -316,7 +316,6 @@ def wtab(tab, tmp_path, monkeypatch):
     tab.set_active(True)
     tab.sample_list_widget.setCurrentRow(1)  # SNARE, one-shot, forward
     assert wait_until(lambda: tab._values["name"].text() == "SNARE")
-    monkeypatch.setattr(tab, "_confirm_first_write", lambda: True)
     return tab
 
 
@@ -366,41 +365,6 @@ def test_the_controls_are_locked_while_a_write_is_on_the_wire(wtab):
     assert wtab._writing and wtab.is_writing() and not wtab.replay_combo.isEnabled() and not wtab.can_write()
     assert wait_until(lambda: not wtab._writing)
     assert wtab.replay_combo.isEnabled()
-
-
-def test_a_declined_first_write_warning_sends_nothing(wtab, monkeypatch):
-    monkeypatch.setattr(wtab, "_confirm_first_write", lambda: False)
-    wtab.replay_combo.setCurrentIndex(wtab.replay_combo.findData(s.REPLAY_LOOP))
-    wtab.write()
-    assert not wtab._writing and wtab.rig.fake.sprm_writes == 0
-    assert wtab.can_write()  # still staged
-
-
-def test_the_first_write_warning_is_remembered(tab, monkeypatch):
-    from PySide6.QtWidgets import QMessageBox
-
-    from core import app_config
-
-    asked = []
-    monkeypatch.setattr(QMessageBox, "warning", lambda *a, **k: asked.append(a[2]) or QMessageBox.StandardButton.Ok)
-    app_config.save_s950_sample_write_warning_acknowledged(False)
-    try:
-        assert tab._confirm_first_write() is True and len(asked) == 1 and "ENT" in asked[0]
-        assert app_config.get_s950_sample_write_warning_acknowledged() is True
-        assert tab._confirm_first_write() is True and len(asked) == 1  # not asked again
-    finally:
-        app_config.save_s950_sample_write_warning_acknowledged(False)
-
-
-def test_declining_the_warning_is_not_remembered(tab, monkeypatch):
-    from PySide6.QtWidgets import QMessageBox
-
-    from core import app_config
-
-    monkeypatch.setattr(QMessageBox, "warning", lambda *a, **k: QMessageBox.StandardButton.Cancel)
-    app_config.save_s950_sample_write_warning_acknowledged(False)
-    assert tab._confirm_first_write() is False
-    assert app_config.get_s950_sample_write_warning_acknowledged() is False
 
 
 def test_a_failed_write_puts_the_combos_back_to_the_sampler_values(wtab):

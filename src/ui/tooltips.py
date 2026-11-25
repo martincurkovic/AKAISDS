@@ -55,7 +55,7 @@ YAMAHA_NO_SAMPLE_INFO = (
     "Sample details and renaming aren't available here for the Yamaha A4000/A5000 -\n"
     "use the Program Editor's Samples tab."
 )
-OPEN_EDITOR_S950 = "Opens the Akai S900/S950 program editor (experimental - writes are untested on hardware)"
+OPEN_EDITOR_S950 = "Opens the Akai S900/S950 program editor"
 # Akai S900/S950 (see controller/s950_transfers.py): it answers on the MIDI
 # input, so sending/receiving/browsing all need one; and it has no delete
 # opcode at all
@@ -96,7 +96,7 @@ ENSONIQ_CANT_DELETE = (
 SAMPLER_TYPE = (
     "Pick the model that matches your sampler; each speaks its own protocol.\n"
     "Akai S1000, S2000/S3000: browse, rename and delete samples, plus the Program Editor.\n"
-    "Akai S900/S950 (experimental): send, receive and rename; no delete.\n"
+    "Akai S900/S950: send, receive and rename; no delete.\n"
     "Yamaha A4000/A5000 (experimental): list, send and receive, plus an editor.\n"
     "Ensoniq EPS/ASR (untested): list, receive and send; each sent file becomes a new instrument.\n"
     "Set the Device ID to the unit's base MIDI channel minus 1.\n"

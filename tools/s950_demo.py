@@ -3,7 +3,7 @@ Standalone dev tool - NOT part of the app.
 
 Opens the Transfer Dashboard wired to core.demo_s950.FakeS950 instead of real
 MIDI ports, with the Sampler Type set to Akai S900/S950, so the S900/S950
-transfer UI (browse, send, receive, rename, the experimental warning) and the
+transfer UI (browse, send, receive, rename, the S950 transfers) and the
 read-only program viewer (the Open Editor button) can be iterated on with no hardware. The fake speaks the real wire format, so this
 exercises the real SamplerController -> S950Transfers -> core.s950_sysex stack;
 only the ports are fake. The Settings dialog is not usable here (it would

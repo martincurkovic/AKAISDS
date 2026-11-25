@@ -76,18 +76,8 @@ class _Main(QMainWindow):
 @pytest.fixture(autouse=True)
 def _isolated(monkeypatch, tmp_path):
     # never touch the real config or the real ~/.akaisds/s950_backups
-    state = {"ack": False}
-    monkeypatch.setattr(
-        viewer.app_config, "get_s950_program_write_warning_acknowledged", lambda: state["ack"]
-    )
-    monkeypatch.setattr(
-        viewer.app_config,
-        "save_s950_program_write_warning_acknowledged",
-        lambda acknowledged=True: state.update(ack=acknowledged),
-    )
     monkeypatch.setattr(viewer.QMessageBox, "warning", lambda *a, **k: QMessageBox.StandardButton.Ok)
     monkeypatch.setattr(viewer.QMessageBox, "question", lambda *a, **k: QMessageBox.StandardButton.Discard)
-    return state
 
 
 @pytest.fixture
@@ -210,7 +200,6 @@ def test_the_sample_buttons_follow_the_staged_edit_and_write_it(win, monkeypatch
     tab.replay_combo.setCurrentIndex(tab.replay_combo.findData(s.REPLAY_LOOP))
     assert win.sample_write_button.isEnabled() and win.sample_revert_button.isEnabled()
     assert win.sample_dirty_label.text() == "1 unsaved change"
-    monkeypatch.setattr(tab, "_confirm_first_write", lambda: True)
     win.sample_write_button.click()
     assert wait_until(lambda: win.rig.fake.sprm_writes == 1 and not tab.is_writing())
     assert win.rig.fake.samples[1]["params"].replay_mode == s.REPLAY_LOOP
@@ -237,7 +226,6 @@ def test_a_sample_write_in_flight_blocks_closing_the_window(win, monkeypatch):
     tab.sample_list_widget.setCurrentRow(1)
     assert wait_until(lambda: tab._params.get(1) is not None)
     tab.replay_combo.setCurrentIndex(tab.replay_combo.findData(s.REPLAY_LOOP))
-    monkeypatch.setattr(tab, "_confirm_first_write", lambda: True)
     win.sample_write_button.click()
     assert tab.is_writing() and win._controller.is_transfer_busy()
     assert win.close() is False  # refused: a MIDI operation is in flight on the shared connection
@@ -512,31 +500,6 @@ def test_write_sends_only_the_edit_then_shows_what_the_unit_holds(win):
     assert win._baseline.keygroups[0].attack == 40  # the unit's own read-back
     assert "verified" in win.status_bar.currentMessage()
     assert list(win.rig.engine.backup_dir.glob("prog00-*.syx"))
-
-
-def test_the_first_write_warns_once_and_remembers(win, _isolated, monkeypatch):
-    shown = []
-    monkeypatch.setattr(
-        viewer.QMessageBox,
-        "warning",
-        lambda parent, title, *a, **k: shown.append(title) or QMessageBox.StandardButton.Ok,
-    )
-    _show(win, 0)
-    _kg(win, "attack").setValue(40)
-    _write_and_wait(win)
-    assert shown == ["Akai S900/S950 - experimental"] and _isolated["ack"] is True
-    _kg(win, "attack").setValue(41)
-    _write_and_wait(win)
-    assert shown == ["Akai S900/S950 - experimental"]  # not asked again
-
-
-def test_cancelling_the_warning_writes_nothing(win, monkeypatch):
-    monkeypatch.setattr(viewer.QMessageBox, "warning", lambda *a, **k: QMessageBox.StandardButton.Cancel)
-    _show(win, 0)
-    _kg(win, "attack").setValue(40)
-    win.write_button.click()
-    assert win._writing is False and win.rig.fake.prgm_writes == 0
-    assert win.is_dirty()
 
 
 def test_write_unchanged_is_a_no_op_that_verifies(win):

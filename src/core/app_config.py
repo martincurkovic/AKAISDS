@@ -129,19 +129,6 @@ def save_s1000_editor_warning_acknowledged(acknowledged=True):
     save_config(config)
 
 
-def get_s950_transfer_warning_acknowledged():
-    # whether the user has already clicked through the one-time "S900/S950
-    # transfers are experimental" warning (shown by the Dashboard before the
-    # first Send in S900/S950 mode)
-    return bool(load_config().get("s950_transfer_warning_acknowledged", False))
-
-
-def save_s950_transfer_warning_acknowledged(acknowledged=True):
-    config = load_config()
-    config["s950_transfer_warning_acknowledged"] = bool(acknowledged)
-    save_config(config)
-
-
 def get_ensoniq_transfer_warning_acknowledged():
     # whether the user has already clicked through the one-time "Ensoniq transfers are experimental" warning (shown by the Dashboard
     # before the first Send in Ensoniq mode)
@@ -162,30 +149,6 @@ def get_asrx_transfer_warning_acknowledged():
 def save_asrx_transfer_warning_acknowledged(acknowledged=True):
     config = load_config()
     config["asrx_transfer_warning_acknowledged"] = bool(acknowledged)
-    save_config(config)
-
-
-def get_s950_program_write_warning_acknowledged():
-    # the one-time "writing S900/S950 programs is experimental" warning, shown
-    # before the first program write (ui/s950_program_editor.py)
-    return bool(load_config().get("s950_program_write_warning_acknowledged", False))
-
-
-def save_s950_program_write_warning_acknowledged(acknowledged=True):
-    config = load_config()
-    config["s950_program_write_warning_acknowledged"] = bool(acknowledged)
-    save_config(config)
-
-
-def get_s950_sample_write_warning_acknowledged():
-    # the one-time "writing S900/S950 sample settings is experimental" warning, shown
-    # before the first sample-parameter write (ui/s950_samples_tab.py)
-    return bool(load_config().get("s950_sample_write_warning_acknowledged", False))
-
-
-def save_s950_sample_write_warning_acknowledged(acknowledged=True):
-    config = load_config()
-    config["s950_sample_write_warning_acknowledged"] = bool(acknowledged)
     save_config(config)
 
 

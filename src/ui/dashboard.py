@@ -1228,8 +1228,6 @@ class TransferDashboard(QWidget):
             )
             return
 
-        if not self._confirm_s950_experimental():
-            return
         if not self._confirm_ensoniq_experimental():
             return
 
@@ -1266,32 +1264,6 @@ class TransferDashboard(QWidget):
             total_units += units
 
         self.progress_bar_overall.setVisible(total_units > 1)
-
-    def _confirm_s950_experimental(self):
-        # S900/S950 transfers were written from s950tools' notes and the
-        # protocol's own documentation with no S900/S950 on hand (see
-        # controller/s950_transfers.py) - say so before the first write, once
-        if self.sampler_controller.device_type != sampler_models.FAMILY_S950:
-            return True
-        if app_config.get_s950_transfer_warning_acknowledged():
-            return True
-        answer = QMessageBox.warning(
-            self,
-            "Akai S900/S950 - experimental",
-            "Sending samples to the Akai S900/S950 is experimental.\n\n"
-            "It was written from another project's notes and the protocol "
-            "documentation, without an S900/S950 to test against. Samples go to "
-            "the first empty slot (nothing is overwritten) and can't be deleted "
-            "over MIDI, only from the front panel.\n\n"
-            "Save anything you can't afford to lose first, and please report "
-            "problems along with ~/.akaisds/akaisds.log.",
-            QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel,
-            QMessageBox.StandardButton.Cancel,
-        )
-        if answer != QMessageBox.StandardButton.Ok:
-            return False
-        app_config.save_s950_transfer_warning_acknowledged(True)
-        return True
 
     def _confirm_ensoniq_experimental(self):
         # Ensoniq sends were written without an Ensoniq on hand (see controller/ensoniq_transfers.py and asrx_transfers.py) - say so before the

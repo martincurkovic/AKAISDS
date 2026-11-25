@@ -9,7 +9,7 @@ def test_choices_are_alphabetical_by_label():
     assert labels == [
         "Akai S1000",
         "Akai S2000/S3000",
-        "Akai S900/S950 (experimental)",
+        "Akai S900/S950",
         "Ensoniq ASR-X (untested, experimental)",
         "Ensoniq EPS/ASR (untested, experimental)",
         "Generic SDS",

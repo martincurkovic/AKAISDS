@@ -24,7 +24,7 @@ A simple way to send and receive audio samples to an Akai S900/S1000/S2000/S3000
 - Per-part key range, transpose, tune and priority on the Multi tab, and save/load Multis as `.m3` files (S2000/S3000)
 - Save and load Akai sample files (`.s3`/`.s1`)
 - Experimental Yamaha A4000/A5000 editor support
-- Experimental Akai S900/S950 support: sample send/receive plus a program editor
+- Akai S900/S950 support: sample send/receive plus a program editor
 - Experimental Ensoniq sampler support: list, receive and send samples. See [Disclaimer](#disclaimer).
 - ReCycle style sample slicing
   - Transient detection

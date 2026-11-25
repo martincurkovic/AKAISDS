@@ -23,7 +23,7 @@ Connect your sampler to your MIDI interface. The MIDI output of your sampler sho
 
 **2. Configure MIDI Settings**
 
-Select your MIDI Input/Output ports and choose your sampler type: Akai S1000, Akai S2000/S3000, Akai S900/S950 (experimental), Ensoniq ASR-X (untested, experimental), Ensoniq EPS/ASR (untested, experimental), Generic SDS or Yamaha A4000/A5000 (experimental). Set the SysEx Device ID (usually 0; this is not your MIDI channel, and a wrong one gets no reply).
+Select your MIDI Input/Output ports and choose your sampler type: Akai S1000, Akai S2000/S3000, Akai S900/S950, Ensoniq ASR-X (untested, experimental), Ensoniq EPS/ASR (untested, experimental), Generic SDS or Yamaha A4000/A5000 (experimental). Set the SysEx Device ID (usually 0; this is not your MIDI channel, and a wrong one gets no reply).
 
 - The **S900/S950** uses its own protocol, needs both a MIDI input and output, and hasn't been tested on real hardware yet - back up your sampler first.
 - The **Ensoniq EPS/EPS-16+/ASR-10** uses Ensoniq's own protocol (not Generic SDS), needs both a MIDI input and output, and has never been tried on real hardware - back up the unit first. Set the Device ID to its base MIDI channel minus 1 (0-15) and turn *MIDI SysEx Enable* on. Listing, receiving and sending samples work (each sent file becomes a new instrument; nothing is overwritten); there is no editor. The ASR-X has its own entry below.
@@ -103,7 +103,7 @@ The editor is powered under the hood by *s3ked*. It offers control over the most
 
 The editor also supports the Akai S1000 - set the Sampler Type to *Akai S1000* in Settings first. An S1000 has no Multi tab, Global tab, modulation matrix, LFO2, portamento, mute groups or velocity start, so those controls are hidden. Its Envelope 2 is a plain ADSR, and its fixed controller routing (what velocity, key, pressure and the mod wheel do) is editable in the *Controllers* cards instead of a modulation matrix.
 
-With the Sampler Type set to *Akai S900/S950 (experimental)*, the Open Editor button opens a separate, smaller editor for the S900/S950: programs and keygroups can be edited and written back to the sampler in one go (the previous values are backed up first). On its Samples tab only the replay mode (O/L/A) and direction (N/R) can be changed, with the same backup and **Write to Sampler** step; everything else there is read-only for now. With *Yamaha A4000/A5000 (experimental)* it opens the [Yamaha editor](#yamaha-a4000a5000-editor-experimental).
+With the Sampler Type set to *Akai S900/S950*, the Open Editor button opens a separate, smaller editor for the S900/S950: programs and keygroups can be edited and written back to the sampler in one go (the previous values are backed up first). On its Samples tab only the replay mode (O/L/A) and direction (N/R) can be changed, with the same backup and **Write to Sampler** step; everything else there is read-only for now. With *Yamaha A4000/A5000 (experimental)* it opens the [Yamaha editor](#yamaha-a4000a5000-editor-experimental).
 
 By default the editor opens up on the Programs page. It will take a second or two to load, especially if you have lots of Programs and Keygroups on your Akai sampler.
 

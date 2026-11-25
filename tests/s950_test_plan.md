@@ -11,7 +11,7 @@ riskiest - **stop at the first step that misbehaves and send the log**
 1. **Use MIDI in both directions.** The S900/S950 answers on your MIDI input; with only an
    output selected, Refresh/Receive/Send/the program editor all refuse (by design - no open-loop
    send).
-2. In AKAISDS: **Settings > Sampler Type > Akai S900/S950 (experimental)**, pick the MIDI input AND output,
+2. In AKAISDS: **Settings > Sampler Type > Akai S900/S950**, pick the MIDI input AND output,
    press OK. The SysEx channel in Settings should match the sampler's MIDI channel setting.
 3. On the sampler, enable MIDI/RS-232 system-exclusive reception if it has such a setting.
 4. Do anything that **writes** (Send, Rename, and every program edit) to a scratch sample or
